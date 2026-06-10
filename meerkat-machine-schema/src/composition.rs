@@ -334,6 +334,12 @@ pub struct EffectHandoffProtocol {
     /// marker generator derives schema/provenance fields from this protocol
     /// instead of carrying a separate handwritten contract.
     pub durable_marker: Option<DurableMarkerProtocol>,
+    /// Typed teardown role of this protocol. A protocol declaring
+    /// [`TeardownObligationClass::DetachBeforeDestroy`] is the detach-ack
+    /// obligation a paired [`EffectTeardownClass::DestroyRequest`] route
+    /// names via `detach_obligation`. Consumed by the `xtask seam-inventory`
+    /// destroy-obligation audit instead of protocol-name substring matching.
+    pub teardown: Option<TeardownObligationClass>,
     /// Explicit Rust code generation metadata for the checked-in helper module.
     pub rust: ProtocolRustBinding,
 }
@@ -2089,6 +2095,45 @@ pub struct Route {
     pub to: RouteTarget,
     pub bindings: Vec<RouteFieldBinding>,
     pub delivery: RouteDelivery,
+    /// Typed teardown classification for this route. `None` means the route
+    /// carries no teardown semantics. Declared in the catalog, consumed by
+    /// the `xtask seam-inventory` destroy-obligation audit — name folklore
+    /// (`contains("Destroy")`) is not a recognized classification channel.
+    pub teardown: Option<EffectTeardownClass>,
+}
+
+/// Typed teardown classification of a composition route.
+///
+/// The C-F3 destroy-obligation audit used to discover destroy routes by
+/// variant-name substring matching. The classification is now a declared,
+/// typed fact on the route itself; the audit derives the destroy inventory
+/// purely from these declarations and enforces cross-route coherence (every
+/// route carrying the same producer effect must agree on its teardown class),
+/// so an undeclared sibling of a declared destroy route fails the gate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EffectTeardownClass {
+    /// Request-side teardown: the producer asks the consumer to destroy
+    /// state it still references. Such a route must be paired with the named
+    /// detach-obligation protocol (an [`EffectHandoffProtocol`] declaring
+    /// [`TeardownObligationClass::DetachBeforeDestroy`]) whose feedback acks
+    /// the detach before the destroy request is routed.
+    DestroyRequest {
+        /// Protocol that closes the paired detach obligation.
+        detach_obligation: ProtocolId,
+    },
+    /// Observation of an already-completed teardown (a reply signal such as
+    /// `RuntimeDestroyed`). The destroy is done by the time it fires, so no
+    /// paired detach obligation is required.
+    TeardownObservation,
+}
+
+/// Typed teardown role of an [`EffectHandoffProtocol`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TeardownObligationClass {
+    /// The protocol's feedback inputs acknowledge detaching consumer-held
+    /// references before a paired [`EffectTeardownClass::DestroyRequest`]
+    /// route may proceed.
+    DetachBeforeDestroy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

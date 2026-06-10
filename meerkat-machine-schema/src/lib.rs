@@ -12,11 +12,12 @@ pub use identity::{
 pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
 pub use catalog::{
-    CompositionCoverageManifest, CoverageAnchor, CoverageSchemaTarget, MachineCoverageManifest,
-    MachineProductionOwnerRelation, ScenarioCoverage, SemanticCoverageEntry, SymbolRef,
-    canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
-    canonical_machine_schemas, compat_composition_schemas, meerkat_mob_seam_composition,
+    CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
+    MachineCoverageManifest, MachineProductionOwnerRelation, ScenarioCoverage,
+    SemanticCoverageEntry, SymbolRef, canonical_composition_coverage_manifests,
+    canonical_composition_schemas, canonical_machine_coverage_manifests,
+    canonical_machine_production_owner_relations, canonical_machine_schemas,
+    compat_composition_schemas, meerkat_mob_seam_composition, scheduler_rule_coverage_name,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,
@@ -26,11 +27,11 @@ pub use composition::{
     CompositionWitness, CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, DriverDispatchRoute,
     DurableMarkerFieldBinding, DurableMarkerProtocol, DurableMarkerRelationProtocol,
-    EffectHandoffProtocol, EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef,
-    HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
-    ProtocolHelperReturnShape, ProtocolRustBinding, Route, RouteBindingSource, RouteDelivery,
-    RouteFieldBinding, RouteTarget, RouteTargetKind, RouteTargetSelector, RouteVariantId,
-    SchedulerRule, WatchedEffect,
+    EffectHandoffProtocol, EffectTeardownClass, EntryInput, FeedbackFieldBinding,
+    FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    RouteTargetSelector, RouteVariantId, SchedulerRule, TeardownObligationClass, WatchedEffect,
 };
 pub use machine::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,

@@ -917,6 +917,10 @@ impl<'a> SuspicionVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for SuspicionVisitor<'_> {
+    // The identifier-substring heuristics below operate on AST-resolved type
+    // and field names (never raw source text) and emit warn-severity
+    // suspicion reports only — they are review prompts, not governance
+    // decisions, so fuzzy name matching is acceptable here.
     fn visit_item(&mut self, node: &'ast Item) {
         match node {
             Item::Enum(item_enum) if item_enum.variants.len() >= 3 => {
@@ -1179,6 +1183,10 @@ fn attrs_allow_dead_code(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// Scan for the `// RMAT-ALLOW(<rule>)` suppression marker on or above the
+/// span's line. Necessarily textual: the marker is a comment convention and
+/// comments are not AST nodes — this asserts an authored suppression marker,
+/// not source structure.
 fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     let needle = format!("RMAT-ALLOW({rule})");
     let start_line = span.start().line;
@@ -1548,6 +1556,9 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
             Ok(s) => s,
             Err(_) => continue,
         };
+        // Marker check stays textual by necessity: `// @generated` is the
+        // emitted generated-file marker contract and comments are not AST
+        // nodes. This asserts emitted text, not source structure.
         if !source.contains("// @generated") {
             findings.push(error_finding(
                 "TerminalMappingThroughGeneratedHelpers",
@@ -1561,13 +1572,19 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
                 false,
             ));
         }
-        if !source.contains("classify_terminal") {
+        // AST-precise: the generated terminal classifier must exist as a real
+        // `fn classify_terminal` item, not as a token mentioned in a comment
+        // or string literal.
+        let has_classifier = syn::parse_file(&source)
+            .map(|parsed| named_fn_exists(&parsed, "classify_terminal"))
+            .unwrap_or(false);
+        if !has_classifier {
             findings.push(error_finding(
                 "TerminalMappingThroughGeneratedHelpers",
                 path,
                 &rule.protocol_name,
                 format!(
-                    "generated terminal mapping for producer `{}` is missing `classify_terminal`; \
+                    "generated terminal mapping for producer `{}` declares no `fn classify_terminal`; \
                      the protocol/codegen surface must generate terminal classification for `{}`",
                     rule.producer_machine, rule.protocol_name
                 ),
@@ -1643,7 +1660,40 @@ fn runtime_external_event_projection_findings_for_sources(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    if !stdin_source.contains("StdinLineFormat::Text => serde_json::json!({ \"body\": body })") {
+    let stdin_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        stdin_path,
+        stdin_source,
+        &mut findings,
+    );
+    let bridge_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        bridge_path,
+        bridge_source,
+        &mut findings,
+    );
+    let input_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        input_path,
+        input_source,
+        &mut findings,
+    );
+
+    // stdin mode discipline, AST-resolved on the `StdinLineFormat` match arms
+    // inside `make_stdin_external_event_input`: the Text arm must not contain
+    // a `from_str` reparse call, and the Json arm must be the (only) arm that
+    // does.
+    let stdin_arms = stdin_parsed.as_ref().and_then(|file| {
+        find_named_fn(file, "make_stdin_external_event_input").map(|item| {
+            let mut detector = StdinFormatArmDetector::default();
+            detector.visit_item_fn(item);
+            detector
+        })
+    });
+    let text_arm_literal = stdin_arms
+        .as_ref()
+        .is_some_and(|arms| arms.text_arm_found && !arms.text_arm_reparses);
+    if !text_arm_literal {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             stdin_path,
@@ -1653,10 +1703,10 @@ fn runtime_external_event_projection_findings_for_sources(
             false,
         ));
     }
-
-    if !stdin_source
-        .contains("StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body)")
-    {
+    let json_arm_reparses = stdin_arms
+        .as_ref()
+        .is_some_and(|arms| arms.json_arm_found && arms.json_arm_reparses);
+    if !json_arm_reparses {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             stdin_path,
@@ -1667,7 +1717,11 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("let blocks = external_event_blocks(interaction);") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "classified_interaction_to_runtime_input",
+        "external_event_blocks",
+    ) {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1678,7 +1732,11 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("payload: external_event_payload(interaction),") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "classified_interaction_to_runtime_input",
+        "external_event_payload",
+    ) {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1689,7 +1747,7 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+    if !fn_has_message_arm_binding_blocks(bridge_parsed.as_ref(), "external_event_blocks") {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1700,13 +1758,28 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !input_source.contains("SystemNoticeBlock::ExternalEvent")
-        || !input_source.contains("content: event.blocks.clone().unwrap_or_default()")
-    {
+    // The runtime loop's typed external-event notice: an
+    // `SystemNoticeBlock::ExternalEvent { .. }` struct expression whose
+    // `content` field is derived from the event's `blocks` (with the
+    // empty-default fallback), resolved on the AST instead of a pinned line.
+    let notice_preserves_blocks = input_parsed.as_ref().is_some_and(|file| {
+        let mut detector = ExternalEventNoticeDetector::default();
+        detector.visit_file(file);
+        if !detector.found {
+            // `syn` does not descend into macro token streams; the notice is
+            // constructed inside `vec![...]`, so scan expression-shaped macro
+            // bodies as well.
+            for expr in collect_macro_body_exprs(file) {
+                detector.visit_expr(&expr);
+            }
+        }
+        detector.found
+    });
+    if !notice_preserves_blocks {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             input_path,
-            "input_to_append",
+            "external_event_notice_renderable",
             "runtime loop must preserve ExternalEvent blocks inside typed system notices instead of flattening them to text"
                 .to_string(),
             false,
@@ -1724,7 +1797,24 @@ fn runtime_comms_bridge_projection_findings_for_sources(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    if !contains_identifier_call(bridge_source, "classified_interaction_to_runtime_input") {
+    let bridge_parsed = parse_audited_source(
+        "RuntimeCommsBridgeProjectionAlignment",
+        bridge_path,
+        bridge_source,
+        &mut findings,
+    );
+    let drain_parsed = parse_audited_source(
+        "RuntimeCommsBridgeProjectionAlignment",
+        drain_path,
+        drain_source,
+        &mut findings,
+    );
+
+    let classified_seam_present = bridge_parsed.as_ref().is_some_and(|file| {
+        named_fn_exists(file, "classified_interaction_to_runtime_input")
+            || file_contains_call(file, "classified_interaction_to_runtime_input")
+    });
+    if !classified_seam_present {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1734,7 +1824,17 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("classified.class() == PeerInputClass::PlainEvent") {
+    // `classified.class() == PeerInputClass::PlainEvent`, resolved as an AST
+    // equality between a `.class()` method call and the typed
+    // `PeerInputClass::PlainEvent` path — not a pinned source line.
+    let plain_event_comparison = bridge_parsed.as_ref().is_some_and(|file| {
+        find_named_fn(file, "classified_interaction_to_runtime_input").is_some_and(|item| {
+            let mut detector = ClassComparisonDetector::default();
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    });
+    if !plain_event_comparison {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1744,9 +1844,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if contains_identifier_call(bridge_source, "interaction_to_peer_input")
-        || bridge_source.contains("pub fn interaction_to_peer_input")
-    {
+    let raw_peer_adapter = bridge_parsed.as_ref().is_some_and(|file| {
+        named_fn_exists(file, "interaction_to_peer_input")
+            || file_contains_call(file, "interaction_to_peer_input")
+    });
+    if raw_peer_adapter {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1757,7 +1859,12 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if bridge_source.contains(".starts_with(\"event:\")") {
+    let sender_prefix_classification = bridge_parsed.as_ref().is_some_and(|file| {
+        let mut detector = MethodCallWithStrLitDetector::new("starts_with", "event:");
+        detector.visit_file(file);
+        detector.found
+    });
+    if sender_prefix_classification {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1768,7 +1875,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("body: peer_rendered_body(interaction)") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "peer_input_from_ingress_fact",
+        "peer_rendered_body",
+    ) {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1779,7 +1890,16 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("interaction.rendered_text") {
+    // `peer_rendered_body` must read the classified ingress' rendered text:
+    // an AST field access named `rendered_text` inside that fn.
+    let reads_rendered_text = bridge_parsed.as_ref().is_some_and(|file| {
+        find_named_fn(file, "peer_rendered_body").is_some_and(|item| {
+            let mut detector = FieldReadDetector::new("rendered_text");
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    });
+    if !reads_rendered_text {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1790,7 +1910,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("blocks: peer_blocks(interaction)") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "peer_input_from_ingress_fact",
+        "peer_blocks",
+    ) {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1801,7 +1925,7 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+    if !fn_has_message_arm_binding_blocks(bridge_parsed.as_ref(), "peer_blocks") {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1812,7 +1936,10 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !contains_identifier_call(drain_source, "classified_interaction_to_runtime_input") {
+    let drain_routes_classified = drain_parsed
+        .as_ref()
+        .is_some_and(|file| file_contains_call(file, "classified_interaction_to_runtime_input"));
+    if !drain_routes_classified {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             drain_path,
@@ -1822,7 +1949,10 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if contains_identifier_call(drain_source, "interaction_to_runtime_input") {
+    let drain_calls_raw_adapter = drain_parsed
+        .as_ref()
+        .is_some_and(|file| file_contains_call(file, "interaction_to_runtime_input"));
+    if drain_calls_raw_adapter {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             drain_path,
@@ -1836,21 +1966,342 @@ fn runtime_comms_bridge_projection_findings_for_sources(
     findings
 }
 
-fn contains_identifier_call(source: &str, ident: &str) -> bool {
-    let pattern = format!("{ident}(");
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find(&pattern) {
-        let start = search_start + offset;
-        let boundary_ok = source[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
-        if boundary_ok {
-            return true;
+/// Parse an audited source file fail-closed: a file an alignment rule cannot
+/// parse cannot be certified, so the parse failure itself is a finding.
+fn parse_audited_source(
+    rule: &str,
+    path: &str,
+    source: &str,
+    findings: &mut Vec<Finding>,
+) -> Option<syn::File> {
+    match syn::parse_file(source) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            findings.push(error_finding(
+                rule,
+                path,
+                "<parse>",
+                format!("audited source failed to parse: {err}"),
+                false,
+            ));
+            None
         }
-        search_start = start + 1;
     }
-    false
+}
+
+/// Walk every fn item in a file, including fns nested in inline modules.
+fn visit_file_fns<'a>(items: &'a [syn::Item], out: &mut Vec<&'a ItemFn>) {
+    for item in items {
+        match item {
+            Item::Fn(item_fn) => out.push(item_fn),
+            Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    visit_file_fns(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn find_named_fn<'a>(file: &'a syn::File, name: &str) -> Option<&'a ItemFn> {
+    let mut fns = Vec::new();
+    visit_file_fns(&file.items, &mut fns);
+    fns.into_iter().find(|item| item.sig.ident == name)
+}
+
+fn named_fn_exists(file: &syn::File, name: &str) -> bool {
+    find_named_fn(file, name).is_some()
+}
+
+/// True when the named fn exists in the file and contains a call (free fn or
+/// method) to `callee`.
+fn fn_contains_call(file: Option<&syn::File>, fn_name: &str, callee: &str) -> bool {
+    file.is_some_and(|file| {
+        find_named_fn(file, fn_name).is_some_and(|item| {
+            let mut detector = CallDetector::new(callee);
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    })
+}
+
+/// True when the file contains a call (free fn or method) to `callee`
+/// anywhere. Ident equality on the AST — a longer identifier that merely
+/// ends with the name does not match, and comments/strings are invisible.
+fn file_contains_call(file: &syn::File, callee: &str) -> bool {
+    let mut detector = CallDetector::new(callee);
+    detector.visit_file(file);
+    detector.found
+}
+
+/// True when the named fn exists and contains a match arm over
+/// `InteractionContent::Message { blocks, .. }` — the structural shape that
+/// preserves multimodal message blocks.
+fn fn_has_message_arm_binding_blocks(file: Option<&syn::File>, fn_name: &str) -> bool {
+    file.is_some_and(|file| {
+        find_named_fn(file, fn_name).is_some_and(|item| {
+            let mut detector = MessageArmBindsBlocksDetector::default();
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    })
+}
+
+/// Collect expressions written inside macro bodies (e.g. `vec![...]`),
+/// recursively. `syn`'s visitor does not descend into macro token streams, so
+/// AST detectors that must see into expression-shaped macros scan these
+/// parsed bodies as a second pass. Macros whose bodies are not
+/// comma-separated expressions (`json!`, `format!` with a literal, …) simply
+/// fail the parse and contribute nothing.
+fn collect_macro_body_exprs(file: &syn::File) -> Vec<Expr> {
+    struct MacroExprCollector {
+        out: Vec<Expr>,
+    }
+    impl<'ast> Visit<'ast> for MacroExprCollector {
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if let Ok(exprs) = node.parse_body_with(
+                syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated,
+            ) {
+                self.out.extend(exprs);
+            }
+            visit::visit_macro(self, node);
+        }
+    }
+    let mut collector = MacroExprCollector { out: Vec::new() };
+    collector.visit_file(file);
+    let mut index = 0;
+    while index < collector.out.len() {
+        let expr = collector.out[index].clone();
+        let mut inner = MacroExprCollector { out: Vec::new() };
+        inner.visit_expr(&expr);
+        collector.out.extend(inner.out);
+        index += 1;
+    }
+    collector.out
+}
+
+fn path_ends_with(path: &syn::Path, suffix: &[&str]) -> bool {
+    let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segments.len() >= suffix.len()
+        && segments[segments.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(seg, expected)| seg == expected)
+}
+
+/// AST detector for a call expression (free fn path or method) whose callee
+/// ident equals `name`.
+struct CallDetector<'n> {
+    name: &'n str,
+    found: bool,
+}
+
+impl<'n> CallDetector<'n> {
+    fn new(name: &'n str) -> Self {
+        Self { name, found: false }
+    }
+}
+
+impl<'ast> Visit<'ast> for CallDetector<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = node.func.as_ref()
+            && let Some(segment) = path.path.segments.last()
+            && segment.ident == self.name
+        {
+            self.found = true;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == self.name {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST detector for a method call whose first argument is a specific string
+/// literal (e.g. `.starts_with("event:")`).
+struct MethodCallWithStrLitDetector<'n> {
+    method: &'n str,
+    literal: &'n str,
+    found: bool,
+}
+
+impl<'n> MethodCallWithStrLitDetector<'n> {
+    fn new(method: &'n str, literal: &'n str) -> Self {
+        Self {
+            method,
+            literal,
+            found: false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for MethodCallWithStrLitDetector<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == self.method && node.args.iter().any(|arg| {
+            matches!(
+                arg,
+                Expr::Lit(lit) if matches!(&lit.lit, syn::Lit::Str(s) if s.value() == self.literal)
+            )
+        }) {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST detector for a named field access (`<expr>.rendered_text`).
+struct FieldReadDetector<'n> {
+    name: &'n str,
+    found: bool,
+}
+
+impl<'n> FieldReadDetector<'n> {
+    fn new(name: &'n str) -> Self {
+        Self { name, found: false }
+    }
+}
+
+impl<'ast> Visit<'ast> for FieldReadDetector<'_> {
+    fn visit_expr_field(&mut self, node: &'ast ExprField) {
+        if let Member::Named(ident) = &node.member
+            && ident == self.name
+        {
+            self.found = true;
+        }
+        visit::visit_expr_field(self, node);
+    }
+}
+
+/// AST detector for the typed peer-class comparison: an equality whose one
+/// side is a `.class()` method call and whose other side is the
+/// `PeerInputClass::PlainEvent` path.
+#[derive(Default)]
+struct ClassComparisonDetector {
+    found: bool,
+}
+
+impl ClassComparisonDetector {
+    fn is_class_call(expr: &Expr) -> bool {
+        matches!(expr, Expr::MethodCall(call) if call.method == "class")
+    }
+
+    fn is_plain_event_path(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Path(path) if path_ends_with(&path.path, &["PeerInputClass", "PlainEvent"])
+        )
+    }
+}
+
+impl<'ast> Visit<'ast> for ClassComparisonDetector {
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_)) {
+            let (left, right) = (node.left.as_ref(), node.right.as_ref());
+            if (Self::is_class_call(left) && Self::is_plain_event_path(right))
+                || (Self::is_class_call(right) && Self::is_plain_event_path(left))
+            {
+                self.found = true;
+            }
+        }
+        visit::visit_expr_binary(self, node);
+    }
+}
+
+/// AST detector for a match arm whose pattern is
+/// `InteractionContent::Message { blocks, .. }` (the block-preserving shape).
+#[derive(Default)]
+struct MessageArmBindsBlocksDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MessageArmBindsBlocksDetector {
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        if let syn::Pat::Struct(pat) = &node.pat
+            && path_ends_with(&pat.path, &["InteractionContent", "Message"])
+            && pat
+                .fields
+                .iter()
+                .any(|field| matches!(&field.member, Member::Named(ident) if ident == "blocks"))
+        {
+            self.found = true;
+        }
+        visit::visit_arm(self, node);
+    }
+}
+
+/// AST detector for the stdin `StdinLineFormat` mode match: records whether
+/// the `Text` / `Json` arms exist and whether each arm's body contains a
+/// `from_str` reparse call.
+#[derive(Default)]
+struct StdinFormatArmDetector {
+    text_arm_found: bool,
+    text_arm_reparses: bool,
+    json_arm_found: bool,
+    json_arm_reparses: bool,
+}
+
+impl StdinFormatArmDetector {
+    fn arm_pattern_is(pat: &syn::Pat, variant: &str) -> bool {
+        match pat {
+            syn::Pat::Path(path) => path_ends_with(&path.path, &["StdinLineFormat", variant]),
+            syn::Pat::TupleStruct(pat) => path_ends_with(&pat.path, &["StdinLineFormat", variant]),
+            syn::Pat::Struct(pat) => path_ends_with(&pat.path, &["StdinLineFormat", variant]),
+            _ => false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for StdinFormatArmDetector {
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let mut reparse = CallDetector::new("from_str");
+        reparse.visit_expr(&node.body);
+        if Self::arm_pattern_is(&node.pat, "Text") {
+            self.text_arm_found = true;
+            self.text_arm_reparses |= reparse.found;
+        }
+        if Self::arm_pattern_is(&node.pat, "Json") {
+            self.json_arm_found = true;
+            self.json_arm_reparses |= reparse.found;
+        }
+        visit::visit_arm(self, node);
+    }
+}
+
+/// AST detector for the typed external-event notice: a
+/// `SystemNoticeBlock::ExternalEvent { .. }` struct expression whose
+/// `content` field expression derives from the event's `blocks` field with
+/// the empty-default fallback (`unwrap_or_default`).
+#[derive(Default)]
+struct ExternalEventNoticeDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for ExternalEventNoticeDetector {
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if path_ends_with(&node.path, &["SystemNoticeBlock", "ExternalEvent"]) {
+            for field in &node.fields {
+                let Member::Named(ident) = &field.member else {
+                    continue;
+                };
+                if ident != "content" {
+                    continue;
+                }
+                let mut blocks_read = FieldReadDetector::new("blocks");
+                blocks_read.visit_expr(&field.expr);
+                let mut default_fallback = CallDetector::new("unwrap_or_default");
+                default_fallback.visit_expr(&field.expr);
+                if blocks_read.found && default_fallback.found {
+                    self.found = true;
+                }
+            }
+        }
+        visit::visit_expr_struct(self, node);
+    }
 }
 
 pub(crate) fn error_finding(

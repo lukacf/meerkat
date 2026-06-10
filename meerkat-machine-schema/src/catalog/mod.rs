@@ -12,9 +12,10 @@ pub use compositions::{
     schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
 };
 pub use coverage::{
-    CompositionCoverageManifest, CoverageAnchor, CoverageSchemaTarget, MachineCoverageManifest,
-    ScenarioCoverage, SemanticCoverageEntry, SymbolRef, canonical_composition_coverage_manifests,
-    canonical_machine_coverage_manifests,
+    CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
+    MachineCoverageManifest, ScenarioCoverage, SemanticCoverageEntry, SymbolRef,
+    canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
+    scheduler_rule_coverage_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

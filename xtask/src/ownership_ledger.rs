@@ -432,6 +432,11 @@ pub fn collect_ownership_findings(
         }
     }
 
+    // Per-crate struct→named-field index for strict write-set resolution,
+    // built lazily so the gate only parses crates the ledger references.
+    let mut struct_field_index_by_crate: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> =
+        BTreeMap::new();
+
     let mut seen_operation_keys = BTreeSet::new();
     for operation in &registry.semantic_operations {
         let key = (operation.path.clone(), operation.symbol.clone());
@@ -569,6 +574,37 @@ pub fn collect_ownership_findings(
                     &entry.symbol,
                     format!(
                         "semantic operation writeset contains duplicate symbol `{writeset_item}`",
+                    ),
+                ));
+            }
+            // Strict write-set resolution (fail-closed): every write-set
+            // element must resolve to a real named struct field — either a
+            // bare `field` on the entry's `owner_shell` struct, or an
+            // explicit typed sub-owner path `OwnerStruct.field`. A semantic
+            // cell name that matches no live field is a stale ownership
+            // claim and goes red instead of false-closing.
+            let (claimed_type, claimed_field) = match writeset_item.split_once('.') {
+                Some((type_name, field_name)) => (type_name.to_string(), field_name),
+                None => (entry.owner_shell.clone(), writeset_item.as_str()),
+            };
+            let crate_dir = entry.path.split('/').next().unwrap_or_default().to_string();
+            let index = match struct_field_index_by_crate.entry(crate_dir.clone()) {
+                Entry::Vacant(slot) => slot.insert(crate_struct_field_index(root, &crate_dir)?),
+                Entry::Occupied(slot) => slot.into_mut(),
+            };
+            let resolved = index
+                .get(&claimed_type)
+                .is_some_and(|fields| fields.contains(claimed_field));
+            if !resolved {
+                findings.push(error_finding(
+                    "OwnershipOperationWritesetUnresolved",
+                    &entry.path,
+                    // The write-set element is part of the finding key so
+                    // multiple unresolved elements on one entry stay
+                    // distinct findings instead of deduping into one.
+                    format!("{}::{writeset_item}", entry.symbol),
+                    format!(
+                        "writeset element `{writeset_item}` does not resolve to a named field `{claimed_field}` on struct `{claimed_type}` in crate `{crate_dir}`",
                     ),
                 ));
             }
@@ -1231,16 +1267,21 @@ fn render_markdown(report: &OwnershipReport) -> String {
             "\n## {} Semantic Operations\n\n",
             title_case_subsystem(subsystem)
         ));
-        out.push_str("| Path | Symbol | Boundary | Status | Anchor |\n");
-        out.push_str("| --- | --- | --- | --- | --- |\n");
+        out.push_str("| Path | Symbol | Boundary | Status | Writes | Anchor |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- |\n");
         for entry in report
             .semantic_operations
             .iter()
             .filter(|entry| subsystem_of_path(&entry.path) == subsystem)
         {
             out.push_str(&format!(
-                "| `{}` | `{}` | `{}` | `{}` | `{}` |\n",
-                entry.path, entry.symbol, entry.boundary_kind, entry.status, entry.anchor
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+                entry.path,
+                entry.symbol,
+                entry.boundary_kind,
+                entry.status,
+                entry.writeset.join("`, `"),
+                entry.anchor
             ));
         }
 
@@ -1569,6 +1610,61 @@ fn parse_struct_field_symbol(symbol: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((type_name, field_name))
+}
+
+/// Build the struct→named-field index for one crate directory (recursing
+/// through `<crate>/src/**.rs`, including structs declared inside inline
+/// modules). Fail-closed: a file the index cannot read or parse aborts the
+/// run instead of silently shrinking the resolution domain.
+fn crate_struct_field_index(
+    root: &Path,
+    crate_dir: &str,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut index = BTreeMap::new();
+    let src = root.join(crate_dir).join("src");
+    if !src.exists() {
+        return Ok(index);
+    }
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))?;
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("read dir entry in {}", dir.display()))?
+                .path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let source = fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?;
+                let parsed = syn::parse_file(&source)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                collect_struct_fields(&parsed.items, &mut index);
+            }
+        }
+    }
+    Ok(index)
+}
+
+fn collect_struct_fields(items: &[Item], index: &mut BTreeMap<String, BTreeSet<String>>) {
+    for item in items {
+        match item {
+            Item::Struct(item_struct) => {
+                let fields = index.entry(item_struct.ident.to_string()).or_default();
+                for field in &item_struct.fields {
+                    if let Some(ident) = &field.ident {
+                        fields.insert(ident.to_string());
+                    }
+                }
+            }
+            Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    collect_struct_fields(inner, index);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn struct_has_named_field(parsed: &syn::File, type_name: &str, field_name: &str) -> bool {
@@ -2315,7 +2411,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "register_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "driver", "ops_lifecycle", "completions"],
+            &[
+                "sessions",
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.ops_lifecycle",
+                "RuntimeSessionEntry.completions"
+            ],
             "MeerkatMachine registration + recovery publication contract",
             &[
                 "registered session exists only after recovery succeeds, with stale attachment publication normalized before reuse",
@@ -2330,7 +2431,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "set_session_silent_intents",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["driver"],
+            &["RuntimeSessionEntry.driver"],
             "MeerkatMachine admission/control policy truth",
             &[
                 "silent comms intent policy updates are applied only to the canonical driver runtime for that registered session",
@@ -2343,7 +2444,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "register_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "attachment", "driver"],
+            &[
+                "sessions",
+                "RuntimeSessionEntry.attachment_slot",
+                "RuntimeSessionEntry.driver"
+            ],
             "MeerkatMachine registration + attachment publication contract",
             &[
                 "session registration and executor attachment establish one canonical runtime identity",
@@ -2356,7 +2461,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "ensure_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "attachment", "driver"],
+            &[
+                "sessions",
+                "RuntimeSessionEntry.attachment_slot",
+                "RuntimeSessionEntry.driver"
+            ],
             "MeerkatMachine attachment publication contract + RuntimeControl transitions",
             &[
                 "executor attachment is published only after driver attach succeeds, with stale attached-driver states repaired via detach/reattach before publication",
@@ -2369,7 +2478,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "unregister_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "drain_slot"],
+            &["sessions", "RuntimeSessionEntry.drain_slot"],
             "registered-session contract + MeerkatMachine drain-control region",
             &["session removed and no drain remains live or suppressing"],
             &["drain slot is owned by session entry (wave-c C-H2)"],
@@ -2380,7 +2489,10 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "hard_cancel_current_run",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["driver", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region + runtime attachment publication contract",
             &[
                 "interrupt requests target only the canonical attached runtime for the registered session",
@@ -2395,7 +2507,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "stop_runtime_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["driver", "completions", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region + runtime attachment publication contract",
             &["runtime stop command and fallback path produce canonical stopped/reset semantics"],
             &["attachment and completion waiter surfaces remain aligned with runtime state"],
@@ -2406,7 +2522,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "accept_input_with_completion",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["driver", "completions", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine admission + input-lifecycle regions",
             &[
                 "accept-with-completion registers waiters strictly from canonical input lifecycle non-terminal states",
@@ -2421,7 +2541,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "update_peer_ingress_context",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["drain_slot"],
+            &["RuntimeSessionEntry.drain_slot"],
             "MeerkatMachine drain-control region",
             &["drain spawn follows handoff protocol and updates slot projection"],
             &["no live drain without registered session"],
@@ -2432,7 +2552,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "notify_comms_drain_exited",
             BoundaryKind::ManualCallback,
             "MeerkatMachine",
-            &["drain_slot"],
+            &["RuntimeSessionEntry.drain_slot"],
             "MeerkatMachine drain-control region",
             &["exit feedback closes drain lifecycle and updates slot projection"],
             &["drain protocol closure and liveness remain satisfied"],
@@ -2443,7 +2563,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "abort_comms_drains",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["drain_slot"],
+            &["RuntimeSessionEntry.drain_slot"],
             "MeerkatMachine drain-control region",
             &["abort requests transition all tracked drains through canonical abort protocol"],
             &["no slot remains in running state after abort completion"],
@@ -2454,7 +2574,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "abort_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["drain_slot"],
+            &["RuntimeSessionEntry.drain_slot"],
             "MeerkatMachine drain-control region",
             &["single-session abort request follows canonical drain abort protocol"],
             &["aborted drain slot cannot retain stale running state"],
@@ -2465,7 +2585,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "wait_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["drain_slot"],
+            &["RuntimeSessionEntry.drain_slot"],
             "MeerkatMachine drain-control region",
             &["wait path preserves canonical drain terminalization and safety-net exit reporting"],
             &["drain phase cannot remain Running after joined completion path"],
@@ -2476,7 +2596,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "publish_event",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "input_state"],
+            &["RuntimeSessionEntry.driver", "InputLedger.states"],
             "MeerkatMachine control + input-lifecycle regions",
             &[
                 "runtime event publication is applied against canonical runtime/input state machines",
@@ -2489,7 +2609,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "retire",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "completions", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region",
             &["retire transitions preserve canonical pending-drain and abandonment semantics"],
             &["retire report and completion closure remain aligned with runtime truth"],
@@ -2500,7 +2624,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "recycle",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "completions", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region",
             &["recoverable work preserved according to driver kind"],
             &["recycle contract matches pre-recycle truth"],
@@ -2511,7 +2639,10 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "reset",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "completions"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions"
+            ],
             "MeerkatMachine control region",
             &["queued work and waiters terminate according to canonical reset semantics"],
             &["completion registry remains waiter-only"],
@@ -2522,7 +2653,10 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "recover",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region",
             &["recovery transitions and wake semantics follow canonical runtime lifecycle truth"],
             &["recovered runtime state and attachment wake signaling remain aligned"],
@@ -2533,7 +2667,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "destroy",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "completions", "attachment"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "RuntimeSessionEntry.completions",
+                "RuntimeSessionEntry.attachment_slot"
+            ],
             "MeerkatMachine control region",
             &[
                 "destroy terminalizes runtime and completion waiters according to canonical semantics",
@@ -2546,7 +2684,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "ingest",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
-            &["driver", "queue", "steer_queue"],
+            &[
+                "RuntimeSessionEntry.driver",
+                "EphemeralRuntimeDriver.queue",
+                "EphemeralRuntimeDriver.steer_queue"
+            ],
             "MeerkatMachine admission + input-lifecycle regions",
             &["accepted work is reflected in canonical ingress/input lifecycle truth"],
             &["driver queues are projections of ingress truth"],
@@ -2557,7 +2699,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "set_removal_timeout",
             BoundaryKind::PublicInherent,
             "McpRouter",
-            &["authority"],
+            &["surface_owner"],
             "ExternalToolSurfaceAuthority",
             &[
                 "removal-timeout policy mutation is applied only through canonical authority mutator with operating-phase guard",
@@ -2583,7 +2725,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "stage_add",
             BoundaryKind::PublicInherent,
             "McpRouter",
-            &["staged_payloads", "authority"],
+            &["staged_payloads", "surface_owner"],
             "ExternalToolSurfaceAuthority staged intent sequence",
             &[
                 "stage-add intent and payload binding remain consistent with canonical staged intent truth",
@@ -2596,7 +2738,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "stage_remove",
             BoundaryKind::PublicInherent,
             "McpRouter",
-            &["staged_payloads", "authority"],
+            &["staged_payloads", "surface_owner"],
             "ExternalToolSurfaceAuthority staged intent sequence",
             &["stage-remove intent is machine-owned and shell payload cache is kept consistent"],
             &["remove staging cannot bypass authority ordering semantics"],
@@ -2607,7 +2749,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "stage_reload",
             BoundaryKind::PublicInherent,
             "McpRouter",
-            &["staged_payloads", "authority"],
+            &["staged_payloads", "surface_owner"],
             "ExternalToolSurfaceAuthority staged intent sequence",
             &[
                 "stage-reload intent and payload replacement remain coupled to machine-owned staged truth",
@@ -2691,7 +2833,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "call_tool",
             BoundaryKind::PublicInherent,
             "McpRouter",
-            &["servers", "projection", "active_calls"],
+            &["servers", "projection", "ServerEntry.active_calls"],
             "ExternalToolSurfaceAuthority",
             &["routing uses published snapshot and inflight truth remains canonical"],
             &["visibility/routing do not read raw servers directly"],
@@ -2829,7 +2971,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "spawn_spec",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["pending_spawns"],
+            &["MobActor.pending_spawns"],
             "PendingSpawnLineage + RosterAuthority",
             &[
                 "spawn_spec delegates to canonical spawn receipt path without introducing helper-owned lifecycle truth",
@@ -2842,7 +2984,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "spawn_many",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["pending_spawns"],
+            &["MobActor.pending_spawns"],
             "PendingSpawnLineage + RosterAuthority",
             &[
                 "batch spawn wrapper preserves per-spec canonical spawn lineage and ordering contract",
@@ -2855,7 +2997,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "retire",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "retired_event_index"],
+            &["roster", "MobActor.retired_event_index"],
             "RosterAuthority + disposal pipeline",
             &["retire surface reflects canonical member lifecycle truth"],
             &["member/session removal follows lifecycle invariants"],
@@ -2866,7 +3008,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "respawn",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "pending_spawns", "wiring"],
+            &[
+                "roster",
+                "MobActor.pending_spawns",
+                "MobActor.dsl_authority"
+            ],
             "respawn helper contract + PendingSpawnLineage + RosterAuthority",
             &["respawn helper follows documented composed contract"],
             &["helper does not invent lifecycle truth"],
@@ -2877,7 +3023,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "retire_all",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "pending_spawns"],
+            &["roster", "MobActor.pending_spawns"],
             "PendingSpawnLineage + RosterAuthority + disposal pipeline",
             &["bulk retire path preserves canonical member lifecycle transitions for each member"],
             &["bulk retire cannot leave member lifecycle truth partially applied"],
@@ -2888,7 +3034,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "wire",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "wiring", "edge_locks"],
+            &["roster", "MobActor.dsl_authority", "MobActor.edge_locks"],
             "RosterAuthority wiring projection contract + trust-edge mutation + edge-lock discipline",
             &["wire mutation reflects canonical peer-graph lifecycle and trust mutation rules"],
             &["wiring projection and trust edge mutation remain aligned"],
@@ -2899,7 +3045,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "unwire",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "wiring", "edge_locks"],
+            &["roster", "MobActor.dsl_authority", "MobActor.edge_locks"],
             "RosterAuthority wiring projection contract + trust-edge mutation + edge-lock discipline",
             &["unwire mutation reflects canonical peer-graph lifecycle and trust mutation rules"],
             &["wiring projection and trust edge mutation remain aligned"],
@@ -2910,7 +3056,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "internal_turn",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["runtime_bridge", "roster"],
+            &["MobActor.runtime_adapter", "roster"],
             "SessionBackend runtime bridge + InputLifecycle truth",
             &[
                 "internal-turn wrapper submits work only through canonical member runtime bridge path",
@@ -2923,7 +3069,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "run_flow",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["orchestrator", "flow_streams", "run_store"],
+            &["MobActor.dsl_authority", "flow_streams", "run_store"],
             "MobOrchestratorAuthority + MobLifecycleAuthority",
             &[
                 "flow run submission aligns with canonical orchestrator and lifecycle transition truth",
@@ -2936,7 +3082,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "run_flow_with_stream",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["orchestrator", "flow_streams", "run_store"],
+            &["MobActor.dsl_authority", "flow_streams", "run_store"],
             "MobOrchestratorAuthority + MobLifecycleAuthority",
             &["streaming flow run submission aligns with canonical orchestrator/run-store truth"],
             &[
@@ -2949,7 +3095,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "cancel_flow",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["run_cancel_tokens", "orchestrator", "run_store"],
+            &[
+                "MobActor.run_cancel_tokens",
+                "MobActor.dsl_authority",
+                "run_store"
+            ],
             "MobOrchestratorAuthority + MobLifecycleAuthority",
             &["flow cancellation surface targets canonical in-flight run truth"],
             &["cancel surface cannot mark runs canceled outside canonical cleanup path"],
@@ -2960,7 +3110,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "stop",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "pending_spawns", "runtime_bridge"],
+            &[
+                "MobActor.dsl_authority",
+                "MobActor.pending_spawns",
+                "MobActor.runtime_adapter"
+            ],
             "MobLifecycleAuthority + RosterAuthority",
             &[
                 "stop command transitions lifecycle through canonical authority and drains pending spawn/runtime work",
@@ -2973,7 +3127,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "resume",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "runtime_bridge"],
+            &["MobActor.dsl_authority", "MobActor.runtime_adapter"],
             "MobLifecycleAuthority + RosterAuthority",
             &["resume command transitions lifecycle through canonical authority"],
             &["resume convenience surface cannot bypass canonical lifecycle guards"],
@@ -2984,7 +3138,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "complete",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "roster", "runtime_bridge"],
+            &[
+                "MobActor.dsl_authority",
+                "roster",
+                "MobActor.runtime_adapter"
+            ],
             "MobLifecycleAuthority + RosterAuthority",
             &[
                 "complete command transitions lifecycle and retirement semantics through canonical authority paths",
@@ -2999,7 +3157,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "reset",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "roster", "runtime_bridge", "pending_spawns"],
+            &[
+                "MobActor.dsl_authority",
+                "roster",
+                "MobActor.runtime_adapter",
+                "MobActor.pending_spawns"
+            ],
             "MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge",
             &["reset command clears runtime/member state through canonical authority transitions"],
             &["reset convenience surface cannot preserve stale helper-owned member/runtime truth"],
@@ -3010,7 +3173,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "destroy",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "roster", "runtime_bridge", "pending_spawns"],
+            &[
+                "MobActor.dsl_authority",
+                "roster",
+                "MobActor.runtime_adapter",
+                "MobActor.pending_spawns"
+            ],
             "MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge",
             &[
                 "destroy command terminalizes runtime/member state through canonical authority transitions",
@@ -3023,7 +3191,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "set_spawn_policy",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["spawn_policy"],
+            &["MobActor.spawn_policy"],
             "MobSpawnPolicySurface",
             &["spawn-policy updates route through canonical actor command path"],
             &["spawn policy convenience surface cannot create side-owned auto-spawn semantics"],
@@ -3034,7 +3202,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "shutdown",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["lifecycle", "runtime_bridge", "pending_spawns", "run_store"],
+            &[
+                "MobActor.dsl_authority",
+                "MobActor.runtime_adapter",
+                "MobActor.pending_spawns",
+                "run_store"
+            ],
             "MobLifecycleAuthority + SessionBackend runtime bridge",
             &[
                 "shutdown command drains runtime/flow resources through canonical actor shutdown path",
@@ -3049,7 +3222,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "force_cancel_member",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "runtime_bridge"],
+            &["roster", "MobActor.runtime_adapter"],
             "SessionBackend runtime bridge + InputLifecycle truth",
             &["force-cancel requests target canonical in-flight member run truth"],
             &["cancel path cannot retire or rewire members implicitly"],
@@ -3060,7 +3233,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "spawn_helper",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "pending_spawns"],
+            &["roster", "MobActor.pending_spawns"],
             "MobMemberLifecycleAuthority",
             &["helper result class is machine-derived"],
             &["helper does not classify from snapshots"],
@@ -3071,7 +3244,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "fork_helper",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "pending_spawns"],
+            &["roster", "MobActor.pending_spawns"],
             "MobMemberLifecycleAuthority",
             &["helper result class is machine-derived"],
             &["helper does not classify from snapshots"],
@@ -3134,7 +3307,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_force_cancel",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["runtime_bridge", "roster"],
+            &["runtime_adapter", "roster"],
             "MobLifecycleAuthority active-member gate + SessionBackend::interrupt_member runtime-adapter ownership contract + InputLifecycle cancellation semantics",
             &[
                 "force-cancel command resolves target membership in roster and routes runtime-backed cancellation through MeerkatMachine when adapter registration exists",
@@ -3147,7 +3320,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_retire",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["roster", "wiring", "runtime_bridge"],
+            &["roster", "dsl_authority", "runtime_adapter"],
             "RosterAuthority + disposal pipeline + SessionBackend retire contract",
             &[
                 "retire command tears down wiring/runtime state and removes the member from the canonical roster projection through disposal sequencing",
@@ -3175,7 +3348,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_submit_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["runtime_bridge", "pending_spawns", "roster"],
+            &["runtime_adapter", "pending_spawns", "roster"],
             "MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract",
             &[
                 "work-lane submission routes external/internal origin legality through MobMachine DSL guards; the shell forwards WorkOrigin verbatim and observes RequestRuntimeIngress before dispatching the turn; auto-spawn remains an external-only policy seam",
@@ -3190,7 +3363,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_cancel_all_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["runtime_bridge", "roster"],
+            &["runtime_adapter", "roster"],
             "MobMachine DSL CancelAllWork legality + SessionBackend runtime bridge",
             &[
                 "work-lane cancel routes through MobMachine DSL guards (live-runtime membership + phase) before the shell issues interrupt_member; fence-token freshness stays a shell-level concurrency invariant"
@@ -3205,7 +3378,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_rotate_supervisor",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["roster", "runtime_bridge"],
+            &["roster", "runtime_adapter"],
             "Supervisor-bridge rotation protocol + fail-closed incomplete rotation on partial remote failure",
             &[
                 "rotation defers durable current-authority advance until remote acceptance and local supervisor activation are confirmed",
@@ -3221,7 +3394,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &[
-                "orchestrator",
+                "dsl_authority",
                 "run_tasks",
                 "run_cancel_tokens",
                 "run_store",
@@ -3264,7 +3437,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_complete",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["lifecycle", "roster", "runtime_bridge"],
+            &["dsl_authority", "roster", "runtime_adapter"],
             "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
             &[
                 "complete command cancels flow work, drains pending spawn lineage, retires canonical roster members, and only then publishes lifecycle completion",
@@ -3279,7 +3452,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_destroy",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["lifecycle", "roster", "runtime_bridge", "pending_spawns"],
+            &[
+                "dsl_authority",
+                "roster",
+                "runtime_adapter",
+                "pending_spawns"
+            ],
             "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
             &[
                 "destroy command drains pending lineage, retires canonical members, and only then publishes lifecycle destroy semantics",
@@ -3292,7 +3470,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "handle_reset",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["lifecycle", "roster", "runtime_bridge", "pending_spawns"],
+            &[
+                "dsl_authority",
+                "roster",
+                "runtime_adapter",
+                "pending_spawns"
+            ],
             "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
             &[
                 "reset command drains pending lineage, retires canonical members, and only then returns lifecycle to the reset-prepared state",

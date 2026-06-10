@@ -1,18 +1,20 @@
 use clap::Args;
 use meerkat_machine_schema::{
-    CompositionSchema, EffectDisposition, MachineSchema, Route, SeamClassification,
-    canonical_composition_schemas, canonical_machine_schemas, compat_composition_schemas,
+    CompositionSchema, EffectDisposition, EffectTeardownClass, MachineSchema, Route,
+    SeamClassification, TeardownObligationClass, canonical_composition_schemas,
+    canonical_machine_schemas, compat_composition_schemas,
 };
 
 /// CLI args for `xtask seam-inventory`.
 #[derive(Debug, Clone, Args, Default)]
 pub struct SeamInventoryArgs {
-    /// Retained for CLI compatibility. Explicit seam classification is now
-    /// enforced by construction: the machine-catalog DSL parser requires a
-    /// `seam <Classification>` clause on every disposition, so an unclassified
-    /// Local/External effect cannot reach this audit. The realization debts
-    /// (handoff protocols, public-surface contracts, routed-effect typed
-    /// realization) are always hard errors regardless of this flag.
+    /// Escalate teardown-declaration completeness debt to a hard failure: a
+    /// handoff protocol declaring `TeardownObligationClass::DetachBeforeDestroy`
+    /// that no `EffectTeardownClass::DestroyRequest` route names as its
+    /// `detach_obligation` is a dangling teardown declaration. The realization
+    /// debts (handoff protocols, public-surface contracts, routed-effect typed
+    /// realization, unpaired/incoherent destroy obligations) are always hard
+    /// errors regardless of this flag.
     #[arg(long)]
     pub strict: bool,
 }
@@ -86,6 +88,126 @@ fn known_public_surface_contracts() -> Vec<SurfaceContractEntry> {
     ]
 }
 
+/// One row of the typed destroy-obligation inventory: a route declaring
+/// [`EffectTeardownClass::DestroyRequest`] together with the resolution state
+/// of the detach obligation it names.
+#[derive(Debug)]
+pub struct DestroyRouteEntry {
+    pub producer_machine: String,
+    pub effect_variant: String,
+    pub composition: String,
+    pub producer_instance: String,
+    pub detach_obligation: String,
+    pub paired: bool,
+}
+
+/// Typed C-F3 teardown inventory derived purely from the declared
+/// [`Route::teardown`] / [`EffectHandoffProtocol::teardown`] facts.
+#[derive(Debug, Default)]
+pub struct TeardownInventory {
+    pub destroy_routes: Vec<DestroyRouteEntry>,
+    /// Routes carrying the same (producer machine, effect variant) must agree
+    /// on their teardown classification. A divergent sibling (e.g. a second
+    /// route for a destroy-request effect that omits the declaration) is a
+    /// hard coherence violation — the typed replacement for the old
+    /// `contains("Destroy")` name sweep.
+    pub coherence_violations: Vec<String>,
+    /// Protocols declaring `DetachBeforeDestroy` that no `DestroyRequest`
+    /// route names. Escalated to a hard failure under `--strict`.
+    pub dangling_detach_protocols: Vec<String>,
+}
+
+/// Build the typed teardown inventory across every composition.
+fn collect_teardown_inventory(compositions: &[&CompositionSchema]) -> TeardownInventory {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut inventory = TeardownInventory::default();
+
+    // Index detach-obligation protocols by name: protocol must declare the
+    // DetachBeforeDestroy teardown class and at least one feedback input
+    // (the ack that closes the obligation).
+    let mut detach_protocols: BTreeSet<String> = BTreeSet::new();
+    for composition in compositions {
+        for protocol in &composition.handoff_protocols {
+            if protocol.teardown == Some(TeardownObligationClass::DetachBeforeDestroy)
+                && !protocol.allowed_feedback_inputs.is_empty()
+            {
+                detach_protocols.insert(protocol.name.as_str().to_string());
+            }
+        }
+    }
+
+    // Coherence: every route carrying the same producer effect must agree on
+    // its teardown classification across all compositions.
+    let mut teardown_by_effect: BTreeMap<(String, String), BTreeSet<Option<EffectTeardownClass>>> =
+        BTreeMap::new();
+    for composition in compositions {
+        for route in &composition.routes {
+            let producer_machine = composition
+                .machines
+                .iter()
+                .find(|m| m.instance_id == route.from_machine)
+                .map(|m| m.machine_name.as_str().to_string())
+                .unwrap_or_default();
+            teardown_by_effect
+                .entry((
+                    producer_machine.clone(),
+                    route.effect_variant.as_str().to_string(),
+                ))
+                .or_default()
+                .insert(route.teardown.clone());
+
+            let Some(EffectTeardownClass::DestroyRequest { detach_obligation }) = &route.teardown
+            else {
+                continue;
+            };
+            let paired = detach_protocols.contains(detach_obligation.as_str());
+            inventory.destroy_routes.push(DestroyRouteEntry {
+                producer_machine,
+                effect_variant: route.effect_variant.as_str().to_string(),
+                composition: composition.name.as_str().to_string(),
+                producer_instance: route.from_machine.as_str().to_string(),
+                detach_obligation: detach_obligation.as_str().to_string(),
+                paired,
+            });
+        }
+    }
+    for ((machine, effect), classes) in &teardown_by_effect {
+        if classes.len() > 1 {
+            inventory.coherence_violations.push(format!(
+                "{machine}::{effect} carries divergent teardown declarations across its routes: {classes:?}"
+            ));
+        }
+    }
+
+    let referenced: BTreeSet<&str> = inventory
+        .destroy_routes
+        .iter()
+        .map(|entry| entry.detach_obligation.as_str())
+        .collect();
+    inventory.dangling_detach_protocols = detach_protocols
+        .iter()
+        .filter(|name| !referenced.contains(name.as_str()))
+        .cloned()
+        .collect();
+
+    inventory.destroy_routes.sort_by(|a, b| {
+        (
+            &a.producer_machine,
+            &a.effect_variant,
+            &a.composition,
+            &a.producer_instance,
+        )
+            .cmp(&(
+                &b.producer_machine,
+                &b.effect_variant,
+                &b.composition,
+                &b.producer_instance,
+            ))
+    });
+    inventory
+}
+
 pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     let machines = canonical_machine_schemas();
     let compositions = canonical_composition_schemas();
@@ -144,6 +266,12 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         .filter(|rr| !rr.missing_consumers.is_empty())
         .collect::<Vec<_>>();
 
+    // Typed C-F3 teardown inventory over canonical + compat compositions.
+    let compat = compat_composition_schemas();
+    let all_compositions: Vec<&CompositionSchema> =
+        compositions.iter().chain(compat.iter()).collect();
+    let teardown_inventory = collect_teardown_inventory(&all_compositions);
+
     // Print the report
     print_report(&entries);
     print_routed_realizations(&routed_realizations);
@@ -156,25 +284,45 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         &unresolved_public_surface_alignment_debt,
         &routed_realizations,
         &unresolved_routed_debt,
-        &compositions,
+        &all_compositions,
+        &teardown_inventory,
     );
 
-    // `--strict` no longer has a classification-debt arm: the DSL parser
-    // requires a `seam <Classification>` clause on every disposition, so each
-    // Local/External effect carries an explicit classification by construction.
-    // An unclassified effect cannot reach this audit — it would fail to compile
-    // in the machine catalog. What remains is the realization debt the strict
-    // mode always enforced (handoff protocols, public-surface contracts, and
-    // routed-effect realization), which are unconditional hard errors. The
-    // `args.strict` flag is retained on the CLI surface for compatibility.
-    let _ = args.strict;
+    // Explicit seam classification is enforced by construction (the
+    // machine-catalog DSL parser requires a `seam <Classification>` clause on
+    // every disposition), so there is no classification-debt arm here. The
+    // realization debts — handoff protocols, public-surface contracts,
+    // routed-effect realization, and the typed C-F3 destroy obligations
+    // (unpaired destroy routes and teardown-coherence divergence) — are
+    // unconditional hard errors. `--strict` additionally escalates dangling
+    // detach-obligation declarations (a `DetachBeforeDestroy` protocol no
+    // destroy route references) from report-only to a hard failure.
     let protocol_debt = unresolved_protocol_debt.len();
     let public_surface_debt = unresolved_public_surface_alignment_debt.len();
     let routed_debt = unresolved_routed_debt.len();
+    let unpaired_destroy_debt = teardown_inventory
+        .destroy_routes
+        .iter()
+        .filter(|entry| !entry.paired)
+        .count();
+    let teardown_coherence_debt = teardown_inventory.coherence_violations.len();
+    let dangling_detach_debt = teardown_inventory.dangling_detach_protocols.len();
 
-    if protocol_debt > 0 || public_surface_debt > 0 || routed_debt > 0 {
+    if protocol_debt > 0
+        || public_surface_debt > 0
+        || routed_debt > 0
+        || unpaired_destroy_debt > 0
+        || teardown_coherence_debt > 0
+    {
         anyhow::bail!(
-            "seam inventory has unresolved debt: protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}",
+            "seam inventory has unresolved debt: protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}, unpaired_destroy={unpaired_destroy_debt}, teardown_coherence={teardown_coherence_debt}",
+        );
+    }
+
+    if args.strict && dangling_detach_debt > 0 {
+        anyhow::bail!(
+            "seam inventory (strict) has dangling detach-obligation declarations: {}",
+            teardown_inventory.dangling_detach_protocols.join(", "),
         );
     }
 
@@ -371,7 +519,8 @@ fn print_summary(
     unresolved_public_surface_alignment_debt: &[&SurfaceContractEntry],
     routed_realizations: &[RoutedRealization],
     unresolved_routed_debt: &[&RoutedRealization],
-    compositions: &[CompositionSchema],
+    all_compositions: &[&CompositionSchema],
+    teardown_inventory: &TeardownInventory,
 ) {
     let total = entries.len();
     let no_owner = entries
@@ -415,11 +564,8 @@ fn print_summary(
     // → realising actor → typed feedback input(s) that close the
     // step-lock (ack / failure). Producers now host the annotation on
     // their canonical effect rather than through bridge-only schemas.
-    let compat = compat_composition_schemas();
     let mut protocol_rows: Vec<(String, String, String, String, String, String)> = Vec::new();
-    let all_compositions: Vec<&CompositionSchema> =
-        compositions.iter().chain(compat.iter()).collect();
-    for composition in &all_compositions {
+    for composition in all_compositions {
         for protocol in &composition.handoff_protocols {
             let feedback_variants: Vec<String> = protocol
                 .allowed_feedback_inputs
@@ -466,93 +612,57 @@ fn print_summary(
     // `MobOwned` by that mob must receive `DetachIngress` first,
     // otherwise the `peer_ingress_mob_id` on that session dangles.
     //
-    // This section walks every canonical routed effect whose variant
-    // name contains the substring "Destroy" and asserts a paired
-    // handoff obligation exists whose feedback inputs include at
-    // least one variant that mentions "IngressDetached" or "Detach".
-    // Unpaired destroy routes are emitted as debt so the
-    // `mob-destroy → session-detach` ordering cannot regress
-    // silently.
-    let mut destroy_routes: Vec<(String, String, String, String, bool)> = Vec::new();
-    for composition in &all_compositions {
-        for route in &composition.routes {
-            // Filter to destroy *requests* that flow from a producer to a
-            // consumer that will be torn down. Reply signals like
-            // `RuntimeDestroyed` (consumer → producer, "destroy observed")
-            // are not request-side effects and do not need a paired
-            // detach obligation: the destroy is already done by the time
-            // they fire.
-            let variant = route.effect_variant.as_str();
-            if !(variant.contains("Destroy") && variant.starts_with("Request")) {
-                continue;
-            }
-            let producer_instance = route.from_machine.as_str().to_string();
-            let producer_machine = composition
-                .machines
-                .iter()
-                .find(|m| m.instance_id == route.from_machine)
-                .map(|m| m.machine_name.as_str().to_string())
-                .unwrap_or_default();
-            let effect = route.effect_variant.as_str().to_string();
-            let composition_name = composition.name.as_str().to_string();
-            // Paired iff some protocol (across all compositions) has a
-            // feedback input whose variant name is "*IngressDetach*"
-            // or "*Detach*" AND the protocol's allowed feedback inputs
-            // route into the same consumer as this destroy route.
-            let consumer_instance = &route.to.machine;
-            let paired = all_compositions.iter().any(|other| {
-                other.handoff_protocols.iter().any(|protocol| {
-                    protocol.allowed_feedback_inputs.iter().any(|fb| {
-                        let variant = fb.input_variant.as_str();
-                        (variant.contains("IngressDetached") || variant.contains("Detach"))
-                            && (fb.machine_instance == *consumer_instance
-                                || other.machines.iter().any(|m| {
-                                    m.instance_id == fb.machine_instance
-                                        && other
-                                            .machines
-                                            .iter()
-                                            .any(|cm| cm.machine_name.as_str() == producer_machine)
-                                })
-                                || protocol.name.as_str().contains("session_ingress"))
-                    })
-                })
-            });
-            destroy_routes.push((
-                producer_machine.clone(),
-                effect,
-                composition_name,
-                producer_instance,
-                paired,
-            ));
-        }
-    }
-    destroy_routes.sort();
-    println!("## Destroy-obligation Pairing (C-F3)");
-    if destroy_routes.is_empty() {
-        println!("  (no canonical routed *Destroy* effects declared)");
+    // The inventory is derived purely from the typed teardown
+    // declarations on the composition schema: a route declaring
+    // `EffectTeardownClass::DestroyRequest` must name a protocol that
+    // declares `TeardownObligationClass::DetachBeforeDestroy` with at
+    // least one feedback input (the detach ack). Coherence enforcement
+    // (every route carrying the same producer effect agrees on its
+    // teardown class) replaces the old variant-name substring sweep,
+    // so an undeclared sibling of a destroy route fails the gate.
+    println!("## Destroy-obligation Pairing (C-F3, typed)");
+    if teardown_inventory.destroy_routes.is_empty() {
+        println!("  (no DestroyRequest-classified routes declared)");
     } else {
         println!(
-            "  {:24} {:32} {:32} {:32} paired",
-            "producer_machine", "effect_variant", "composition", "producer_instance"
+            "  {:24} {:32} {:32} {:32} {:36} paired",
+            "producer_machine",
+            "effect_variant",
+            "composition",
+            "producer_instance",
+            "detach_obligation"
         );
-        for (producer, effect, composition_name, instance, paired) in &destroy_routes {
+        for entry in &teardown_inventory.destroy_routes {
             println!(
-                "  {:24} {:32} {:32} {:32} {}",
-                producer,
-                effect,
-                composition_name,
-                instance,
-                if *paired { "yes" } else { "NO" }
+                "  {:24} {:32} {:32} {:32} {:36} {}",
+                entry.producer_machine,
+                entry.effect_variant,
+                entry.composition,
+                entry.producer_instance,
+                entry.detach_obligation,
+                if entry.paired { "yes" } else { "NO" }
             );
         }
     }
-    let unpaired_destroy_debt: Vec<&(String, String, String, String, bool)> = destroy_routes
+    let unpaired_destroy_debt = teardown_inventory
+        .destroy_routes
         .iter()
-        .filter(|(_, _, _, _, paired)| !paired)
-        .collect();
+        .filter(|entry| !entry.paired)
+        .count();
+    println!("  unpaired destroy routes (debt):            {unpaired_destroy_debt}");
+    for violation in &teardown_inventory.coherence_violations {
+        println!("  ! TEARDOWN COHERENCE: {violation}");
+    }
     println!(
-        "  unpaired destroy routes (debt):            {}",
-        unpaired_destroy_debt.len()
+        "  teardown coherence violations (debt):      {}",
+        teardown_inventory.coherence_violations.len()
+    );
+    for dangling in &teardown_inventory.dangling_detach_protocols {
+        println!("  ! DANGLING DETACH OBLIGATION: {dangling}");
+    }
+    println!(
+        "  dangling detach obligations (strict debt): {}",
+        teardown_inventory.dangling_detach_protocols.len()
     );
     println!();
     println!("## Public Surface Contracts");
@@ -581,8 +691,9 @@ fn print_summary(
         "  unresolved routed-effect debt:             {}",
         unresolved_routed_debt.len()
     );
+    println!("  unpaired destroy-obligation debt (C-F3):   {unpaired_destroy_debt}");
     println!(
-        "  unpaired destroy-obligation debt (C-F3):   {}",
-        unpaired_destroy_debt.len()
+        "  teardown coherence debt (C-F3):            {}",
+        teardown_inventory.coherence_violations.len()
     );
 }

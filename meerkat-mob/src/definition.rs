@@ -473,6 +473,20 @@ pub struct MobDefinition {
     /// realm-scoped reusable profile.
     #[serde(default)]
     pub profiles: BTreeMap<ProfileName, ProfileBinding>,
+    /// Mob-scoped custom model registry entries (`[models.<id>]`).
+    ///
+    /// Reuses the typed config owner [`meerkat_core::config::CustomModelConfig`]:
+    /// one definition feeds provider inference, compaction scaling, capability
+    /// gates, and call timeouts through the effective model registry at member
+    /// build time.
+    #[serde(default)]
+    pub models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    /// Mob-level default provider for `Auto` image-generation targets.
+    ///
+    /// Profiles may override per-profile via
+    /// `Profile::image_generation_provider`.
+    #[serde(default)]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
     /// Wiring rules for automatic peer connections.
     #[serde(default)]
     pub wiring: WiringRules,
@@ -527,6 +541,10 @@ struct TomlDefinition {
     #[serde(default)]
     profiles: BTreeMap<ProfileName, ProfileBinding>,
     #[serde(default)]
+    models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    #[serde(default)]
+    image_generation_provider: Option<meerkat_core::Provider>,
+    #[serde(default)]
     wiring: WiringRules,
     #[serde(default)]
     skills: BTreeMap<String, SkillSource>,
@@ -553,6 +571,8 @@ impl MobDefinition {
             id: id.into(),
             orchestrator: None,
             profiles: BTreeMap::new(),
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
@@ -581,6 +601,11 @@ impl MobDefinition {
             ProfileName::from("delegate"),
             ProfileBinding::Inline(Profile {
                 model: model.to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: crate::profile::ToolConfig {
                     comms: true,
@@ -599,6 +624,8 @@ impl MobDefinition {
             id: mob_id,
             orchestrator: None,
             profiles,
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: WiringRules {
                 auto_wire_orchestrator: false,
                 role_wiring: Vec::new(),
@@ -627,6 +654,8 @@ impl MobDefinition {
             id: raw.mob.id,
             orchestrator,
             profiles: raw.profiles,
+            models: raw.models,
+            image_generation_provider: raw.image_generation_provider,
             wiring: raw.wiring,
             skills: raw.skills,
             backend: raw.backend,
@@ -736,6 +765,73 @@ path = "skills/reviewer.md"
     }
 
     #[test]
+    fn test_mob_definition_from_toml_parses_models_and_image_provider() {
+        // `image_generation_provider` is a top-level definition fact (the
+        // `[mob]` table only owns id/orchestrator), so it precedes the tables.
+        let toml_str = r#"
+image_generation_provider = "gemini"
+
+[mob]
+id = "custom-models"
+
+[models.claude-internal-preview]
+provider = "anthropic"
+display_name = "Claude Internal Preview"
+context_window = 500000
+max_output_tokens = 16384
+vision = true
+call_timeout_secs = 900
+
+[profiles.worker]
+model = "claude-internal-preview"
+
+[profiles.worker.tools]
+comms = true
+"#;
+        let def = MobDefinition::from_toml(toml_str).unwrap();
+        assert_eq!(
+            def.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+        let model = def
+            .models
+            .get("claude-internal-preview")
+            .expect("custom model entry parses");
+        assert_eq!(model.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(model.context_window, Some(500_000));
+        assert_eq!(model.max_output_tokens, Some(16_384));
+        assert_eq!(model.vision, Some(true));
+        assert_eq!(model.web_search, None);
+        assert_eq!(model.call_timeout_secs, Some(900));
+
+        // Round-trips through serde (definitions are stored in MobCreated events).
+        let json = serde_json::to_string(&def).unwrap();
+        let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, def);
+    }
+
+    #[test]
+    fn test_mob_definition_custom_model_provider_is_fail_closed() {
+        let toml_str = r#"
+[mob]
+id = "custom-models"
+
+[models.mystery-model]
+provider = "mystery"
+
+[profiles.worker]
+model = "mystery-model"
+
+[profiles.worker.tools]
+comms = true
+"#;
+        assert!(
+            MobDefinition::from_toml(toml_str).is_err(),
+            "unknown custom-model provider names must fail closed at mob load"
+        );
+    }
+
+    #[test]
     fn test_mob_definition_from_toml() {
         let def = MobDefinition::from_toml(example_toml()).unwrap();
         assert_eq!(def.id.as_str(), "code-review");
@@ -795,12 +891,19 @@ path = "skills/reviewer.md"
             orchestrator: Some(OrchestratorConfig {
                 profile: ProfileName::from("lead"),
             }),
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             profiles: {
                 let mut m = BTreeMap::new();
                 m.insert(
                     ProfileName::from("lead"),
                     ProfileBinding::Inline(Profile {
                         model: "claude-opus-4-8".to_string(),
+                        provider: None,
+                        self_hosted_server_id: None,
+                        image_generation_provider: None,
+                        auto_compact_threshold: None,
+                        resume_overrides: Vec::new(),
                         skills: vec!["skill-a".to_string()],
                         tools: ToolConfig::default(),
                         peer_description: "The leader".to_string(),

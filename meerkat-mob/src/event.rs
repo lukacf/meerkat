@@ -703,6 +703,11 @@ mod tests {
             ProfileName::from("worker"),
             ProfileBinding::Inline(Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: vec![],
                 tools: ToolConfig::default(),
                 peer_description: "A worker".to_string(),

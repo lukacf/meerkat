@@ -366,6 +366,35 @@ mod tests {
     }
 
     #[test]
+    fn claude_fable_5_is_cataloged_with_official_limits() {
+        let caps = capabilities_for(Provider::Anthropic, "claude-fable-5")
+            .expect("claude-fable-5 must be in the Anthropic catalog");
+        assert_eq!(caps.provider, Provider::Anthropic);
+        assert_eq!(caps.model_family, "claude-fable-5");
+        assert_eq!(caps.context_window, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+        assert!(
+            caps.max_output_tokens_beta.is_none(),
+            "Fable 5 is not listed for the output-300k batch beta"
+        );
+        assert_eq!(caps.thinking, ThinkingSupport::AnthropicAdaptiveOnly);
+        assert!(
+            !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+            "Fable 5 rejects all sampling parameters"
+        );
+        assert!(
+            !caps.supports_thinking_budget_legacy,
+            "budget_tokens is fully removed on Fable 5"
+        );
+        assert!(caps.vision);
+        assert!(caps.supports_compaction);
+        assert!(caps.supports_structured_output);
+        assert!(caps.supports_web_search);
+        assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
+        assert!(caps.effort_levels.contains(&EffortLevel::Max));
+    }
+
+    #[test]
     fn beta_feature_is_typed_owner_with_projected_wire_labels() {
         // The semantic beta-feature domain is the typed enum; the wire label is
         // a derived projection. Pin the projection so the catalog/wire shape

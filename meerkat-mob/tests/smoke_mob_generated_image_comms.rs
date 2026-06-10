@@ -62,6 +62,11 @@ fn generated_image_comms_profile(
 ) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             builtins: false,
@@ -113,6 +118,11 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
 fn image_relay_profile(model: &str, peer_description: &str, image_generation: bool) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             builtins: false,

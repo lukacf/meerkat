@@ -3299,6 +3299,11 @@ fn sample_definition() -> MobDefinition {
         ProfileName::from("lead"),
         ProfileBinding::Inline(Profile {
             model: "claude-opus-4-8".into(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 builtins: true,
@@ -3325,6 +3330,11 @@ fn sample_definition() -> MobDefinition {
         ProfileName::from("worker"),
         ProfileBinding::Inline(Profile {
             model: "claude-sonnet-4-5".into(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,
@@ -35710,6 +35720,11 @@ async fn test_spawn_realm_ref_resolves_from_store() {
     let realm_store = Arc::new(InMemoryRealmProfileStore::new());
     let worker_profile = Profile {
         model: "claude-sonnet-4-5".into(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             comms: true,

@@ -35,6 +35,10 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
         .into_iter()
         .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
         .collect::<Result<_, _>>()?;
+    // `models` reuses the typed core config owner on both sides of the wire;
+    // no re-derivation, just a move.
+    definition.models = input.models;
+    definition.image_generation_provider = input.image_generation_provider;
     definition.wiring = WiringRules {
         auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
         role_wiring: input
@@ -89,9 +93,34 @@ fn decode_profile_binding(
     }
 }
 
+fn decode_resume_override_field(
+    input: meerkat_contracts::WireMobResumeOverrideField,
+) -> meerkat_mob::ResumeOverrideField {
+    match input {
+        meerkat_contracts::WireMobResumeOverrideField::Model => {
+            meerkat_mob::ResumeOverrideField::Model
+        }
+        meerkat_contracts::WireMobResumeOverrideField::Provider => {
+            meerkat_mob::ResumeOverrideField::Provider
+        }
+        meerkat_contracts::WireMobResumeOverrideField::ProviderParams => {
+            meerkat_mob::ResumeOverrideField::ProviderParams
+        }
+    }
+}
+
 fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
     Ok(Profile {
         model: input.model,
+        provider: input.provider,
+        self_hosted_server_id: input.self_hosted_server_id,
+        image_generation_provider: input.image_generation_provider,
+        auto_compact_threshold: input.auto_compact_threshold,
+        resume_overrides: input
+            .resume_overrides
+            .into_iter()
+            .map(decode_resume_override_field)
+            .collect(),
         skills: input.skills,
         tools: ToolConfig {
             builtins: input.tools.builtins,
@@ -373,6 +402,11 @@ mod tests {
             "lead".to_string(),
             MobProfileBindingInput::Inline(MobProfileInput {
                 model: "gpt-5.4".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: vec!["triage".to_string()],
                 tools: MobToolConfigInput {
                     comms: true,
@@ -457,6 +491,8 @@ mod tests {
             id: "triage".to_string(),
             orchestrator: None,
             profiles,
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: Default::default(),
             skills: BTreeMap::new(),
             backend: MobBackendConfigInput::default(),

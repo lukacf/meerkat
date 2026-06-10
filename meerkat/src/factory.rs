@@ -306,6 +306,18 @@ pub struct AgentBuildConfig {
     pub provider: Option<Provider>,
     /// Durable self-hosted server binding for configured aliases.
     pub self_hosted_server_id: Option<String>,
+    /// Caller-scoped custom model registry entries (e.g. mob-definition
+    /// `[models.<id>]` tables). Merged into the effective `ModelRegistry`
+    /// for this build, the single owner feeding provider inference,
+    /// compaction scaling, capability gates, and call timeouts.
+    pub custom_models: std::collections::BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    /// Configured default provider for `Auto` image-generation targets.
+    /// When set, the planner resolves `Auto` against this provider instead of
+    /// inferring one from the session's effective text model.
+    pub image_generation_provider: Option<Provider>,
+    /// Per-build auto-compaction threshold override (tokens, non-zero).
+    /// Wins over the global config knob and model-aware scaling.
+    pub auto_compact_threshold_override: Option<std::num::NonZeroU64>,
     /// Max tokens per turn. If `None`, uses `Config::max_tokens`.
     pub max_tokens: Option<u32>,
     /// Typed per-request system-prompt policy.
@@ -522,6 +534,12 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("model", &self.model)
             .field("provider", &self.provider)
             .field("self_hosted_server_id", &self.self_hosted_server_id)
+            .field("custom_models", &self.custom_models.keys())
+            .field("image_generation_provider", &self.image_generation_provider)
+            .field(
+                "auto_compact_threshold_override",
+                &self.auto_compact_threshold_override,
+            )
             .field("max_tokens", &self.max_tokens)
             .field("system_prompt", &{
                 match &self.system_prompt {
@@ -624,6 +642,9 @@ impl AgentBuildConfig {
             model: model.into(),
             provider: None,
             self_hosted_server_id: None,
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             max_tokens: None,
             system_prompt: crate::SystemPromptOverride::Inherit,
             output_schema: None,
@@ -741,6 +762,9 @@ impl AgentBuildConfig {
     pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
         self.provider = build.provider;
         self.self_hosted_server_id = build.self_hosted_server_id.clone();
+        self.custom_models = build.custom_models.clone();
+        self.image_generation_provider = build.image_generation_provider;
+        self.auto_compact_threshold_override = build.auto_compact_threshold_override;
         self.output_schema = build.output_schema.clone();
         self.structured_output_retries = build.structured_output_retries;
         self.hooks_override = build.hooks_override.clone();
@@ -804,6 +828,9 @@ impl AgentBuildConfig {
         SessionBuildOptions {
             provider: self.provider,
             self_hosted_server_id: self.self_hosted_server_id.clone(),
+            custom_models: self.custom_models.clone(),
+            image_generation_provider: self.image_generation_provider,
+            auto_compact_threshold_override: self.auto_compact_threshold_override,
             output_schema: self.output_schema.clone(),
             structured_output_retries: self.structured_output_retries,
             hooks_override: self.hooks_override.clone(),
@@ -1026,8 +1053,15 @@ fn model_aware_compaction_config(
     registry: &ModelRegistry,
     provider: Provider,
     model: &str,
+    build_threshold_override: Option<std::num::NonZeroU64>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
+    // The per-build override (e.g. a mob profile's `auto_compact_threshold`)
+    // wins over the global config knob and model-aware scaling.
+    if let Some(threshold) = build_threshold_override {
+        compaction.auto_compact_threshold = threshold.get();
+        return compaction;
+    }
     let default_threshold = meerkat_core::CompactionConfig::default().auto_compact_threshold;
     if config.compaction.auto_compact_threshold_explicit
         || compaction.auto_compact_threshold != default_threshold
@@ -1269,12 +1303,27 @@ mod image_generation_executor_routing_tests {
 #[cfg(not(target_arch = "wasm32"))]
 struct CompositeImageGenerationPlanner {
     profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
+    /// Configured default provider for `Auto` targets. When set, `Auto`
+    /// resolves against this provider instead of inferring one from the
+    /// session's effective text model.
+    auto_target_provider: Option<meerkat_core::Provider>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CompositeImageGenerationPlanner {
     fn new(profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>) -> Self {
-        Self { profiles }
+        Self {
+            profiles,
+            auto_target_provider: None,
+        }
+    }
+
+    fn with_auto_target_provider(
+        mut self,
+        auto_target_provider: Option<meerkat_core::Provider>,
+    ) -> Self {
+        self.auto_target_provider = auto_target_provider;
+        self
     }
 
     fn profile_for_provider(
@@ -1330,8 +1379,13 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
             meerkat_core::Provider::infer_from_model(status.effective_model.as_str());
         let (target_provider, profile) = match &request.target {
             ImageGenerationTargetPreference::Auto => {
-                let provider =
-                    effective_provider.ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
+                // A configured image-generation provider is the declared
+                // `Auto` default; only absent that does `Auto` fall back to
+                // the session's effective text provider.
+                let provider = self
+                    .auto_target_provider
+                    .or(effective_provider)
+                    .ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
                 let profile = self
                     .profile_for_provider(provider)
                     .ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
@@ -3476,15 +3530,22 @@ impl AgentFactory {
             return Err(BuildAgentError::KeepAliveRequiresCommsName);
         }
 
-        let registry = self.model_registry(config)?;
+        let registry = if build_config.custom_models.is_empty() {
+            self.model_registry(config)?
+        } else {
+            ModelRegistry::from_config_with_models(config, &build_config.custom_models)
+                .map_err(|err| BuildAgentError::Config(err.to_string()))?
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let image_generation_planner: Option<
             Arc<dyn meerkat_core::ImageGenerationPlanner>,
         > = {
             let profiles = self.provider_registry.image_generation_profiles();
             (!profiles.is_empty()).then(|| {
-                Arc::new(CompositeImageGenerationPlanner::new(profiles))
-                    as Arc<dyn meerkat_core::ImageGenerationPlanner>
+                Arc::new(
+                    CompositeImageGenerationPlanner::new(profiles)
+                        .with_auto_target_provider(build_config.image_generation_provider),
+                ) as Arc<dyn meerkat_core::ImageGenerationPlanner>
             })
         };
 
@@ -5062,7 +5123,13 @@ impl AgentFactory {
         #[cfg(feature = "session-compaction")]
         {
             let compactor = Arc::new(meerkat_session::DefaultCompactor::new(
-                model_aware_compaction_config(config, &registry, provider, &model),
+                model_aware_compaction_config(
+                    config,
+                    &registry,
+                    provider,
+                    &model,
+                    build_config.auto_compact_threshold_override,
+                ),
             ));
             builder = builder.compactor(compactor);
         }
@@ -5512,7 +5579,7 @@ mod tests {
         let registry = config.model_registry().expect("registry");
 
         let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
 
         assert_eq!(compaction.auto_compact_threshold, 840_000);
     }
@@ -5558,7 +5625,7 @@ mod tests {
         let registry = config.model_registry().expect("registry");
 
         let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
 
         assert_eq!(compaction.auto_compact_threshold, 42_000);
     }
@@ -5571,7 +5638,7 @@ mod tests {
         let registry = config.model_registry().expect("registry");
 
         let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
 
         assert_eq!(compaction.auto_compact_threshold, 100_000);
     }
@@ -8765,6 +8832,176 @@ mod tests {
             result,
             Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
         ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct AutoTargetGeminiProfile;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl meerkat_core::ImageGenerationProviderProfile for AutoTargetGeminiProfile {
+        fn canonical_provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Gemini
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            _operation_id: meerkat_core::ImageOperationId,
+            model: &meerkat_core::model_profile::catalog::ImageGenerationModelProfile,
+            _request: &meerkat_core::GenerateImageRequest,
+            capabilities: meerkat_core::ImageGenerationTargetCapabilities,
+            max_count: std::num::NonZeroU32,
+        ) -> Result<
+            meerkat_core::ImageGenerationProviderResolution,
+            meerkat_core::ImageOperationDenialReason,
+        > {
+            Ok(meerkat_core::ImageGenerationProviderResolution {
+                provider_call_model: meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    model.model_id,
+                ),
+                execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                    provider: meerkat_core::ProviderId::new("gemini"),
+                    backend: meerkat_core::ImageGenerationBackendKind::NativeModel,
+                    max_count,
+                    capabilities,
+                    requires_scoped_override: true,
+                    provider_plan: serde_json::Value::Null,
+                },
+            })
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn auto_target_image_request() -> meerkat_core::GenerateImageRequest {
+        meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::Auto,
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_auto_uses_configured_image_generation_provider() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        // The session's effective text model is Anthropic — a provider with no
+        // image-generation profile — yet the configured default must let `Auto`
+        // resolve against Gemini.
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)])
+            .with_auto_target_provider(Some(meerkat_core::Provider::Gemini));
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("claude-opus-4-8"),
+            None,
+            None,
+            None,
+        );
+
+        let plan = planner
+            .resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &auto_target_image_request(),
+            )
+            .expect("configured image_generation_provider must satisfy Auto targets");
+        assert_eq!(
+            plan.provider_model.as_str(),
+            "gemini-3.1-flash-image-preview"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_auto_without_configured_provider_fails_closed_for_anthropic() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        // Without a configured default, `Auto` still resolves via the
+        // effective text provider; Anthropic has no image profile, so the
+        // typed denial is preserved (no silent fallback).
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("claude-opus-4-8"),
+            None,
+            None,
+            None,
+        );
+
+        let result = planner.resolve_image_generation_plan(
+            &status,
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+            &auto_target_image_request(),
+        );
+        assert!(matches!(
+            result,
+            Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+        ));
+    }
+
+    #[test]
+    fn per_build_auto_compact_threshold_override_wins_over_config_and_scaling() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 42_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let registry = config.model_registry().expect("registry");
+
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            std::num::NonZeroU64::new(9_000),
+        );
+
+        assert_eq!(
+            compaction.auto_compact_threshold, 9_000,
+            "per-build override must beat the explicit config knob and model-aware scaling"
+        );
+    }
+
+    #[test]
+    fn build_options_roundtrip_custom_model_and_image_provider_and_threshold() {
+        let mut build = AgentBuildConfig::new("claude-internal-preview");
+        build.custom_models.insert(
+            "claude-internal-preview".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::Anthropic,
+                display_name: None,
+                context_window: Some(400_000),
+                max_output_tokens: None,
+                vision: None,
+                web_search: None,
+                call_timeout_secs: None,
+            },
+        );
+        build.image_generation_provider = Some(Provider::Gemini);
+        build.auto_compact_threshold_override = std::num::NonZeroU64::new(50_000);
+
+        let options = build.to_session_build_options();
+        let mut rebuilt = AgentBuildConfig::new("claude-internal-preview");
+        rebuilt.apply_session_build_options(&options);
+
+        assert_eq!(
+            rebuilt
+                .custom_models
+                .get("claude-internal-preview")
+                .map(|model| model.provider),
+            Some(Provider::Anthropic),
+            "custom models must survive deferred-session option materialization"
+        );
+        assert_eq!(rebuilt.image_generation_provider, Some(Provider::Gemini));
+        assert_eq!(
+            rebuilt.auto_compact_threshold_override,
+            std::num::NonZeroU64::new(50_000)
+        );
     }
 
     #[test]

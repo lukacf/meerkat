@@ -135,11 +135,11 @@ pub use mob::{
     WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext, WireHandlingMode,
     WireMemberLaunchMode, WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind,
     WireMobError, WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus,
-    WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome, WireMobRun, WireMobRunStatus,
-    WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction, WirePeerConnectivity,
-    WirePeerConnectivitySnapshot, WireRenderClass, WireRenderMetadata, WireRenderSalience,
-    WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity,
-    WireTrustedPeerSpec, WireUnreachablePeer, WireWorkOrigin,
+    WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome, WireMobResumeOverrideField,
+    WireMobRun, WireMobRunStatus, WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction,
+    WirePeerConnectivity, WirePeerConnectivitySnapshot, WireRenderClass, WireRenderMetadata,
+    WireRenderSalience, WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter,
+    WireTrustedPeerIdentity, WireTrustedPeerSpec, WireUnreachablePeer, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

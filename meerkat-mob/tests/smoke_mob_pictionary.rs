@@ -134,6 +134,11 @@ fn sanitize_gemini_key_error(api_key: &str, error: reqwest::Error) -> String {
 fn comms_profile(model: &str, peer_desc: &str) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             comms: true,

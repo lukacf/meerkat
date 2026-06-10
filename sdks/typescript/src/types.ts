@@ -6,6 +6,7 @@
 
 import type {
   CommsChecksumTokenParams as WireCommsChecksumTokenParams,
+  CustomModelConfig,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
   MobFlowSpecInput,
@@ -22,8 +23,10 @@ import type {
   WireAuthBindingRef,
   WireContentInput,
   WireMemberLaunchMode,
+  Provider,
   WireMobBackendKind,
   WireMobProfile,
+  WireMobResumeOverrideField,
   WireMobRuntimeMode,
   WireRuntimeBinding,
   WireToolAccessPolicy,
@@ -449,6 +452,11 @@ export type MobToolConfig = MobToolConfigInput;
 
 export interface MobProfile {
   readonly model: string;
+  readonly provider?: Provider;
+  readonly self_hosted_server_id?: string;
+  readonly image_generation_provider?: Provider;
+  readonly auto_compact_threshold?: number;
+  readonly resume_overrides?: readonly WireMobResumeOverrideField[];
   readonly skills?: readonly string[];
   readonly tools?: MobToolConfig;
   readonly peer_description?: string;
@@ -466,6 +474,8 @@ export interface MobDefinition {
   readonly id: string;
   readonly orchestrator?: MobOrchestratorInput;
   readonly profiles: Readonly<Record<string, MobProfileBinding>>;
+  readonly models?: Readonly<Record<string, CustomModelConfig>>;
+  readonly image_generation_provider?: Provider;
   readonly wiring?: MobWiringRulesInput;
   readonly flows?: Readonly<Record<string, MobFlowSpecInput>>;
   readonly skills?: Readonly<Record<string, MobSkillSourceInput>>;

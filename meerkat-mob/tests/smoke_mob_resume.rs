@@ -143,6 +143,11 @@ fn joke_mob_definition(model: String) -> MobDefinition {
         ProfileName::from("lead"),
         ProfileBinding::Inline(Profile {
             model: model.clone(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,
@@ -161,6 +166,11 @@ fn joke_mob_definition(model: String) -> MobDefinition {
         ProfileName::from("worker"),
         ProfileBinding::Inline(Profile {
             model,
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,

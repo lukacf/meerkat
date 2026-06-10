@@ -1419,6 +1419,11 @@ mod tests {
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::profile::ToolConfig {
                     comms: true,

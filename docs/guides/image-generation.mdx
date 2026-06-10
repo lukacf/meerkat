@@ -119,8 +119,9 @@ Reference an existing blob when the source image did not come from a previous `g
 
 By default, `target` is `auto`.
 
-- If the current session model belongs to a provider with an image profile, `auto` uses that provider's default image target.
-- If the current session provider does not support image generation, set `provider` explicitly.
+- If a configured `image_generation_provider` exists (mob definition top-level key or per-profile field in `mob.toml`), `auto` resolves against that provider's default image target — even when the session's text provider (for example Anthropic) has no image profile.
+- Otherwise, if the current session model belongs to a provider with an image profile, `auto` uses that provider's default image target.
+- If neither applies, set `provider` explicitly per request.
 - To force a model, pass both `provider` and `model`.
 
 OpenAI default:

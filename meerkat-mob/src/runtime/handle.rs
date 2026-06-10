@@ -288,6 +288,25 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
     let tools = &profile.tools;
     meerkat_contracts::WireMobProfile {
         model: profile.model.clone(),
+        provider: profile.provider,
+        self_hosted_server_id: profile.self_hosted_server_id.clone(),
+        image_generation_provider: profile.image_generation_provider,
+        auto_compact_threshold: profile.auto_compact_threshold,
+        resume_overrides: profile
+            .resume_overrides
+            .iter()
+            .map(|field| match field {
+                crate::profile::ResumeOverrideField::Model => {
+                    meerkat_contracts::WireMobResumeOverrideField::Model
+                }
+                crate::profile::ResumeOverrideField::Provider => {
+                    meerkat_contracts::WireMobResumeOverrideField::Provider
+                }
+                crate::profile::ResumeOverrideField::ProviderParams => {
+                    meerkat_contracts::WireMobResumeOverrideField::ProviderParams
+                }
+            })
+            .collect(),
         skills: profile.skills.clone(),
         tools: meerkat_contracts::WireMobToolConfig {
             builtins: tools.builtins,

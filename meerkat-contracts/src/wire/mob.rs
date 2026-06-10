@@ -142,12 +142,41 @@ pub struct WireMobToolConfig {
     pub mcp: Vec<String>,
 }
 
+/// Profile fields that win over durable session metadata on resume.
+///
+/// Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
+/// vocabulary, parsed fail-closed at the wire boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobResumeOverrideField {
+    Model,
+    Provider,
+    ProviderParams,
+}
+
 /// Profile override for `mob/spawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireMobProfile {
     pub model: String,
+    /// Explicit typed provider for the profile model (closed vocabulary,
+    /// fail-closed at the wire boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<meerkat_core::Provider>,
+    /// Durable self-hosted server binding for configured self-hosted aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    /// Configured default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
+    /// Per-profile auto-compaction threshold override (tokens, non-zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold: Option<std::num::NonZeroU64>,
+    /// Profile fields that win over durable session metadata on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_overrides: Vec<WireMobResumeOverrideField>,
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -249,6 +278,22 @@ pub enum MobProfileBindingInput {
 #[serde(deny_unknown_fields)]
 pub struct MobProfileInput {
     pub model: String,
+    /// Explicit typed provider for the profile model (closed vocabulary,
+    /// fail-closed at the wire boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<meerkat_core::Provider>,
+    /// Durable self-hosted server binding for configured self-hosted aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    /// Configured default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
+    /// Per-profile auto-compaction threshold override (tokens, non-zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold: Option<std::num::NonZeroU64>,
+    /// Profile fields that win over durable session metadata on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_overrides: Vec<WireMobResumeOverrideField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -538,6 +583,14 @@ pub struct MobDefinitionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<MobOrchestratorInput>,
     pub profiles: BTreeMap<String, MobProfileBindingInput>,
+    /// Mob-scoped custom model registry entries (`[models.<id>]`). Reuses the
+    /// typed config owner so one definition feeds provider inference,
+    /// compaction scaling, capability gates, and call timeouts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    /// Mob-level default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
     #[serde(default)]
     pub wiring: MobWiringRulesInput,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2247,6 +2300,88 @@ pub struct MobListMembersMatchingResult {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_mob_profile_parses_provider_fields_fail_closed() {
+        // Minimal legacy payload (no new fields) still parses.
+        let legacy: WireMobProfile =
+            serde_json::from_str(r#"{"model":"claude-opus-4-8"}"#).expect("legacy profile parses");
+        assert_eq!(legacy.provider, None);
+        assert!(legacy.resume_overrides.is_empty());
+
+        // Typed provider + resume override vocabulary parse into closed enums.
+        let full: WireMobProfile = serde_json::from_str(
+            r#"{
+                "model": "claude-internal-preview",
+                "provider": "anthropic",
+                "image_generation_provider": "gemini",
+                "auto_compact_threshold": 60000,
+                "resume_overrides": ["model", "provider"]
+            }"#,
+        )
+        .expect("typed profile parses");
+        assert_eq!(full.provider, Some(meerkat_core::Provider::Anthropic));
+        assert_eq!(
+            full.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+        assert_eq!(
+            full.resume_overrides,
+            vec![
+                WireMobResumeOverrideField::Model,
+                WireMobResumeOverrideField::Provider
+            ]
+        );
+
+        // Fail-closed: unknown provider names and zero thresholds reject.
+        assert!(
+            serde_json::from_str::<WireMobProfile>(r#"{"model":"m","provider":"not-a-provider"}"#)
+                .is_err(),
+            "unknown provider names must fail closed at the wire boundary"
+        );
+        assert!(
+            serde_json::from_str::<WireMobProfile>(r#"{"model":"m","auto_compact_threshold":0}"#)
+                .is_err(),
+            "zero auto_compact_threshold must fail closed at the wire boundary"
+        );
+        assert!(
+            serde_json::from_str::<WireMobProfile>(
+                r#"{"model":"m","resume_overrides":["everything"]}"#
+            )
+            .is_err(),
+            "resume_overrides vocabulary is closed"
+        );
+    }
+
+    #[test]
+    fn mob_definition_input_parses_custom_models() {
+        let input: MobDefinitionInput = serde_json::from_str(
+            r#"{
+                "id": "m",
+                "profiles": {"worker": {"model": "claude-internal-preview"}},
+                "models": {
+                    "claude-internal-preview": {
+                        "provider": "anthropic",
+                        "context_window": 500000,
+                        "vision": true
+                    }
+                },
+                "image_generation_provider": "openai"
+            }"#,
+        )
+        .expect("definition with custom models parses");
+        let model = input
+            .models
+            .get("claude-internal-preview")
+            .expect("custom model present");
+        assert_eq!(model.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(model.context_window, Some(500_000));
+        assert_eq!(model.vision, Some(true));
+        assert_eq!(
+            input.image_generation_provider,
+            Some(meerkat_core::Provider::OpenAI)
+        );
+    }
 
     #[test]
     fn wire_member_ref_round_trips_through_encode_decode() {

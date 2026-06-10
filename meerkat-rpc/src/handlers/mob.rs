@@ -115,6 +115,22 @@ fn mob_backend_kind_from_wire(kind: WireMobBackendKind) -> MobBackendKind {
     }
 }
 
+fn resume_override_field_from_wire(
+    field: meerkat_contracts::WireMobResumeOverrideField,
+) -> meerkat_mob::ResumeOverrideField {
+    match field {
+        meerkat_contracts::WireMobResumeOverrideField::Model => {
+            meerkat_mob::ResumeOverrideField::Model
+        }
+        meerkat_contracts::WireMobResumeOverrideField::Provider => {
+            meerkat_mob::ResumeOverrideField::Provider
+        }
+        meerkat_contracts::WireMobResumeOverrideField::ProviderParams => {
+            meerkat_mob::ResumeOverrideField::ProviderParams
+        }
+    }
+}
+
 fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::SchemaError> {
     let tools = profile.tools;
     // Wire-decode validation: the profile output schema is validated into the
@@ -126,6 +142,15 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         .transpose()?;
     Ok(Profile {
         model: profile.model,
+        provider: profile.provider,
+        self_hosted_server_id: profile.self_hosted_server_id,
+        image_generation_provider: profile.image_generation_provider,
+        auto_compact_threshold: profile.auto_compact_threshold,
+        resume_overrides: profile
+            .resume_overrides
+            .into_iter()
+            .map(resume_override_field_from_wire)
+            .collect(),
         skills: profile.skills,
         tools: ToolConfig {
             builtins: tools.builtins,
@@ -2270,6 +2295,11 @@ mod tests {
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "worker".to_string(),

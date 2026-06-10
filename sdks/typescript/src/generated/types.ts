@@ -272,14 +272,19 @@ export interface WireMobToolConfig {
 }
 
 export interface WireMobProfile {
+  auto_compact_threshold?: number;
   backend?: WireMobBackendKind;
   external_addressable?: boolean;
+  image_generation_provider?: Provider;
   max_inline_peer_notifications?: number;
   model: string;
   output_schema?: unknown;
   peer_description?: string;
+  provider?: Provider;
   provider_params?: unknown;
+  resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
+  self_hosted_server_id?: string;
   skills?: string[];
   tools?: WireMobToolConfig;
 }
@@ -674,7 +679,9 @@ export interface MobDefinitionInput {
   event_router?: MobEventRouterConfigInput;
   flows?: Record<string, MobFlowSpecInput>;
   id: string;
+  image_generation_provider?: Provider;
   limits?: MobLimitsSpecInput;
+  models?: Record<string, CustomModelConfig>;
   orchestrator?: MobOrchestratorInput;
   profiles: Record<string, MobProfileBindingInput>;
   skills?: Record<string, MobSkillSourceInput>;
@@ -741,14 +748,19 @@ export interface MobOrchestratorInput {
 }
 
 export interface MobProfileInput {
+  auto_compact_threshold?: number;
   backend?: WireMobBackendKind;
   external_addressable?: boolean;
+  image_generation_provider?: Provider;
   max_inline_peer_notifications?: number;
   model: string;
   output_schema?: unknown;
   peer_description?: string;
+  provider?: Provider;
   provider_params?: unknown;
+  resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
+  self_hosted_server_id?: string;
   skills?: string[];
   tools?: MobToolConfigInput;
 }
@@ -790,6 +802,16 @@ export interface MobTopologySpecInput {
 export interface MobWiringRulesInput {
   auto_wire_orchestrator?: boolean;
   role_wiring?: MobRoleWiringRuleInput[];
+}
+
+export interface CustomModelConfig {
+  call_timeout_secs?: number;
+  context_window?: number;
+  display_name?: string;
+  max_output_tokens?: number;
+  provider: Provider;
+  vision?: boolean;
+  web_search?: boolean;
 }
 
 export interface MobMemberSpecWire {
@@ -1266,9 +1288,13 @@ export type WireContentBlock = WireContentBlockText | WireContentBlockImage | Wi
 
 export type WireContentInput = string | WireContentBlock[];
 
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
+
 export type WireMemberRef = string;
 
 export type WireMobBackendKind = "session" | "external";
+
+export type WireMobResumeOverrideField = "model" | "provider" | "provider_params";
 
 export interface WireRuntimeBindingSession {
   kind: "session";

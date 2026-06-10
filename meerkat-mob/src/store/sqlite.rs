@@ -2309,6 +2309,11 @@ mod tests {
             ProfileName::from("worker"),
             ProfileBinding::Inline(Profile {
                 model: "model".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -3228,6 +3233,11 @@ mod tests {
             let store = SqliteRealmProfileStore::open(&db_path).unwrap();
             let profile = Profile {
                 model: "claude-sonnet-4-5".into(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: String::new(),

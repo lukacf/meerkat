@@ -451,6 +451,34 @@ mod tests {
     }
 
     #[test]
+    fn fable_5_schema_is_adaptive_only_with_full_effort_ladder() {
+        let caps =
+            capabilities_for(crate::Provider::Anthropic, "claude-fable-5").expect("fable 5 row");
+        let schema = build_params_schema(caps);
+
+        let keys = property_keys(&schema);
+        assert!(
+            !keys.contains("thinking_budget"),
+            "fable 5 must not advertise the legacy thinking budget"
+        );
+
+        let values = enum_values_for(&schema, "effort").expect("effort enum");
+        assert!(values.contains("xhigh"), "fable 5 must advertise xhigh");
+        assert!(values.contains("max"), "fable 5 must advertise max");
+
+        // The thinking schema admits only {"type": "adaptive"} — Fable 5
+        // rejects both enabled and explicit disabled modes.
+        let thinking_type = schema
+            .get("properties")
+            .and_then(|p| p.get("thinking"))
+            .and_then(|t| t.get("properties"))
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.get("enum"))
+            .expect("fable 5 thinking type enum");
+        assert_eq!(thinking_type, &serde_json::json!(["adaptive"]));
+    }
+
+    #[test]
     fn sonnet_45_has_no_effort_property() {
         let caps = capabilities_for(crate::Provider::Anthropic, "claude-sonnet-4-5")
             .expect("sonnet 4.5 row");

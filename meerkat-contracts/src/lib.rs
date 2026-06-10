@@ -364,6 +364,7 @@ pub use wire::{
     WireMobProfile,
     WireMobReconcileStage,
     WireMobRespawnOutcome,
+    WireMobResumeOverrideField,
     WireMobRun,
     WireMobRunStatus,
     WireMobRuntimeMode,

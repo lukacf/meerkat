@@ -2159,7 +2159,7 @@
         "type": "string"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
           "openai",
@@ -2911,7 +2911,7 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
           "openai",
@@ -7004,6 +7004,68 @@
   },
   "MobCreateParams": {
     "$defs": {
+      "CustomModelConfig": {
+        "additionalProperties": false,
+        "description": "User-defined model registry entry (`[models.<id>]` in `config.toml` or a\nmob definition).\n\nDeclares an uncatalogued model that an API provider serves so a single\ndefinition feeds provider inference, compaction scaling, capability gates,\nand call timeouts through the effective [`crate::ModelRegistry`].\n\nCapability flags are conservative when omitted: an undeclared capability is\ntreated as absent rather than guessed from the model name.",
+        "properties": {
+          "call_timeout_secs": {
+            "description": "Default call timeout in seconds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "context_window": {
+            "description": "Model context window in tokens (drives compaction scaling).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "display_name": {
+            "description": "Human-readable display name. Defaults to the model id.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_output_tokens": {
+            "description": "Maximum output tokens per call.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "Typed provider that serves this model. Parsed fail-closed at config\ningress: unknown provider names reject the entry."
+          },
+          "vision": {
+            "description": "Whether the model accepts image input. Conservative default: false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "web_search": {
+            "description": "Whether the model supports provider-native web search tools.\nConservative default: false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      },
       "MeerkatSchema": {
         "description": "A Meerkat-native JSON schema."
       },
@@ -7236,6 +7298,17 @@
           "id": {
             "type": "string"
           },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mob-level default provider for `Auto` image-generation targets."
+          },
           "limits": {
             "anyOf": [
               {
@@ -7245,6 +7318,13 @@
                 "type": "null"
               }
             ]
+          },
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/$defs/CustomModelConfig"
+            },
+            "description": "Mob-scoped custom model registry entries (`[models.<id>]`). Reuses the\ntyped config owner so one definition feeds provider inference,\ncompaction scaling, capability gates, and call timeouts.",
+            "type": "object"
           },
           "orchestrator": {
             "anyOf": [
@@ -7693,6 +7773,15 @@
       "MobProfileInput": {
         "additionalProperties": false,
         "properties": {
+          "auto_compact_threshold": {
+            "description": "Per-profile auto-compaction threshold override (tokens, non-zero).",
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "backend": {
             "anyOf": [
               {
@@ -7706,6 +7795,17 @@
           "external_addressable": {
             "default": false,
             "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured default provider for `Auto` image-generation targets."
           },
           "max_inline_peer_notifications": {
             "format": "int32",
@@ -7730,6 +7830,17 @@
           "peer_description": {
             "type": "string"
           },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
+          },
           "provider_params": {
             "anyOf": [
               {
@@ -7741,9 +7852,23 @@
             ],
             "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
           },
+          "resume_overrides": {
+            "description": "Profile fields that win over durable session metadata on resume.",
+            "items": {
+              "$ref": "#/$defs/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "description": "Durable self-hosted server binding for configured self-hosted aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "skills": {
             "items": {
@@ -8042,6 +8167,17 @@
           "schema"
         ],
         "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
       },
       "SchemaCompat": {
         "description": "Compatibility mode for provider lowering.",
@@ -8400,6 +8536,15 @@
         "enum": [
           "session",
           "external"
+        ],
+        "type": "string"
+      },
+      "WireMobResumeOverrideField": {
+        "description": "Profile fields that win over durable session metadata on resume.\n\nWire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case\nvocabulary, parsed fail-closed at the wire boundary.",
+        "enum": [
+          "model",
+          "provider",
+          "provider_params"
         ],
         "type": "string"
       },
@@ -10077,6 +10222,15 @@
       "MobProfileInput": {
         "additionalProperties": false,
         "properties": {
+          "auto_compact_threshold": {
+            "description": "Per-profile auto-compaction threshold override (tokens, non-zero).",
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "backend": {
             "anyOf": [
               {
@@ -10090,6 +10244,17 @@
           "external_addressable": {
             "default": false,
             "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured default provider for `Auto` image-generation targets."
           },
           "max_inline_peer_notifications": {
             "format": "int32",
@@ -10114,6 +10279,17 @@
           "peer_description": {
             "type": "string"
           },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
+          },
           "provider_params": {
             "anyOf": [
               {
@@ -10125,9 +10301,23 @@
             ],
             "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
           },
+          "resume_overrides": {
+            "description": "Profile fields that win over durable session metadata on resume.",
+            "items": {
+              "$ref": "#/$defs/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "description": "Durable self-hosted server binding for configured self-hosted aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "skills": {
             "items": {
@@ -10232,6 +10422,17 @@
           "schema"
         ],
         "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
       },
       "SchemaCompat": {
         "description": "Compatibility mode for provider lowering.",
@@ -10437,6 +10638,15 @@
         "enum": [
           "session",
           "external"
+        ],
+        "type": "string"
+      },
+      "WireMobResumeOverrideField": {
+        "description": "Profile fields that win over durable session metadata on resume.\n\nWire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case\nvocabulary, parsed fail-closed at the wire boundary.",
+        "enum": [
+          "model",
+          "provider",
+          "provider_params"
         ],
         "type": "string"
       },
@@ -10846,6 +11056,15 @@
       "MobProfileInput": {
         "additionalProperties": false,
         "properties": {
+          "auto_compact_threshold": {
+            "description": "Per-profile auto-compaction threshold override (tokens, non-zero).",
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "backend": {
             "anyOf": [
               {
@@ -10859,6 +11078,17 @@
           "external_addressable": {
             "default": false,
             "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured default provider for `Auto` image-generation targets."
           },
           "max_inline_peer_notifications": {
             "format": "int32",
@@ -10883,6 +11113,17 @@
           "peer_description": {
             "type": "string"
           },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
+          },
           "provider_params": {
             "anyOf": [
               {
@@ -10894,9 +11135,23 @@
             ],
             "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
           },
+          "resume_overrides": {
+            "description": "Profile fields that win over durable session metadata on resume.",
+            "items": {
+              "$ref": "#/$defs/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "description": "Durable self-hosted server binding for configured self-hosted aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "skills": {
             "items": {
@@ -11001,6 +11256,17 @@
           "schema"
         ],
         "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
       },
       "SchemaCompat": {
         "description": "Compatibility mode for provider lowering.",
@@ -11206,6 +11472,15 @@
         "enum": [
           "session",
           "external"
+        ],
+        "type": "string"
+      },
+      "WireMobResumeOverrideField": {
+        "description": "Profile fields that win over durable session metadata on resume.\n\nWire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case\nvocabulary, parsed fail-closed at the wire boundary.",
+        "enum": [
+          "model",
+          "provider",
+          "provider_params"
         ],
         "type": "string"
       },
@@ -12516,6 +12791,17 @@
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
       },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
@@ -12859,6 +13145,15 @@
         "additionalProperties": false,
         "description": "Profile override for `mob/spawn`.",
         "properties": {
+          "auto_compact_threshold": {
+            "description": "Per-profile auto-compaction threshold override (tokens, non-zero).",
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "backend": {
             "anyOf": [
               {
@@ -12872,6 +13167,17 @@
           "external_addressable": {
             "default": false,
             "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured default provider for `Auto` image-generation targets."
           },
           "max_inline_peer_notifications": {
             "format": "int32",
@@ -12888,10 +13194,35 @@
             "default": "",
             "type": "string"
           },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
+          },
           "provider_params": true,
+          "resume_overrides": {
+            "description": "Profile fields that win over durable session metadata on resume.",
+            "items": {
+              "$ref": "#/$defs/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "description": "Durable self-hosted server binding for configured self-hosted aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "skills": {
             "default": [],
@@ -12919,6 +13250,15 @@
           "model"
         ],
         "type": "object"
+      },
+      "WireMobResumeOverrideField": {
+        "description": "Profile fields that win over durable session metadata on resume.\n\nWire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case\nvocabulary, parsed fail-closed at the wire boundary.",
+        "enum": [
+          "model",
+          "provider",
+          "provider_params"
+        ],
+        "type": "string"
       },
       "WireMobRuntimeMode": {
         "enum": [
@@ -17062,7 +17402,7 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
           "openai",

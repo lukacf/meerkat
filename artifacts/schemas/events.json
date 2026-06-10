@@ -1122,7 +1122,7 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
           "openai",
@@ -5032,7 +5032,7 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
           "openai",

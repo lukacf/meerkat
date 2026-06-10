@@ -210,6 +210,23 @@ impl CreateSessionRequest {
 pub struct SessionBuildOptions {
     pub provider: Option<Provider>,
     pub self_hosted_server_id: Option<String>,
+    /// Caller-scoped custom model registry entries (e.g. mob-definition
+    /// `[models.<id>]` tables), merged into the effective `ModelRegistry`
+    /// for this build via `ModelRegistry::from_config_with_models`.
+    pub custom_models: BTreeMap<String, crate::config::CustomModelConfig>,
+    /// Configured default provider for `Auto` image-generation targets.
+    ///
+    /// When set, the image-generation planner resolves
+    /// `ImageGenerationTargetPreference::Auto` against this provider instead
+    /// of inferring a provider from the session's effective text model.
+    pub image_generation_provider: Option<Provider>,
+    /// Per-build auto-compaction threshold override (tokens).
+    ///
+    /// `NonZeroU64` is the typed fail-closed carrier: a zero threshold is
+    /// rejected at ingress instead of disabling compaction by accident. When
+    /// set, this wins over both the global config knob and model-aware
+    /// context-window scaling.
+    pub auto_compact_threshold_override: Option<std::num::NonZeroU64>,
     pub output_schema: Option<OutputSchema>,
     /// Structured-output retry budget *intent*. `None` inherits the canonical
     /// default ([`crate::config::default_structured_output_retries`]); the
@@ -992,6 +1009,9 @@ impl Default for SessionBuildOptions {
         Self {
             provider: None,
             self_hosted_server_id: None,
+            custom_models: BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             output_schema: None,
             structured_output_retries: None,
             hooks_override: HookRunOverrides::default(),
@@ -1048,6 +1068,12 @@ impl std::fmt::Debug for SessionBuildOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionBuildOptions")
             .field("provider", &self.provider)
+            .field("custom_models", &self.custom_models.keys())
+            .field("image_generation_provider", &self.image_generation_provider)
+            .field(
+                "auto_compact_threshold_override",
+                &self.auto_compact_threshold_override,
+            )
             .field("output_schema", &self.output_schema.is_some())
             .field("structured_output_retries", &self.structured_output_retries)
             .field("hooks_override", &self.hooks_override)

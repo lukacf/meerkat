@@ -1,10 +1,17 @@
 //! Provider enumeration shared across interfaces.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Supported LLM providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+///
+/// `JsonSchema` is derived unconditionally (schemars is a non-optional
+/// meerkat-core dependency): config-owned types such as
+/// [`crate::config::CustomModelConfig`] embed the typed provider directly and
+/// derive their schemas without the `schema` feature.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,

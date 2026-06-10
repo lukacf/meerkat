@@ -548,6 +548,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_fable_5_in_catalog_without_changing_default_ladder() {
+        let entry = entry_for(Provider::Anthropic, "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert_eq!(entry.provider, "anthropic");
+        assert_eq!(entry.display_name, "Claude Fable 5");
+        assert_eq!(entry.context_window, Some(1_000_000));
+        assert_eq!(entry.max_output_tokens, Some(128_000));
+        assert!(
+            allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5"),
+            "claude-fable-5 must be in the Anthropic allowlist"
+        );
+        // The default-model ladder is deliberately unchanged: Opus 4.8 remains
+        // the Anthropic and global default even though Fable 5 is the more
+        // capable (and more expensive) model.
+        assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-4-8"));
+        assert_eq!(global_default_model(), "claude-opus-4-8");
+    }
+
+    #[test]
     fn image_generation_defaults_are_catalog_owned_and_typed() {
         let openai = default_image_generation_model(Provider::OpenAI)
             .expect("OpenAI must have an image-generation default");

@@ -8705,6 +8705,9 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: build_provider_override.map(Provider::as_core),
             override_comms: Default::default(),
             self_hosted_server_id: None,
@@ -10116,6 +10119,9 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
         let build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: create.provider,
             output_schema: create.output_schema.clone(),
             structured_output_retries: create.structured_output_retries,
@@ -18382,6 +18388,9 @@ capabilities = ["definitely_missing_capability"]
         ));
 
         let mut build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             mob_tools: Some(mob_factory),
             llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                 llm_override,
@@ -18460,6 +18469,9 @@ capabilities = ["definitely_missing_capability"]
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         llm_override,
                     )),
@@ -18578,6 +18590,9 @@ capabilities = ["definitely_missing_capability"]
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(session),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
@@ -18717,6 +18732,9 @@ capabilities = ["definitely_missing_capability"]
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
+                custom_models: std::collections::BTreeMap::new(),
+                image_generation_provider: None,
+                auto_compact_threshold_override: None,
                 llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                     llm_override,
                 )),
@@ -18854,6 +18872,9 @@ capabilities = ["definitely_missing_capability"]
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(session),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
@@ -18926,6 +18947,9 @@ capabilities = ["definitely_missing_capability"]
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         llm_override,
                     )),
@@ -18997,6 +19021,9 @@ capabilities = ["definitely_missing_capability"]
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
+                custom_models: std::collections::BTreeMap::new(),
+                image_generation_provider: None,
+                auto_compact_threshold_override: None,
                 resume_session: Some(session),
                 runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                 initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
@@ -19065,6 +19092,9 @@ capabilities = ["definitely_missing_capability"]
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
+                custom_models: std::collections::BTreeMap::new(),
+                image_generation_provider: None,
+                auto_compact_threshold_override: None,
                 resume_session: Some(session),
                 runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                 initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(

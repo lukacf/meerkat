@@ -208,6 +208,9 @@ impl McpScheduleContext {
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .or_else(|| Some(self.realm_id.clone()));
         let build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: create.provider,
             override_comms: Default::default(),
             self_hosted_server_id: None,

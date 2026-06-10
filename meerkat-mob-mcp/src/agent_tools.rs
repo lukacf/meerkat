@@ -3040,6 +3040,11 @@ mod tests {
             ProfileName::from("delegate"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -3058,6 +3063,11 @@ mod tests {
             ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -4817,6 +4827,11 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "test".to_string(),
@@ -4843,6 +4858,11 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "test".to_string(),
@@ -4868,6 +4888,11 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "test".to_string(),
@@ -4894,6 +4919,11 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: expected_model.clone(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "override test".to_string(),

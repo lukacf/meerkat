@@ -109,7 +109,9 @@ pub mod machine_schema_exports {
     }
 }
 
-pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
+pub use profile::{
+    Profile, ProfileBinding, ProfileSource, ResumeOverrideField, SpawnTooling, ToolConfig,
+};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot,

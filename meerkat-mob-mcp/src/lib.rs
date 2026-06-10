@@ -6471,6 +6471,11 @@ mod tests {
             ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::profile::ToolConfig {
                     comms: true,
@@ -6493,6 +6498,11 @@ mod tests {
     fn sample_realm_profile(model: &str) -> meerkat_mob::Profile {
         meerkat_mob::profile::Profile {
             model: model.to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: Vec::new(),
             tools: meerkat_mob::profile::ToolConfig::default(),
             peer_description: "realm worker".to_string(),

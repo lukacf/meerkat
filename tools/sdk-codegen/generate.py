@@ -223,8 +223,10 @@ WORKGRAPH_RPC_CONTRACT_HELPER_TYPES = [
 ]
 
 MOB_RPC_CONTRACT_ALIAS_TYPES = [
+    "Provider",
     "WireMemberRef",
     "WireMobBackendKind",
+    "WireMobResumeOverrideField",
     "WireRuntimeBinding",
     "WireMemberLaunchMode",
     "WireForkContext",
@@ -268,6 +270,7 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "MobTopologyRuleInput",
     "MobTopologySpecInput",
     "MobWiringRulesInput",
+    "CustomModelConfig",
     "MobMemberSpecWire",
     "MobReconcileOptionsWire",
     "MobReconcileReportWire",

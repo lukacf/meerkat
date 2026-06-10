@@ -522,6 +522,12 @@ pub fn resolve_effective_turn_config(
     let mut build = SessionBuildOptions {
         provider: llm_binding.provider,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
+        // Caller-scoped build inputs, not durable session facts: the owning
+        // surface (e.g. the mob runtime, which rebuilds from its definition)
+        // re-supplies these on resume.
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
         output_schema: overrides
             .output_schema
             .clone()

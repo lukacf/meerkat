@@ -244,6 +244,39 @@ export type SkillId = SkillKey;
 
 // ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 
+/** Closed provider vocabulary (matches Rust `meerkat_core::Provider`). */
+export type ProviderName =
+  | 'anthropic'
+  | 'openai'
+  | 'gemini'
+  | 'self_hosted'
+  | 'other';
+
+/** Profile fields that win over durable session metadata on resume. */
+export type ResumeOverrideField = 'model' | 'provider' | 'provider_params';
+
+/**
+ * User-defined model registry entry (`[models.<id>]`).
+ *
+ * Matches Rust `meerkat_core::config::CustomModelConfig`.
+ */
+export interface CustomModelEntry {
+  /** Typed provider that serves this model. */
+  provider: ProviderName;
+  /** Human-readable display name (defaults to the model id). */
+  display_name?: string;
+  /** Model context window in tokens (drives compaction scaling). */
+  context_window?: number;
+  /** Maximum output tokens per call. */
+  max_output_tokens?: number;
+  /** Whether the model accepts image input (conservative default: false). */
+  vision?: boolean;
+  /** Whether the model supports provider-native web search. */
+  web_search?: boolean;
+  /** Default call timeout in seconds. */
+  call_timeout_secs?: number;
+}
+
 /**
  * Mob definition passed to {@link MeerkatRuntime.createMob}.
  *
@@ -252,6 +285,10 @@ export type SkillId = SkillKey;
 export interface MobDefinition {
   id: string;
   profiles: Record<string, Profile>;
+  /** Mob-scoped custom model registry entries (`[models.<id>]`). */
+  models?: Record<string, CustomModelEntry>;
+  /** Mob-level default provider for Auto image-generation targets. */
+  image_generation_provider?: ProviderName;
   /** Wiring rules for automatic peer connections. */
   wiring?: WiringRules;
   /** Named flow definitions. */
@@ -275,6 +312,16 @@ export interface MobDefinition {
 export interface Profile {
   /** LLM model name (e.g. "claude-sonnet-4-5"). */
   model: string;
+  /** Explicit typed provider for the profile model. */
+  provider?: ProviderName;
+  /** Durable self-hosted server binding for configured self-hosted aliases. */
+  self_hosted_server_id?: string;
+  /** Configured default provider for Auto image-generation targets. */
+  image_generation_provider?: ProviderName;
+  /** Per-profile auto-compaction threshold override (tokens, non-zero). */
+  auto_compact_threshold?: number;
+  /** Profile fields that win over durable session metadata on resume. */
+  resume_overrides?: ResumeOverrideField[];
   /** Skill references to load. */
   skills?: string[];
   /** Tool configuration. */

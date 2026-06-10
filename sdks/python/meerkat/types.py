@@ -555,6 +555,11 @@ class MobProfileTools(TypedDict, total=False):
 
 class MobProfile(TypedDict, total=False):
     model: str
+    provider: str | None
+    self_hosted_server_id: str | None
+    image_generation_provider: str | None
+    auto_compact_threshold: int | None
+    resume_overrides: list[str]
     skills: list[str]
     tools: MobProfileTools
     peer_description: str

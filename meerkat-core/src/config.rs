@@ -870,13 +870,22 @@ pub struct HtmlTemplateConfig {
     pub body: Option<String>,
 }
 
-/// Model defaults by provider.
+/// Model defaults by provider, plus user-defined custom model registry
+/// entries (`[models.<id>]` tables).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelDefaults {
     pub anthropic: String,
     pub openai: String,
     pub gemini: String,
+    /// User-defined model registry entries keyed by model id.
+    ///
+    /// TOML form: `[models.<id>]` tables alongside the per-provider default
+    /// strings. Each entry is merged into the effective [`crate::ModelRegistry`]
+    /// by `ModelRegistry::from_config`, the single owner that feeds provider
+    /// inference, compaction scaling, capability gates, and call timeouts.
+    #[serde(flatten)]
+    pub custom: BTreeMap<String, CustomModelConfig>,
 }
 
 impl Default for ModelDefaults {
@@ -891,8 +900,45 @@ impl Default for ModelDefaults {
             gemini: crate::model_profile::catalog::default_model(crate::Provider::Gemini)
                 .unwrap_or_default()
                 .to_string(),
+            custom: BTreeMap::new(),
         }
     }
+}
+
+/// User-defined model registry entry (`[models.<id>]` in `config.toml` or a
+/// mob definition).
+///
+/// Declares an uncatalogued model that an API provider serves so a single
+/// definition feeds provider inference, compaction scaling, capability gates,
+/// and call timeouts through the effective [`crate::ModelRegistry`].
+///
+/// Capability flags are conservative when omitted: an undeclared capability is
+/// treated as absent rather than guessed from the model name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModelConfig {
+    /// Typed provider that serves this model. Parsed fail-closed at config
+    /// ingress: unknown provider names reject the entry.
+    pub provider: crate::Provider,
+    /// Human-readable display name. Defaults to the model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Model context window in tokens (drives compaction scaling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Maximum output tokens per call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// Whether the model accepts image input. Conservative default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    /// Whether the model supports provider-native web search tools.
+    /// Conservative default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
+    /// Default call timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
 }
 
 /// Default shell program

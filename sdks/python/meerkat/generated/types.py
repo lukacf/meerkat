@@ -380,13 +380,18 @@ class WireMobToolConfig:
 class WireMobProfile:
     """Profile override for `mob/spawn`."""
     model: str
+    auto_compact_threshold: Optional[int] = None
     backend: Optional[WireMobBackendKind] = None
     external_addressable: Optional[bool] = None
+    image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
+    provider: Optional[Provider] = None
     provider_params: Optional[Any] = None
+    resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    self_hosted_server_id: Optional[str] = None
     skills: Optional[list[str]] = None
     tools: Optional[WireMobToolConfig] = None
 
@@ -959,7 +964,9 @@ Not `Eq`: `profiles` transitively carries float provider params."""
     backend: Optional[MobBackendConfigInput] = None
     event_router: Optional[MobEventRouterConfigInput] = None
     flows: Optional[dict[str, MobFlowSpecInput]] = None
+    image_generation_provider: Optional[Provider] = None
     limits: Optional[MobLimitsSpecInput] = None
+    models: Optional[dict[str, CustomModelConfig]] = None
     orchestrator: Optional[MobOrchestratorInput] = None
     skills: Optional[dict[str, MobSkillSourceInput]] = None
     spawn_policy: Optional[MobSpawnPolicyInput] = None
@@ -1044,13 +1051,18 @@ class MobOrchestratorInput:
 class MobProfileInput:
     """Request payload for MobProfileInput."""
     model: str
+    auto_compact_threshold: Optional[int] = None
     backend: Optional[WireMobBackendKind] = None
     external_addressable: Optional[bool] = None
+    image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
+    provider: Optional[Provider] = None
     provider_params: Optional[Any] = None
+    resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    self_hosted_server_id: Optional[str] = None
     skills: Optional[list[str]] = None
     tools: Optional[MobToolConfigInput] = None
 
@@ -1104,6 +1116,26 @@ class MobWiringRulesInput:
     """Request payload for MobWiringRulesInput."""
     auto_wire_orchestrator: Optional[bool] = None
     role_wiring: Optional[list[MobRoleWiringRuleInput]] = None
+
+
+@dataclass
+class CustomModelConfig:
+    """User-defined model registry entry (`[models.<id>]` in `config.toml` or a
+mob definition).
+
+Declares an uncatalogued model that an API provider serves so a single
+definition feeds provider inference, compaction scaling, capability gates,
+and call timeouts through the effective [`crate::ModelRegistry`].
+
+Capability flags are conservative when omitted: an undeclared capability is
+treated as absent rather than guessed from the model name."""
+    provider: Provider
+    call_timeout_secs: Optional[int] = None
+    context_window: Optional[int] = None
+    display_name: Optional[str] = None
+    max_output_tokens: Optional[int] = None
+    vision: Optional[bool] = None
+    web_search: Optional[bool] = None
 
 
 @dataclass
@@ -2999,6 +3031,14 @@ WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlo
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[WireContentBlock]
 
+# Supported LLM providers.
+#
+# `JsonSchema` is derived unconditionally (schemars is a non-optional
+# meerkat-core dependency): config-owned types such as
+# [`crate::config::CustomModelConfig`] embed the typed provider directly and
+# derive their schemas without the `schema` feature.
+Provider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
+
 # Server-resolved opaque handle for a mob member.
 #
 # Encodes `{mob_id, agent_identity}` as a single base64url-encoded token
@@ -3014,6 +3054,12 @@ WireMemberRef = str
 
 # Mob RPC helper wire type for WireMobBackendKind.
 WireMobBackendKind = Literal['session', 'external']
+
+# Profile fields that win over durable session metadata on resume.
+#
+# Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
+# vocabulary, parsed fail-closed at the wire boundary.
+WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params']
 
 # Runtime binding for spawn requests.
 #

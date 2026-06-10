@@ -51,6 +51,14 @@ pub enum DiagnosticCode {
     ReservedSystemIdentifier,
     /// Inline peer notification threshold is outside supported range.
     InvalidInlinePeerNotificationThreshold,
+    /// A profile model is neither catalogued, custom-defined (`[models.<id>]`),
+    /// nor provider-annotated.
+    UnknownModel,
+    /// A `[models.<id>]` entry declares a provider that cannot own a custom
+    /// model (self-hosted or unknown).
+    InvalidCustomModel,
+    /// An `image_generation_provider` has no image-generation capability.
+    InvalidImageGenerationProvider,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -77,6 +85,9 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidInlinePeerNotificationThreshold => {
                 "invalid_inline_peer_notification_threshold"
             }
+            Self::UnknownModel => "unknown_model",
+            Self::InvalidCustomModel => "invalid_custom_model",
+            Self::InvalidImageGenerationProvider => "invalid_image_generation_provider",
         };
         f.write_str(s)
     }
@@ -178,6 +189,50 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
         // definition has no opinion on which sources exist; mismatched names
         // simply produce no tools at compose time. No mob-level validation.
 
+        // Fail-fast model resolution: a profile model must be catalogued,
+        // custom-defined in this definition's `[models.<id>]` tables, or
+        // provider-annotated. Anything else would brick the member at first
+        // delivery with "Cannot infer provider from model".
+        let model_resolvable = profile.provider.is_some()
+            || def.models.contains_key(&profile.model)
+            || meerkat_core::model_profile::catalog::catalog()
+                .iter()
+                .any(|entry| entry.id == profile.model);
+        if !model_resolvable {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::UnknownModel,
+                message: format!(
+                    "profiles.{} model '{}' is neither catalogued, defined under [models.{}], \
+                     nor provider-annotated (set `provider = \"...\"` or define the model)",
+                    name.as_str(),
+                    profile.model,
+                    profile.model
+                ),
+                location: Some(format!("profiles.{}.model", name.as_str())),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
+        if let Some(provider) = profile.image_generation_provider
+            && meerkat_core::model_profile::catalog::default_image_generation_model(provider)
+                .is_none()
+        {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::InvalidImageGenerationProvider,
+                message: format!(
+                    "profiles.{} image_generation_provider '{}' has no image-generation \
+                     capability",
+                    name.as_str(),
+                    provider.as_str()
+                ),
+                location: Some(format!(
+                    "profiles.{}.image_generation_provider",
+                    name.as_str()
+                )),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
         if let Some(threshold) = profile.max_inline_peer_notifications
             && threshold < -1
         {
@@ -192,6 +247,43 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     "profiles.{}.max_inline_peer_notifications",
                     name.as_str()
                 )),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+    }
+
+    // Mob-level image generation default must point at a provider that can
+    // actually generate images.
+    if let Some(provider) = def.image_generation_provider
+        && meerkat_core::model_profile::catalog::default_image_generation_model(provider).is_none()
+    {
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::InvalidImageGenerationProvider,
+            message: format!(
+                "image_generation_provider '{}' has no image-generation capability",
+                provider.as_str()
+            ),
+            location: Some("image_generation_provider".to_string()),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
+
+    // `[models.<id>]` entries must declare a concrete API provider; the same
+    // rule the model registry enforces at member build time, surfaced
+    // fail-fast at mob load.
+    for (model_id, model) in &def.models {
+        if matches!(
+            model.provider,
+            meerkat_core::Provider::SelfHosted | meerkat_core::Provider::Other
+        ) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::InvalidCustomModel,
+                message: format!(
+                    "models.{model_id}: provider must be a concrete API provider \
+                     (anthropic, openai, gemini); self-hosted models belong in the host \
+                     config's [self_hosted.models]"
+                ),
+                location: Some(format!("models.{model_id}.provider")),
                 severity: DiagnosticSeverity::Error,
             });
         }
@@ -354,6 +446,11 @@ mod tests {
     fn base_profile() -> Profile {
         Profile {
             model: "claude-opus-4-8".to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig::default(),
             peer_description: "test".to_string(),
@@ -657,6 +754,145 @@ model = "claude-sonnet-4-5"
                     && d.location.as_deref() == Some("profiles.lead.max_inline_peer_notifications")
             }),
             "expected invalid inline threshold diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_unknown_model_is_rejected_at_load() {
+        let mut def = valid_definition();
+        def.profiles.insert(
+            ProfileName::from("custom"),
+            ProfileBinding::Inline({
+                let mut p = base_profile();
+                p.model = "uncatalogued-model".to_string();
+                p
+            }),
+        );
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == DiagnosticCode::UnknownModel
+                    && d.severity == DiagnosticSeverity::Error
+                    && d.location.as_deref() == Some("profiles.custom.model")
+            }),
+            "a model that is neither catalogued, custom-defined, nor provider-annotated \
+             must fail at mob load: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_provider_annotated_model_passes_load_validation() {
+        let mut def = valid_definition();
+        def.profiles.insert(
+            ProfileName::from("custom"),
+            ProfileBinding::Inline({
+                let mut p = base_profile();
+                p.model = "uncatalogued-model".to_string();
+                p.provider = Some(meerkat_core::Provider::Anthropic);
+                p
+            }),
+        );
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::UnknownModel),
+            "provider-annotated uncatalogued models are admissible: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_custom_defined_model_passes_load_validation() {
+        let mut def = valid_definition();
+        def.models.insert(
+            "uncatalogued-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: meerkat_core::Provider::OpenAI,
+                display_name: None,
+                context_window: None,
+                max_output_tokens: None,
+                vision: None,
+                web_search: None,
+                call_timeout_secs: None,
+            },
+        );
+        def.profiles.insert(
+            ProfileName::from("custom"),
+            ProfileBinding::Inline({
+                let mut p = base_profile();
+                p.model = "uncatalogued-model".to_string();
+                p
+            }),
+        );
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::UnknownModel),
+            "[models.<id>]-defined models are admissible: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_custom_model_with_non_concrete_provider_is_rejected() {
+        let mut def = valid_definition();
+        def.models.insert(
+            "weird-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: meerkat_core::Provider::SelfHosted,
+                display_name: None,
+                context_window: None,
+                max_output_tokens: None,
+                vision: None,
+                web_search: None,
+                call_timeout_secs: None,
+            },
+        );
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == DiagnosticCode::InvalidCustomModel
+                    && d.location.as_deref() == Some("models.weird-model.provider")
+            }),
+            "self-hosted providers in [models.<id>] must be rejected: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_image_generation_provider_without_capability_is_rejected() {
+        let mut def = valid_definition();
+        def.image_generation_provider = Some(meerkat_core::Provider::Anthropic);
+        def.profiles
+            .get_mut(&ProfileName::from("worker"))
+            .expect("worker profile")
+            .as_inline_mut()
+            .unwrap()
+            .image_generation_provider = Some(meerkat_core::Provider::Anthropic);
+
+        let diagnostics = validate_definition(&def);
+        let hits: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::InvalidImageGenerationProvider)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            2,
+            "both mob-level and profile-level Anthropic image providers must be rejected: {diagnostics:?}"
+        );
+
+        def.image_generation_provider = Some(meerkat_core::Provider::Gemini);
+        def.profiles
+            .get_mut(&ProfileName::from("worker"))
+            .expect("worker profile")
+            .as_inline_mut()
+            .unwrap()
+            .image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::InvalidImageGenerationProvider),
+            "image-capable providers must pass: {diagnostics:?}"
         );
     }
 

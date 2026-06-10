@@ -414,12 +414,6 @@ if include_scenario(40):
                             "peer_description": "Review worker",
                             "external_addressable": True,
                         },
-                        "broken": {
-                            "model": "definitely-invalid-live-smoke-model",
-                            "tools": {"comms": True},
-                            "peer_description": "Deterministic failure worker",
-                            "external_addressable": True,
-                        },
                     },
                     "wiring": {
                         "auto_wire_orchestrator": False,
@@ -481,22 +475,26 @@ if include_scenario(40):
                 {entry["agent_identity"] for entry in members}
             )
 
-            try:
-                broken = await mob.spawn(
-                    profile="broken",
-                    agent_identity="broken-1",
-                    runtime_mode="turn_driven",
+            # Load-time model validation: a profile model that is neither
+            # catalogued, custom-defined ([models.<id>]), nor
+            # provider-annotated fails fast at mob create instead of
+            # bricking the member at first delivery.
+            with pytest.raises(MeerkatError) as broken_create:
+                await client.create_mob(
+                    definition={
+                        "id": f"python-sdk-swarm-broken-{uuid4().hex[:8]}",
+                        "profiles": {
+                            "broken": {
+                                "model": "definitely-invalid-live-smoke-model",
+                                "tools": {"comms": True},
+                                "peer_description": "Deterministic failure worker",
+                                "external_addressable": True,
+                            },
+                        },
+                    }
                 )
-            except MeerkatError as err:
-                assert "definitely-invalid-live-smoke-model" in str(err)
-            else:
-                assert broken["agent_identity"] == "broken-1"
-                with pytest.raises(MeerkatError):
-                    await mob.member("broken-1").send(
-                        "This turn must fail because the member model is invalid.",
-                    )
-                broken_state = await mob.member_status("broken-1")
-                assert not (broken_state.get("output_preview") or "").strip()
+            assert "unknown_model" in str(broken_create.value)
+            assert "definitely-invalid-live-smoke-model" in str(broken_create.value)
 
             respawn_result = await mob.respawn(
                 "reviewer-1",

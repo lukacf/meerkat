@@ -3359,6 +3359,9 @@ async fn handle_meerkat_run(
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
         provider: create_provider,
         override_comms: Default::default(),
         self_hosted_server_id: None,
@@ -3769,6 +3772,9 @@ async fn handle_meerkat_resume(
     .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: llm_binding.provider,
             override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id.clone(),
@@ -4537,6 +4543,11 @@ mod tests {
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -4577,6 +4588,11 @@ mod tests {
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -6200,6 +6216,9 @@ mod tests {
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
@@ -6322,6 +6341,9 @@ mod tests {
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
@@ -7045,6 +7067,9 @@ mod tests {
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(TestClient::default()),
                     )),

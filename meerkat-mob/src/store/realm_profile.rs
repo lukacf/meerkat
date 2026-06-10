@@ -70,6 +70,11 @@ pub(crate) mod contract_tests {
     fn sample_profile(model: &str) -> Profile {
         Profile {
             model: model.to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
             peer_description: String::new(),

@@ -68,10 +68,12 @@ struct OutgoingAudioPacket {
 struct OutgoingAudioControl {
     generation: AtomicU64,
     queued_packets: AtomicUsize,
-    /// D223: count of output-audio packets dropped because the RTP pacing
-    /// queue was full or closed. A non-zero value is a typed delivery-degraded
-    /// fact — the session/transport knows output audio was not fully delivered
-    /// — rather than the prior `tracing::warn`-and-forget.
+    /// D223/K16: count of output-audio packets dropped because the RTP pacing
+    /// queue was full or closed. The cumulative count is lowered into the
+    /// live-host signal seam (`LiveAdapterHost::signal_output_audio_degraded`)
+    /// once per degraded chunk, so the session observes delivery degradation
+    /// as a typed fact — this counter is the running total feeding that
+    /// signal, not a transport-local truth with no live reader.
     dropped_packets: AtomicU64,
 }
 
@@ -722,6 +724,7 @@ async fn pump_observations_to_data_channel(
             match bridge.encode_provider_pcm24k_chunk(data) {
                 Ok(packets) => {
                     let generation = outgoing_audio_control.generation();
+                    let mut chunk_cumulative_dropped = None;
                     for packet in packets {
                         match outgoing_audio_tx.try_send(OutgoingAudioPacket {
                             generation,
@@ -735,6 +738,7 @@ async fn pump_observations_to_data_channel(
                                 // transport/session knows output audio was not
                                 // fully delivered.
                                 let dropped = outgoing_audio_control.note_dropped();
+                                chunk_cumulative_dropped = Some(dropped);
                                 tracing::warn!(
                                     channel = %channel_id,
                                     error = %err,
@@ -743,6 +747,23 @@ async fn pump_observations_to_data_channel(
                                 );
                             }
                         }
+                    }
+                    // K16: lower the delivery degradation into the canonical
+                    // host signal seam (the same `LiveProjectionSink` path
+                    // `signal_transport_barge_in` uses) so the dropped output
+                    // audio is a typed fact the session observes — not a
+                    // transport-local counter with no live reader. One signal
+                    // per degraded chunk, carrying the cumulative drop count.
+                    if let Some(dropped) = chunk_cumulative_dropped
+                        && let Err(err) = host
+                            .signal_output_audio_degraded(&channel_id, dropped)
+                            .await
+                    {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            error = %err,
+                            "failed to lower WebRTC output-audio degradation into the host signal seam"
+                        );
                     }
                 }
                 Err(err) => {

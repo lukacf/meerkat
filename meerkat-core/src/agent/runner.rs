@@ -25,7 +25,7 @@ use crate::tool_scope::{
 use crate::turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
-use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
+use crate::types::{ContentInput, Message, RunInput, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
 use std::collections::HashSet;
@@ -48,21 +48,25 @@ fn user_message_from_operator_renderable(
     }
 }
 
-fn prompt_from_admitted_pending_tail(
+fn run_input_from_admitted_pending_tail(
     messages: &[Message],
     admitted_tail: ObservedSessionTailKind,
-) -> Result<ContentInput, AgentError> {
+) -> Result<RunInput, AgentError> {
     match (admitted_tail, messages.last()) {
         (ObservedSessionTailKind::User, Some(Message::User(user)))
             if user.has_non_text_content() =>
         {
-            Ok(ContentInput::Blocks(user.content.clone()))
+            Ok(RunInput::Content {
+                content: ContentInput::Blocks(user.content.clone()),
+            })
         }
-        (ObservedSessionTailKind::User, Some(Message::User(user))) => {
-            Ok(ContentInput::Text(user.text_content()))
-        }
+        (ObservedSessionTailKind::User, Some(Message::User(user))) => Ok(RunInput::Content {
+            content: ContentInput::Text(user.text_content()),
+        }),
         (ObservedSessionTailKind::ToolResults, Some(Message::ToolResults { .. })) => {
-            Ok(ContentInput::Text(String::new()))
+            // The pending tail is staged tool results: that fact travels as
+            // its own typed variant — never as a fabricated empty prompt.
+            Ok(RunInput::PendingToolResults)
         }
         _ => Err(AgentError::InternalError(format!(
             "generated pending-continuation authority admitted tail {admitted_tail:?}, but transcript tail no longer matches"
@@ -452,8 +456,10 @@ where
     /// Apply the live LLM request policy paired with an identity hot-swap.
     pub fn apply_llm_request_policy(&mut self, policy: crate::SessionLlmRequestPolicy) {
         self.config.model = policy.model;
-        self.config.provider_params = policy.provider_params;
-        self.config.provider_tool_defaults = policy.provider_tool_defaults;
+        self.config.provider_params = crate::lifecycle::run_primitive::ProviderParamsCarrier {
+            params: policy.provider_params.unwrap_or_default(),
+            tool_defaults: policy.provider_tool_defaults,
+        };
     }
 
     /// Replace the LLM client and its next-turn request policy together.
@@ -841,12 +847,12 @@ where
 
     async fn run_started_hooks(
         &self,
-        prompt: &ContentInput,
+        input: &RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation::run_started(self.session.id().clone(), prompt.clone()),
+                HookInvocation::run_started(self.session.id().clone(), input.clone()),
                 event_tx,
             )
             .await?;
@@ -936,7 +942,7 @@ where
 
     async fn emit_run_started_event(
         &self,
-        prompt: ContentInput,
+        input: RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let _ = crate::event_tap::tap_emit(
@@ -944,7 +950,7 @@ where
             event_tx,
             AgentEvent::RunStarted {
                 session_id: self.session.id().clone(),
-                prompt,
+                input,
             },
         )
         .await;
@@ -985,10 +991,8 @@ where
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
-                error_class: error_report.class,
-                error: error_report.message.clone(),
+                error_report,
                 terminal_cause_kind,
-                error_report: Some(error_report),
             },
         )
         .await;
@@ -1173,9 +1177,9 @@ where
             ContentInput::Blocks(blocks)
         };
 
-        // Hooks/events receive the typed content input; legacy hook fields
-        // still include the text projection for compatibility.
-        let run_prompt_input = user_input.clone();
+        // Hooks/events receive the typed run input; the external hook wire
+        // envelope derives its text projection at serialization time only.
+        let run_prompt_input = RunInput::from(user_input.clone());
 
         // Run-start hooks own the start veto. They must run — and be able to
         // deny — BEFORE we publish `RunStarted` or commit the user message to
@@ -1209,9 +1213,8 @@ where
         self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
             .await;
 
-        self.tool_dispatch_context =
-            crate::ToolDispatchContext::from_current_turn_input(&run_prompt_input)
-                .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
+        self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&run_prompt_input)
+            .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -1275,7 +1278,7 @@ where
                         "generated pending-continuation authority emitted terminal {terminal:?} for runnable continuation"
                     )));
                 }
-                match prompt_from_admitted_pending_tail(self.session.messages(), session_tail) {
+                match run_input_from_admitted_pending_tail(self.session.messages(), session_tail) {
                     Ok(prompt) => prompt,
                     Err(error) => {
                         self.clear_runtime_execution_kind();
@@ -1319,7 +1322,7 @@ where
         self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
             .await;
 
-        self.tool_dispatch_context = crate::ToolDispatchContext::from_current_turn_input(&prompt)
+        self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&prompt)
             .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
@@ -1692,9 +1695,10 @@ mod skill_activation_effect_tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: serde_json::Value,
-        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<Output = Result<crate::skills::SkillFunctionOutput, SkillError>> + Send
+        {
             let missing = key.clone();
             async move { Err(SkillError::NotFound { key: missing }) }
         }
@@ -1779,9 +1783,10 @@ mod skill_activation_effect_tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: serde_json::Value,
-        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<Output = Result<crate::skills::SkillFunctionOutput, SkillError>> + Send
+        {
             let missing = key.clone();
             async move { Err(SkillError::NotFound { key: missing }) }
         }
@@ -1976,9 +1981,10 @@ mod skill_activation_effect_tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: serde_json::Value,
-        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<Output = Result<crate::skills::SkillFunctionOutput, SkillError>> + Send
+        {
             let missing = key.clone();
             async move { Err(SkillError::NotFound { key: missing }) }
         }
@@ -2227,6 +2233,7 @@ mod snapshot_projection_tests {
             terminal_cause_kind: None,
             extraction_attempts: 0,
             max_extraction_retries: 0,
+            extraction_active: false,
             llm_retry_attempt: 0,
             llm_retry_max_retries: 0,
             llm_retry_selected_delay_ms: 0,
@@ -2292,5 +2299,46 @@ mod snapshot_projection_tests {
                 Ok(_) => panic!("{field} overflow must yield a typed projection error"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod run_input_pending_tail_tests {
+    use super::*;
+    use crate::types::{ToolResult, UserMessage};
+
+    /// K3 invariant: a pending tool-results tail resolves to the typed
+    /// `RunInput::PendingToolResults` variant — never to a fabricated
+    /// empty-string prompt.
+    #[test]
+    fn pending_tool_results_tail_is_typed_variant_not_empty_prompt() {
+        let messages = vec![Message::tool_results(vec![ToolResult::new(
+            "tc-1".to_string(),
+            "ok".to_string(),
+            false,
+        )])];
+        let input =
+            run_input_from_admitted_pending_tail(&messages, ObservedSessionTailKind::ToolResults)
+                .expect("admitted tool-results tail resolves");
+        assert_eq!(input, RunInput::PendingToolResults);
+        assert_eq!(
+            input.prompt_text(),
+            None,
+            "pending-tail runs have no prompt; nothing may fabricate an empty string"
+        );
+    }
+
+    #[test]
+    fn user_tail_resolves_to_typed_content() {
+        let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
+        let input = run_input_from_admitted_pending_tail(&messages, ObservedSessionTailKind::User)
+            .expect("admitted user tail resolves");
+        assert_eq!(
+            input,
+            RunInput::Content {
+                content: ContentInput::Text("hello".to_string())
+            }
+        );
     }
 }

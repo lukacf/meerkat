@@ -671,13 +671,12 @@ impl CoreExecutor for NoopExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         Ok(CoreApplyOutput {
-            receipt: meerkat_core::RunBoundaryReceipt {
+            receipt: meerkat_core::RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: None,

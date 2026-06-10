@@ -5667,6 +5667,7 @@ const STA_LOCAL_ENUMS: &[&str] = &[
     "StartTurnPublicTerminal",
     "StartTurnDispatchAuthorization",
     "RuntimeKeepAliveRequest",
+    "RuntimeKeepAlivePersistenceDecision",
     "TurnHandlingMode",
 ];
 const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
@@ -5739,6 +5740,7 @@ fn sta_default_variant(name: &str) -> Result<&'static str> {
         "StartTurnPublicTerminal" => Ok("NoPendingBoundary"),
         "StartTurnDispatchAuthorization" => Ok("Authorized"),
         "RuntimeKeepAliveRequest" => Ok("Preserve"),
+        "RuntimeKeepAlivePersistenceDecision" => Ok("PreserveExisting"),
         "TurnHandlingMode" => Ok("Queue"),
         other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
     }

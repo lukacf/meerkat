@@ -2,7 +2,7 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
-use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResult, Usage};
+use crate::types::{ContentBlock, RunInput, SessionId, StopReason, ToolResult, Usage};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -202,8 +202,9 @@ pub struct HookLlmRequest {
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Typed effective provider parameter overrides for this LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub message_count: usize,
 }
 
@@ -332,7 +333,7 @@ pub struct HookInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_input: Option<ContentInput>,
+    pub prompt_input: Option<RunInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_report: Option<AgentErrorReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,7 +357,7 @@ impl Serialize for HookInvocation {
         // `prompt` and `error` are serialize-only text projections derived
         // from the typed owners at serialization time for external hook
         // consumers; they are never stored and never deserialized back.
-        let prompt = self.prompt_input.as_ref().map(ContentInput::text_content);
+        let prompt = self.prompt_input.as_ref().and_then(RunInput::prompt_text);
         let error = self
             .error_report
             .as_ref()
@@ -425,7 +426,7 @@ impl HookInvocation {
         }
     }
 
-    pub fn run_started(session_id: SessionId, prompt_input: ContentInput) -> Self {
+    pub fn run_started(session_id: SessionId, prompt_input: RunInput) -> Self {
         Self {
             prompt_input: Some(prompt_input),
             ..Self::new(HookPoint::RunStarted, session_id)
@@ -828,7 +829,9 @@ mod tests {
     fn hook_invocation_prompt_and_error_are_serialize_only_projections() {
         let mut invocation = HookInvocation::run_started(
             SessionId::new(),
-            ContentInput::Text("typed prompt".to_string()),
+            RunInput::Content {
+                content: crate::types::ContentInput::Text("typed prompt".to_string()),
+            },
         );
         invocation.error_report = Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
@@ -852,6 +855,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&decoded).expect("re-serialize")["prompt"],
             serde_json::json!("typed prompt")
+        );
+    }
+
+    /// K3 invariant: a pending-tool-results run carries the typed
+    /// `RunInput::PendingToolResults` variant — no fabricated empty-string
+    /// `prompt` projection appears on the hook wire envelope.
+    #[test]
+    fn hook_invocation_pending_tail_run_has_typed_variant_and_no_prompt_mirror() {
+        let invocation =
+            HookInvocation::run_started(SessionId::new(), RunInput::PendingToolResults);
+        assert_eq!(
+            invocation.prompt_input,
+            Some(RunInput::PendingToolResults),
+            "pending-tail run must carry the typed variant"
+        );
+
+        let json = serde_json::to_value(&invocation).expect("serialize");
+        assert_eq!(
+            json["prompt_input"],
+            serde_json::json!({ "kind": "pending_tool_results" })
+        );
+        assert!(
+            json.get("prompt").is_none(),
+            "no empty-string prompt mirror may be fabricated for pending-tail runs: {json}"
         );
     }
 }

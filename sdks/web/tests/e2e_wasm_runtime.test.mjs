@@ -460,14 +460,16 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await delay(25);
         items = subscription.poll();
-        if (items.some((item) => item.type === "lagged")) {
+        if (items.some((item) => item.payload?.type === "stream_truncated")) {
           break;
         }
       }
 
-      const lagged = items.find((item) => item.type === "lagged");
-      assert.ok(lagged, "expected a lagged signal from the shipped subscription path");
-      assert.ok(lagged.skipped >= 1);
+      // K19: a lag gap arrives as the generated stream_truncated envelope.
+      const lagged = items.find((item) => item.payload?.type === "stream_truncated");
+      assert.ok(lagged, "expected a stream_truncated lag signal from the shipped subscription path");
+      assert.equal(lagged.payload.reason.kind, "stream_lagged");
+      assert.ok(lagged.payload.reason.dropped >= 1);
       const survivingEvent = items.find((item) => item.payload?.type === "text_delta");
       assert.ok(survivingEvent, "expected a surviving text_delta event after lag");
       subscription.close();

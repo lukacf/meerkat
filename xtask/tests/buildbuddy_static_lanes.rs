@@ -470,9 +470,7 @@ fn rpc_catalog_router_docs_and_sdk_wrappers_are_aligned() {
 
     let mut catalog_methods = BTreeSet::new();
     for needle in [
-        "RpcMethodDescriptor::basic(",
         "RpcMethodDescriptor::typed(",
-        "RpcMethodDescriptor::params_only(",
         "RpcMethodDescriptor::result_only(",
     ] {
         catalog_methods.extend(quoted_after(&catalog, needle));

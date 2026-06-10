@@ -1073,7 +1073,14 @@ impl SystemContextSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct PendingSystemContextAppend {
-    pub text: String,
+    /// Typed renderable append content, carried end-to-end from the surface
+    /// request ([`AppendSystemContextRequest.content`]). The ONE lowering to
+    /// model-facing prompt text happens where the transcript consumes the
+    /// append ([`CoreRenderable::render_text`] inside the render seam) —
+    /// surfaces never pre-flatten this into a string.
+    ///
+    /// [`CoreRenderable::render_text`]: crate::lifecycle::run_primitive::CoreRenderable::render_text
+    pub content: crate::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1432,7 +1439,8 @@ impl ConsumedDeferredTurnInputs {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct SeenSystemContextKey {
-    pub text: String,
+    /// Typed renderable content of the accepted append for this key.
+    pub content: crate::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Typed provenance carried from the append, so runtime-steer cleanup can
@@ -1960,7 +1968,9 @@ fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
         rendered.push_str(source);
     }
     rendered.push_str("\n\n");
-    rendered.push_str(&append.text);
+    // The single CoreRenderable -> prompt-text lowering for system-context
+    // appends. Surfaces carry the typed renderable through untouched.
+    rendered.push_str(append.content.render_text().trim());
     rendered
 }
 
@@ -2096,7 +2106,7 @@ mod system_context_authority {
                 .chain(state.applied.iter())
                 .any(|append| {
                     append.idempotency_key.as_ref() == Some(key)
-                        && seen.text == append.text
+                        && seen.content == append.content
                         && seen.source.as_deref() == append.source.as_deref()
                 })
         });
@@ -2116,18 +2126,21 @@ mod system_context_authority {
         accepted_at: SystemTime,
         active_turn_scoped: bool,
     ) -> Result<AppendSystemContextStatus, SystemContextStageError> {
-        let rendered_text = req.text();
-        let text = rendered_text.trim();
+        // Emptiness is judged on the canonical text projection; the typed
+        // renderable itself is what gets stored (lowering happens once, at
+        // the transcript render seam).
+        let rendered_text = req.content.render_text();
+        let rendered_len = rendered_text.trim().len();
         let existing = req
             .idempotency_key
             .as_ref()
             .and_then(|key| state.seen.get(key));
         let existing_key_matches = existing.is_some_and(|existing| {
-            existing.text == text && existing.source.as_deref() == req.source.as_deref()
+            existing.content == req.content && existing.source.as_deref() == req.source.as_deref()
         });
         let existing_key_conflicts = existing.is_some() && !existing_key_matches;
         let decision = resolve_append_decision(
-            usize_to_u64(text.len()),
+            usize_to_u64(rendered_len),
             req.idempotency_key.is_some(),
             existing_key_matches,
             existing_key_conflicts,
@@ -2155,7 +2168,7 @@ mod system_context_authority {
                 };
                 return Err(SystemContextStageError::Conflict {
                     key: key.clone(),
-                    existing_text: existing.text.clone(),
+                    existing_text: existing.content.render_text(),
                     existing_source: existing.source.clone(),
                 });
             }
@@ -2166,7 +2179,7 @@ mod system_context_authority {
         }
 
         let append = PendingSystemContextAppend {
-            text: text.to_string(),
+            content: req.content.clone(),
             source: req.source.clone(),
             idempotency_key: req.idempotency_key.clone(),
             source_kind: req.source_kind,
@@ -2180,7 +2193,7 @@ mod system_context_authority {
             state.seen.insert(
                 key.clone(),
                 SeenSystemContextKey {
-                    text: append.text.clone(),
+                    content: append.content.clone(),
                     source: append.source.clone(),
                     source_kind: append.source_kind,
                     state: SeenSystemContextState::Pending,
@@ -2371,7 +2384,7 @@ mod system_context_authority {
     ) -> Vec<PendingSystemContextAppend> {
         let mut new_appends: Vec<PendingSystemContextAppend> = Vec::new();
         for append in appends {
-            if append.text.trim().is_empty() {
+            if append.content.render_text().trim().is_empty() {
                 continue;
             }
             let rendered = render_system_context_block(append);
@@ -2430,7 +2443,7 @@ mod system_context_authority {
             state.seen.insert(
                 key.clone(),
                 SeenSystemContextKey {
-                    text: append.text.clone(),
+                    content: append.content.clone(),
                     source: append.source.clone(),
                     source_kind: append.source_kind,
                     state: SeenSystemContextState::Applied,
@@ -2453,14 +2466,14 @@ mod system_context_authority {
         seen: &SeenSystemContextKey,
         append: &PendingSystemContextAppend,
     ) -> bool {
-        seen.text == append.text && seen.source.as_deref() == append.source.as_deref()
+        seen.content == append.content && seen.source.as_deref() == append.source.as_deref()
     }
 
     fn pending_system_context_matches(
         existing: &PendingSystemContextAppend,
         append: &PendingSystemContextAppend,
     ) -> bool {
-        existing.text == append.text && existing.source.as_deref() == append.source.as_deref()
+        existing.content == append.content && existing.source.as_deref() == append.source.as_deref()
     }
 }
 
@@ -2551,6 +2564,39 @@ impl Session {
             return Ok(None);
         }
         self.replace_messages_internal(retained, reason)
+    }
+
+    /// Atomically refresh the synthetic runtime notices of one kind.
+    ///
+    /// This is the ONE transcript authority operation for synthetic-notice
+    /// refresh: it strips every existing `SystemNotice` message of `kind` and
+    /// appends `replacements` (possibly empty, meaning "no current notice")
+    /// as a single edit. On a strip fault nothing is pushed and the typed
+    /// [`TranscriptEditError`] propagates — callers must not re-implement
+    /// the strip-then-push pair (the swallowed-strip variant leaves a stale
+    /// notice beside a fresh one: a divergence window).
+    pub fn replace_synthetic_notices(
+        &mut self,
+        kind: crate::types::SystemNoticeKind,
+        replacements: Vec<Message>,
+    ) -> Result<(), TranscriptEditError> {
+        for (index, message) in replacements.iter().enumerate() {
+            let matches_kind =
+                matches!(message, Message::SystemNotice(notice) if notice.kind == kind);
+            if !matches_kind {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "replacement {index} for synthetic notice kind {kind:?} is not a                      system notice of that kind"
+                )));
+            }
+        }
+        self.retain_messages_internal(
+            |message| !matches!(message, Message::SystemNotice(notice) if notice.kind == kind),
+            TranscriptRewriteReason::new("synthetic_notice_cleanup"),
+        )?;
+        for message in replacements {
+            self.push(message);
+        }
+        Ok(())
     }
 
     /// Get creation time
@@ -3732,8 +3778,10 @@ pub struct SessionMetadata {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_hosted_server_id: Option<String>,
+    /// Typed provider parameter overrides persisted with the session.
+    /// Parsed fail-closed at the serde boundary — no JSON bag survives here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub tooling: SessionTooling,
     #[serde(default)]
     pub keep_alive: bool,
@@ -3792,8 +3840,9 @@ pub struct SessionLlmIdentity {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_hosted_server_id: Option<String>,
+    /// Typed provider parameter overrides carried on the durable identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Realm-scoped auth binding this session resolves credentials
     /// through. Carried on the identity so mid-session hot-swaps
     /// (`apply_live_session_llm_identity`) re-resolve against the
@@ -3820,7 +3869,8 @@ pub struct SessionLlmIdentity {
 pub struct SessionLlmIdentityOverride<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<TurnMetadataOverride<&'a serde_json::Value>>,
+    pub provider_params:
+        Option<TurnMetadataOverride<&'a crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<&'a crate::AuthBindingRef>>,
 }
 
@@ -3928,10 +3978,12 @@ pub fn resolve_session_llm_identity_override(
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmRequestPolicy {
     pub model: String,
+    /// Typed explicit provider parameter overrides for the next LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// Typed provider-native tool defaults resolved for the swapped target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    pub provider_tool_defaults: Option<crate::lifecycle::run_primitive::ProviderTag>,
 }
 
 impl SessionMetadata {
@@ -4157,6 +4209,103 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// K4 invariant: synthetic-notice refresh is ONE atomic transcript edit —
+    /// after a refresh, at most the replacement notices of that kind exist
+    /// (no stale notice survives beside a fresh one).
+    #[test]
+    fn replace_synthetic_notices_leaves_only_replacements_of_kind() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale one",
+        )));
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale two",
+        )));
+        // A notice of another kind must be untouched.
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::BackgroundJob,
+            "other-kind",
+        )));
+
+        session
+            .replace_synthetic_notices(
+                SystemNoticeKind::McpPending,
+                vec![Message::SystemNotice(SystemNoticeMessage::new(
+                    SystemNoticeKind::McpPending,
+                    "fresh",
+                ))],
+            )
+            .expect("notice refresh succeeds");
+
+        let mcp_pending: Vec<&SystemNoticeMessage> = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::McpPending => {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mcp_pending.len(), 1, "exactly one notice of the kind");
+        assert_eq!(mcp_pending[0].body.as_deref(), Some("fresh"));
+        assert!(
+            session.messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::BackgroundJob
+            )),
+            "other-kind notices are untouched"
+        );
+
+        // Empty replacements = pure strip.
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
+            .expect("pure strip succeeds");
+        assert!(
+            !session.messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::McpPending
+            )),
+            "empty replacement clears the kind"
+        );
+    }
+
+    /// K4 invariant (fail-closed): an invalid replacement is rejected with a
+    /// typed fault BEFORE any strip happens — the transcript is unchanged, so
+    /// a fault can never strand a half-refreshed notice state.
+    #[test]
+    fn replace_synthetic_notices_rejects_mismatched_kind_without_mutation() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale",
+        )));
+        let before = session.messages().to_vec();
+
+        let err = session
+            .replace_synthetic_notices(
+                SystemNoticeKind::McpPending,
+                vec![Message::User(UserMessage::text("not a notice".to_string()))],
+            )
+            .expect_err("mismatched replacement must fail typed");
+        assert!(
+            matches!(err, TranscriptEditError::InvalidTranscriptShape(_)),
+            "expected InvalidTranscriptShape, got {err:?}"
+        );
+        assert_eq!(
+            session.messages(),
+            before.as_slice(),
+            "fault must leave the transcript unchanged (no partial strip)"
+        );
     }
 
     #[test]
@@ -6534,7 +6683,7 @@ mod tests {
         assert!(state.pending.is_empty());
         assert_eq!(state.applied.len(), 1);
         assert_eq!(
-            state.applied[0].text,
+            state.applied[0].content.render_text(),
             "Authoritative peer token is birch seventeen."
         );
         assert_eq!(
@@ -6667,7 +6816,9 @@ mod tests {
             "base{}{}{}{}",
             SYSTEM_CONTEXT_SEPARATOR,
             render_system_context_block(&PendingSystemContextAppend {
-                text: "old steer".to_string(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "old steer".to_string()
+                ),
                 source: Some("steer-source-old".to_string()),
                 idempotency_key: Some("steer-key-old".to_string()),
                 source_kind: SystemContextSource::RuntimeSteer,
@@ -6676,7 +6827,9 @@ mod tests {
             }),
             SYSTEM_CONTEXT_SEPARATOR,
             render_system_context_block(&PendingSystemContextAppend {
-                text: "durable peer fact".to_string(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "durable peer fact".to_string()
+                ),
                 source: Some("peer_response_terminal:analyst:req".to_string()),
                 idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                 source_kind: SystemContextSource::Normal,
@@ -6687,7 +6840,9 @@ mod tests {
         session
             .set_system_context_state(SessionSystemContextState {
                 pending: vec![PendingSystemContextAppend {
-                    text: "pending steer".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "pending steer".to_string(),
+                    ),
                     source: Some("steer-source-pending".to_string()),
                     idempotency_key: Some("steer-key-pending".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6696,7 +6851,9 @@ mod tests {
                 }],
                 applied: vec![
                     PendingSystemContextAppend {
-                        text: "old steer".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "old steer".to_string(),
+                        ),
                         source: Some("steer-source-old".to_string()),
                         idempotency_key: Some("steer-key-old".to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
@@ -6704,7 +6861,9 @@ mod tests {
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                     PendingSystemContextAppend {
-                        text: "durable peer fact".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "durable peer fact".to_string(),
+                        ),
                         source: Some("peer_response_terminal:analyst:req".to_string()),
                         idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                         source_kind: SystemContextSource::Normal,
@@ -6715,7 +6874,9 @@ mod tests {
                 seen: BTreeMap::from([(
                     "steer-key-old".to_string(),
                     SeenSystemContextKey {
-                        text: "old steer".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "old steer".to_string(),
+                        ),
                         source: Some("steer-source-old".to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
                         state: SeenSystemContextState::Applied,
@@ -6737,7 +6898,7 @@ mod tests {
         let state = session.system_context_state().unwrap_or_default();
         assert!(state.pending.is_empty());
         assert_eq!(state.applied.len(), 1);
-        assert_eq!(state.applied[0].text, "durable peer fact");
+        assert_eq!(state.applied[0].content.render_text(), "durable peer fact");
         assert!(state.seen.is_empty());
         assert!(state.active_turn_pending_keys.is_empty());
     }
@@ -6745,7 +6906,9 @@ mod tests {
     #[test]
     fn append_system_context_blocks_records_typed_applied_context() {
         let append = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some(
                 "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
             ),
@@ -6850,10 +7013,52 @@ mod tests {
         );
     }
 
+    /// K5 invariant: the typed `CoreRenderable` travels end-to-end through
+    /// staging — the pending append stores the renderable itself, and the
+    /// ONE lowering to prompt text happens at the transcript render seam.
+    #[test]
+    fn staged_system_context_carries_typed_renderable_to_render_seam() {
+        use crate::lifecycle::run_primitive::CoreRenderable;
+
+        let accepted_at = SystemTime::UNIX_EPOCH;
+        let mut state = SessionSystemContextState::default();
+        let renderable = CoreRenderable::Json {
+            value: serde_json::json!({"alert": "disk-full", "severity": 2}),
+        };
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    content: renderable.clone(),
+                    source: Some("ops/monitor".to_string()),
+                    idempotency_key: Some("alert-1".to_string()),
+                    source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+                accepted_at,
+            )
+            .expect("typed renderable append should stage");
+
+        // The pending append owns the typed renderable — no pre-flattened
+        // text shadow exists anywhere on the staging path.
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].content, renderable);
+
+        // Lowering happens exactly once, at the render seam, via the single
+        // canonical projection.
+        let rendered = render_system_context_block(&state.pending[0]);
+        assert!(rendered.starts_with(SYSTEM_CONTEXT_RENDER_LABEL));
+        assert!(
+            rendered.contains(renderable.render_text().trim()),
+            "render seam must lower via CoreRenderable::render_text: {rendered}"
+        );
+    }
+
     #[test]
     fn append_system_context_blocks_skips_duplicate_idempotency_key() {
         let first = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
@@ -6892,7 +7097,9 @@ mod tests {
     #[test]
     fn append_system_context_blocks_skips_conflicting_duplicate_idempotency_key() {
         let first = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
@@ -6900,7 +7107,9 @@ mod tests {
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let conflicting = PendingSystemContextAppend {
-            text: "Conflicting peer token should not reach the prompt.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Conflicting peer token should not reach the prompt.".to_string(),
+            ),
             accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
             ..first.clone()
         };

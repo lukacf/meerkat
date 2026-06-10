@@ -130,3 +130,20 @@ pub struct ScheduleToolCallParams {
     #[serde(default)]
     pub arguments: Value,
 }
+
+/// Basic server identity advertised by the RPC `initialize` handshake.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ServerInfo {
+    pub name: String,
+    pub version: String,
+}
+
+/// Capabilities returned by the RPC server during `initialize`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ServerCapabilities {
+    pub server_info: ServerInfo,
+    pub contract_version: String,
+    pub methods: Vec<String>,
+}

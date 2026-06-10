@@ -237,38 +237,64 @@ pub enum TokenLifecycleClearError {
     AuthMachineRelease(DslTransitionError),
     #[error("TokenStore clear failed: {0}")]
     TokenStoreClear(TokenStoreError),
+    /// The durable clear failed AND rolling the staged lease release back to
+    /// the pre-clear snapshot was rejected. Both typed faults are carried;
+    /// durable truth still holds the credential, so the next status rehydrate
+    /// restores the lease projection from the durable lifecycle marker.
+    #[error("TokenStore clear failed ({clear}); staged lease release rollback failed ({restore})")]
+    StagedReleaseRestore {
+        clear: TokenStoreError,
+        restore: DslTransitionError,
+    },
 }
 
 /// Clear persisted token material and release the AuthMachine lifecycle.
 ///
-/// The durable token record carries the machine-stamped lifecycle marker (see
-/// [`mark_tokens_lifecycle_published_for_transition`]), so the single
-/// `store.clear` IS the atomic boundary: one durable mutation destroys the
-/// credential and its lifecycle publication together. The in-process lease
-/// release that follows is a projection update of that durable truth, not a
-/// second commit — there is no compensation window to manage:
+/// The lease release is STAGED before the durable clear commits, so no lease
+/// operation ever runs after the durable credential is gone — the
+/// "resurrected live lease over a cleared credential" interleaving is
+/// unrepresentable:
 ///
-/// - If the clear fails, nothing changed (durable record and lease both stand)
-///   and the typed [`TokenLifecycleClearError::TokenStoreClear`] fault
-///   propagates.
-/// - If the clear succeeds and the release transition is rejected, the typed
-///   [`TokenLifecycleClearError::AuthMachineRelease`] fault propagates and the
-///   stale in-process lease self-heals on the next status rehydrate:
-///   [`rehydrate_marked_tokens_for_status`] derives lease state from durable
-///   truth and releases a credential-bearing lease whose durable record is
-///   gone.
+/// - If staging the release fails (a release-observer fault — which aborts
+///   the release before its authoritative transition — or a machine
+///   rejection), the typed
+///   [`TokenLifecycleClearError::AuthMachineRelease`] fault propagates and
+///   the durable clear NEVER runs. Durable truth retains the credential and
+///   the lease projection still matches it; the clear is retryable.
+/// - If the durable clear commit fails, the staged release is rolled back
+///   from the pre-stage snapshot (legal: the durable record still holds the
+///   credential, so lease truth re-aligns with durable truth) and the typed
+///   [`TokenLifecycleClearError::TokenStoreClear`] fault propagates.
+/// - Once the durable clear has committed, the operation is complete: the
+///   lease was already released at staging, and nothing fallible follows the
+///   commit.
 pub async fn clear_tokens_and_publish_lifecycle_released(
     store: &dyn TokenStore,
     handle: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> Result<(), TokenLifecycleClearError> {
     let key = TokenKey::from_auth_binding(auth_binding);
-    store
-        .clear(&key)
-        .await
-        .map_err(TokenLifecycleClearError::TokenStoreClear)?;
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+
+    // Stage: release the lease BEFORE the durable commit, capturing the
+    // pre-stage snapshot for rollback if the commit fails.
+    let staged = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
     publish_token_lifecycle_released(handle, auth_binding)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
+
+    // Commit: one durable mutation destroys the credential and its lifecycle
+    // marker together.
+    if let Err(clear_err) = store.clear(&key).await {
+        // Pre-commit rollback: durable truth still holds the credential, so
+        // restoring the staged release keeps the lease projection aligned.
+        if let Err(restore_err) = restore_token_lifecycle_snapshot(handle, &staged) {
+            return Err(TokenLifecycleClearError::StagedReleaseRestore {
+                clear: clear_err,
+                restore: restore_err,
+            });
+        }
+        return Err(TokenLifecycleClearError::TokenStoreClear(clear_err));
+    }
     Ok(())
 }
 

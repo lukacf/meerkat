@@ -1,16 +1,20 @@
 //! Skill function tool.
 //!
 //! Keyed by typed `SkillKey` (source_uuid + skill_name) — no slash-string
-//! parsing of skill identity on the ingress path.
+//! parsing of skill identity on the ingress path. Function identity and
+//! arguments are parsed fail-closed at this ingress into the typed core
+//! contract (`SkillFunctionName` + `ToolCallArguments`); the engine seam
+//! never sees a bare `&str` function name or an unvalidated JSON bag.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolDef;
-use meerkat_core::skills::{SkillKey, SkillName, SkillRuntime, SourceUuid};
+use meerkat_core::skills::{SkillFunctionName, SkillKey, SkillName, SkillRuntime, SourceUuid};
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
@@ -19,8 +23,23 @@ struct SkillInvokeFunctionArgs {
     source_uuid: String,
     skill_name: String,
     function_name: String,
+    /// Structured function arguments. Must be a JSON object when present;
+    /// non-object shapes are rejected at ingress (`ToolCallArguments`
+    /// fail-closed parse), never ferried to the engine.
     #[serde(default)]
-    arguments: Value,
+    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>")]
+    arguments: Option<ToolCallArguments>,
+}
+
+/// Typed response payload for a successful skill function invocation. The
+/// function output itself is wire-opaque third-party JSON and is carried
+/// verbatim (`RawValue`), never re-interpreted here.
+#[derive(Debug, Serialize)]
+struct SkillInvokeFunctionResponse {
+    source_uuid: String,
+    skill_name: String,
+    function_name: String,
+    output: Box<serde_json::value::RawValue>,
 }
 
 pub struct SkillInvokeFunctionTool {
@@ -73,18 +92,9 @@ impl BuiltinTool for SkillInvokeFunctionTool {
         let args: SkillInvokeFunctionArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
         let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
-        // Fail closed on degenerate function identity at the same ingress
-        // where source_uuid/skill_name parse fail-closed. Full typed
-        // ownership (a `SkillFunctionName` newtype on the core
-        // `SkillSource::invoke_function` contract) is tracked as the root
-        // fix; until that lands, the surface refuses obviously-invalid
-        // identity instead of ferrying it to the engine.
-        let function_name = args.function_name.trim();
-        if function_name.is_empty() {
-            return Err(BuiltinToolError::InvalidArgs(
-                "function_name must be a non-empty skill function identifier".to_string(),
-            ));
-        }
+        let function_name = SkillFunctionName::parse(&args.function_name)
+            .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+        let arguments = args.arguments.unwrap_or_else(ToolCallArguments::empty);
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -93,15 +103,21 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let output = self
             .engine
-            .invoke_function(&key, function_name, args.arguments)
+            .invoke_function(&key, &function_name, arguments)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(ToolOutput::Json(json!({
-            "source_uuid": key.source_uuid.to_string(),
-            "skill_name": key.skill_name.as_str(),
-            "function_name": function_name,
-            "output": output,
-        })))
+        let response = SkillInvokeFunctionResponse {
+            source_uuid: key.source_uuid.to_string(),
+            skill_name: key.skill_name.as_str().to_string(),
+            function_name: function_name.to_string(),
+            output: output.into_raw(),
+        };
+        let value = serde_json::to_value(&response).map_err(|err| {
+            BuiltinToolError::ExecutionFailed(format!(
+                "failed to serialize skill function response: {err}"
+            ))
+        })?;
+        Ok(ToolOutput::Json(value))
     }
 }

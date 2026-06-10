@@ -198,29 +198,6 @@ impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
     }
 }
 
-fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod typed_context_append_tests {
     use super::*;
@@ -248,7 +225,7 @@ mod typed_context_append_tests {
         };
 
         assert_eq!(
-            render_context_append_text(&content),
+            content.render_text(),
             SystemNoticeMessage::with_blocks(
                 SystemNoticeKind::Comms,
                 Some("Peer terminal response context".to_string()),
@@ -266,7 +243,7 @@ fn pending_system_context_appends_from_primitive(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,

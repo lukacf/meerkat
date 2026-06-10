@@ -30,6 +30,24 @@ pub enum FactoryError {
     #[error("provider client build failed: {0}")]
     ClientBuild(#[from] crate::provider_runtime::errors::ProviderClientError),
 
+    /// Realm/binding connection-target selection failed, carrying the typed
+    /// [`meerkat_core::ConnectionTargetError`] cause so callers branch on the
+    /// realm/binding selection fault instead of re-parsing a flattened string.
+    #[error("connection target resolution failed: {0}")]
+    ConnectionTarget(#[from] meerkat_core::ConnectionTargetError),
+
+    /// The persisted TokenStore backing OAuth-backed bindings failed to open.
+    ///
+    /// A store that cannot be opened is a fault, not an absence of
+    /// credentials: collapsing it to "no store attached" would launder the
+    /// open failure into `AuthError::InteractiveLoginRequired` at the first
+    /// OAuth resolution. The typed open fault is carried (shared via `Arc`
+    /// because the factory holds the original) and propagates at the
+    /// resolution seam.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("token store unavailable: {0}")]
+    TokenStore(std::sync::Arc<meerkat_core::auth::TokenStoreError>),
+
     /// Client creation failed for a reason with no richer typed cause (config
     /// load, unknown model, lower-level client-build error). The payload is an
     /// opaque, display-only message — no production code branches on its text.

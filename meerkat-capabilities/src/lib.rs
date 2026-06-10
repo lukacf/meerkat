@@ -56,10 +56,13 @@ impl<'a> MobpackCapabilityRequirement<'a> {
     pub fn parse(raw: &'a str) -> Self {
         let id = CapabilityId::from_str(raw).map_or_else(
             |_| {
-                HostProcessCapabilityId::parse(raw).map_or(
-                    MobpackCapabilityId::Unknown,
-                    MobpackCapabilityId::HostProcess,
-                )
+                HostProcessCapabilityId::parse(raw)
+                    .map(MobpackCapabilityId::HostProcess)
+                    .or_else(|| {
+                        DeploySurfaceCapabilityId::parse(raw)
+                            .map(MobpackCapabilityId::DeploySurface)
+                    })
+                    .unwrap_or(MobpackCapabilityId::Unknown)
             },
             MobpackCapabilityId::Known,
         );
@@ -80,7 +83,39 @@ impl<'a> MobpackCapabilityRequirement<'a> {
 pub enum MobpackCapabilityId {
     Known(CapabilityId),
     HostProcess(HostProcessCapabilityId),
+    DeploySurface(DeploySurfaceCapabilityId),
     Unknown,
+}
+
+/// Deploy-surface capabilities named by mobpack manifests.
+///
+/// These name the runtime surface a deployed mob is hosted on (`core`,
+/// `mcp`, `rpc`), distinct from the feature-capability vocabulary in
+/// [`CapabilityId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploySurfaceCapabilityId {
+    Core,
+    Mcp,
+    Rpc,
+}
+
+impl DeploySurfaceCapabilityId {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "core" => Some(Self::Core),
+            "mcp" => Some(Self::Mcp),
+            "rpc" => Some(Self::Rpc),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Mcp => "mcp",
+            Self::Rpc => "rpc",
+        }
+    }
 }
 
 /// Host process capabilities named by existing mobpack manifests.
@@ -129,9 +164,9 @@ pub fn browser_mobpack_capability_decision(
                 capability: requirement.id(),
             }
         }
-        MobpackCapabilityId::Known(_) | MobpackCapabilityId::Unknown => {
-            BrowserMobpackCapabilityDecision::Allowed
-        }
+        MobpackCapabilityId::Known(_)
+        | MobpackCapabilityId::DeploySurface(_)
+        | MobpackCapabilityId::Unknown => BrowserMobpackCapabilityDecision::Allowed,
     }
 }
 

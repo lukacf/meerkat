@@ -35,7 +35,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `last_receipt_detail`: `Option<String>`
 - `last_receipt_correlation_id`: `Option<CorrelationId>`
 - `last_receipt_materialized_session_id`: `Option<SessionId>`
-- `runtime_outcome_key`: `Option<String>`
+- `runtime_outcome_key`: `Option<RuntimeOutcomeKey>`
 - `receipt_stage`: `Option<DeliveryReceiptStage>`
 - `receipt_failure_class`: `Option<OccurrenceFailureClass>`
 - `receipt_detail`: `Option<String>`
@@ -49,7 +49,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, target_materialized_session_id: Option<SessionId>, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
 - `SyncTargetSnapshot`(target_binding_key: TargetBindingId, target_materialized_session_id: Option<SessionId>)
-- `RecordReceipt`(correlation_id: Option<CorrelationId>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
+- `RecordReceipt`(correlation_id: Option<CorrelationId>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<RuntimeOutcomeKey>)
 - `ClassifyDue`(now_utc_ms: u64)
 - `ClassifyOccurrenceTerminality`
 - `ClassifyClaimedDispatchDisposition`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)

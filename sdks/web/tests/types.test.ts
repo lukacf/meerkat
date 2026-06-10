@@ -307,9 +307,14 @@ spawnSpecWithoutGeneration.generation = 1;
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
     case 'run_started':
-      return typeof event.prompt === 'string'
-        ? event.prompt
-        : event.prompt
+      // K3: the run boundary carries the typed `RunInput` — a content-bearing
+      // run exposes its content; a pending-continuation run has no prompt.
+      if (event.input.kind !== 'content') {
+        return '';
+      }
+      return typeof event.input.content === 'string'
+        ? event.input.content
+        : event.input.content
             .map((block) => ('type' in block && block.type === 'text' ? block.text : ''))
             .join('');
     case 'hook_started':
@@ -335,7 +340,8 @@ function handleEvent(event: AgentEvent): string {
     case 'run_completed':
       return event.result;
     case 'run_failed':
-      return event.error;
+      // K3: the typed error report is the authority.
+      return event.error_report.message;
     case 'tool_execution_started':
       return `exec:${event.name}`;
     case 'tool_execution_completed':

@@ -78,7 +78,7 @@ subset.
 
 | Method | Category | Params | Result | Description |
 | --- | --- | --- | --- | --- |
-| `initialize` | Handshake | — | — | Returns server capabilities |
+| `initialize` | Handshake | — | `ServerCapabilities` | Returns server capabilities |
 | `help/ask` | Help | `HelpRequest` | `HelpResponse` | Ask Meerkat usage help with the embedded platform skill |
 | `runtime/host_info` | Runtime | — | `RuntimeHostInfo` | Read host identity, endpoints, capabilities, health, and realm projection |
 | `runtime/capabilities` | Runtime | — | `RuntimeHostCapabilities` | Read runtime host capability flags |
@@ -108,7 +108,7 @@ subset.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append runtime-backed system context to the next turn |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
-| `turn/interrupt` | Turn | `InterruptParams` | `Value` | Cancel in-flight turn |
+| `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
 | `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel for a session |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
@@ -174,23 +174,23 @@ subset.
 | `schedule/tools` | Schedule | — | `ScheduleToolsResult` | List schedule tools (schedule feature) |
 | `schedule/call` | Schedule | `ScheduleToolCallParams` | `Value` | Call a schedule tool directly (schedule feature) |
 | `workgraph/get` | WorkGraph | `WorkGraphIdParams` | `WorkItem` | Read a WorkGraph item (workgraph feature) |
-| `workgraph/list` | WorkGraph | `WorkItemFilter` | `WorkGraphItemsResponse` | List WorkGraph items (workgraph feature) |
-| `workgraph/ready` | WorkGraph | `ReadyWorkFilter` | `WorkGraphItemsResponse` | List ready WorkGraph items (workgraph feature) |
+| `workgraph/list` | WorkGraph | `WorkItemFilter` | `WorkItemsResult` | List WorkGraph items (workgraph feature) |
+| `workgraph/ready` | WorkGraph | `ReadyWorkFilter` | `WorkItemsResult` | List ready WorkGraph items (workgraph feature) |
 | `workgraph/snapshot` | WorkGraph | `WorkGraphSnapshotFilter` | `WorkGraphSnapshot` | Read a WorkGraph observability snapshot (workgraph feature) |
-| `workgraph/events` | WorkGraph | `WorkGraphEventFilter` | `WorkGraphEventsResponse` | Read WorkGraph event history (workgraph feature) |
+| `workgraph/events` | WorkGraph | `WorkGraphEventFilter` | `WorkEventsResult` | Read WorkGraph event history (workgraph feature) |
 | `workgraph/goal/status` | WorkGraph | `GoalStatusRequest` | `GoalStatusResult` | Read goal and attention status (workgraph feature) |
 | `workgraph/attention/list` | WorkGraph | `AttentionListRequest` | `AttentionListResult` | List attention bindings, optionally filtered by status (workgraph feature) |
 | `comms/send` | Comms | `CommsSendParams` | `CommsSendResult` | Dispatch a comms command to a session |
 | `comms/peers` | Comms | `CommsPeersParams` | `CommsPeersResult` | List discoverable peers (comms feature) |
-| `skills/list` | Skills | — | — | List skills with provenance |
+| `skills/list` | Skills | — | `SkillListResponse` | List skills with provenance |
 | `mcp/add` | MCP | `McpAddParams` | `McpLiveOpResponse` | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | `McpRemoveParams` | `McpLiveOpResponse` | Stage live MCP server removal (mcp feature) |
 | `mcp/reload` | MCP | `McpReloadParams` | `McpLiveOpResponse` | Reload one or all MCP servers (mcp feature) |
 | `models/catalog` | Models | — | `ModelsCatalogResponse` | List available models with capabilities and provider profiles |
-| `capabilities/get` | Capabilities | — | — | Runtime capability report |
-| `config/get` | Config | — | — | Read current config |
-| `config/set` | Config | — | — | Replace config |
-| `config/patch` | Config | — | — | Merge-patch config (RFC 7396) |
+| `capabilities/get` | Capabilities | — | `CapabilitiesResponse` | Runtime capability report |
+| `config/get` | Config | — | `ConfigEnvelope` | Read current config |
+| `config/set` | Config | `ConfigSetParams` | `ConfigWriteResult` | Replace config |
+| `config/patch` | Config | `ConfigPatchParams` | `ConfigWriteResult` | Merge-patch config (RFC 7396) |
 | `auth/profile/list` | Auth | `RealmIdParams` | `WireAuthProfilesList` | List auth profiles in a realm |
 | `auth/profile/get` | Auth | `BindingIdParams` | `WireAuthProfileDetail` | Get one auth profile |
 | `auth/profile/create` | Auth | `CreateProfileParams` | `WireAuthProfileCreated` | Create an auth profile (CLI-driven for now) |
@@ -1312,7 +1312,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 6, "patch": 6},
+    "contract_version": {"major": 0, "minor": 7, "patch": 0},
     "capabilities": [
       {
         "id": "sessions",

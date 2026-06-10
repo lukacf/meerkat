@@ -382,17 +382,11 @@ async fn malformed_provider_tool_call_args_fail_closed_before_event_or_hook_proj
     let mut saw_tool_result_event = false;
     while let Ok(event) = rx.try_recv() {
         match event {
-            AgentEvent::RunFailed {
-                error_class,
-                error_report,
-                ..
-            } => {
+            AgentEvent::RunFailed { error_report, .. } => {
                 saw_run_failed = true;
-                assert_eq!(error_class, AgentErrorClass::Tool);
+                assert_eq!(error_report.class, AgentErrorClass::Tool);
                 assert!(
-                    error_report
-                        .as_ref()
-                        .is_some_and(|report| report.message.contains("tool call arguments")),
+                    error_report.message.contains("tool call arguments"),
                     "RunFailed should carry the typed projection failure"
                 );
             }

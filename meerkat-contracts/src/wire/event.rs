@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::version::ContractVersion;
-use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 use meerkat_core::{AgentEvent, RuntimeMetadata, SessionId};
 
 /// Canonical event envelope for wire protocol.
@@ -123,39 +122,6 @@ pub struct EventReplayEnvelope {
     #[serde(default, skip_serializing_if = "RuntimeMetadata::is_empty")]
     pub metadata: RuntimeMetadata,
     pub event: AgentEvent,
-}
-
-impl EventReplayEnvelope {
-    #[must_use]
-    pub fn session(
-        session_id: SessionId,
-        sequence: u64,
-        timestamp: SystemTime,
-        event: AgentEvent,
-    ) -> Self {
-        let scope = EventReplayScope::Session {
-            session_id: session_id.clone(),
-        };
-        let timestamp_ms = timestamp
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(0);
-        Self {
-            event_id: EventReplayEventId {
-                scope: scope.clone(),
-                sequence,
-            },
-            cursor: EventReplayCursor::new(scope.clone(), sequence),
-            timestamp_ms,
-            source: scope,
-            session_id: Some(session_id),
-            mob_id: None,
-            agent_identity: None,
-            run_id: None,
-            metadata: RuntimeMetadata::default(),
-            event,
-        }
-    }
 }
 
 /// Parameters for `events/latest_cursor`.
@@ -312,25 +278,6 @@ mod tests {
                 .validate_for_list_since(&scope, u64::MAX),
             Err(EventReplayCursorError::SequenceOverflow)
         );
-    }
-
-    #[test]
-    fn event_replay_envelope_does_not_put_runtime_truth_in_metadata() {
-        let session_id = SessionId::new();
-        let event = AgentEvent::RunStarted {
-            session_id: session_id.clone(),
-            prompt: meerkat_core::ContentInput::Text("hello".to_string()),
-        };
-
-        let envelope = EventReplayEnvelope::session(session_id.clone(), 7, UNIX_EPOCH, event);
-        let value = serde_json::to_value(&envelope).expect("serialize replay envelope");
-
-        assert_eq!(value["cursor"]["sequence"], 7);
-        assert_eq!(value["source"]["type"], "session");
-        assert_eq!(value["session_id"], session_id.to_string());
-        assert!(value.get("metadata").is_none());
-        assert!(matches!(envelope.event, AgentEvent::RunStarted { .. }));
-        assert_eq!(envelope.timestamp_ms, 0);
     }
 
     #[test]

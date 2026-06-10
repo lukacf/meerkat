@@ -75,7 +75,7 @@ pub struct MobMemberKickoffSnapshot {
 /// Public fields use the identity-native model (0.6). Bridge-level fields
 /// (`member_ref`, `peer_id`, `external_peer_specs`) are
 /// `pub(crate)` for internal dispatch only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RosterEntry {
     // --- Identity-native public fields ---
     /// Stable member identity.

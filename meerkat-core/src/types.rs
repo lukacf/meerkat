@@ -459,6 +459,46 @@ impl From<&str> for ContentInput {
     }
 }
 
+/// Typed input fact for a run boundary.
+///
+/// A run either starts from caller-provided content or resumes from tool
+/// results already staged at the session's pending-continuation boundary.
+/// The pending-tail case is its own typed variant — run-boundary events and
+/// hooks never fabricate an empty-string prompt to stand in for it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunInput {
+    /// The run starts from caller-provided content (text or blocks).
+    Content { content: ContentInput },
+    /// The run resumes a pending continuation whose transcript tail is a
+    /// staged tool-results message; there is no caller prompt.
+    PendingToolResults,
+}
+
+impl RunInput {
+    /// Borrow the caller-provided content, when this run has one.
+    pub fn content(&self) -> Option<&ContentInput> {
+        match self {
+            RunInput::Content { content } => Some(content),
+            RunInput::PendingToolResults => None,
+        }
+    }
+
+    /// Text projection of the caller-provided content, when present.
+    /// `PendingToolResults` has no prompt and projects to `None` — never to
+    /// a fabricated empty string.
+    pub fn prompt_text(&self) -> Option<String> {
+        self.content().map(ContentInput::text_content)
+    }
+}
+
+impl From<ContentInput> for RunInput {
+    fn from(content: ContentInput) -> Self {
+        RunInput::Content { content }
+    }
+}
+
 /// Handling mode for ordinary content-bearing work.
 ///
 /// `Queue` means outer-loop / next-turn handling and leaves the current run
@@ -1064,7 +1104,7 @@ impl std::fmt::Display for SessionId {
 }
 
 /// A message in the conversation history
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// System prompt (injected at start)
     System(SystemMessage),
@@ -1242,7 +1282,7 @@ impl<'de> Deserialize<'de> for Message {
 }
 
 /// System message content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemMessage {
     pub content: String,
@@ -2034,7 +2074,7 @@ impl TranscriptUserRole {
 }
 
 /// User message content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct UserMessage {
     #[serde(with = "content_blocks_serde")]
@@ -2233,7 +2273,7 @@ impl ToolCall {
 }
 
 /// Result of executing a tool
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolResult {
     /// Matches the tool_call.id

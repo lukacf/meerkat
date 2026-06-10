@@ -16,7 +16,10 @@ pub mod session_locator;
 pub mod version;
 pub mod wire;
 
-#[cfg(feature = "schema")]
+// Schema emission is a host-side concern (the `emit-schemas` binary); some
+// emitted entries reference host-only types (`meerkat_core::ConfigEnvelope`),
+// so the module is additionally gated off wasm32.
+#[cfg(all(feature = "schema", not(target_arch = "wasm32")))]
 pub mod emit;
 
 // Re-exports for convenience
@@ -43,6 +46,8 @@ pub use rpc_catalog::{
 };
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
+#[cfg(not(target_arch = "wasm32"))]
+pub use wire::ConfigWriteResult;
 pub use wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
@@ -99,10 +104,14 @@ pub use wire::{
     CommsPeerRequestIntent,
     CommsPeerRequestParams,
     CommsPeerResponseResult,
+    CommsPeerUnreachableReason,
     CommsPeersParams,
     CommsPeersResult,
+    CommsSendErrorData,
     CommsSendParams,
     CommsSendResult,
+    ConfigPatchParams,
+    ConfigSetParams,
     CoreCreateParams,
     CreateProfileParams,
     DeviceCompleteParams,
@@ -127,6 +136,7 @@ pub use wire::{
     HelpRequest,
     HelpResponse,
     HookParams,
+    InterruptResult,
     ListSchedulesParams,
     LiveChannelParams,
     LiveCloseResult,
@@ -295,6 +305,8 @@ pub use wire::{
     ScheduleListResult,
     ScheduleOccurrencesParams,
     ScheduleOccurrencesResult,
+    ServerCapabilities,
+    ServerInfo,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,
     SessionStreamCloseParams,
@@ -308,7 +320,12 @@ pub use wire::{
     SkillsParams,
     StreamReadStatus,
     StructuredOutputParams,
+    SupervisorRotationIncompleteDataWire,
+    SupervisorRotationIncompleteDetailsWire,
+    SupervisorRotationIncompleteKind,
     SupervisorRotationReportWire,
+    SupervisorRotationRetryAuthority,
+    SupervisorRotationRetryScope,
     TranscriptRewriteMessage,
     UpdateScheduleParams,
     VisibilityClass,
@@ -343,13 +360,22 @@ pub use wire::{
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
+    WireInterruptOutcome,
     WireLiveAdapterErrorCode,
     WireLiveAdapterObservation,
     WireLiveAdapterStatus,
     WireLiveChannelCapabilities,
+    WireLiveChannelCloseFailure,
+    WireLiveChannelRefreshFailure,
+    WireLiveCloseFailure,
+    WireLiveConfigPropagationReport,
     WireLiveContinuityMode,
     WireLiveDegradationReason,
+    WireLiveHotSwapSkip,
+    WireLiveHotSwapSkipReason,
+    WireLiveRefreshFailure,
     WireLiveResponseModality,
+    WireLiveSwapFailure,
     WireLiveTransportBootstrap,
     WireLoginReady,
     WireLoginStart,
@@ -378,6 +404,7 @@ pub use wire::{
     WirePeerConnectivity,
     WirePeerConnectivitySnapshot,
     WirePendingToolCall,
+    WirePromptInput,
     WireProviderBinding,
     WireProviderMeta,
     WireProvisionApiKeyResult,
@@ -409,4 +436,6 @@ pub use wire::{
     WireUnreachablePeer,
     WireUsage,
     WireWorkOrigin,
+    WorkEventsResult,
+    WorkItemsResult,
 };

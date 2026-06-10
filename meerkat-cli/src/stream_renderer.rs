@@ -460,7 +460,7 @@ fn render_event(
             );
         }
 
-        AgentEvent::RunFailed { error, .. } => {
+        AgentEvent::RunFailed { error_report, .. } => {
             end_text_block(state);
             end_thinking_block(mux, scope_id, state);
             chrome_line(
@@ -470,7 +470,7 @@ fn render_event(
                     "\n{}{}error: {}{}",
                     style(ansi, RED),
                     style(ansi, BOLD),
-                    error,
+                    error_report.message,
                     reset(ansi)
                 ),
             );

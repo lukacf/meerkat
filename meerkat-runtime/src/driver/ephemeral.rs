@@ -606,6 +606,24 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(|state| state.input_boundary_sequences.get(&key).copied())
     }
 
+    /// Read the machine-owned per-run boundary counter for a run.
+    ///
+    /// This is the SINGLE producer of the run-boundary receipt sequence
+    /// (dogma K10): live boundary-context checkpoints advance it inside the
+    /// generated machine; runs without an entry are at the base sequence 0.
+    /// The driver mints final `RunBoundaryReceipt`s from this value — shells
+    /// and executors never fabricate it.
+    pub fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {
+        let key = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            state
+                .live_boundary_context_sequence_by_run
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
     /// Read the typed terminal outcome for an input, reconstructed from the
     /// DSL's typed terminal metadata maps.
     pub fn input_terminal_outcome(&self, input_id: &InputId) -> Option<InputTerminalOutcome> {

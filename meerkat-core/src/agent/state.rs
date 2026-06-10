@@ -144,41 +144,11 @@ fn synthetic_notice_block_message(
     Message::SystemNotice(SystemNoticeMessage::with_block(kind, Some(body), block))
 }
 
+/// Test-only predicate; production notice refresh goes through the atomic
+/// `Session::replace_synthetic_notices` transcript authority.
+#[cfg(test)]
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
-}
-
-fn merge_provider_param_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target_obj), Value::Object(patch_obj)) => {
-            for (key, value) in patch_obj {
-                if value.is_null() {
-                    target_obj.remove(key);
-                } else {
-                    merge_provider_param_patch(
-                        target_obj.entry(key.clone()).or_insert(Value::Null),
-                        value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
-        }
-    }
-}
-
-fn merged_provider_params(defaults: Option<&Value>, explicit: Option<&Value>) -> Option<Value> {
-    match (defaults, explicit) {
-        (None, None) => None,
-        (Some(defaults), None) => Some(defaults.clone()),
-        (None, Some(explicit)) => Some(explicit.clone()),
-        (Some(defaults), Some(explicit)) => {
-            let mut merged = defaults.clone();
-            merge_provider_param_patch(&mut merged, explicit);
-            Some(merged)
-        }
-    }
 }
 
 fn hidden_deferred_catalog_names(
@@ -349,13 +319,12 @@ where
     }
 
     fn turn_in_extraction_flow(&self) -> Result<bool, AgentError> {
-        let snapshot = self.runtime_turn_authority_snapshot()?;
-        Ok(matches!(snapshot.turn_phase, TurnPhase::Extracting)
-            || (self.extraction_state.primary_output().is_some()
-                && matches!(
-                    snapshot.turn_phase,
-                    TurnPhase::CallingLlm | TurnPhase::DrainingBoundary
-                )))
+        // Dogma K9: the generated machine owns the total in-extraction fact
+        // (`extraction_active`, set by EnterExtraction, cleared on terminal
+        // transitions and run start). The former derivation from the
+        // loop-local `extraction_state.primary_output` scratch was shell
+        // shadow truth with a divergence window during retry rounds.
+        Ok(self.runtime_turn_authority_snapshot()?.extraction_active)
     }
 
     fn turn_terminal_outcome(&self) -> Result<TurnTerminalOutcome, AgentError> {
@@ -1432,14 +1401,16 @@ where
                     //
                     //    Strip prior synthetic AuthReauthRequired notices
                     //    so the notice always reflects current DSL state.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| {
-                            !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
-                        },
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up auth synthetic notices");
-                    }
+                    //    Notice refresh is ONE atomic transcript-authority
+                    //    edit; a strip fault propagates typed instead of
+                    //    leaving a stale notice in prompt truth.
+                    self.session
+                        .replace_synthetic_notices(SystemNoticeKind::AuthReauthRequired, Vec::new())
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "auth synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 1. Poll external updates BEFORE tool capture so newly
                     //    connected tools are visible in the same LLM call.
@@ -1455,28 +1426,24 @@ where
                     }
 
                     // 3. Manage [MCP_PENDING] notice lifecycle.
-                    //    Always strip prior synthetic notices to avoid stale state.
-                    //    Uses starts_with on a strict prefix to avoid matching user text.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| !is_synthetic_notice(message, SystemNoticeKind::McpPending),
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up MCP synthetic notices");
-                    }
-                    // The MCP lifecycle handle is the only authoritative read
-                    // side for pending server notices. Without it, core has no
-                    // typed owner to project from.
+                    //    The MCP lifecycle handle is the only authoritative
+                    //    read side for pending server notices; the refresh is
+                    //    ONE atomic strip+push transcript edit. A strip fault
+                    //    propagates typed — no push happens on top of a stale
+                    //    notice.
                     let pending_servers: Vec<String> = self
                         .mcp_server_lifecycle_handle
                         .as_deref()
                         .map(|handle| handle.pending_server_ids().into_iter().collect())
                         .unwrap_or_default();
-                    if !pending_servers.is_empty() {
+                    let mcp_pending_notices = if pending_servers.is_empty() {
+                        Vec::new()
+                    } else {
                         let body = format!(
                             "Servers connecting: {}. Tools will appear when ready.",
                             pending_servers.join(", ")
                         );
-                        self.session.push(synthetic_notice_block_message(
+                        vec![synthetic_notice_block_message(
                             SystemNoticeKind::McpPending,
                             body.clone(),
                             crate::types::SystemNoticeBlock::Mcp {
@@ -1487,16 +1454,23 @@ where
                                 detail: Some(body),
                                 pending_sources: pending_servers,
                             },
-                        ));
-                    }
+                        )]
+                    };
+                    self.session
+                        .replace_synthetic_notices(
+                            SystemNoticeKind::McpPending,
+                            mcp_pending_notices,
+                        )
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "MCP pending synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 3b. Background shell job completion notices via CompletionFeed.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob),
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up background-job synthetic notices");
-                    }
+                    //    Collected first, then applied through the ONE atomic
+                    //    notice-refresh transcript edit below.
+                    let mut background_job_notices: Vec<Message> = Vec::new();
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
                     if let (Some(feed), Some(registry)) =
                         (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
@@ -1552,7 +1526,7 @@ where
                                 entry.display_name, job_id, status_str, detail,
                             );
                             notice.push_str("\nUse shell_job_status to get the full output.");
-                            self.session.push(synthetic_notice_block_message(
+                            background_job_notices.push(synthetic_notice_block_message(
                                 SystemNoticeKind::BackgroundJob,
                                 notice,
                                 crate::types::SystemNoticeBlock::BackgroundJob {
@@ -1586,6 +1560,20 @@ where
                             "completion feed present without generated ops cursor authority; skipping feed delivery"
                         );
                     }
+                    // ONE atomic strip+push refresh for background-job
+                    // notices: stale notices are cleared even when no feed is
+                    // wired, and a strip fault propagates typed instead of
+                    // pushing fresh notices beside stale ones.
+                    self.session
+                        .replace_synthetic_notices(
+                            SystemNoticeKind::BackgroundJob,
+                            background_job_notices,
+                        )
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "background-job synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
@@ -1843,10 +1831,14 @@ where
 
                     let effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    let mut effective_provider_params = merged_provider_params(
-                        self.config.provider_tool_defaults.as_ref(),
-                        self.config.provider_params.as_ref(),
-                    );
+                    // Typed field-wise merge on the carrier: explicit params
+                    // win, build-derived tool defaults fill unset slots. A
+                    // provider-family conflict is a typed config fault.
+                    let mut effective_provider_params = self
+                        .config
+                        .provider_params
+                        .effective_params()
+                        .map_err(|error| AgentError::ConfigError(error.to_string()))?;
 
                     let pre_llm_invocation = HookInvocation {
                         point: HookPoint::PreLlmRequest,
@@ -1858,7 +1850,8 @@ where
                         llm_request: Some(HookLlmRequest {
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
-                            provider_params: effective_provider_params.clone(),
+                            provider_params: (!effective_provider_params.is_empty())
+                                .then(|| effective_provider_params.clone()),
                             message_count: self.session.messages().len(),
                         }),
                         llm_response: None,
@@ -1910,22 +1903,34 @@ where
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
-                        // Inject structured_output into provider params
-                        let mut params =
-                            effective_provider_params.unwrap_or_else(|| serde_json::json!({}));
-                        if let Some(output_schema) = &self.config.output_schema
-                            && let Some(obj) = params.as_object_mut()
-                        {
-                            obj.insert("structured_output".to_string(), output_schema.to_value());
+                        // Inject structured_output through the typed ProviderTag
+                        // owner; an identity-conflict fault terminalizes the
+                        // extraction instead of being silently dropped. A
+                        // provider with no typed structured-output slot is a
+                        // typed `NoProviderSlot` outcome — extraction proceeds
+                        // prompt-based and the schema is enforced at the
+                        // validation seam below.
+                        if let Some(output_schema) = self.config.output_schema.clone() {
+                            match effective_provider_params
+                                .set_structured_output(self.client.provider(), output_schema)
+                            {
+                                Ok(_injection) => {}
+                                Err(error) => {
+                                    return self
+                                        .complete_extraction_failed(
+                                            &run_id,
+                                            turn_count,
+                                            tool_call_count,
+                                            error.to_string(),
+                                            &event_tx,
+                                        )
+                                        .await;
+                                }
+                            }
                         }
                         // Strip the provider-native web-search/grounding body via the typed
                         // ProviderTag owner — extraction is deterministic and tool-free.
-                        let mut typed = ProviderParamsOverride::from_legacy_provider_value(
-                            self.client.provider().as_str(),
-                            &params,
-                        );
-                        typed.clear_web_search();
-                        effective_provider_params = Some(typed.to_legacy_provider_value());
+                        effective_provider_params.clear_web_search();
                     }
 
                     // No tools for extraction turn (empty slice)
@@ -1935,15 +1940,8 @@ where
                     } else {
                         &tool_defs
                     };
-                    let typed_provider_params = effective_provider_params
-                        .as_ref()
-                        .map(|params| {
-                            ProviderParamsOverride::from_legacy_provider_value(
-                                self.client.provider().as_str(),
-                                params,
-                            )
-                        })
-                        .filter(|params| !params.is_empty());
+                    let typed_provider_params =
+                        Some(effective_provider_params).filter(|params| !params.is_empty());
 
                     // Call LLM with retry — route errors through machine authority
                     let boundary_system_context = self
@@ -3163,7 +3161,6 @@ mod tests {
         ToolDef, ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
 
@@ -3369,9 +3366,11 @@ mod tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: Value,
-        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillFunctionOutput, crate::skills::SkillError>,
+        > + Send {
             let missing = key.clone();
             async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
@@ -3459,9 +3458,11 @@ mod tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: Value,
-        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillFunctionOutput, crate::skills::SkillError>,
+        > + Send {
             let missing = key.clone();
             async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
@@ -5770,17 +5771,12 @@ mod tests {
             match event {
                 crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
                 crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
-                crate::event::AgentEvent::RunFailed {
-                    error_class,
-                    error_report,
-                    ..
-                } => {
+                crate::event::AgentEvent::RunFailed { error_report, .. } => {
                     saw_run_failed = true;
-                    saw_typed_boundary_failure = error_class == crate::event::AgentErrorClass::Hook
+                    saw_typed_boundary_failure = error_report.class
+                        == crate::event::AgentErrorClass::Hook
                         && matches!(
-                            error_report
-                                .as_ref()
-                                .and_then(|report| report.reason.as_ref()),
+                            error_report.reason.as_ref(),
                             Some(crate::event::AgentErrorReason::HookDenied {
                                 hook_id: Some(hook_id),
                                 point: HookPoint::TurnBoundary,
@@ -5955,10 +5951,22 @@ mod tests {
 
     #[tokio::test]
     async fn hot_swap_request_policy_updates_next_turn_provider_params() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
         let client = Arc::new(RecordingLlmClient::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .provider_params(serde_json::json!({"old": true}))
-            .provider_tool_defaults(serde_json::json!({"stale_tool": {"type": "old"}}))
+            .provider_params(ProviderParamsOverride {
+                top_p: Some(0.5),
+                ..Default::default()
+            })
+            .provider_tool_defaults(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "stale"}),
+                )),
+                ..Default::default()
+            }))
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
@@ -5967,9 +5975,15 @@ mod tests {
             client.clone(),
             crate::SessionLlmRequestPolicy {
                 model: "new-model".to_string(),
-                provider_params: Some(serde_json::json!({"temperature": 0.2})),
-                provider_tool_defaults: Some(serde_json::json!({
-                    "web_search": {"type": "web_search"}
+                provider_params: Some(ProviderParamsOverride {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                }),
+                provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": "web_search"}),
+                    )),
+                    ..Default::default()
                 })),
             },
         );
@@ -7045,18 +7059,12 @@ mod tests {
         let mut saw_success_like_event = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::RunFailed {
-                    error_class,
-                    error_report,
-                    ..
-                } => {
+                crate::event::AgentEvent::RunFailed { error_report, .. } => {
                     saw_run_failed = true;
-                    saw_typed_post_tool_failure = error_class
+                    saw_typed_post_tool_failure = error_report.class
                         == crate::event::AgentErrorClass::Hook
                         && matches!(
-                            error_report
-                                .as_ref()
-                                .and_then(|report| report.reason.as_ref()),
+                            error_report.reason.as_ref(),
                             Some(crate::event::AgentErrorReason::HookDenied {
                                 hook_id: Some(hook_id),
                                 point: crate::hooks::HookPoint::PostToolExecution,

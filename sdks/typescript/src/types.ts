@@ -640,14 +640,9 @@ export interface Capability {
   readonly status: string;
 }
 
-export interface ConfigEnvelope {
-  readonly config: Record<string, unknown>;
-  readonly generation: number;
-  readonly realmId?: string;
-  readonly instanceId?: string;
-  readonly backend?: string;
-  readonly resolvedPaths?: Readonly<Record<string, string>>;
-}
+// K20: the config envelope is the generated wire contract — the SDK no
+// longer owns a camelCase projection of it.
+export type { ConfigEnvelope, ConfigWriteResult } from "./generated/types.js";
 
 export interface CommsSendReceipt extends Record<string, unknown> {
   readonly kind?: string;

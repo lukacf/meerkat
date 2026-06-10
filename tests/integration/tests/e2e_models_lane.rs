@@ -113,34 +113,15 @@ async fn run_chat(
     client: &dyn LlmClient,
     model: &str,
     prompt: &str,
-    provider_params: Option<serde_json::Value>,
+    provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderTag>,
     max_tokens: u32,
 ) -> Result<String, String> {
     let messages = vec![Message::User(UserMessage::text(prompt.to_string()))];
     let mut request = LlmRequest::new(model, messages).with_max_tokens(max_tokens);
-    if let Some(params) = provider_params {
-        // Test helper: project untyped JSON into the per-provider tag at the
-        // adapter boundary so legacy e2e fixtures keep working against the
-        // typed-provider-params surface.
-        use meerkat_core::Provider;
-        use meerkat_core::lifecycle::run_primitive::{
-            AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
-        };
-        let tag = match client.provider() {
-            Provider::Anthropic => AnthropicProviderTag::from_legacy_value(&params)
-                .ok()
-                .map(ProviderTag::Anthropic),
-            Provider::OpenAI => OpenAiProviderTag::from_legacy_value(&params)
-                .ok()
-                .map(ProviderTag::OpenAi),
-            Provider::Gemini => GeminiProviderTag::from_legacy_value(&params)
-                .ok()
-                .map(ProviderTag::Gemini),
-            Provider::SelfHosted | Provider::Other => None,
-        };
-        if let Some(tag) = tag {
-            request = request.with_provider_params(tag);
-        }
+    if let Some(tag) = provider_params {
+        // K2: e2e fixtures construct the typed per-provider tag directly —
+        // no legacy JSON-bag projection at the adapter boundary.
+        request = request.with_provider_params(tag);
     }
 
     let mut stream = client.stream(&request);
@@ -218,10 +199,42 @@ async fn chat_roundtrip_all_models() {
 /// OpenAI: `{ reasoning_effort: <level> }` → client forwards into
 /// `reasoning.effort` on the Responses API.
 /// Gemini: effort levels are not a concept; this test is skipped for Gemini.
-fn effort_provider_params(provider: &str, level: &str) -> Option<serde_json::Value> {
+fn effort_provider_params(
+    provider: &str,
+    level: &str,
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicEffort, AnthropicProviderTag, OpenAiProviderTag, ProviderTag, ReasoningEffort,
+    };
     match provider {
-        "anthropic" => Some(serde_json::json!({ "effort": level })),
-        "openai" => Some(serde_json::json!({ "reasoning_effort": level })),
+        "anthropic" => {
+            let effort = match level {
+                "low" => AnthropicEffort::Low,
+                "medium" => AnthropicEffort::Medium,
+                "high" => AnthropicEffort::High,
+                "max" => AnthropicEffort::Max,
+                "xhigh" => AnthropicEffort::XHigh,
+                _ => return None,
+            };
+            Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                effort: Some(effort),
+                ..Default::default()
+            }))
+        }
+        "openai" => {
+            let effort = match level {
+                "none" => ReasoningEffort::None,
+                "low" => ReasoningEffort::Low,
+                "medium" => ReasoningEffort::Medium,
+                "high" => ReasoningEffort::High,
+                "xhigh" => ReasoningEffort::XHigh,
+                _ => return None,
+            };
+            Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort: Some(effort),
+                ..Default::default()
+            }))
+        }
         _ => None,
     }
 }
@@ -303,7 +316,16 @@ async fn thinking_modes_per_capability() {
 
     for (entry, api_key) in for_each_catalog_model_with_key() {
         let caps = caps_for(entry);
-        let configs: Vec<(&'static str, serde_json::Value)> = match caps.thinking {
+        use meerkat_core::lifecycle::run_primitive::{
+            AnthropicProviderTag, AnthropicThinkingConfig, ProviderTag,
+        };
+        let anthropic_thinking = |config: AnthropicThinkingConfig| {
+            ProviderTag::Anthropic(AnthropicProviderTag {
+                thinking: Some(config),
+                ..Default::default()
+            })
+        };
+        let configs: Vec<(&'static str, ProviderTag)> = match caps.thinking {
             ThinkingSupport::None | ThinkingSupport::GeminiThinkingLevel => {
                 // Gemini thinking goes through a separate knob (thinking_level)
                 // that our client does not forward today — skip here to keep
@@ -312,27 +334,23 @@ async fn thinking_modes_per_capability() {
             }
             ThinkingSupport::AnthropicEnabledOnly => vec![(
                 "enabled",
-                serde_json::json!({
-                    "thinking": { "type": "enabled", "budget_tokens": 2048 }
+                anthropic_thinking(AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 2048,
                 }),
             )],
             ThinkingSupport::AnthropicAdaptiveOnly => vec![(
                 "adaptive",
-                serde_json::json!({
-                    "thinking": { "type": "adaptive" }
-                }),
+                anthropic_thinking(AnthropicThinkingConfig::Adaptive),
             )],
             ThinkingSupport::AnthropicAdaptiveAndEnabled => vec![
                 (
                     "adaptive",
-                    serde_json::json!({
-                        "thinking": { "type": "adaptive" }
-                    }),
+                    anthropic_thinking(AnthropicThinkingConfig::Adaptive),
                 ),
                 (
                     "enabled",
-                    serde_json::json!({
-                        "thinking": { "type": "enabled", "budget_tokens": 2048 }
+                    anthropic_thinking(AnthropicThinkingConfig::Enabled {
+                        budget_tokens: 2048,
                     }),
                 ),
             ],

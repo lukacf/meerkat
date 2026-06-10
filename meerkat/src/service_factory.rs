@@ -1012,11 +1012,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "video-alias".to_string(),
             prompt: "fail closed on stale config".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),
@@ -1050,11 +1048,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "video-alias".to_string(),
                 prompt: "defer identity parity".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -1316,12 +1312,10 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1410,12 +1404,10 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -1519,11 +1511,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1588,11 +1578,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1784,12 +1772,10 @@ mod tests {
         CreateSessionRequest {
             model: model.to_string(),
             prompt: "test".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,

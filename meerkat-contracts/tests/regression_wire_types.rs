@@ -407,7 +407,9 @@ fn agent_event_all_variants_roundtrip() {
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
             session_id: session_id.clone(),
-            prompt: ContentInput::Text("hello".to_string()),
+            input: meerkat_core::types::RunInput::Content {
+                content: ContentInput::Text("hello".to_string()),
+            },
         },
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
@@ -424,9 +426,11 @@ fn agent_event_all_variants_roundtrip() {
         },
         AgentEvent::RunFailed {
             session_id,
-            error_class: AgentErrorClass::Internal,
-            error: "boom".to_string(),
-            error_report: None,
+            error_report: meerkat_core::event::AgentErrorReport {
+                class: AgentErrorClass::Internal,
+                reason: None,
+                message: "boom".to_string(),
+            },
             terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {
@@ -658,7 +662,9 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
             session_id: SessionId::new(),
-            prompt: ContentInput::Text("hello".to_string()),
+            input: meerkat_core::types::RunInput::Content {
+                content: ContentInput::Text("hello".to_string()),
+            },
         },
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
@@ -670,9 +676,11 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         },
         AgentEvent::RunFailed {
             session_id: SessionId::new(),
-            error_class: AgentErrorClass::Internal,
-            error: "nope".to_string(),
-            error_report: None,
+            error_report: meerkat_core::event::AgentErrorReport {
+                class: AgentErrorClass::Internal,
+                reason: None,
+                message: "nope".to_string(),
+            },
             terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {

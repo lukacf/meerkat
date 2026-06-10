@@ -5351,7 +5351,7 @@ mod tests {
             runtime.public_key(),
             MessageKind::Lifecycle {
                 kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
-                params: serde_json::json!({"name": "sender"}),
+                params: serde_json::json!({"peer": "sender"}),
             },
         );
         envelope.id = lifecycle_id;
@@ -6157,7 +6157,6 @@ mod tests {
                 params: serde_json::json!({
                     "peer": "worker-1",
                     "role": "worker",
-                    "peer_name": "mob/worker/worker-1",
                 }),
             },
         )

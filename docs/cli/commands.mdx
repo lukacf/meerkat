@@ -20,7 +20,7 @@ You can also use subcommands explicitly:
 
 ```bash
 rkat run "summarize this repository"
-rkat run --resume "keep going"
+rkat run --resume last "keep going"
 rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 ```
 
@@ -205,7 +205,7 @@ rkat run --resume[=<SESSION_ID>] [OPTIONS] <PROMPT>
 Examples:
 
 ```bash
-rkat run --resume "keep going"
+rkat run --resume last "keep going"
 rkat run --resume ~2 "pick this thread back up"
 cat notes.txt | rkat run --resume "merge these notes into the plan"
 tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
@@ -218,7 +218,7 @@ tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
 - `last`
 - `~N`
 
-Omitting the value means `last`, so `rkat run --resume "keep going"` and `rkat run --resume last "keep going"` are equivalent.
+Omitting the value means `last`, so `rkat run --resume last "keep going"` and `rkat run --resume last "keep going"` are equivalent.
 
 Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 

@@ -231,6 +231,16 @@ impl ToolDispatchContext {
         }
     }
 
+    /// Project the typed run input into a dispatch context. The
+    /// pending-tool-results continuation carries no caller content, so it
+    /// projects to an empty context rather than a fabricated empty prompt.
+    pub fn from_run_input(input: &crate::types::RunInput) -> Self {
+        match input {
+            crate::types::RunInput::Content { content } => Self::from_current_turn_input(content),
+            crate::types::RunInput::PendingToolResults => Self::default(),
+        }
+    }
+
     #[must_use]
     pub fn with_turn_metadata(mut self, metadata: BTreeMap<String, serde_json::Value>) -> Self {
         self.turn_metadata = metadata;

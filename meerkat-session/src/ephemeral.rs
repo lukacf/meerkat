@@ -13,7 +13,7 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, MobToolAuthorityContext, SessionControlError, SessionError,
@@ -162,6 +162,10 @@ enum SessionCommand {
     },
     RecordLiveTerminalError {
         cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+        reply_tx: oneshot::Sender<()>,
+    },
+    RecordLiveOutputAudioDegraded {
+        dropped: u64,
         reply_tx: oneshot::Sender<()>,
     },
     AppendExternalUserContent {
@@ -823,7 +827,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
         session: &meerkat_core::Session,
-    ) -> Result<RunBoundaryReceipt, SessionError> {
+    ) -> Result<RunBoundaryReceiptDraft, SessionError> {
         let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to serialize session for runtime receipt digest: {err}"
@@ -831,13 +835,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
         let digest = format!("{:x}", Sha256::digest(encoded_messages));
 
-        Ok(RunBoundaryReceipt {
+        // Dogma K10: the boundary sequence is machine-owned; the session
+        // service returns an UNSEQUENCED draft and the runtime driver mints
+        // the final receipt from the generated per-run boundary counter.
+        Ok(RunBoundaryReceiptDraft {
             run_id,
             boundary,
             contributing_input_ids,
             conversation_digest: Some(digest),
             message_count: session.messages().len(),
-            sequence: 0,
         })
     }
 
@@ -1500,9 +1506,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map(|append| {
                 (
                     AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            append.text,
-                        ),
+                        content: append.content,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
@@ -1644,6 +1648,38 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reply_rx.await.map_err(|_| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Record a live transport output-audio delivery degradation (K16).
+    ///
+    /// Routes the dropped-packet count through the session task so it is
+    /// stamped and broadcast as a typed `StreamTruncated` event
+    /// (`OutputAudioDegraded`) to session subscribers, instead of remaining a
+    /// transport-local counter with no live reader.
+    pub async fn record_live_output_audio_degraded(
+        &self,
+        id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply".to_string(),
             ))
         })
     }
@@ -2660,6 +2696,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             }
         }
 
+        // Dogma K10: `RuntimeTurnMetadata` (via `build.initial_turn_metadata`)
+        // is the ONLY carrier of initial-turn render/skill facts — there is no
+        // request-level duplicate left to merge.
         let initial_turn_metadata = req
             .build
             .as_ref()
@@ -2667,16 +2706,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .cloned();
         let initial_render_metadata = initial_turn_metadata
             .as_ref()
-            .and_then(|metadata| metadata.render_metadata.clone())
-            .or(req.render_metadata);
+            .and_then(|metadata| metadata.render_metadata.clone());
         let initial_handling_mode = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.handling_mode)
             .unwrap_or(meerkat_core::types::HandlingMode::Queue);
         let initial_skill_references = initial_turn_metadata
             .as_ref()
-            .and_then(|metadata| metadata.skill_references.clone())
-            .or(req.skill_references);
+            .and_then(|metadata| metadata.skill_references.clone());
         let initial_flow_tool_overlay = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.flow_tool_overlay.clone());
@@ -3199,7 +3236,7 @@ fn render_runtime_system_context_event_prompt(
                 text.push_str(source);
             }
             text.push_str("\n\n");
-            text.push_str(&append.text);
+            text.push_str(&append.content.render_text());
             text
         })
         .collect::<Vec<_>>()
@@ -3231,7 +3268,9 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
             source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
-                prompt: ContentInput::Text(prompt),
+                input: meerkat_core::types::RunInput::Content {
+                    content: ContentInput::Text(prompt),
+                },
             },
         );
         let _ = control.session_event_tx.send(started);
@@ -3274,7 +3313,9 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
             source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
-                prompt: ContentInput::Text(prompt),
+                input: meerkat_core::types::RunInput::Content {
+                    content: ContentInput::Text(prompt),
+                },
             },
         );
         let _ = control.session_event_tx.send(started);
@@ -3600,15 +3641,18 @@ async fn session_task<A: SessionAgent>(
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
                     .or(runtime.flow_tool_overlay);
-                // #345: forward the typed keep-alive request to the machine
-                // rather than collapsing presence into a bool. This ephemeral
-                // admission path only observes presence/absence of a resolved
-                // KeepAlivePolicy (a present policy enables keep-alive, an absent
-                // one preserves the existing setting); the explicit Disable
-                // request flows from the inbound `Option<bool>` override path.
+                // #345 / dogma K13: forward the full typed keep-alive
+                // tri-state to the machine. The metadata carrier is
+                // `Option<KeepAliveDirective>`: Enable(policy) -> Enable,
+                // Disable -> Disable, absent -> Preserve. No collapse.
                 let keep_alive_request =
                     match metadata.as_ref().and_then(|metadata| metadata.keep_alive) {
-                        Some(_) => RuntimeKeepAliveRequest::Enable,
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(_),
+                        ) => RuntimeKeepAliveRequest::Enable,
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable,
+                        ) => RuntimeKeepAliveRequest::Disable,
                         None => RuntimeKeepAliveRequest::Preserve,
                     };
                 let pre_turn_context_appends = runtime.pre_turn_context_appends;
@@ -3860,8 +3904,14 @@ async fn session_task<A: SessionAgent>(
                     let _ = result_tx.send(Err(error));
                     continue;
                 }
-                if persist_runtime_keep_alive {
-                    agent.update_keep_alive(true);
+                match persist_runtime_keep_alive {
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PersistEnabled => {
+                        agent.update_keep_alive(true);
+                    }
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PersistDisabled => {
+                        agent.update_keep_alive(false);
+                    }
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PreserveExisting => {}
                 }
                 let begin_phase = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -4128,17 +4178,28 @@ async fn session_task<A: SessionAgent>(
                     &source,
                     AgentEvent::RunFailed {
                         session_id: agent.session_id(),
-                        error_class: meerkat_core::event::AgentErrorClass::Terminal,
-                        error: message.clone(),
                         terminal_cause_kind: None,
-                        error_report: Some(meerkat_core::event::AgentErrorReport {
+                        error_report: meerkat_core::event::AgentErrorReport {
                             class: meerkat_core::event::AgentErrorClass::Terminal,
                             reason: None,
                             message,
-                        }),
+                        },
                     },
                 );
                 let _ = control.session_event_tx.send(failed);
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx } => {
+                let truncated = stamp_event_envelope(
+                    &mut next_seq,
+                    &source,
+                    AgentEvent::StreamTruncated {
+                        reason: meerkat_core::event::StreamTruncationReason::OutputAudioDegraded {
+                            dropped,
+                        },
+                    },
+                );
+                let _ = control.session_event_tx.send(truncated);
                 let _ = reply_tx.send(());
             }
             SessionCommand::AppendExternalUserContent { content, reply_tx } => {
@@ -4519,7 +4580,7 @@ mod runtime_turn_metadata_tests {
             self.observed_context_texts
                 .lock()
                 .expect("observed context texts lock poisoned")
-                .extend(appends.iter().map(|append| append.text.clone()));
+                .extend(appends.iter().map(|append| append.content.render_text()));
         }
 
         fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
@@ -4823,7 +4884,7 @@ mod runtime_turn_metadata_tests {
                     .stage_append_with_snapshot(
                         &meerkat_core::service::AppendSystemContextRequest {
                             content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                                append.text.clone(),
+                                append.content.render_text(),
                             ),
                             source: append.source.clone(),
                             idempotency_key: append.idempotency_key.clone(),
@@ -4854,11 +4915,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: None,
@@ -4950,11 +5009,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: None,
@@ -4975,11 +5032,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("again".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: None,
@@ -5029,11 +5084,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5075,11 +5128,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Stage,
                 build: None,
@@ -5127,11 +5178,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Stage,
                 build: None,
@@ -5189,11 +5238,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5255,11 +5302,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5281,7 +5326,9 @@ mod runtime_turn_metadata_tests {
                         None,
                         None,
                         vec![PendingSystemContextAppend {
-                            text: "terminal peer context".to_string(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                "terminal peer context".to_string(),
+                            ),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5334,11 +5381,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5347,7 +5392,9 @@ mod runtime_turn_metadata_tests {
             .await
             .expect("deferred session should create");
         let appends = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string()
+            ),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5408,11 +5455,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5456,7 +5501,9 @@ mod runtime_turn_metadata_tests {
             .expect("blocking turn should expose active run id");
 
         let appends = vec![PendingSystemContextAppend {
-            text: "active-turn steer context".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "active-turn steer context".to_string(),
+            ),
             source: Some("console:steer:test".to_string()),
             idempotency_key: Some("console:steer:test".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5482,7 +5529,10 @@ mod runtime_turn_metadata_tests {
             .expect("session state should exist");
         let pending = state.snapshot().pending().to_vec();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].text, "active-turn steer context");
+        assert_eq!(
+            pending[0].content.render_text(),
+            "active-turn steer context"
+        );
 
         release.notify_waiters();
         run.await
@@ -5518,11 +5568,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5560,7 +5608,9 @@ mod runtime_turn_metadata_tests {
                 &result.session_id,
                 &run_id,
                 vec![PendingSystemContextAppend {
-                    text: "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
+                    ),
                     source: Some("console:steer:stale".to_string()),
                     idempotency_key: Some("console:steer:stale".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5603,11 +5653,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5634,7 +5682,9 @@ mod runtime_turn_metadata_tests {
                 &result.session_id,
                 &wrong_run_id,
                 vec![PendingSystemContextAppend {
-                    text: "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
+                    ),
                     source: Some("console:steer:wrong-run".to_string()),
                     idempotency_key: Some("console:steer:wrong-run".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5673,11 +5723,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5705,7 +5753,9 @@ mod runtime_turn_metadata_tests {
                 &run_id,
                 vec![
                     PendingSystemContextAppend {
-                        text: "first staged context".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            "first staged context".to_string(),
+                        ),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5713,7 +5763,9 @@ mod runtime_turn_metadata_tests {
                         peer_response_terminal: None,
                     },
                     PendingSystemContextAppend {
-                        text: "conflicting staged context".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            "conflicting staged context".to_string(),
+                        ),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5764,11 +5816,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5794,7 +5844,9 @@ mod runtime_turn_metadata_tests {
                             dispatch_context: Default::default(),
                         }),
                         vec![PendingSystemContextAppend {
-                            text: "must not leak before setup succeeds".to_string(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                "must not leak before setup succeeds".to_string(),
+                            ),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5997,11 +6049,9 @@ mod admission_window_tests {
         CreateSessionRequest {
             model: "admission-window-test".to_string(),
             prompt: ContentInput::Text("defer".to_string()),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),
@@ -6420,11 +6470,9 @@ mod inline_video_admission_tests {
         CreateSessionRequest {
             model: "providerless-video-alias".to_string(),
             prompt,
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),

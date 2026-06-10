@@ -3162,10 +3162,12 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
         let (key, value) = param.split_once('=').ok_or_else(|| {
             anyhow::anyhow!("Invalid --param format '{param}': expected KEY=VALUE")
         })?;
-        map.insert(
-            key.to_string(),
-            serde_json::Value::String(value.to_string()),
-        );
+        // A bare KEY=VALUE accepts JSON literals (numbers, booleans, nested
+        // JSON) and falls back to a plain string for unquoted text, so typed
+        // knobs like `temperature=0.7` parse into the typed override.
+        let parsed = serde_json::from_str::<serde_json::Value>(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+        map.insert(key.to_string(), parsed);
     }
 
     Ok(Some(serde_json::Value::Object(map)))
@@ -3191,19 +3193,26 @@ fn parse_provider_params_json(raw: Option<String>) -> anyhow::Result<Option<serd
 fn merge_provider_params(
     kv_params: Option<serde_json::Value>,
     json_params: Option<serde_json::Value>,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    match (kv_params, json_params) {
-        (None, None) => Ok(None),
-        (Some(kv), None) => Ok(Some(kv)),
-        (None, Some(json)) => Ok(Some(json)),
+) -> anyhow::Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>> {
+    let merged = match (kv_params, json_params) {
+        (None, None) => return Ok(None),
+        (Some(kv), None) => kv,
+        (None, Some(json)) => json,
         (Some(serde_json::Value::Object(kv)), Some(serde_json::Value::Object(mut json))) => {
             json.extend(kv);
-            Ok(Some(serde_json::Value::Object(json)))
+            serde_json::Value::Object(json)
         }
-        _ => Err(anyhow::anyhow!(
-            "provider params must be JSON objects after parsing"
-        )),
-    }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "provider params must be JSON objects after parsing"
+            ));
+        }
+    };
+    // K2: parse fail-closed into the typed override at the CLI ingress —
+    // unknown knobs are rejected here, not at the first LLM call.
+    serde_json::from_value(merged)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("invalid provider params: {e}"))
 }
 
 fn looks_like_path(raw: &str) -> bool {
@@ -4440,12 +4449,19 @@ enum LoginProvider {
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 impl LoginProvider {
+    /// Parse via the canonical typed owner — the OAuth provider alias
+    /// taxonomy lives in `meerkat_core::OAuthProviderIdentity::from_alias`
+    /// only (K18). The CLI keeps no second alias table; aliases that the
+    /// owner does not recognize are rejected here too.
     fn parse(raw: &str) -> Option<Self> {
-        match raw.to_ascii_lowercase().trim() {
-            "anthropic" | "claude" | "claude.ai" => Some(Self::Anthropic),
-            "openai" | "chatgpt" => Some(Self::OpenAi),
-            "google" | "gemini" | "code_assist" | "code-assist" => Some(Self::Google),
-            _ => None,
+        use meerkat_providers::oauth_flow::OAuthProviderIdentity;
+        match OAuthProviderIdentity::from_alias(raw.to_ascii_lowercase().trim())? {
+            OAuthProviderIdentity::AnthropicClaudeAi => Some(Self::Anthropic),
+            OAuthProviderIdentity::OpenAiChatGpt => Some(Self::OpenAi),
+            OAuthProviderIdentity::GoogleCodeAssist => Some(Self::Google),
+            // The console API-key provisioning identity is not an interactive
+            // `rkat auth login` provider.
+            OAuthProviderIdentity::AnthropicConsoleApiKey => None,
         }
     }
 
@@ -4545,14 +4561,6 @@ impl LoginProvider {
 
     fn oauth_auth_method(self) -> &'static str {
         self.normalized_auth_method().as_str()
-    }
-
-    fn oauth_alias(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "google",
-        }
     }
 
     fn oauth_identity(self) -> meerkat_providers::oauth_flow::OAuthProviderIdentity {
@@ -5241,42 +5249,46 @@ async fn noninteractive_login(
     secret: Option<&str>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    use meerkat_providers::auth_store::{
-        PersistedAuthMode, PersistedTokens, TokenKey, TokenStoreBackend,
-    };
+    use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStoreBackend};
 
     let provider = provider_hint
         .ok_or_else(|| anyhow::anyhow!("--non-interactive requires a positional <provider> arg"))?;
     let provider_lc = provider.to_lowercase();
-    if !matches!(provider_lc.as_str(), "anthropic" | "openai" | "gemini") {
-        anyhow::bail!("unknown provider '{provider}' — expected anthropic / openai / gemini");
-    }
+    // K18: provider identity is owned by the typed `Provider` parser — no
+    // CLI-local provider-string allowlist.
+    let provider_enum = meerkat_core::Provider::parse_strict(&provider_lc).ok_or_else(|| {
+        anyhow::anyhow!("unknown provider '{provider}' — expected anthropic / openai / gemini")
+    })?;
 
+    // K18: the auth-method taxonomy and the method→persisted-mode mapping are
+    // owned by the per-provider typed matrix (`NormalizedAuthMethod`), the
+    // same owner REST/RPC consume. The CLI keeps no string allowlist and no
+    // `method == "static_bearer"` inference: an unknown method fails parse,
+    // and only directly-creatable secret modes are accepted here.
     let method = method_hint.unwrap_or("api_key");
-    if method != "api_key" && method != "azure_api_key" && method != "static_bearer" {
-        anyhow::bail!(
-            "--non-interactive login supports only --method api_key|azure_api_key|static_bearer; \
-             OAuth-backed methods (managed_chatgpt_oauth, claude_ai_oauth, google_oauth, \
-             oauth_to_api_key) require the interactive browser flow"
-        );
-    }
+    let normalized =
+        meerkat_providers::NormalizedAuthMethod::parse_for_provider(provider_enum, method)
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown auth method '{method}' for provider '{provider}'")
+            })?;
+    let auth_mode = normalized
+        .persisted_auth_mode()
+        .filter(|mode| meerkat_core::persisted_auth_mode_is_directly_creatable(*mode))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--non-interactive login supports only directly-creatable secret methods \
+                 (api_key|azure_api_key|static_bearer); OAuth-backed methods \
+                 (managed_chatgpt_oauth, claude_ai_oauth, google_oauth, oauth_to_api_key) \
+                 require the interactive browser flow"
+            )
+        })?;
 
     let backend = match backend_hint {
         Some(hint) => hint.to_string(),
-        None => {
-            let provider_enum =
-                meerkat_core::Provider::parse_strict(&provider_lc).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown provider '{provider}' — expected anthropic / openai / gemini"
-                    )
-                })?;
-            meerkat_providers::NormalizedBackendKind::default_for_provider(provider_enum)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("provider '{provider}' has no default backend kind")
-                })?
-                .as_str()
-                .to_string()
-        }
+        None => meerkat_providers::NormalizedBackendKind::default_for_provider(provider_enum)
+            .ok_or_else(|| anyhow::anyhow!("provider '{provider}' has no default backend kind"))?
+            .as_str()
+            .to_string(),
     };
 
     let secret_value = match secret {
@@ -5301,11 +5313,6 @@ async fn noninteractive_login(
     let binding_id_str = format!("default_{provider_lc}");
     let key = TokenKey::parse("dev", &binding_id_str)
         .map_err(|e| anyhow::anyhow!("invalid token-key realm/binding: {e}"))?;
-    let auth_mode = if method == "static_bearer" {
-        PersistedAuthMode::StaticBearer
-    } else {
-        PersistedAuthMode::ApiKey
-    };
     let persisted = PersistedTokens {
         auth_mode,
         primary_secret: Some(secret_value),
@@ -5318,7 +5325,7 @@ async fn noninteractive_login(
         metadata: serde_json::json!({
             "provider": provider_lc,
             "backend_kind": backend,
-            "auth_method": method,
+            "auth_method": normalized.as_str(),
             "source": "rkat auth login --non-interactive",
         }),
     };
@@ -5420,12 +5427,12 @@ async fn interactive_login(
     .await
     .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
     let redirect_url = pending_callback.redirect_url.clone();
-    let resolved = meerkat_providers::oauth_flow::resolve_oauth_provider(
-        provider.oauth_alias(),
-        &redirect_url,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-    debug_assert_eq!(resolved.identity, identity);
+    // K18: resolve endpoints from the typed identity directly — no
+    // typed→alias→typed round trip through a CLI-local alias string.
+    let endpoints =
+        meerkat_providers::oauth_flow::oauth_provider_endpoints(identity, redirect_url.clone());
+    let client_secret = identity.client_secret();
+    let auth_mode = identity.auth_mode();
     let state_token = scope
         .oauth_flow_authority
         .start(
@@ -5440,9 +5447,6 @@ async fn interactive_login(
         "Local callback ready at {}",
         auth_cyan(&redirect_url),
     ));
-    let endpoints = resolved.endpoints;
-    let client_secret = resolved.client_secret;
-    let auth_mode = resolved.auth_mode;
 
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
@@ -5961,22 +5965,25 @@ fn doctor_legacy_self_hosted_connection(
     let binding_id = doctor_legacy_self_hosted_binding_id(server_id)?;
     let binding_key = binding_id.as_str().to_string();
 
+    // K18: the auth-method literal is owned by the typed provider matrix —
+    // project it from `SelfHostedAuthMethod`, never a CLI-local string.
+    use meerkat_core::provider_matrix::self_hosted::SelfHostedAuthMethod;
     let (auth_method, source) = match (&server.bearer_token, &server.bearer_token_env) {
         (Some(secret), _) => (
-            "static_bearer".to_string(),
+            SelfHostedAuthMethod::StaticBearer.as_str().to_string(),
             meerkat_core::CredentialSourceSpec::InlineSecret {
                 secret: secret.clone(),
             },
         ),
         (None, Some(env)) => (
-            "static_bearer".to_string(),
+            SelfHostedAuthMethod::StaticBearer.as_str().to_string(),
             meerkat_core::CredentialSourceSpec::Env {
                 env: env.clone(),
                 fallback: Vec::new(),
             },
         ),
         (None, None) => (
-            "none".to_string(),
+            SelfHostedAuthMethod::None.as_str().to_string(),
             meerkat_core::CredentialSourceSpec::PlatformDefault,
         ),
     };
@@ -7180,9 +7187,12 @@ fn mcp_server_may_need_oauth(server: &meerkat_core::mcp_config::McpServerConfig)
 
 #[cfg(feature = "mcp")]
 fn mcp_ready_wait_timeout(max_server_timeout_secs: u32, mcp_auth: CliMcpAuthMode) -> Duration {
+    // K14: no artificial cap — the wait honors the configured per-server
+    // connect timeout; expiry surfaces as a typed `McpNotReady` fault that
+    // aborts the run instead of warn-and-proceed.
     let base = Duration::from_secs(max_server_timeout_secs as u64 + 5);
     match mcp_auth {
-        CliMcpAuthMode::Stored => Duration::from_secs(base.as_secs().min(60)),
+        CliMcpAuthMode::Stored => base,
         CliMcpAuthMode::Interactive => base + meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT,
     }
 }
@@ -7275,7 +7285,7 @@ async fn create_mcp_tools(
 
     let should_wait_for_mcp = wait_for_mcp || has_oauth_candidate;
     if should_wait_for_mcp && result.pending_count > 0 {
-        // Compute timeout: max(connect_timeout_secs) + 5s, capped at 60s
+        // Compute timeout: max(connect_timeout_secs) + 5s
         let max_server_timeout = servers_with_scope
             .iter()
             .filter_map(|s| s.server.connect_timeout_secs)
@@ -7289,7 +7299,13 @@ async fn create_mcp_tools(
             total_timeout.as_secs()
         );
 
-        let notices = adapter.wait_until_ready(total_timeout).await;
+        // K14: wait-for-mcp is fail-closed — servers still pending at the
+        // deadline surface as a typed `McpNotReady` fault that aborts the run
+        // before the first turn, never a warn-and-proceed.
+        let notices = adapter
+            .wait_until_ready(total_timeout)
+            .await
+            .map_err(|not_ready| anyhow::anyhow!("{not_ready}"))?;
         for notice in &notices {
             if notice.status_text().starts_with("failed") {
                 eprintln!(
@@ -7378,33 +7394,6 @@ struct CliRuntimeExecutor {
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
-fn cli_render_context_append_text(
-    content: &meerkat_core::lifecycle::run_primitive::CoreRenderable,
-) -> String {
-    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
-
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
 fn cli_terminal_pre_turn_context_appends(
     primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive,
 ) -> Vec<meerkat_core::PendingSystemContextAppend> {
@@ -7421,7 +7410,7 @@ fn cli_terminal_pre_turn_context_appends(
         .context_appends
         .iter()
         .map(|append| meerkat_core::PendingSystemContextAppend {
-            text: cli_render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
@@ -7639,7 +7628,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
 
         Ok(
             meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: match &primitive {
                         meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
@@ -7650,7 +7639,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 result,
@@ -8450,7 +8438,7 @@ async fn run_agent(
     output: CliOutputSelection,
     stream: bool,
     stream_policy: Option<stream_renderer::StreamRenderPolicy>,
-    provider_params: Option<serde_json::Value>,
+    provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     no_web_search: bool,
     output_schema: Option<OutputSchema>,
     structured_output_retries: Option<u32>,
@@ -8790,12 +8778,10 @@ async fn run_agent(
         let create_req = CreateSessionRequest {
             model: model.to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt,
             max_tokens: Some(max_tokens),
             event_tx: output_pipeline.event_sender(),
 
-            skill_references: None,
             // Always defer — the runtime adapter handles execution.
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -9464,12 +9450,10 @@ async fn resume_session_with_llm_override(
                 .create_session(CreateSessionRequest {
                     model,
                     prompt: prompt.clone().into(),
-                    render_metadata: None,
                     system_prompt,
                     max_tokens,
                     event_tx: output_pipeline.event_sender(),
 
-                    skill_references: None,
                     // Always defer — runtime adapter handles execution.
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -10149,13 +10133,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: "".into(),
-                render_metadata: None,
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
                     .or_else(|| create.system_prompt.clone()),
                 max_tokens: create.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -12566,16 +12548,17 @@ where
     if let Some(policy) = config_policy {
         return Ok(policy);
     }
-    Ok(TrustPolicy::Permissive)
+    // K18: the default is the typed owner's default — `TrustPolicy::Strict`
+    // (fail closed). Accepting an unsigned/unknown-signer pack requires an
+    // explicit `--trust permissive` / RKAT_TRUST_POLICY / config opt-in.
+    Ok(TrustPolicy::default())
 }
 
+/// Parse through the typed owner's serde taxonomy (`TrustPolicy` is
+/// `snake_case`-tagged) — the CLI keeps no duplicate policy-string table.
 #[cfg(feature = "mob")]
 fn parse_trust_policy(raw: &str) -> Option<TrustPolicy> {
-    match raw.to_ascii_lowercase().as_str() {
-        "permissive" => Some(TrustPolicy::Permissive),
-        "strict" => Some(TrustPolicy::Strict),
-        _ => None,
-    }
+    serde_json::from_value(serde_json::Value::String(raw.to_ascii_lowercase())).ok()
 }
 
 #[cfg(feature = "mob")]
@@ -12776,31 +12759,47 @@ fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
         .join("trusted-signers.toml")
 }
 
+/// K18: the runtime's deploy capability set is expressed in the typed
+/// capability vocabulary (`MobpackCapabilityId`), not raw token strings.
 #[cfg(feature = "mob")]
-fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet<String> {
-    let mut caps = std::collections::BTreeSet::from([
-        "core".to_string(),
-        "skills".to_string(),
-        "hooks".to_string(),
-    ]);
+fn runtime_capabilities(
+    surface: DeploySurfaceArg,
+) -> Vec<meerkat_contracts::capability::MobpackCapabilityId> {
+    use meerkat_contracts::capability::{
+        CapabilityId, DeploySurfaceCapabilityId, MobpackCapabilityId,
+    };
+    let mut caps = vec![
+        MobpackCapabilityId::DeploySurface(DeploySurfaceCapabilityId::Core),
+        MobpackCapabilityId::Known(CapabilityId::Skills),
+        MobpackCapabilityId::Known(CapabilityId::Hooks),
+    ];
     #[cfg(feature = "comms")]
-    caps.insert("comms".to_string());
+    caps.push(MobpackCapabilityId::Known(CapabilityId::Comms));
     #[cfg(feature = "mcp")]
-    caps.insert("mcp".to_string());
+    caps.push(MobpackCapabilityId::DeploySurface(
+        DeploySurfaceCapabilityId::Mcp,
+    ));
     if matches!(surface, DeploySurfaceArg::Rpc) {
-        caps.insert("rpc".to_string());
+        caps.push(MobpackCapabilityId::DeploySurface(
+            DeploySurfaceCapabilityId::Rpc,
+        ));
     }
     caps
 }
 
+/// K18: required capabilities are compared by typed [`MobpackCapabilityId`],
+/// never by raw token string. A requirement that does not classify into the
+/// typed vocabulary (`Unknown`) can never be satisfied and fails closed.
 #[cfg(feature = "mob")]
 fn validate_required_capabilities(
     manifest: &meerkat_mob_pack::manifest::MobpackManifest,
-    runtime_caps: &std::collections::BTreeSet<String>,
+    runtime_caps: &[meerkat_contracts::capability::MobpackCapabilityId],
 ) -> Result<(), meerkat_mob_pack::validate::PackValidationError> {
+    use meerkat_contracts::capability::MobpackCapabilityId;
     if let Some(requires) = &manifest.requires {
         for required in &requires.capabilities {
-            if !runtime_caps.contains(required.token()) {
+            let id = required.id();
+            if matches!(id, MobpackCapabilityId::Unknown) || !runtime_caps.contains(&id) {
                 return Err(
                     meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(
                         required.token().to_string(),
@@ -13283,7 +13282,7 @@ mod tests {
         };
 
         assert_eq!(
-            cli_render_context_append_text(&content),
+            content.render_text(),
             meerkat_core::types::SystemNoticeMessage::with_blocks(
                 meerkat_core::types::SystemNoticeKind::Comms,
                 Some("Peer terminal response context".to_string()),
@@ -15632,7 +15631,7 @@ default_model = "gemma"
         assert_eq!(appends.len(), 1);
         assert_eq!(appends[0].source.as_deref(), Some(append_key));
         assert!(
-            appends[0].text.contains("ash twelve"),
+            appends[0].content.render_text().contains("ash twelve"),
             "terminal peer-response context must reach the CLI start_turn request"
         );
     }
@@ -16889,10 +16888,12 @@ url = "https://user.example/mcp"
     #[cfg(feature = "mcp")]
     #[test]
     fn test_cli_mcp_interactive_wait_budget_includes_browser_login_timeout() {
+        // K14: no artificial cap — stored mode honors the configured
+        // per-server connect timeout; expiry is a typed `McpNotReady` fault.
         assert_eq!(
             mcp_ready_wait_timeout(120, CliMcpAuthMode::Stored),
-            std::time::Duration::from_secs(60),
-            "stored mode keeps the legacy readiness cap"
+            std::time::Duration::from_secs(125),
+            "stored mode honors the configured connect timeout without a cap"
         );
         assert_eq!(
             mcp_ready_wait_timeout(10, CliMcpAuthMode::Interactive),
@@ -17153,9 +17154,19 @@ url = "https://user.example/mcp"
             .await
             .expect("pack before validate");
 
-        let ok_output = execute_mob_validate(&scope, &valid_pack, None)
+        // K18 regression: with no explicit trust opt-in anywhere, the typed
+        // owner's fail-closed default (Strict) rejects the unsigned pack.
+        let default_err = execute_mob_validate(&scope, &valid_pack, None)
             .await
-            .expect("validate should succeed");
+            .expect_err("default trust policy is Strict; unsigned pack must be rejected");
+        assert!(
+            default_err.to_string().contains("unsigned pack"),
+            "default-strict rejection should mention the unsigned pack: {default_err}"
+        );
+
+        let ok_output = execute_mob_validate(&scope, &valid_pack, Some(TrustPolicyArg::Permissive))
+            .await
+            .expect("validate should succeed under explicit permissive opt-in");
         assert!(
             ok_output.starts_with("valid\t"),
             "validate success should report digest"
@@ -17221,9 +17232,15 @@ url = "https://user.example/mcp"
 
         // No wasm artifact supplied: must fail closed, never emit a bundle.
         let missing_out = temp.path().join("web-missing");
-        let missing_err = execute_mob_web_build(&scope, &valid_pack, &missing_out, None, None)
-            .await
-            .expect_err("web build must fail closed when no wasm artifact is supplied");
+        let missing_err = execute_mob_web_build(
+            &scope,
+            &valid_pack,
+            &missing_out,
+            None,
+            Some(TrustPolicyArg::Permissive),
+        )
+        .await
+        .expect_err("web build must fail closed when no wasm artifact is supplied");
         assert!(
             missing_err.to_string().contains("--wasm"),
             "missing-wasm failure should name the required artifact: {missing_err}"
@@ -17239,10 +17256,15 @@ url = "https://user.example/mcp"
             .await
             .expect("write empty wasm fixture");
         let empty_out = temp.path().join("web-empty");
-        let empty_err =
-            execute_mob_web_build(&scope, &valid_pack, &empty_out, Some(&empty_wasm), None)
-                .await
-                .expect_err("web build must reject a 0-byte wasm artifact");
+        let empty_err = execute_mob_web_build(
+            &scope,
+            &valid_pack,
+            &empty_out,
+            Some(&empty_wasm),
+            Some(TrustPolicyArg::Permissive),
+        )
+        .await
+        .expect_err("web build must reject a 0-byte wasm artifact");
         assert!(
             empty_err.to_string().contains("empty"),
             "empty-wasm failure should mention the empty artifact: {empty_err}"
@@ -17255,10 +17277,15 @@ url = "https://user.example/mcp"
             .await
             .expect("write real wasm fixture");
         let real_out = temp.path().join("web-real");
-        let rendered =
-            execute_mob_web_build(&scope, &valid_pack, &real_out, Some(&real_wasm), None)
-                .await
-                .expect("web build should succeed with a real wasm artifact");
+        let rendered = execute_mob_web_build(
+            &scope,
+            &valid_pack,
+            &real_out,
+            Some(&real_wasm),
+            Some(TrustPolicyArg::Permissive),
+        )
+        .await
+        .expect("web build should succeed with a real wasm artifact");
         assert!(
             rendered.starts_with("web\t"),
             "successful web build should report the output path: {rendered}"
@@ -17296,12 +17323,16 @@ url = "https://user.example/mcp"
         .expect("env should win when cli missing");
         assert_eq!(from_env, TrustPolicy::Strict);
 
-        let from_config = resolve_trust_policy(None, |_| None, Some(TrustPolicy::Strict))
+        let from_config = resolve_trust_policy(None, |_| None, Some(TrustPolicy::Permissive))
             .expect("config should win when cli/env missing");
-        assert_eq!(from_config, TrustPolicy::Strict);
+        assert_eq!(from_config, TrustPolicy::Permissive);
 
-        let from_default = resolve_trust_policy(None, |_| None, None).expect("default permissive");
-        assert_eq!(from_default, TrustPolicy::Permissive);
+        // K18 regression: with no explicit opt-in anywhere, the resolved
+        // policy is the typed owner's fail-closed default (`Strict`) — an
+        // unsigned pack is rejected unless permissive is explicitly chosen.
+        let from_default = resolve_trust_policy(None, |_| None, None).expect("default strict");
+        assert_eq!(from_default, TrustPolicy::Strict);
+        assert_eq!(from_default, TrustPolicy::default());
     }
 
     #[cfg(feature = "mob")]
@@ -17314,6 +17345,70 @@ version = "1.0.0"
 "#,
         )
         .expect("manifest fixture")
+    }
+
+    /// K18 regression: required capabilities are compared by typed id and an
+    /// unclassifiable (`Unknown`) requirement fails closed — never satisfied
+    /// by raw token-string coincidence.
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_required_capabilities_typed_comparison_fails_closed_on_unknown() {
+        let manifest: meerkat_mob_pack::manifest::MobpackManifest = toml::from_str(
+            r#"
+[mobpack]
+name = "deploy-fixture"
+version = "1.0.0"
+
+[requires]
+capabilities = ["skills", "totally-made-up-capability"]
+"#,
+        )
+        .expect("manifest fixture");
+        let caps = runtime_capabilities(DeploySurfaceArg::Cli);
+        let err = validate_required_capabilities(&manifest, &caps)
+            .expect_err("unknown capability token must fail closed");
+        assert!(matches!(
+            err,
+            meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(token)
+                if token == "totally-made-up-capability"
+        ));
+
+        let satisfied: meerkat_mob_pack::manifest::MobpackManifest = toml::from_str(
+            r#"
+[mobpack]
+name = "deploy-fixture"
+version = "1.0.0"
+
+[requires]
+capabilities = ["core", "skills", "hooks"]
+"#,
+        )
+        .expect("manifest fixture");
+        validate_required_capabilities(&satisfied, &caps)
+            .expect("typed-classified requirements present in the runtime set are satisfied");
+    }
+
+    /// K18 regression: the OAuth login provider taxonomy is owned by
+    /// `OAuthProviderIdentity::from_alias`; the deleted CLI-local alias table
+    /// (which accepted the divergent hyphenated "code-assist") stays deleted.
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_login_provider_parse_consumes_canonical_alias_taxonomy() {
+        assert_eq!(LoginProvider::parse("gemini"), Some(LoginProvider::Google));
+        assert_eq!(
+            LoginProvider::parse("code_assist"),
+            Some(LoginProvider::Google)
+        );
+        assert_eq!(
+            LoginProvider::parse("claude.ai"),
+            Some(LoginProvider::Anthropic)
+        );
+        assert_eq!(LoginProvider::parse("chatgpt"), Some(LoginProvider::OpenAi));
+        // The hyphenated alias only ever existed in the CLI's second table —
+        // the canonical taxonomy does not accept it, so neither does the CLI.
+        assert_eq!(LoginProvider::parse("code-assist"), None);
+        // Non-interactive-only identity is not an interactive login provider.
+        assert_eq!(LoginProvider::parse("anthropic_console_api_key"), None);
     }
 
     #[cfg(feature = "mob")]
@@ -17423,7 +17518,7 @@ capabilities = ["definitely_missing_capability"]
             &scope,
             &pack_out,
             "hello",
-            None,
+            Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
         )
@@ -17451,7 +17546,7 @@ capabilities = ["definitely_missing_capability"]
             &scope,
             &pack_out,
             "hello",
-            None,
+            Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
         )
@@ -17493,7 +17588,7 @@ capabilities = ["definitely_missing_capability"]
             &scope,
             &pack_out,
             "hello",
-            None,
+            Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
         )
@@ -17533,7 +17628,7 @@ capabilities = ["definitely_missing_capability"]
             &scope,
             &pack_out,
             "hello",
-            None,
+            Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
         )
@@ -17571,7 +17666,7 @@ capabilities = ["definitely_missing_capability"]
                 &pack_for_deploy,
                 "hello",
                 DeployInvocation {
-                    cli_trust_policy: None,
+                    cli_trust_policy: Some(TrustPolicyArg::Permissive),
                     surface: DeploySurfaceArg::Rpc,
                     cli_overrides: CliOverrides::default(),
                     rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
@@ -17752,7 +17847,7 @@ capabilities = ["definitely_missing_capability"]
             &scope,
             &pack_out,
             "hello",
-            None,
+            Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
         )
@@ -18171,7 +18266,7 @@ capabilities = ["definitely_missing_capability"]
             &pack_out,
             "hello",
             DeployInvocation {
-                cli_trust_policy: None,
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
                 surface: DeploySurfaceArg::Cli,
                 cli_overrides: CliOverrides {
                     model: Some("override-model-for-deploy".to_string()),
@@ -18404,12 +18499,10 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -18461,11 +18554,9 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -18582,11 +18673,9 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -18724,11 +18813,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -18864,11 +18951,9 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -18939,11 +19024,9 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -19013,11 +19096,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -19084,11 +19165,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -19371,9 +19450,11 @@ capabilities = ["definitely_missing_capability"]
         ];
         let result = parse_provider_params(&params)?;
         let json = result.ok_or("missing result")?;
+        // K2: bare KEY=VALUE accepts JSON literals so typed numeric/boolean
+        // knobs parse into the typed override; unquoted text stays a string.
         assert_eq!(json["reasoning_effort"], "high");
-        assert_eq!(json["seed"], "42");
-        assert_eq!(json["custom_flag"], "true");
+        assert_eq!(json["seed"], 42);
+        assert_eq!(json["custom_flag"], true);
         Ok(())
     }
 
@@ -20315,5 +20396,187 @@ supports_reasoning = true
             json["skill_diagnostics"]["source_health"]["state"],
             "degraded"
         );
+    }
+}
+
+/// K23: docs-CLI-examples gate. Every ```-fenced `rkat` invocation in
+/// `docs/**.mdx` must parse against the real clap definition
+/// (`Cli::try_parse_from`), so a documented invocation the binary would
+/// reject (e.g. `--sign` without `--signer-id`) turns this test red instead
+/// of shipping as teaching material.
+#[cfg(test)]
+mod docs_cli_examples {
+    use clap::Parser;
+
+    /// Minimal quote-aware shell-ish splitter for doc examples. Doc commands
+    /// that need real shell features (pipes, substitution, placeholders) are
+    /// skipped by [`skippable`], so this only needs words and quotes.
+    fn split_tokens(line: &str) -> Option<Vec<String>> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let chars = line.chars();
+        let mut in_single = false;
+        let mut in_double = false;
+        for ch in chars {
+            match ch {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                c if c.is_whitespace() && !in_single && !in_double => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            }
+        }
+        if in_single || in_double {
+            return None;
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        Some(tokens)
+    }
+
+    /// Doc lines that are illustrative shapes rather than literal
+    /// invocations: placeholders, shell composition, or output elision.
+    fn skippable(line: &str) -> bool {
+        line.contains('<')
+            || line.contains('[')
+            || line.contains("...")
+            || line.contains('|')
+            || line.contains('>')
+            || line.contains("$(")
+            || line.contains('`')
+            || line.contains('$')
+            || line.contains('#')
+    }
+
+    fn fenced_command_lines(text: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut in_fence = false;
+        let mut pending = String::new();
+        for raw in text.lines() {
+            let trimmed = raw.trim();
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                pending.clear();
+                continue;
+            }
+            if !in_fence {
+                continue;
+            }
+            let mut line = trimmed.to_string();
+            if !pending.is_empty() {
+                line = format!("{pending} {line}");
+                pending.clear();
+            }
+            if let Some(stripped) = line.strip_suffix('\\') {
+                pending = stripped.trim_end().to_string();
+                continue;
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    #[test]
+    fn fenced_rkat_doc_examples_parse_against_clap() {
+        let docs_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("docs");
+        let mut checked = 0usize;
+        let mut failures = Vec::new();
+        let mut stack = vec![docs_root];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("mdx") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in fenced_command_lines(&text) {
+                    let line = line.strip_prefix("$ ").unwrap_or(&line).to_string();
+                    if !(line.starts_with("rkat ") || line == "rkat") {
+                        continue;
+                    }
+                    if skippable(&line) {
+                        continue;
+                    }
+                    let Some(tokens) = split_tokens(&line) else {
+                        continue;
+                    };
+                    checked += 1;
+                    // Validate through the binary's REAL ingress: the arg
+                    // normalization shim (default-run injection, resume
+                    // shortcuts) runs before clap in `main`.
+                    let normalized =
+                        super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+                    if let Err(err) = super::Cli::try_parse_from(&normalized) {
+                        // `--help` / `--version` examples parse successfully;
+                        // clap models their output as an "error" kind.
+                        if !matches!(
+                            err.kind(),
+                            clap::error::ErrorKind::DisplayHelp
+                                | clap::error::ErrorKind::DisplayVersion
+                        ) {
+                            failures.push(format!("{}: `{line}`: {err}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "docs-CLI-examples gate found no fenced rkat invocations to check"
+        );
+        assert!(
+            failures.is_empty(),
+            "documented rkat invocations the CLI rejects:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// K18 ratchet: the CLI keeps no provider/auth-method alias tables of its
+/// own — provider identity, auth-method taxonomy, and the method→persisted
+/// mode mapping are consumed from their typed owners (`Provider`,
+/// `NormalizedAuthMethod`, `OAuthProviderIdentity`). The retired alias
+/// helpers must not reappear in production code.
+#[cfg(test)]
+mod no_cli_alias_tables {
+    #[test]
+    fn cli_production_code_has_no_alias_tables() {
+        let text = include_str!("main.rs");
+        // Scan only production code: everything before the first test module.
+        let production_end = text.find("#[cfg(test)]").unwrap_or(text.len());
+        let production = &text[..production_end];
+        for needle in ["fn oauth_alias", "\"code-assist\""] {
+            assert!(
+                !production.contains(needle),
+                "retired CLI alias table reappeared in production code (K18): {needle}"
+            );
+        }
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !(trimmed.contains("== \"static_bearer\"") || trimmed.contains("== \"api_key\"")),
+                "CLI must not infer auth modes from method strings (K18): {line}"
+            );
+        }
     }
 }

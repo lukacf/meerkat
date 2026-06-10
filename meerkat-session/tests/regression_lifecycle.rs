@@ -87,9 +87,11 @@ impl SessionAgent for MockAgent {
             let _ = event_tx
                 .send(AgentEvent::RunFailed {
                     session_id: self.session_id.clone(),
-                    error_class: meerkat_core::event::AgentErrorClass::Internal,
-                    error: "simulated failure".to_string(),
-                    error_report: None,
+                    error_report: meerkat_core::event::AgentErrorReport {
+                        class: meerkat_core::event::AgentErrorClass::Internal,
+                        reason: None,
+                        message: "simulated failure".to_string(),
+                    },
                     terminal_cause_kind: None,
                 })
                 .await;
@@ -101,7 +103,9 @@ impl SessionAgent for MockAgent {
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id: self.session_id.clone(),
-                prompt: meerkat_core::ContentInput::Text("test".to_string()),
+                input: meerkat_core::types::RunInput::Content {
+                    content: meerkat_core::ContentInput::Text("test".to_string()),
+                },
             })
             .await;
 
@@ -618,12 +622,10 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
 
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,

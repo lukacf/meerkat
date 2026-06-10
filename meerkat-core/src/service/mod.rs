@@ -165,22 +165,25 @@ impl SystemContextStageError {
 }
 
 /// Request to create a new session and run the first turn.
+///
+/// Initial-turn runtime semantics (render metadata, skill references,
+/// handling mode, tool overlays, …) have exactly ONE carrier:
+/// `SessionBuildOptions::initial_turn_metadata` (a
+/// [`crate::lifecycle::run_primitive::RuntimeTurnMetadata`]). The former
+/// request-level `render_metadata` / `skill_references` duplicates are gone
+/// (dogma K10) — callers populate the typed carrier in `build`.
 #[derive(Debug)]
 pub struct CreateSessionRequest {
     /// Model name (e.g. "claude-opus-4-8").
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
-    /// Optional normalized rendering metadata for the initial prompt.
-    pub render_metadata: Option<RenderMetadata>,
     /// Optional system prompt override.
     pub system_prompt: Option<String>,
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Canonical SkillKeys to resolve and inject for the first turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
     pub initial_turn: InitialTurnPolicy,
     /// How to treat `prompt` when `initial_turn == Defer`.
@@ -237,7 +240,9 @@ pub struct SessionBuildOptions {
     pub peer_meta: Option<PeerMeta>,
     pub resume_session: Option<Session>,
     pub budget_limits: Option<BudgetLimits>,
-    pub provider_params: Option<serde_json::Value>,
+    /// Typed explicit provider parameter overrides for this build (K2:
+    /// the JSON bag is retired; surfaces parse fail-closed at their ingress).
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Serializable tool definitions used to reconstruct recoverable
     /// surface-owned dispatchers during session resume/rebuild.
@@ -322,7 +327,6 @@ pub struct SessionBuildOptions {
     ///
     /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
     /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
-    /// Same tradeoff as `provider_params`.
     pub app_context: Option<serde_json::Value>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
@@ -1777,6 +1781,27 @@ pub trait SessionService: Send + Sync {
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
             "record_live_terminal_error".to_string(),
+        ))
+    }
+
+    /// Record a live transport output-audio delivery degradation against a
+    /// session.
+    ///
+    /// K16: when a live transport drops queued output-audio packets (e.g.
+    /// WebRTC RTP pacing-queue backpressure), the dropped-delivery fact must
+    /// be observable on the session's owned event stream — not a
+    /// transport-local counter with no live reader. `dropped` carries the
+    /// cumulative drop count for the channel.
+    ///
+    /// Returns `Unsupported` by default; runtime-backed services that own a
+    /// live session event stream override this.
+    async fn record_live_output_audio_degraded(
+        &self,
+        _id: &SessionId,
+        _dropped: u64,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "record_live_output_audio_degraded".to_string(),
         ))
     }
 }

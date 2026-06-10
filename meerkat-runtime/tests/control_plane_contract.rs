@@ -15,7 +15,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorError,
 };
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_runtime::completion::CompletionOutcome;
@@ -121,13 +121,12 @@ impl CoreExecutor for RecordingExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+            receipt: RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: self.terminal.clone(),

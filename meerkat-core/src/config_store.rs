@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 /// Resolved paths attached to a config store context.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigResolvedPaths {
     pub root: String,

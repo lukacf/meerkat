@@ -1325,7 +1325,40 @@ mod tests {
     }
 
     #[test]
-    fn classify_lifecycle_without_peer_param_falls_back_to_sender() {
+    fn classify_lifecycle_without_peer_subject_is_rejected_at_ingress() {
+        // K15: a peer lifecycle notice without a valid typed peer subject is
+        // a rejected input at classify ingress — it is never attributed to
+        // the sender name. (Fails-old: the missing subject silently fell back
+        // to the sender's display name.)
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("orchestrator", &sender.public_key());
+        let ctx = make_context(true, trusted, vec![]);
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "peer": "" }),
+            serde_json::json!({ "peer": 42 }),
+        ] {
+            let envelope = make_envelope(
+                &sender,
+                MessageKind::Request {
+                    intent: "mob.peer_added".to_string(),
+                    params,
+                    blocks: None,
+                    handling_mode: None,
+                },
+            );
+            let result = ctx.prepare(InboxItem::External { envelope });
+            assert!(
+                result.is_none(),
+                "lifecycle request without a valid peer subject must fail closed at ingress"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_lifecycle_prefers_typed_peer_spec_subject() {
+        // K15: `peer_spec` (the canonical typed identity from the wire
+        // contract) wins over the presentation `peer` field.
         let sender = make_keypair();
         let trusted = make_trusted_peers("orchestrator", &sender.public_key());
         let ctx = make_context(true, trusted, vec![]);
@@ -1333,15 +1366,23 @@ mod tests {
             &sender,
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
-                params: serde_json::json!({}),
+                params: serde_json::json!({
+                    "peer": "new-agent",
+                    "peer_spec": {
+                        "name": "mob/new-agent",
+                        "peer_id": "pid-new-agent",
+                        "address": "inproc://mob/new-agent"
+                    }
+                }),
                 blocks: None,
                 handling_mode: None,
             },
         );
-        let item = InboxItem::External { envelope };
-        let result = ctx.prepare(item).expect("should classify");
+        let result = ctx
+            .prepare(InboxItem::External { envelope })
+            .expect("typed lifecycle params should classify");
         assert_eq!(result.class, PeerInputClass::PeerLifecycleAdded);
-        assert_eq!(result.lifecycle_peer.as_deref(), Some("orchestrator"));
+        assert_eq!(result.lifecycle_peer.as_deref(), Some("mob/new-agent"));
     }
 
     #[test]

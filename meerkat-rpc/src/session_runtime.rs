@@ -40,7 +40,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal}
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
@@ -81,9 +81,7 @@ use meerkat::{
 use meerkat_core::ToolConfigChangeOperation;
 
 use meerkat::session_runtime::recovery::{parse_provider_override, unknown_provider_message};
-use meerkat::session_runtime::staged_promotion::{
-    pending_system_context_appends, render_context_append_text,
-};
+use meerkat::session_runtime::staged_promotion::pending_system_context_appends;
 
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
@@ -1423,6 +1421,43 @@ fn approval_service_from_persistence(
     }
 }
 
+/// Construct the wire replay envelope from the durable stored-event identity.
+///
+/// This is the only envelope constructor on the durable replay path: every
+/// identity fact is a projection of the persisted [`meerkat::StoredEvent`]
+/// row (`seq`, `timestamp`, `mob_id`, payload) — never a fabricated
+/// session-scoped identity. The fabricating `EventReplayEnvelope::session`
+/// shortcut must not appear on replay/rehydrate paths; it is reserved for
+/// genuinely session-minted live events.
+fn replay_envelope_from_stored(
+    session_id: &SessionId,
+    stored: meerkat::StoredEvent,
+) -> meerkat_contracts::EventReplayEnvelope {
+    let scope = meerkat_contracts::EventReplayScope::Session {
+        session_id: session_id.clone(),
+    };
+    let timestamp_ms = stored
+        .timestamp
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    meerkat_contracts::EventReplayEnvelope {
+        event_id: meerkat_contracts::EventReplayEventId {
+            scope: scope.clone(),
+            sequence: stored.seq,
+        },
+        cursor: meerkat_contracts::EventReplayCursor::new(scope.clone(), stored.seq),
+        timestamp_ms,
+        source: scope,
+        session_id: Some(session_id.clone()),
+        mob_id: stored.mob_id,
+        agent_identity: None,
+        run_id: None,
+        metadata: meerkat_core::RuntimeMetadata::default(),
+        event: stored.event,
+    }
+}
+
 /// Snapshot of the slot-shared realm/instance/backend triple.
 ///
 /// Phase 4 R1: the realm context is held inside the inner
@@ -1449,14 +1484,24 @@ impl SessionRuntime {
         })
     }
 
-    fn turn_keep_alive_policy(
+    /// Map the wire `Option<bool>` keep-alive request onto the typed
+    /// tri-state carrier: `Some(true)` -> `Enable(policy)`, `Some(false)` ->
+    /// `Disable` (explicit operator intent), `None` -> preserve. Dogma K13:
+    /// `Some(false)` must NOT be dropped into preserve.
+    fn turn_keep_alive_directive(
         requested: Option<bool>,
-    ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
-        requested.and_then(|keep_alive| {
-            keep_alive.then(|| meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                ttl: std::time::Duration::from_secs(30),
-                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-            })
+    ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAliveDirective> {
+        requested.map(|keep_alive| {
+            if keep_alive {
+                meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                    meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(30),
+                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                    },
+                )
+            } else {
+                meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable
+            }
         })
     }
 
@@ -1487,25 +1532,9 @@ impl SessionRuntime {
             ProviderParamsOverride, TurnMetadataOverride,
         };
 
-        // The tri-state already lives on `TurnOverrides`; only the typed value
-        // mapping (`serde_json::Value` -> `ProviderParamsOverride`) remains.
-        let provider_params = overrides.and_then(|ov| {
-            ov.provider_params
-                .as_ref()
-                .map(|directive| match directive {
-                    TurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
-                    TurnMetadataOverride::Set(params) => {
-                        let provider = ov
-                            .provider
-                            .as_deref()
-                            .or(provider_hint)
-                            .unwrap_or("unknown");
-                        TurnMetadataOverride::Set(
-                            ProviderParamsOverride::from_legacy_provider_value(provider, params),
-                        )
-                    }
-                })
-        });
+        // K2: `TurnOverrides` carries the typed `ProviderParamsOverride`
+        // tri-state end-to-end — no legacy JSON round-trip at this seam.
+        let provider_params = overrides.and_then(|ov| ov.provider_params.clone());
         let auth_binding = overrides.and_then(|ov| ov.auth_binding.clone());
         let provider = overrides.and_then(|ov| {
             ov.provider
@@ -1515,7 +1544,7 @@ impl SessionRuntime {
         });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
-            keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
+            keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_directive(ov.keep_alive)),
             skill_references,
             flow_tool_overlay,
             additional_instructions: Self::turn_additional_instructions(additional_instructions),
@@ -1554,27 +1583,19 @@ impl SessionRuntime {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let metadata = metadata?;
-        // Map the typed `ProviderParamsOverride` value back to the legacy JSON
-        // value the surface seam carries; the tri-state shape is preserved.
-        let provider_params = metadata
-            .provider_params
-            .as_ref()
-            .map(|directive| match directive {
-                TurnMetadataOverride::Set(params) => {
-                    TurnMetadataOverride::Set(params.to_legacy_provider_value())
-                }
-                TurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
-            });
+        // K2: the surface seam carries the typed `ProviderParamsOverride`
+        // tri-state; pass it through unchanged.
+        let provider_params = metadata.provider_params.clone();
         let auth_binding = metadata.auth_binding.clone();
-        // Reconstruct the tri-state keep-alive request from the typed
-        // keep-alive policy rather than collapsing presence: a materialized
-        // `KeepAlivePolicy` is an explicit `Enable`, while its absence is
-        // `Preserve` (no per-turn keep-alive intent). `Disable` does not
-        // survive in `RuntimeTurnMetadata` because it carries no negative
-        // keep-alive policy slot; the tri-state `Disable` lives only on the
-        // inbound `TurnOverrides.keep_alive: Option<bool>` and is folded into
-        // `RuntimeKeepAliveRequest` at admission, not rehydrated from metadata.
-        let keep_alive = metadata.keep_alive.map(|_| true);
+        // Rehydrate the full tri-state from the typed directive carrier:
+        // Enable -> Some(true), Disable -> Some(false), absent -> None
+        // (preserve). Dogma K13: presence no longer collapses to `true`.
+        let keep_alive = metadata.keep_alive.map(|directive| {
+            matches!(
+                directive,
+                meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(_)
+            )
+        });
         let overrides = crate::handlers::turn::TurnOverrides {
             keep_alive,
             model: metadata.model.as_ref().map(ToString::to_string),
@@ -2794,8 +2815,14 @@ impl SessionRuntime {
     /// Persistent TokenStore used by OAuth-backed bindings (shared with
     /// the AgentFactory so login writes + resolve reads see the same
     /// credentials).
-    pub fn token_store(&self) -> Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> {
-        self.factory.token_store.clone()
+    ///
+    /// K6: a default-store open FAILURE is a typed fault, not an absent
+    /// store — it propagates as `Err` instead of being collapsed to `None`.
+    pub fn token_store(
+        &self,
+    ) -> Result<Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>, meerkat::FactoryError>
+    {
+        self.factory.resolution_token_store()
     }
 
     pub fn auth_lease_handle(&self) -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
@@ -3690,6 +3717,19 @@ impl SessionRuntime {
             .await
     }
 
+    /// Record a live transport output-audio delivery degradation, routing
+    /// the typed fact onto the session's owned event stream via the canonical
+    /// [`SessionService::record_live_output_audio_degraded`] seam (K16).
+    pub async fn record_live_output_audio_degraded(
+        &self,
+        session_id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), SessionError> {
+        self.service
+            .record_live_output_audio_degraded(session_id, dropped)
+            .await
+    }
+
     pub async fn append_realtime_transcript_event(
         &self,
         session_id: &SessionId,
@@ -3977,7 +4017,7 @@ impl SessionRuntime {
         }
         if let RunPrimitive::StagedInput(staged) = primitive {
             for append in &staged.context_appends {
-                let text = render_context_append_text(&append.content);
+                let text = append.content.render_text();
                 if !text.trim().is_empty() {
                     parts.push(text);
                 }
@@ -4067,13 +4107,12 @@ impl SessionRuntime {
             .map(|session| session.messages().len())
             .unwrap_or(0);
 
-        let receipt = RunBoundaryReceipt {
+        let receipt = RunBoundaryReceiptDraft {
             run_id,
             boundary: primitive.apply_boundary(),
             contributing_input_ids: primitive.contributing_input_ids().to_vec(),
             conversation_digest: None,
             message_count,
-            sequence: 0,
         };
         Ok(Some(CoreApplyOutput::without_terminal(receipt, None)))
     }
@@ -5407,12 +5446,9 @@ impl SessionRuntime {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: runtime_prompt.clone(),
-                render_metadata: None,
                 system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-
-                skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -5857,12 +5893,9 @@ impl SessionRuntime {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                render_metadata: None,
                 system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-
-                skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -6318,9 +6351,7 @@ impl SessionRuntime {
                 .append_system_context(
                     session_id,
                     AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            pending.text.clone(),
-                        ),
+                        content: pending.content.clone(),
                         source: pending.source.clone(),
                         idempotency_key: pending.idempotency_key.clone(),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -6336,7 +6367,10 @@ impl SessionRuntime {
     /// Interrupt a running turn on the given session.
     ///
     /// If the session is idle, this is a no-op.
-    pub async fn interrupt(&self, session_id: &SessionId) -> Result<(), RpcError> {
+    pub async fn interrupt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::wire::WireInterruptOutcome, RpcError> {
         let staged_info = self
             .staged_sessions
             .info(session_id)
@@ -6370,7 +6404,7 @@ impl SessionRuntime {
                 )
                 .await
             {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(meerkat_contracts::wire::WireInterruptOutcome::Interrupted),
                 Err(SessionError::NotRunning { .. } | SessionError::NotFound { .. }) => {
                     let result = meerkat_runtime::resolve_user_interrupt_public_result(
                         UserInterruptObservation::NotInterruptible,
@@ -6470,15 +6504,17 @@ impl SessionRuntime {
         session_id: &SessionId,
         result: UserInterruptPublicResult,
         conflict_state: Option<RuntimeState>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<meerkat_contracts::wire::WireInterruptOutcome, RpcError> {
         match result {
-            // #348: both a live cancellation and a staged-session no-op are
-            // non-error successes at this seam. The typed `StagedNoop` is owned
-            // by the machine; surfacing it as a distinct wire `{result:
-            // staged_noop}` is the L-sdks surface-signature change (downstream),
-            // so this runtime->rpc collapse keeps the success contract.
-            UserInterruptPublicResult::Interrupted | UserInterruptPublicResult::StagedNoop => {
-                Ok(())
+            // #348/K17: both non-error outcomes surface as the typed wire
+            // tri-state — a staged-session no-op is reported honestly as
+            // `staged_noop`, never collapsed into a fabricated live
+            // cancellation.
+            UserInterruptPublicResult::Interrupted => {
+                Ok(meerkat_contracts::wire::WireInterruptOutcome::Interrupted)
+            }
+            UserInterruptPublicResult::StagedNoop => {
+                Ok(meerkat_contracts::wire::WireInterruptOutcome::StagedNoop)
             }
             UserInterruptPublicResult::NotFound => Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
@@ -6553,7 +6589,10 @@ impl SessionRuntime {
     /// Unlike `interrupt`, this must not hard-cancel the current run. It is used
     /// by runtime peer ingress so queued work can proceed after a wait/yield
     /// boundary without aborting the in-flight turn.
-    pub async fn interrupt_yielding(&self, session_id: &SessionId) -> Result<(), RpcError> {
+    pub async fn interrupt_yielding(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::wire::WireInterruptOutcome, RpcError> {
         let staged_info = self
             .staged_sessions
             .info(session_id)
@@ -7253,14 +7292,7 @@ impl SessionRuntime {
         let events = stored
             .into_iter()
             .take(limit)
-            .map(|stored| {
-                meerkat_contracts::EventReplayEnvelope::session(
-                    session_id.clone(),
-                    stored.seq,
-                    stored.timestamp,
-                    stored.event,
-                )
-            })
+            .map(|stored| replay_envelope_from_stored(&session_id, stored))
             .collect();
         Ok(Some(meerkat_contracts::EventsListSinceResult {
             contract_version: meerkat_contracts::ContractVersion::CURRENT,
@@ -7849,17 +7881,30 @@ impl SessionRuntime {
                     })?;
             }
             None => {
-                // Reload all active servers.
-                let names = adapter.active_server_names().await;
-                for name in names {
-                    adapter
-                        .stage_reload(McpReloadTarget::ServerName(name))
-                        .await
-                        .map_err(|e| RpcError {
-                            code: error::INTERNAL_ERROR,
-                            message: e,
-                            data: None,
-                        })?;
+                // K14: the lifecycle owner's reload-all primitive stages the
+                // whole roster under one router lock and returns the typed
+                // report; a non-clean report is a typed wire fault, never a
+                // half-staged hand loop.
+                let report = adapter.stage_reload_all().await.map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: e.to_string(),
+                    data: None,
+                })?;
+                if !report.is_clean() {
+                    let failed = report
+                        .failed
+                        .iter()
+                        .map(|failure| format!("{}: {}", failure.server, failure.error))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!(
+                            "MCP reload-all staged {} server(s) but rejected: {failed}",
+                            report.staged.len()
+                        ),
+                        data: None,
+                    });
                 }
             }
         }
@@ -8288,6 +8333,62 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
+
+    /// Dogma K13: the inbound `Option<bool>` keep-alive request must map onto
+    /// the full typed tri-state — `Some(false)` is an explicit `Disable`, not
+    /// a silently-dropped no-op — and rehydration from persisted turn
+    /// metadata must read the tri-state back, not presence.
+    #[test]
+    fn keep_alive_request_maps_full_tri_state() {
+        use meerkat_core::lifecycle::run_primitive::KeepAliveDirective;
+
+        assert!(matches!(
+            SessionRuntime::turn_keep_alive_directive(Some(true)),
+            Some(KeepAliveDirective::Enable(_))
+        ));
+        assert!(matches!(
+            SessionRuntime::turn_keep_alive_directive(Some(false)),
+            Some(KeepAliveDirective::Disable)
+        ));
+        assert!(SessionRuntime::turn_keep_alive_directive(None).is_none());
+
+        // Rehydration: Disable survives as Some(false), not true/absent.
+        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            keep_alive: Some(KeepAliveDirective::Disable),
+            ..Default::default()
+        };
+        let overrides = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+            .expect("explicit disable is a non-empty override");
+        assert_eq!(overrides.keep_alive, Some(false));
+    }
+
+    /// Dogma K12: durable replay must project the persisted stream-envelope
+    /// identity (`mob_id`, durable `seq`, payload) — never fabricate a
+    /// session-scoped envelope with `mob_id: None`.
+    #[test]
+    fn replay_envelope_projects_stored_identity() {
+        let session_id = SessionId::new();
+        let stored = meerkat::StoredEvent {
+            seq: 42,
+            schema_version: 2,
+            timestamp: meerkat_core::time_compat::SystemTime::now(),
+            source: meerkat_core::event::EventSourceIdentity::runtime("runtime-7"),
+            mob_id: Some("mob-attributed".to_string()),
+            stream_seq: 9,
+            event: AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        };
+        let envelope = replay_envelope_from_stored(&session_id, stored);
+        assert_eq!(envelope.mob_id.as_deref(), Some("mob-attributed"));
+        assert_eq!(envelope.event_id.sequence, 42);
+        assert_eq!(envelope.cursor.sequence, 42);
+        assert_eq!(envelope.session_id.as_ref(), Some(&session_id));
+        assert!(matches!(
+            envelope.event,
+            AgentEvent::TextDelta { ref delta } if delta == "hello"
+        ));
+    }
     use futures::{StreamExt, stream};
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
@@ -8596,11 +8697,21 @@ mod tests {
             self_hosted_server_id: None,
             // Other fields differ — provider_params change must NOT trigger a
             // close-and-reopen. R11 scope is model + provider only.
-            provider_params: Some(serde_json::json!({"x": 1})),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.1),
+                    ..Default::default()
+                },
+            ),
             auth_binding: None,
         };
         let new = SessionLlmIdentity {
-            provider_params: Some(serde_json::json!({"x": 2})),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                },
+            ),
             ..id.clone()
         };
         assert!(
@@ -8855,7 +8966,7 @@ mod tests {
 
         assert_eq!(runtime_context.len(), 1);
         assert_eq!(
-            runtime_context[0].text,
+            runtime_context[0].content.render_text(),
             "Authoritative peer token is birch seventeen."
         );
         assert_eq!(
@@ -9529,11 +9640,9 @@ mod tests {
         CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text("service-created session".to_string()),
-            render_metadata: None,
             system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build_config.to_session_build_options()),
@@ -10454,7 +10563,7 @@ mod tests {
 
         assert_eq!(open_config.runtime_system_context.len(), 1);
         assert_eq!(
-            open_config.runtime_system_context[0].text,
+            open_config.runtime_system_context[0].content.render_text(),
             "Authoritative peer token is birch seventeen."
         );
         assert_eq!(
@@ -10758,7 +10867,7 @@ mod tests {
                     source.contains(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                     )
-                }) && append.text.contains("birch seventeen")
+                }) && append.content.render_text().contains("birch seventeen")
             }),
             "expected realtime projection to carry terminal peer response as typed runtime context: {:?}",
             open_config.runtime_system_context
@@ -11146,7 +11255,11 @@ mod tests {
             let mut saw_context_started = false;
             while let Some(event) = events.next().await {
                 match event.payload {
-                    AgentEvent::RunStarted { prompt, .. } => {
+                    AgentEvent::RunStarted { input, .. } => {
+                        let prompt = input
+                            .content()
+                            .expect("content-bearing run input")
+                            .clone();
                         let normalized = prompt.text_content().to_lowercase();
                         if normalized.contains(
                             "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
@@ -11313,7 +11426,11 @@ mod tests {
             let mut saw_context_started = false;
             while let Some(event) = events.next().await {
                 match event.payload {
-                    AgentEvent::RunStarted { prompt, .. } => {
+                    AgentEvent::RunStarted { input, .. } => {
+                        let prompt = input
+                            .content()
+                            .expect("content-bearing run input")
+                            .clone();
                         let normalized = prompt.text_content().to_lowercase();
                         if normalized.contains("peer_response_terminal:")
                             && normalized.contains("birch seventeen")
@@ -11377,7 +11494,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string()
+            ),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11693,7 +11812,7 @@ mod tests {
             open_config
                 .runtime_system_context
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "realtime open config should seed durable terminal peer context: {:?}",
             open_config.runtime_system_context
         );
@@ -11801,7 +11920,7 @@ mod tests {
         assert!(
             projected_context
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "durable runtime context should survive realtime transcript append: {projected_context:?}"
         );
         assert!(
@@ -11857,7 +11976,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string()
+            ),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11891,7 +12012,7 @@ mod tests {
             open_config
                 .runtime_system_context
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "runtime-backed realtime open config should include durable context append: {:?}",
             open_config.runtime_system_context
         );
@@ -11976,7 +12097,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string()
+            ),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -12926,7 +13049,10 @@ mod tests {
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(
                 meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                    serde_json::json!({ "temperature": 0.2 }),
+                    meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                        temperature: Some(0.2f32),
+                        ..Default::default()
+                    },
                 ),
             ),
             ..Default::default()
@@ -13026,7 +13152,10 @@ mod tests {
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(
                 meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                    serde_json::json!({ "temperature": 0.1 }),
+                    meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                        temperature: Some(0.1f32),
+                        ..Default::default()
+                    },
                 ),
             ),
             ..Default::default()
@@ -13052,7 +13181,12 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
-            provider_params: Some(serde_json::json!({ "temperature": 0.7 })),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.7f32),
+                    ..Default::default()
+                },
+            ),
             auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -13486,7 +13620,7 @@ mod tests {
             state
                 .pending()
                 .iter()
-                .any(|pending| pending.text == append.text()),
+                .any(|pending| pending.content.render_text() == append.text()),
             "rollback must preserve appends made while promotion was in progress: {state:?}"
         );
     }
@@ -13713,11 +13847,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build_config.to_session_build_options()),
@@ -13763,11 +13895,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build_config.to_session_build_options()),
@@ -17296,11 +17426,9 @@ mod tests {
         let create_req = CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build_config.to_session_build_options()),
@@ -17379,11 +17507,9 @@ mod tests {
         let create_req = CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build_config.to_session_build_options()),
@@ -19032,7 +19158,10 @@ mod tests {
         // Wait for the background MCP connect to complete before setting
         // inflight calls — otherwise `drain_pending` on the next boundary
         // replaces the entry and resets active_calls to 0.
-        adapter.wait_until_ready(Duration::from_secs(5)).await;
+        adapter
+            .wait_until_ready(Duration::from_secs(5))
+            .await
+            .expect("MCP server should become ready");
 
         adapter
             .set_removal_timeout_for_testing(Duration::from_millis(20))
@@ -20059,7 +20188,7 @@ mod tests {
             "system_prompt": "You are helpful",
             "output_schema": {"type": "object"},
             "structured_output_retries": 3,
-            "provider_params": {"thinking": true},
+            "provider_params": {"temperature": 0.3},
             "auth_binding": {"action": "clear"}
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
@@ -20076,7 +20205,12 @@ mod tests {
         // is a Clear.
         assert_eq!(
             params.provider_params.as_ref().and_then(|o| o.as_set()),
-            Some(&serde_json::json!({"thinking": true}))
+            Some(
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.3),
+                    ..Default::default()
+                }
+            )
         );
         assert!(!matches!(
             params.provider_params,
@@ -20119,12 +20253,23 @@ mod tests {
         use crate::handlers::turn::TurnOverrides;
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
-        let provider_params = serde_json::json!({
-            "temperature": 0.2,
-            "thinking": { "budget_tokens": 10_000 }
-        });
+        // K2: TurnOverrides carries the typed override end-to-end.
+        let provider_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.2),
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 10_000,
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
         let overrides = TurnOverrides {
-            provider_params: Some(TurnMetadataOverride::Set(provider_params)),
+            provider_params: Some(TurnMetadataOverride::Set(provider_params.clone())),
             ..Default::default()
         };
 
@@ -20140,24 +20285,40 @@ mod tests {
         let Some(TurnMetadataOverride::Set(params)) = metadata.provider_params else {
             panic!("provider_params set override should be preserved");
         };
-        assert_eq!(params.temperature, Some(0.2));
-        assert!(
-            params.provider_tag.is_some(),
-            "provider-native keys must stay represented on the typed override"
-        );
+        assert_eq!(params, provider_params);
     }
 
+    /// K2: the typed `ProviderParamsOverride` tri-state survives the
+    /// overrides -> metadata -> overrides round trip byte-identically — the
+    /// former legacy-JSON projection at this seam is deleted.
     #[test]
-    fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
+    fn runtime_turn_metadata_round_trips_typed_provider_params() {
         use crate::handlers::turn::TurnOverrides;
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
+        let provider_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 10_000,
+                        },
+                    ),
+                    effort: Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::XHigh),
+                    // Explicit provider-native null body (web-search opt-out)
+                    // must not be dropped by the round trip.
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::Value::Null,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
         let overrides = TurnOverrides {
-            provider_params: Some(TurnMetadataOverride::Set(serde_json::json!({
-                "thinking": { "budget_tokens": 10_000 },
-                "effort": "xhigh",
-                "web_search": null,
-            }))),
+            provider_params: Some(TurnMetadataOverride::Set(provider_params.clone())),
             ..Default::default()
         };
         let metadata = SessionRuntime::turn_metadata_from_overrides(
@@ -20171,28 +20332,12 @@ mod tests {
 
         let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
             .expect("metadata should reconstruct turn overrides");
-        let provider_params = round_tripped
+        let round_tripped_params = round_tripped
             .provider_params
             .as_ref()
             .and_then(|o| o.as_set())
             .expect("provider params should survive metadata round trip");
-
-        assert!(
-            provider_params.get("provider_tag").is_none(),
-            "runtime adapter must not feed typed provider_tag envelopes back as legacy params"
-        );
-        assert_eq!(
-            provider_params["thinking"]["budget_tokens"],
-            serde_json::json!(10_000)
-        );
-        assert_eq!(provider_params["effort"], serde_json::json!("xhigh"));
-        assert!(
-            provider_params
-                .as_object()
-                .is_some_and(|obj| obj.contains_key("web_search")),
-            "explicit provider-native null must not be dropped"
-        );
-        assert!(provider_params["web_search"].is_null());
+        assert_eq!(round_tripped_params, &provider_params);
     }
 
     #[test]
@@ -20934,9 +21079,19 @@ mod tests {
             .await
             .unwrap();
 
-        let provider_params = serde_json::json!({
-            "thinking": { "budget_tokens": 10_000 }
-        });
+        let provider_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 10_000,
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(
                 meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
@@ -21008,9 +21163,17 @@ mod tests {
             .await
             .unwrap();
 
-        let provider_params = serde_json::json!({
-            "reasoning": { "effort": "medium" }
-        });
+        let provider_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                    reasoning_effort: Some(
+                        meerkat_core::lifecycle::run_primitive::ReasoningEffort::Medium,
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
@@ -21090,9 +21253,19 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
-        build.provider_params = Some(serde_json::json!({
-            "thinking": { "budget_tokens": 10_000 }
-        }));
+        build.provider_params = Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 10_000,
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        });
         let session_id = runtime
             .create_session(build, None, None)
             .await

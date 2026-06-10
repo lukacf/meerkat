@@ -390,17 +390,6 @@ class SessionDetails(SessionInfo):
     resolved_capabilities: ResolvedModelCapabilities | None = None
 
 
-class ConfigEnvelope(TypedDict, total=False):
-    """Config envelope returned by config APIs."""
-
-    config: dict[str, Any]
-    generation: int
-    realm_id: str | None
-    instance_id: str | None
-    backend: str | None
-    resolved_paths: dict[str, str] | None
-
-
 class ExternalEventOutcome(TypedDict, total=False):
     """Outcome payload returned by `session/external_event`."""
 
@@ -518,6 +507,7 @@ class WorkItem(TypedDict, total=False):
 # that workgraph wrappers consume the generated shapes, not hand mirrors.
 from .generated.types import WorkEdge as WorkEdge  # noqa: E402
 from .generated.types import WorkGraphEvent as WorkGraphEvent  # noqa: E402
+from .generated.types import ConfigEnvelope as ConfigEnvelope  # noqa: E402
 from .generated.types import WorkGraphItemsResponse as WorkGraphItemsResponse  # noqa: E402
 from .generated.types import WorkGraphEventsResponse as WorkGraphEventsResponse  # noqa: E402
 

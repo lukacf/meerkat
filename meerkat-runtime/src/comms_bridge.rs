@@ -397,7 +397,9 @@ mod tests {
             from: "peer-1".into(),
             content: InteractionContent::Request {
                 intent: "mob.peer_added".into(),
-                params: serde_json::json!({"name": "agent-1"}),
+                // K15: lifecycle-classed requests carry the typed peer
+                // subject; a missing subject is rejected at ingress.
+                params: serde_json::json!({"peer": "agent-1"}),
                 blocks: None,
             },
             id: make_interaction_id(),
@@ -417,7 +419,7 @@ mod tests {
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(
                 p.payload,
-                Some(serde_json::json!({"name": "agent-1"})),
+                Some(serde_json::json!({"peer": "agent-1"})),
                 "request params must remain structured on PeerInput so runtime prompt projection does not depend on pre-rendered comms prose"
             );
             assert_eq!(

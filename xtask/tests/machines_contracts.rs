@@ -793,6 +793,60 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_aliases_and_projection_w
     );
 }
 
+/// The CAS store-write denial is an AST method-call rule, not a line-text
+/// scan: a `cas_*` token inside a comment or string literal must not flag,
+/// while a real call split across lines and the UFCS call form must flag.
+#[test]
+fn live_flow_cas_write_ratchet_is_ast_shaped_not_token_shaped() {
+    let dir = tempdir().expect("tempdir");
+    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    fs::create_dir_all(&runtime).expect("create runtime dir");
+    fs::write(
+        runtime.join("cas_shapes.rs"),
+        concat!(
+            "// commentary mentioning .cas_flow_state( must not flag\n",
+            "const DOC: &str = \"docs about .cas_run_snapshot( in a string\";\n",
+            "async fn multi_line(store: Store) {\n",
+            "    let _ = store\n",
+            "        .cas_loop_state(&id, &old, &new)\n",
+            "        .await;\n",
+            "}\n",
+            "async fn ufcs(store: Store) {\n",
+            "    let _ = Store::cas_frame_state(&store, &id, &old, &new).await;\n",
+            "}\n",
+        ),
+    )
+    .expect("write cas shapes");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow reducer transition mismatches");
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_loop_state(")
+                && mismatch.contains("cas_shapes.rs:5")),
+        "expected multi-line CAS call to flag at the method ident line, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_frame_state(")),
+        "expected UFCS CAS call form to flag, got {mismatches:#?}"
+    );
+    assert!(
+        !mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_run_snapshot(")),
+        "string-literal CAS token must not flag, got {mismatches:#?}"
+    );
+    assert!(
+        !mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("cas_shapes.rs:1")),
+        "comment CAS token must not flag, got {mismatches:#?}"
+    );
+}
+
 #[test]
 fn mob_runtime_catalog_command_gate_ratchet_rejects_missing_and_warning_only_gates() {
     let dir = tempdir().expect("tempdir");

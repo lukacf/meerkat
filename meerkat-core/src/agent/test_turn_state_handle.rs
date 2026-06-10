@@ -1383,6 +1383,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                 .transpose()?,
                 extraction_attempts: state_u64(&state, "extraction_attempts", CONTEXT)?,
                 max_extraction_retries: state_u64(&state, "max_extraction_retries", CONTEXT)?,
+                extraction_active: state_bool(&state, "extraction_active", CONTEXT)?,
                 llm_retry_attempt: state_u32(&state, "llm_retry_attempt", CONTEXT)?,
                 llm_retry_max_retries: state_u32(&state, "llm_retry_max_retries", CONTEXT)?,
                 llm_retry_selected_delay_ms: state_u64(
@@ -1638,6 +1639,83 @@ mod tests {
         assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
         assert_eq!(snapshot.llm_retry_attempt, 3);
         assert_eq!(snapshot.llm_retry_max_retries, 3);
+    }
+
+    /// Dogma K9: "am I extracting" is a TOTAL machine-owned fact
+    /// (`extraction_active`), observable purely via the machine snapshot for
+    /// the whole extraction sub-flow — including the retry rounds where
+    /// `turn_phase` cycles back through `CallingLlm` / `DrainingBoundary`.
+    /// The shell must never re-derive it from loop-local scratch.
+    #[test]
+    fn extraction_active_is_total_through_retry_loop() {
+        let handle = TestTurnStateHandle::new();
+        let run_id = RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start run");
+        assert!(!handle.snapshot().extraction_active);
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("llm returned");
+        assert!(!handle.snapshot().extraction_active);
+
+        // Enter extraction: DrainingBoundary -> Extracting.
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("enter extraction");
+        assert!(handle.snapshot().extraction_active);
+
+        // Extraction LLM round: phase returns to CallingLlm, but the machine
+        // answer to "am I extracting" stays true (the former divergence
+        // window).
+        handle
+            .extraction_start(run_id.clone())
+            .expect("extraction start");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert!(snapshot.extraction_active);
+
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("extraction llm returned");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::DrainingBoundary);
+        assert!(snapshot.extraction_active);
+
+        // Failed validation with retries remaining: still extracting.
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("re-enter extraction");
+        handle
+            .extraction_validation_failed(run_id.clone(), "invalid".to_string())
+            .expect("validation failed retry");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert!(snapshot.extraction_active);
+
+        // Passing validation terminates the sub-flow and clears the fact.
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("retry llm returned");
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("final enter extraction");
+        handle
+            .extraction_validation_passed(run_id)
+            .expect("validation passed");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
+        assert!(!snapshot.extraction_active);
     }
 
     #[test]

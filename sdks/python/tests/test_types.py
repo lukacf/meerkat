@@ -867,6 +867,18 @@ def test_parse_session_message_fails_closed_on_missing_identity_facts():
         )
     assert excinfo.value.code == "INVALID_RESPONSE"
 
+    # `WireToolResult.content` is mandatory on the wire — a tool result
+    # without it must raise instead of fabricating an empty transcript.
+    with pytest.raises(MeerkatError, match="missing content") as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [{"tool_use_id": "tc_1", "is_error": False}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
     with pytest.raises(MeerkatError) as excinfo:
         MeerkatClient._parse_session_message(
             {
@@ -1519,7 +1531,7 @@ def test_parse_scoped_mob_event_omits_runtime_binding_atoms():
 def test_parse_attributed_mob_event_preserves_source_fence_token():
     event = MeerkatClient._parse_attributed_mob_event(
         {
-            "source": "writer",
+            "source": {"identity": "writer", "generation": 2},
             "source_fence_token": 7,
             "role": "worker",
             "envelope": {
@@ -1536,7 +1548,7 @@ def test_parse_attributed_mob_event_preserves_source_fence_token():
 def test_parse_attributed_mob_event_omitted_source_fence_token_is_none():
     event = MeerkatClient._parse_attributed_mob_event(
         {
-            "source": "writer",
+            "source": {"identity": "writer", "generation": 0},
             "role": "worker",
             "envelope": {
                 "payload": {"type": "text_delta", "delta": "hi"},
@@ -1557,11 +1569,46 @@ def test_parse_attributed_mob_event_fails_closed_on_missing_source():
         )
 
 
+def test_parse_attributed_mob_event_rejects_legacy_string_source():
+    # The wire source is the typed AgentRuntimeId record {identity, generation};
+    # a free-form string source is a malformed frame and must fail closed.
+    with pytest.raises(MeerkatError, match="missing source"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": "writer",
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_requires_generation():
+    with pytest.raises(MeerkatError, match="generation"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer"},
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_rejects_negative_generation():
+    with pytest.raises(MeerkatError, match="non-negative integer"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer", "generation": -1},
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
 def test_parse_attributed_mob_event_fails_closed_on_missing_envelope():
     with pytest.raises(MeerkatError, match="missing envelope"):
         MeerkatClient._parse_attributed_mob_event(
             {
-                "source": "writer",
+                "source": {"identity": "writer", "generation": 0},
                 "role": "worker",
             }
         )
@@ -1571,7 +1618,7 @@ def test_parse_attributed_mob_event_fails_closed_on_non_number_fence():
     with pytest.raises(MeerkatError, match="source_fence_token must be number"):
         MeerkatClient._parse_attributed_mob_event(
             {
-                "source": "writer",
+                "source": {"identity": "writer", "generation": 0},
                 "role": "worker",
                 "source_fence_token": "7",
                 "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
@@ -2682,10 +2729,12 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
     )
 
     assert fetched["id"] == "prep-dentist-ride"
-    assert listed["items"][0]["priority"] == "high"
-    assert ready["items"][0]["status"] == "open"
+    # K20: list/ready/events return the generated result dataclasses
+    # (WorkItemsResult / WorkEventsResult), not raw dicts.
+    assert listed.items[0]["priority"] == "high"
+    assert ready.items[0]["status"] == "open"
     assert snapshot["ready_item_ids"] == ["prep-dentist-ride"]
-    assert events["events"][0]["kind"] == "created"
+    assert events.events[0]["kind"] == "created"
     assert goal["attention"]["binding_id"] == "attn-1"
     assert attention["attention"][0]["binding_id"] == "attn-1"
     assert [method for method, _ in calls] == [
@@ -4239,3 +4288,30 @@ async def test_tool_registry_keeps_string_results_as_strings() -> None:
     content, is_error = await registry.handle("text", {})
     assert is_error is False
     assert content == "plain text result"
+
+
+@pytest.mark.asyncio
+async def test_mob_collection_helpers_raise_on_malformed_entries() -> None:
+    # Malformed collection entries are contract violations and must raise
+    # INVALID_RESPONSE — never be silently skipped into an empty/partial
+    # success (Terminal-Truth: absence of members is a different fact than
+    # malformed members).
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        return {"members": ["not-an-object"]}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.wait_mob_kickoff("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.wait_mob_ready("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"

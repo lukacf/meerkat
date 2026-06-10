@@ -197,11 +197,9 @@ pub struct LlmRequest {
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
     /// Typed provider-specific knobs. `ProviderTag` is a provider-tagged
-    /// enum with typed fields for every known knob; legacy untyped JSON
-    /// is projected through
-    /// [`meerkat_core::lifecycle::run_primitive::AnthropicProviderTag::from_legacy_value`]
-    /// (and the OpenAi/Gemini siblings) at the adapter boundary so the
-    /// request surface never carries `serde_json::Value`.
+    /// enum with typed fields for every known knob; callers construct it
+    /// typed end-to-end (K2 deleted the legacy untyped-JSON projection), so
+    /// the request surface never carries `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<ProviderTag>,
 }

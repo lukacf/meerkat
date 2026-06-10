@@ -751,6 +751,20 @@ pub trait LiveProjectionSink: Send + Sync {
         response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
+    /// Project a transport-level output-audio delivery degradation.
+    ///
+    /// K16: when a transport drops queued output-audio packets (e.g. the
+    /// WebRTC RTP pacing queue is full or closed), the dropped-delivery fact
+    /// must reach the session through the same typed host-signal seam that
+    /// transport barge-ins use — not a transport-local counter with no live
+    /// reader. `dropped` is the cumulative count of output-audio packets the
+    /// transport failed to deliver on this channel's session.
+    async fn signal_output_audio_degraded(
+        &self,
+        session_id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), LiveProjectionError>;
+
     /// Mark the live turn complete in canonical session state.
     ///
     /// R6: `response_id` carries the provider's response identifier from
@@ -959,6 +973,14 @@ impl LiveProjectionSink for NoOpProjectionSink {
         &self,
         _session_id: &SessionId,
         _response_id: Option<&str>,
+    ) -> Result<(), LiveProjectionError> {
+        Ok(())
+    }
+
+    async fn signal_output_audio_degraded(
+        &self,
+        _session_id: &SessionId,
+        _dropped: u64,
     ) -> Result<(), LiveProjectionError> {
         Ok(())
     }
@@ -2859,6 +2881,27 @@ impl LiveAdapterHost {
         let session_id = self.channel_session(channel_id).await?;
         self.projection_sink
             .signal_turn_interrupt(&session_id, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Lower a transport-local output-audio delivery degradation into the
+    /// canonical host signal seam (K16).
+    ///
+    /// This routes through the *same* [`LiveProjectionSink`] signal path that
+    /// [`Self::signal_transport_barge_in`] uses, so dropped output-audio
+    /// packets (e.g. RTP pacing-queue backpressure) are a typed,
+    /// session-observable delivery fact — not a transport-local counter whose
+    /// only reader is a test. `dropped` carries the cumulative drop count for
+    /// the channel.
+    pub async fn signal_output_audio_degraded(
+        &self,
+        channel_id: &LiveChannelId,
+        dropped: u64,
+    ) -> Result<(), LiveAdapterHostError> {
+        let session_id = self.channel_session(channel_id).await?;
+        self.projection_sink
+            .signal_output_audio_degraded(&session_id, dropped)
             .await?;
         Ok(())
     }
@@ -5034,6 +5077,46 @@ mod tests {
         assert_eq!(interrupts[0].1, None);
     }
 
+    // -- K16: transport output-audio delivery degradation lowers into the
+    //    same host signal seam barge-in uses --
+
+    #[tokio::test]
+    async fn transport_output_audio_degradation_emits_typed_signal_via_sink() {
+        // Dropped RTP output-audio packets must become a typed, session-
+        // observable delivery-degraded fact through the projection-sink seam —
+        // not a transport-local AtomicU64 whose only reader is a test.
+        // (Fails-old: `LiveProjectionSink` had no degradation signal and the
+        // host had no lowering path, so the drop count never left the
+        // transport.)
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let session_id = test_session_id();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+
+        host.signal_output_audio_degraded(&ch, 3).await.unwrap();
+
+        {
+            let degraded = sink.output_audio_degraded.lock().unwrap();
+            assert_eq!(
+                degraded.as_slice(),
+                &[(session_id, 3)],
+                "degradation must surface exactly once with the cumulative drop count"
+            );
+        }
+
+        // An unknown channel is a typed rejection, not a silent no-op.
+        let missing = host
+            .signal_output_audio_degraded(&LiveChannelId::new("no-such-channel"), 1)
+            .await;
+        assert!(matches!(
+            missing,
+            Err(LiveAdapterHostError::ChannelNotFound(_))
+        ));
+    }
+
     // -- A10: terminal error projection --
 
     #[tokio::test]
@@ -5393,6 +5476,7 @@ mod tests {
             )>,
         >,
         interrupts: StdMutex<Vec<(SessionId, Option<String>)>>,
+        output_audio_degraded: StdMutex<Vec<(SessionId, u64)>>,
         turn_completed: StdMutex<Vec<(SessionId, StopReason, Usage, Option<String>)>>,
         terminal_errors: StdMutex<Vec<(SessionId, LiveAdapterErrorCode, String)>>,
         realtime_events: StdMutex<Vec<(SessionId, RealtimeTranscriptEvent)>>,
@@ -5511,6 +5595,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((session_id.clone(), response_id.map(|s| s.to_string())));
+            Ok(())
+        }
+
+        async fn signal_output_audio_degraded(
+            &self,
+            session_id: &SessionId,
+            dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            self.output_audio_degraded
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), dropped));
             Ok(())
         }
 

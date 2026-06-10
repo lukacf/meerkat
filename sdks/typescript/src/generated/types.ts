@@ -128,6 +128,56 @@ export interface McpLiveOpResponse {
   status: "staged" | "applied" | "rejected";
 }
 
+export interface ConfigEnvelope {
+  backend?: string;
+  config: unknown;
+  generation: number;
+  instance_id?: string;
+  realm_id?: string;
+  resolved_paths?: Record<string, unknown>;
+}
+
+export interface ConfigPatchParams {
+  expected_generation?: number;
+  patch?: unknown;
+}
+
+export interface ConfigWriteResult {
+  backend?: string;
+  config: unknown;
+  generation: number;
+  instance_id?: string;
+  live_propagation?: Record<string, unknown>;
+  realm_id?: string;
+  resolved_paths?: Record<string, unknown>;
+}
+
+export interface InterruptResult {
+  interrupted: boolean;
+  result: "interrupted" | "staged_noop";
+  session_id: string;
+}
+
+export interface ServerCapabilities {
+  contract_version: string;
+  methods: string[];
+  server_info: Record<string, unknown>;
+}
+
+export interface SkillListResponse {
+  skills: Record<string, unknown>[];
+}
+
+export interface WorkEventsResult {
+  events: unknown[];
+}
+
+export interface WorkItemsResult {
+  items: unknown[];
+}
+
+export type ConfigSetParams = Record<string, unknown> | unknown;
+
 export interface MobWireParams {
   member: string;
   mob_id: string;

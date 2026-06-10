@@ -139,6 +139,99 @@ impl std::fmt::Display for SkillName {
     }
 }
 
+/// Canonical identity of a skill-defined function.
+///
+/// Typed owner of the function-name fact on the skill invocation seam:
+/// parsed fail-closed at ingress (non-empty, no surrounding whitespace,
+/// printable identifier), so no bare `&str` ferries function identity into
+/// [`SkillSource::invoke_function`] / [`SkillEngine::invoke_function`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillFunctionName(String);
+
+impl SkillFunctionName {
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        if value.is_empty() {
+            return Err(SkillError::Parse("function_name cannot be empty".into()));
+        }
+        if value.trim() != value {
+            return Err(SkillError::Parse(
+                format!("invalid function_name '{value}': surrounding whitespace").into(),
+            ));
+        }
+        if value.chars().any(char::is_whitespace) || value.chars().any(char::is_control) {
+            return Err(SkillError::Parse(
+                format!("invalid function_name '{value}': whitespace/control characters").into(),
+            ));
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SkillFunctionName {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillFunctionName> for String {
+    fn from(value: SkillFunctionName) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for SkillFunctionName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Wire-opaque output of a skill-defined function invocation.
+///
+/// Skill function results are third-party JSON produced by the skill, not a
+/// shape core interprets — the typed owner is therefore a pass-through
+/// `RawValue` carrier (the sanctioned opaque-JSON boundary type), never a
+/// bare `serde_json::Value` ferried through the system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SkillFunctionOutput(Box<serde_json::value::RawValue>);
+
+impl SkillFunctionOutput {
+    /// Wrap an already-serialized JSON payload.
+    pub fn from_raw(raw: Box<serde_json::value::RawValue>) -> Self {
+        Self(raw)
+    }
+
+    /// Serialize a structured value into the opaque carrier. Fails closed on
+    /// serialization faults rather than fabricating an empty payload.
+    pub fn from_serialize<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+        serde_json::value::to_raw_value(value).map(Self)
+    }
+
+    /// Borrow the raw JSON text.
+    pub fn as_raw(&self) -> &serde_json::value::RawValue {
+        &self.0
+    }
+
+    /// Consume into the raw JSON payload.
+    pub fn into_raw(self) -> Box<serde_json::value::RawValue> {
+        self.0
+    }
+}
+
+impl PartialEq for SkillFunctionOutput {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
 /// Canonical runtime identity for a skill.
 ///
 /// This is the single identity carried across every surface — the wire parses
@@ -974,13 +1067,13 @@ pub trait SkillSource: Send + Sync {
         async move { Err(SkillError::NotFound { key: missing }) }
     }
 
-    /// Invoke a skill-defined function with structured arguments.
+    /// Invoke a skill-defined function with typed, object-shaped arguments.
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send {
         let missing = key.clone();
         let _ = function_name;
         let _ = arguments;
@@ -1071,9 +1164,9 @@ where
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send {
         async move {
             (**self)
                 .invoke_function(key, function_name, arguments)
@@ -1141,13 +1234,13 @@ pub trait SkillEngine: Send + Sync {
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send;
 
-    /// Invoke a skill-defined function with structured arguments.
+    /// Invoke a skill-defined function with typed, object-shaped arguments.
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send;
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send;
 
     /// List all skills with provenance and shadow information.
     fn list_all_with_provenance(
@@ -1210,7 +1303,11 @@ type HealthSnapshotFn = dyn Fn() -> OwnedSkillFuture<SourceHealthSnapshot> + Sen
 type ListArtifactsFn = dyn Fn(SkillKey) -> OwnedSkillFuture<Vec<SkillArtifact>> + Send + Sync;
 type ReadArtifactFn =
     dyn Fn(SkillKey, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
-type InvokeFunctionFn = dyn Fn(SkillKey, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value>
+type InvokeFunctionFn = dyn Fn(
+        SkillKey,
+        SkillFunctionName,
+        crate::event::ToolCallArguments,
+    ) -> OwnedSkillFuture<SkillFunctionOutput>
     + Send
     + Sync;
 type ListAllWithProvenanceFn =
@@ -1288,7 +1385,9 @@ impl SkillRuntime {
                 Box::pin(async move { engine.read_artifact(&key, &artifact_path).await })
             }),
             invoke_function_fn: Arc::new(
-                move |key: SkillKey, function_name: String, arguments: serde_json::Value| {
+                move |key: SkillKey,
+                      function_name: SkillFunctionName,
+                      arguments: crate::event::ToolCallArguments| {
                     let engine = Arc::clone(&invoke_function_engine);
                     Box::pin(async move {
                         engine
@@ -1359,10 +1458,10 @@ impl SkillRuntime {
     pub async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
-        (self.invoke_function_fn)(key.clone(), function_name.to_string(), arguments).await
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> Result<SkillFunctionOutput, SkillError> {
+        (self.invoke_function_fn)(key.clone(), function_name.clone(), arguments).await
     }
 
     pub async fn list_all_with_provenance(

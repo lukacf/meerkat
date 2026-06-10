@@ -513,12 +513,14 @@ describe("Skills v2.1", () => {
     assert.equal(calls[2].method, "config/patch");
     assert.equal(calls[2].params.expected_generation, 3);
 
+    // K20: config wrappers return the generated wire contract verbatim —
+    // the SDK no longer owns a camelCase projection of the envelope.
     for (const response of [getResponse, setResponse, patchResponse]) {
       assert.equal(response.generation, 3);
-      assert.equal(response.realmId, "realm-alpha");
-      assert.equal(response.instanceId, "instance-42");
+      assert.equal(response.realm_id, "realm-alpha");
+      assert.equal(response.instance_id, "instance-42");
       assert.equal(response.backend, "sqlite");
-      assert.deepEqual(response.resolvedPaths, {
+      assert.deepEqual(response.resolved_paths, {
         root: "/tmp/realm-alpha",
         config: "/tmp/realm-alpha/config.toml",
       });

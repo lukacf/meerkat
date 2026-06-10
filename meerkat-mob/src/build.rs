@@ -421,12 +421,10 @@ pub fn to_create_session_request(
     CreateSessionRequest {
         model: config.model.clone(),
         prompt,
-        render_metadata: None,
         system_prompt: config.system_prompt.to_persisted_option(),
         max_tokens: config.max_tokens,
         event_tx: None,
 
-        skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution
         // during create_session so spawn does not block on LLM latency, and do
@@ -2105,10 +2103,18 @@ mod tests {
             .expect("lead profile")
             .as_inline_mut()
             .unwrap()
-            .provider_params = Some(serde_json::json!({
-            "thinking_budget": 4096,
-            "top_k": 40
-        }));
+            .provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                    meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                        thinking_budget: Some(4096),
+                        top_k: Some(40),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        );
 
         let lead = def.profiles[&lead_key].as_inline().unwrap();
         let config = build_agent_config(BuildAgentConfigParams {
@@ -2131,10 +2137,20 @@ mod tests {
 
         assert_eq!(
             config.provider_params,
-            Some(serde_json::json!({
-                "thinking_budget": 4096,
-                "top_k": 40
-            })),
+            Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                            meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                                thinking_budget: Some(4096),
+                                top_k: Some(40),
+                                ..Default::default()
+                            },
+                        )
+                    ),
+                    ..Default::default()
+                }
+            ),
             "provider_params should be passed through to AgentBuildConfig"
         );
 
@@ -2142,10 +2158,20 @@ mod tests {
         let build = req.build.expect("build options should be set");
         assert_eq!(
             build.provider_params,
-            Some(serde_json::json!({
-                "thinking_budget": 4096,
-                "top_k": 40
-            })),
+            Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                            meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                                thinking_budget: Some(4096),
+                                top_k: Some(40),
+                                ..Default::default()
+                            },
+                        )
+                    ),
+                    ..Default::default()
+                }
+            ),
             "provider_params should survive into SessionBuildOptions"
         );
     }
@@ -2281,7 +2307,15 @@ mod tests {
         let mut config = AgentBuildConfig::new("claude-opus-4-8");
         config.provider = Some(meerkat_core::Provider::Anthropic);
         config.comms_name = Some("mob.m/lead/lead-1".to_string());
-        config.provider_params = Some(serde_json::json!({"fresh": true}));
+        let fresh_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.1),
+            ..Default::default()
+        };
+        let stale_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.9),
+            ..Default::default()
+        };
+        config.provider_params = Some(fresh_params);
         config.resume_override_mask.model = true;
         config.resume_override_mask.provider = true;
 
@@ -2292,7 +2326,7 @@ mod tests {
             structured_output_retries: 2,
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
-            provider_params: Some(serde_json::json!({"stale": true})),
+            provider_params: Some(stale_params.clone()),
             tooling: Default::default(),
             keep_alive: false,
             comms_name: Some("mob.m/lead/lead-1".to_string()),
@@ -2318,7 +2352,7 @@ mod tests {
         );
         assert_eq!(
             config.provider_params,
-            Some(serde_json::json!({"stale": true})),
+            Some(stale_params),
             "unmasked provider_params restore durable truth"
         );
 

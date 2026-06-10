@@ -233,13 +233,24 @@ fn require_token_store(
     runtime: &SessionRuntime,
     id: Option<RpcId>,
 ) -> Result<Arc<dyn meerkat_providers::auth_store::TokenStore>, RpcResponse> {
-    runtime.token_store().ok_or_else(|| {
-        RpcResponse::error(
-            id.clone(),
-            error::INTERNAL_ERROR,
-            "TokenStore not configured for this runtime",
-        )
-    })
+    runtime
+        .token_store()
+        .map_err(|err| {
+            // K6: a token-store open failure is a typed fault, not an
+            // absence of credentials.
+            RpcResponse::error(
+                id.clone(),
+                error::INTERNAL_ERROR,
+                format!("TokenStore unavailable: {err}"),
+            )
+        })?
+        .ok_or_else(|| {
+            RpcResponse::error(
+                id.clone(),
+                error::INTERNAL_ERROR,
+                "TokenStore not configured for this runtime",
+            )
+        })
 }
 
 fn require_managed_store_source(
@@ -824,20 +835,18 @@ pub async fn handle_realm_list(id: Option<RpcId>, runtime: &SessionRuntime) -> R
         Ok(c) => c,
         Err(r) => return r.with_id(id),
     };
-    let realms: Vec<serde_json::Value> = config
+    let realms: Vec<meerkat_contracts::WireRealmSummary> = config
         .realm
         .iter()
-        .map(|(realm_id, section)| {
-            serde_json::json!({
-                "realm_id": realm_id,
-                "default_binding": section.default_binding,
-                "backend_count": section.backend.len(),
-                "auth_profile_count": section.auth.len(),
-                "binding_count": section.binding.len(),
-            })
+        .map(|(realm_id, section)| meerkat_contracts::WireRealmSummary {
+            realm_id: realm_id.clone(),
+            default_binding: section.default_binding.clone(),
+            backend_count: section.backend.len(),
+            auth_profile_count: section.auth.len(),
+            binding_count: section.binding.len(),
         })
         .collect();
-    RpcResponse::success(id, serde_json::json!({ "realms": realms }))
+    RpcResponse::success(id, meerkat_contracts::WireRealmList { realms })
 }
 
 pub async fn handle_realm_get(
@@ -892,12 +901,12 @@ pub async fn handle_auth_profile_list(
         .collect();
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": realm.realm_id,
-            "auth_profiles": profiles,
-            "backend_profiles": backends,
-            "bindings": bindings,
-        }),
+        meerkat_contracts::WireAuthProfilesList {
+            realm_id: realm.realm_id.to_string(),
+            auth_profiles: profiles,
+            backend_profiles: backends,
+            bindings,
+        },
     )
 }
 
@@ -920,12 +929,12 @@ pub async fn handle_auth_profile_get(
     {
         Ok((auth_binding, binding, auth_profile)) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "auth_binding": &auth_binding,
-                "binding_id": &binding.id,
-                "profile_id": &auth_profile.id,
-                "auth_profile": WireAuthProfile::from(&auth_profile),
-            }),
+            meerkat_contracts::WireAuthProfileDetail {
+                auth_binding: meerkat_contracts::WireAuthBindingRef::from(auth_binding),
+                binding_id: binding.id,
+                profile_id: auth_profile.id.clone(),
+                auth_profile: WireAuthProfile::from(&auth_profile),
+            },
         ),
         Err(r) => r.with_id(id),
     }
@@ -1015,15 +1024,13 @@ pub async fn handle_auth_profile_create(
     );
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": auth_binding.realm.as_str(),
-            "binding_id": auth_binding.binding.as_str(),
-            "auth_binding": &auth_binding,
-            "profile_id": &auth_profile.id,
-            "provider": auth_profile.provider.as_str(),
-            "auth_method": &auth_profile.auth_method,
-            "stored": true,
-        }),
+        meerkat_contracts::WireAuthProfileCreated {
+            identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
+            profile_id: auth_profile.id.clone(),
+            provider: auth_profile.provider.as_str().to_string(),
+            auth_method: auth_profile.auth_method.clone(),
+            stored: true,
+        },
     )
 }
 
@@ -1064,13 +1071,11 @@ pub async fn handle_auth_profile_delete(
     );
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": auth_binding.realm.as_str(),
-            "binding_id": auth_binding.binding.as_str(),
-            "auth_binding": &auth_binding,
-            "profile_id": &auth_profile.id,
-            "cleared": true,
-        }),
+        meerkat_contracts::WireAuthProfileCleared {
+            identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
+            profile_id: auth_profile.id.clone(),
+            cleared: true,
+        },
     )
 }
 
@@ -1133,12 +1138,12 @@ pub async fn handle_auth_login_start(
         .authorize_url_with_pkce(&pkce.challenge, &state_token);
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "authorize_url": authorize_url,
-            "state": state_token,
-            "redirect_uri": parsed.redirect_uri,
-            "provider": parsed.provider,
-        }),
+        meerkat_contracts::WireLoginStart {
+            authorize_url,
+            state: state_token,
+            redirect_uri: parsed.redirect_uri,
+            provider: parsed.provider,
+        },
     )
 }
 
@@ -1307,16 +1312,15 @@ pub async fn handle_auth_login_complete(
     );
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": auth_binding.realm.as_str(),
-            "binding_id": auth_binding.binding.as_str(),
-            "auth_binding": &auth_binding,
-            "profile_id": &auth_profile.id,
-            "provider": parsed.provider,
-            "expires_at": expires_at.map(|e| e.to_rfc3339()),
-            "has_refresh_token": tokens.refresh_token.is_some(),
-            "scopes": tokens.scopes,
-        }),
+        meerkat_contracts::WireLoginReady {
+            state: None,
+            identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
+            profile_id: auth_profile.id.clone(),
+            provider: parsed.provider,
+            expires_at: expires_at.map(|e| e.to_rfc3339()),
+            has_refresh_token: tokens.refresh_token.is_some(),
+            scopes: tokens.scopes,
+        },
     )
 }
 
@@ -1380,15 +1384,15 @@ pub async fn handle_auth_login_device_start(
             }
             RpcResponse::success(
                 id,
-                serde_json::json!({
-                    "device_code": resp.device_code,
-                    "user_code": resp.user_code,
-                    "verification_uri": resp.verification_uri,
-                    "verification_uri_complete": resp.verification_uri_complete,
-                    "expires_in": resp.expires_in,
-                    "interval": resp.interval,
-                    "provider": parsed.provider,
-                }),
+                meerkat_contracts::WireDeviceStart {
+                    device_code: resp.device_code,
+                    user_code: resp.user_code,
+                    verification_uri: resp.verification_uri,
+                    verification_uri_complete: resp.verification_uri_complete,
+                    expires_in: resp.expires_in,
+                    interval: resp.interval,
+                    provider: parsed.provider,
+                },
             )
         }
         Err(e) => RpcResponse::error(
@@ -1777,7 +1781,18 @@ pub async fn handle_auth_status_get(
         .map(persisted_auth_mode_is_oauth_login)
         .unwrap_or(false);
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    let token_store = runtime.token_store();
+    let token_store = match runtime.token_store() {
+        Ok(store) => store,
+        Err(err) => {
+            // K6: a token-store open failure is a typed fault — report it
+            // instead of laundering it into "no persisted credentials".
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("TokenStore unavailable: {err}"),
+            );
+        }
+    };
     let mut stored = None;
     if source_uses_store {
         if phase.is_no_live_lease() {
@@ -1914,13 +1929,11 @@ pub async fn handle_auth_logout(
     );
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": auth_binding.realm.as_str(),
-            "binding_id": auth_binding.binding.as_str(),
-            "auth_binding": &auth_binding,
-            "profile_id": &auth_profile.id,
-            "cleared": true,
-        }),
+        meerkat_contracts::WireAuthProfileCleared {
+            identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
+            profile_id: auth_profile.id.clone(),
+            cleared: true,
+        },
     )
 }
 
@@ -1992,8 +2005,8 @@ mod tests {
         config: meerkat_core::Config,
     ) -> SessionRuntime {
         let temp = tempfile::tempdir().unwrap();
-        let mut factory = meerkat::AgentFactory::new(temp.path().join("sessions"));
-        factory.token_store = None;
+        let factory =
+            meerkat::AgentFactory::new(temp.path().join("sessions")).without_token_store();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -3215,7 +3228,10 @@ mod tests {
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
@@ -3256,7 +3272,10 @@ mod tests {
         ));
         let auth_binding = openai_auth_binding();
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let tokens = chatgpt_oauth_tokens_with_secret("fresh-chatgpt-access");
         store
             .save(
@@ -3325,7 +3344,10 @@ mod tests {
         let auth_binding = openai_auth_binding();
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
@@ -3368,7 +3390,10 @@ mod tests {
         let auth_binding = openai_auth_binding();
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
@@ -3417,7 +3442,10 @@ mod tests {
         let auth_binding = openai_auth_binding();
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
@@ -3529,7 +3557,10 @@ mod tests {
     #[tokio::test]
     async fn ready_device_consume_failure_does_not_commit_token() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.generated_auth_lease_handle();
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
@@ -3586,7 +3617,10 @@ mod tests {
             config_with_openai_managed_store_binding(),
             file_store,
         );
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.auth_lease_handle();
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
@@ -3668,7 +3702,10 @@ mod tests {
     #[tokio::test]
     async fn raw_registry_browser_success_cannot_commit_tokens() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.auth_lease_handle();
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
@@ -3733,7 +3770,10 @@ mod tests {
     #[tokio::test]
     async fn raw_registry_device_success_cannot_commit_tokens() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.auth_lease_handle();
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
@@ -3798,7 +3838,10 @@ mod tests {
     #[tokio::test]
     async fn browser_consume_failure_does_not_reauthorize_stale_previous_tokens() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.auth_lease_handle();
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
@@ -3850,7 +3893,10 @@ mod tests {
     #[tokio::test]
     async fn stale_previous_rollback_preserves_newer_oauth_flow() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.generated_auth_lease_handle();
         let authority = runtime.oauth_flow_authority();
         let auth_binding = AuthBindingRef {
@@ -3920,7 +3966,10 @@ mod tests {
     #[tokio::test]
     async fn oauth_only_previous_rollback_does_not_reauthorize_stale_tokens() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.generated_auth_lease_handle();
         let authority = runtime.oauth_flow_authority();
         let auth_binding = AuthBindingRef {
@@ -4002,7 +4051,10 @@ mod tests {
         runtime
             .runtime_adapter()
             .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
@@ -4059,7 +4111,10 @@ mod tests {
         runtime
             .runtime_adapter()
             .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
@@ -4126,7 +4181,10 @@ mod tests {
     #[tokio::test]
     async fn oauth_to_api_key_browser_consume_marks_current_lifecycle_snapshot() {
         let runtime = test_runtime_with_config(config_with_anthropic_oauth_to_api_key_binding());
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_lease = runtime.auth_lease_handle();
         let authority = runtime.oauth_flow_authority();
         let auth_binding = AuthBindingRef {
@@ -4190,7 +4248,10 @@ mod tests {
         runtime
             .runtime_adapter()
             .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
@@ -4268,7 +4329,10 @@ mod tests {
             "realm_id": "dev",
             "binding_id": "default_openai"
         }));
-        let store = runtime.token_store().expect("test token store");
+        let store = runtime
+            .token_store()
+            .expect("token store open")
+            .expect("test token store");
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),

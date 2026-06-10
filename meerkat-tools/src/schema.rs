@@ -1,30 +1,19 @@
 //! Shared JSON schema helpers for tool definitions.
+//!
+//! The emission itself is owned by the core schema module
+//! ([`meerkat_core::schema::tool_input_schema_for`]) — the single infallible
+//! `schema_for!` → `Value` seam in the workspace. This module re-exposes it
+//! under the historical `schema_for` name for tool crates.
 
 use schemars::JsonSchema;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
+pub use meerkat_core::schema::tool_input_schema_for;
+
+/// Infallible tool-input schema for `T`. See
+/// [`meerkat_core::schema::tool_input_schema_for`].
 pub fn schema_for<T: JsonSchema>() -> Value {
-    let schema = schemars::schema_for!(T);
-    // `schemars::Schema` is `#[repr(transparent)] struct Schema(Value)`; `to_value`
-    // hands back the schema's own inner JSON value directly. Use it instead of a
-    // fallible `serde_json::to_value(..).unwrap_or(Value::Null)` round-trip: there
-    // is no serialization step to fail and therefore no fail-open path that could
-    // launder a failure into a `null` schema. A tool can never advertise
-    // `input_schema: null` from this helper.
-    let mut value = schema.to_value();
-
-    // Some generators omit empty `properties`/`required` for `{}`.
-    // Our tool schema contract expects explicit presence of both keys.
-    if let Value::Object(ref mut obj) = value
-        && obj.get("type").and_then(Value::as_str) == Some("object")
-    {
-        obj.entry("properties".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        obj.entry("required".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-    }
-
-    value
+    tool_input_schema_for::<T>()
 }
 
 #[derive(Debug, Clone, Copy, JsonSchema)]

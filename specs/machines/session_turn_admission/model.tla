@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionTurnAdmissionMachine.
 
-CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnHandlingModeValues
+CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnHandlingModeValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]

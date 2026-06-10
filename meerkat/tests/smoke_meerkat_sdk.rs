@@ -1144,12 +1144,10 @@ mod scenario_09_session_service {
             prompt: "Hello, I am testing the session service."
                 .to_string()
                 .into(),
-            render_metadata: None,
             system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
             max_tokens: Some(256),
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,
@@ -1638,7 +1636,7 @@ mod scenario_22_runtime_host_comms {
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
@@ -1710,13 +1708,12 @@ mod scenario_22_runtime_host_comms {
             );
 
             Ok(CoreApplyOutput::with_run_result(
-                RunBoundaryReceipt {
+                RunBoundaryReceiptDraft {
                     run_id: _run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 result,
@@ -1773,13 +1770,11 @@ mod scenario_22_runtime_host_comms {
             prompt: "You are Agent A. Acknowledge peer messages briefly."
                 .to_string()
                 .into(),
-            render_metadata: None,
             system_prompt: Some(
                 "You are Agent A. When you receive a message, acknowledge it.".to_string(),
             ),
             max_tokens: Some(256),
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build_a),
@@ -1815,10 +1810,15 @@ mod scenario_22_runtime_host_comms {
             "You are Agent A. Wait for messages.".to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(60),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
-                    }),
+                    keep_alive: Some(
+                        meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(60),
+                                policy:
+                                    meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
+                            },
+                        ),
+                    ),
                     ..Default::default()
                 },
             ),
@@ -2006,7 +2006,19 @@ mod scenario_23_web_search_default_on {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let mut build = AgentBuildConfig::new(smoke_model());
-        build.provider_params = Some(serde_json::json!({"web_search": null}));
+        build.provider_params = Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::Value::Null,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        });
         let mut agent = factory
             .build_agent(build, &config)
             .await

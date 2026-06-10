@@ -46,16 +46,6 @@ pub struct RpcMethodDescriptor {
 }
 
 impl RpcMethodDescriptor {
-    const fn basic(name: &'static str, description: &'static str) -> Self {
-        Self {
-            name,
-            description,
-            params_type: None,
-            result_type: None,
-            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
-        }
-    }
-
     const fn typed(
         name: &'static str,
         description: &'static str,
@@ -93,7 +83,11 @@ impl RpcMethodDescriptor {
 
 pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDescriptor> {
     let mut methods = vec![
-        RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
+        RpcMethodDescriptor::result_only(
+            "initialize",
+            "Handshake, returns server capabilities",
+            "ServerCapabilities",
+        ),
         RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
@@ -166,12 +160,26 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "turn/interrupt",
             "Cancel in-flight turn",
             "InterruptParams",
-            "Value",
+            "InterruptResult",
         ),
-        RpcMethodDescriptor::basic("config/get", "Read config"),
-        RpcMethodDescriptor::basic("config/set", "Replace config"),
-        RpcMethodDescriptor::basic("config/patch", "Merge-patch config"),
-        RpcMethodDescriptor::basic("capabilities/get", "Get runtime capabilities"),
+        RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
+        RpcMethodDescriptor::typed(
+            "config/set",
+            "Replace config",
+            "ConfigSetParams",
+            "ConfigWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "config/patch",
+            "Merge-patch config",
+            "ConfigPatchParams",
+            "ConfigWriteResult",
+        ),
+        RpcMethodDescriptor::result_only(
+            "capabilities/get",
+            "Get runtime capabilities",
+            "CapabilitiesResponse",
+        ),
         RpcMethodDescriptor::result_only(
             "runtime/host_info",
             "Get read-only runtime host information",
@@ -471,13 +479,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/list",
                 "List WorkGraph items",
                 "WorkItemFilter",
-                "WorkGraphItemsResponse",
+                "WorkItemsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/ready",
                 "List ready WorkGraph items",
                 "ReadyWorkFilter",
-                "WorkGraphItemsResponse",
+                "WorkItemsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/snapshot",
@@ -489,7 +497,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/events",
                 "List WorkGraph events",
                 "WorkGraphEventFilter",
-                "WorkGraphEventsResponse",
+                "WorkEventsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/goal/status",
@@ -507,9 +515,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.skills_enabled {
-        methods.extend([RpcMethodDescriptor::basic(
+        methods.extend([RpcMethodDescriptor::result_only(
             "skills/list",
             "List available skills",
+            "SkillListResponse",
         )]);
     }
 
@@ -1096,6 +1105,53 @@ mod tests {
                 !methods.iter().any(|m| m == retired),
                 "mutating WorkGraph RPC method must not be advertised: {retired}"
             );
+        }
+    }
+
+    /// Catalog totality (Generated-Artifact Theater closure): every public
+    /// RPC method advertises a typed result contract. The schema-less
+    /// `basic` constructor was deleted — a new method cannot be added
+    /// without declaring its wire contract, so this test locks the
+    /// invariant against a constructor being reintroduced.
+    #[test]
+    fn every_method_advertises_a_typed_result_contract() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        let schema_light: Vec<&str> = methods
+            .iter()
+            .filter(|method| method.result_type.is_none())
+            .map(|method| method.name)
+            .collect();
+        assert!(
+            schema_light.is_empty(),
+            "RPC methods without a typed result contract: {schema_light:?}"
+        );
+    }
+
+    #[test]
+    fn config_capability_and_skills_methods_advertise_typed_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params, expected_result) in [
+            ("initialize", None, Some("ServerCapabilities")),
+            ("config/get", None, Some("ConfigEnvelope")),
+            (
+                "config/set",
+                Some("ConfigSetParams"),
+                Some("ConfigWriteResult"),
+            ),
+            (
+                "config/patch",
+                Some("ConfigPatchParams"),
+                Some("ConfigWriteResult"),
+            ),
+            ("capabilities/get", None, Some("CapabilitiesResponse")),
+            ("skills/list", None, Some("SkillListResponse")),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(descriptor.params_type, expected_params, "{name} params");
+            assert_eq!(descriptor.result_type, expected_result, "{name} result");
         }
     }
 

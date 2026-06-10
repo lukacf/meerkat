@@ -125,7 +125,7 @@ pub struct CreateSessionParams {
     pub budget_limits: Option<BudgetLimits>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Override the realm-scoped auth binding for this session.
     #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
@@ -199,6 +199,29 @@ pub async fn handle_create(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
+    create_session_with_params(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+}
+
+/// Typed `session/create` entrypoint shared with identity-native callers
+/// (`help/ask`). Takes a fully-formed [`CreateSessionParams`] so callers
+/// route typed params without re-serializing through a hand-shaped JSON
+/// payload (K17: handlers speak typed params/results only).
+pub async fn create_session_with_params(
+    id: Option<RpcId>,
+    params: CreateSessionParams,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }

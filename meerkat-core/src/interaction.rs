@@ -684,16 +684,6 @@ pub fn render_peer_ingress_admitted_text(
     }
 }
 
-/// Extract the lifecycle subject from typed request/lifecycle parameters.
-pub fn peer_lifecycle_subject(params: &Value, fallback_peer: &str) -> String {
-    params
-        .get("peer")
-        .and_then(Value::as_str)
-        .filter(|peer| !peer.is_empty())
-        .unwrap_or(fallback_peer)
-        .to_string()
-}
-
 /// Canonical peer/event ingress candidate handed to runtime admission.
 ///
 /// This is the typed, machine-authored drain unit for runtime-backed peer

@@ -360,8 +360,10 @@ pub struct AgentBuildConfig {
     /// Runs after provider resolution and after either raw or pre-adapted
     /// explicit overrides have reached the `AgentLlmClient` boundary.
     pub agent_llm_client_decorator: Option<AgentLlmClientDecorator>,
-    /// Provider-specific parameters (e.g., thinking config, reasoning effort).
-    pub provider_params: Option<serde_json::Value>,
+    /// Typed provider-specific parameter overrides (e.g., thinking config,
+    /// reasoning effort). Parsed fail-closed at the surface ingress; the
+    /// factory never ferries an untyped JSON bag (K2).
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Serializable tool definitions that can rebuild recoverable
@@ -894,15 +896,13 @@ pub enum BuildAgentError {
     #[error("Cannot infer provider from model '{model}'")]
     UnknownProvider { model: String },
 
-    /// Realm-scoped auth binding failed to resolve into a client.
-    ///
-    /// Produced by the Phase 3 `ProviderRuntimeRegistry` dispatch path
-    /// when `AgentBuildConfig.auth_binding` is set. Wraps the
-    /// underlying provider-runtime error as a stringified message.
-    #[error("Connection resolution failed: {0}")]
-    ConnectionResolution(String),
-
     /// LLM client creation failed.
+    ///
+    /// Carries the typed [`FactoryError`] cause: realm/binding target
+    /// selection (`ConnectionTarget`), provider auth/credential resolution
+    /// (`ProviderAuth`), client construction (`ClientBuild`), and TokenStore
+    /// availability (`TokenStore`) all propagate typed — never flattened
+    /// into a string variant.
     #[error("LLM client creation failed: {0}")]
     LlmClient(#[from] FactoryError),
 
@@ -965,7 +965,10 @@ fn provider_tool_defaults_for(
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
     web_search_override: ToolCategoryOverride,
-) -> Option<serde_json::Value> {
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag, ProviderTag,
+    };
     if matches!(web_search_override, ToolCategoryOverride::Disable) {
         return None;
     }
@@ -974,14 +977,28 @@ fn provider_tool_defaults_for(
     }
 
     match provider {
-        Provider::Anthropic if config.provider_tools.anthropic.web_search => Some(
-            serde_json::json!({"web_search": {"type": "web_search_20250305", "name": "web_search"}}),
-        ),
+        Provider::Anthropic if config.provider_tools.anthropic.web_search => {
+            Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                    "type": "web_search_20250305",
+                    "name": "web_search"
+                }))),
+                ..Default::default()
+            }))
+        }
         Provider::OpenAI if config.provider_tools.openai.web_search => {
-            Some(serde_json::json!({"web_search": {"type": "web_search"}}))
+            Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                )),
+                ..Default::default()
+            }))
         }
         Provider::Gemini if config.provider_tools.gemini.google_search => {
-            Some(serde_json::json!({"google_search": {}}))
+            Some(ProviderTag::Gemini(GeminiProviderTag {
+                google_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({}))),
+                ..Default::default()
+            }))
         }
         _ => None,
     }
@@ -1494,6 +1511,27 @@ fn is_openai_realtime_capable(model: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Typed attachment state of the factory's persistent TokenStore.
+///
+/// One owner for the three construction outcomes: no store (detached),
+/// an open store (attached), or a default store whose open FAILED. The
+/// open failure is a fault, not an absence of credentials — it is held
+/// typed and propagated at the resolution seam
+/// ([`AgentFactory::resolution_token_store`]) instead of being collapsed
+/// to "no store" and laundered into `AuthError::InteractiveLoginRequired`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+enum TokenStoreAttachment {
+    /// No token store attached (minimal builds, callers that deliberately
+    /// resolve without persisted credentials).
+    Detached,
+    /// A token store is attached; OAuth-backed bindings read persisted
+    /// tokens from it during `resolve_binding`.
+    Attached(Arc<dyn meerkat_providers::auth_store::TokenStore>),
+    /// The default token store failed to open at factory construction.
+    OpenFailed(Arc<meerkat_providers::auth_store::TokenStoreError>),
+}
+
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
@@ -1535,28 +1573,34 @@ pub struct AgentFactory {
     /// the same keypair and TCP listener across session restarts).
     #[cfg(feature = "comms")]
     pub comms_runtime: Option<Arc<meerkat_comms::CommsRuntime>>,
-    /// Persistent TokenStore used by the provider-runtime registry when
-    /// resolving OAuth-backed bindings (Claude.ai / ChatGPT / Google
-    /// Code Assist). When `None`, OAuth bindings surface
+    /// Persistent TokenStore attachment used by the provider-runtime registry
+    /// when resolving OAuth-backed bindings (Claude.ai / ChatGPT / Google
+    /// Code Assist). When detached, OAuth bindings surface
     /// `AuthError::InteractiveLoginRequired` — CLI / REST / RPC surfaces
-    /// set this to an `AutoTokenStore` during construction so the whole
-    /// stack reads the same persisted credentials.
+    /// attach an `AutoTokenStore` during construction so the whole stack
+    /// reads the same persisted credentials. When the default store failed
+    /// to open at construction, the typed open fault is held here and
+    /// propagates at the first provider resolution instead of being
+    /// laundered into a missing-credential outcome.
     #[cfg(not(target_arch = "wasm32"))]
-    pub token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>,
+    token_store: TokenStoreAttachment,
     /// Refresh coordinator for OAuth token lifecycle. When `None`, a
     /// fresh `InMemoryCoordinator` is created per build; callers that
     /// need cross-process refresh dedup (e.g. concurrent CLI runs) set
     /// a `FileLockCoordinator` here.
     #[cfg(not(target_arch = "wasm32"))]
     pub refresh_coord: Option<Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>>,
-    /// External auth resolvers keyed by handle. Merged into
+    /// External auth resolvers keyed by their typed
+    /// [`meerkat_core::ExternalResolverId`] identity. Merged into
     /// `ResolverEnvironment.external_resolvers` during `build_agent`.
-    /// The WASM runtime registers a `WasmExternalAuthResolver` under
-    /// `"wasm_host"` so realm bindings configured with
-    /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
-    /// delegate credential resolution to the JS host's OAuth flow.
-    pub external_auth_resolvers:
-        BTreeMap<String, Arc<dyn meerkat_providers::ExternalAuthResolverHandle>>,
+    /// The WASM runtime registers a `WasmExternalAuthResolver` under its
+    /// typed resolver id so realm bindings configured with
+    /// `CredentialSourceSpec::ExternalResolver { handle }` delegate
+    /// credential resolution to the JS host's OAuth flow.
+    pub external_auth_resolvers: BTreeMap<
+        meerkat_core::ExternalResolverId,
+        Arc<dyn meerkat_providers::ExternalAuthResolverHandle>,
+    >,
     /// Provider runtime registry, owned by the factory. Populated with
     /// the feature-gated per-provider runtimes
     /// (`AnthropicProviderRuntime`, `OpenAiProviderRuntime`,
@@ -1605,15 +1649,15 @@ impl AgentFactory {
         provider: Provider,
         auth_binding: Option<&AuthBindingRef>,
         preferred_realm: Option<&RealmId>,
-    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), meerkat_core::ConnectionTargetError>
+    {
         let target = meerkat_core::resolve_auth_binding_or_default_for_provider(
             config,
             provider,
             auth_binding,
             preferred_realm,
             true,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         Ok((
             target.realm,
             target.auth_binding.binding.to_string(),
@@ -1626,7 +1670,8 @@ impl AgentFactory {
         provider: Provider,
         auth_binding: Option<&AuthBindingRef>,
         preferred_realm: Option<&RealmId>,
-    ) -> Result<Vec<meerkat_core::ResolvedConnectionTarget>, String> {
+    ) -> Result<Vec<meerkat_core::ResolvedConnectionTarget>, meerkat_core::ConnectionTargetError>
+    {
         meerkat_core::resolve_auth_binding_candidates_for_provider(
             config,
             provider,
@@ -1634,7 +1679,6 @@ impl AgentFactory {
             preferred_realm,
             true,
         )
-        .map_err(|e| e.to_string())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1832,11 +1876,17 @@ impl AgentFactory {
         provider: Provider,
         selected_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+        // The `String` error here is a display-only reason that feeds the
+        // fail-closed `CapabilityUnavailable` / silent-inherit policy of the
+        // image executor path; the typed `ConnectionTargetError` is lowered
+        // exactly once at this seam.
         let Some(selected_realm) = selected_realm else {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None)
+                .map_err(|e| e.to_string());
         };
         if selected_realm.is_env_default() {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None)
+                .map_err(|e| e.to_string());
         }
         if !config.realm.contains_key(selected_realm.as_str()) {
             return Self::resolve_realm_binding_for_provider(
@@ -1844,7 +1894,8 @@ impl AgentFactory {
                 provider,
                 None,
                 Some(selected_realm),
-            );
+            )
+            .map_err(|e| e.to_string());
         }
         Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm.clone())
     }
@@ -1855,11 +1906,17 @@ impl AgentFactory {
         provider: Provider,
         selected_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+        // The `String` error here is a display-only reason that feeds the
+        // fail-closed `CapabilityUnavailable` / silent-inherit policy of the
+        // web-search executor path; the typed `ConnectionTargetError` is
+        // lowered exactly once at this seam.
         let Some(selected_realm) = selected_realm else {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None)
+                .map_err(|e| e.to_string());
         };
         if selected_realm.is_env_default() {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None)
+                .map_err(|e| e.to_string());
         }
         if !config.realm.contains_key(selected_realm.as_str()) {
             return Self::resolve_realm_binding_for_provider(
@@ -1867,7 +1924,8 @@ impl AgentFactory {
                 provider,
                 None,
                 Some(selected_realm),
-            );
+            )
+            .map_err(|e| e.to_string());
         }
         Self::resolve_selected_web_search_binding_for_provider(
             config,
@@ -1887,9 +1945,12 @@ impl AgentFactory {
     ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, BuildAgentError> {
         let (realm, _binding_id, auth_binding) =
             Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
-                .map_err(BuildAgentError::ConnectionResolution)?;
+                .map_err(|e| BuildAgentError::LlmClient(FactoryError::ConnectionTarget(e)))?;
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        if let Some(store) = self.token_store.clone() {
+        if let Some(store) = self
+            .resolution_token_store()
+            .map_err(BuildAgentError::LlmClient)?
+        {
             env = env.with_token_store(store);
         }
         if let Some(coord) = self.refresh_coord.clone() {
@@ -1902,18 +1963,20 @@ impl AgentFactory {
             .provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+            .map_err(|e| BuildAgentError::LlmClient(FactoryError::ProviderAuth(e)))?;
         if is_azure_openai_connection(&connection) {
-            return Err(BuildAgentError::ConnectionResolution(
-                "azure_openai does not support the OpenAI realtime sideband in Meerkat v1"
-                    .to_string(),
+            return Err(BuildAgentError::LlmClient(
+                FactoryError::UnsupportedProvider(
+                    "azure_openai does not support the OpenAI realtime sideband in Meerkat v1"
+                        .to_string(),
+                ),
             ));
         }
-        let secret = connection.resolved_secret().ok_or_else(|| {
-            BuildAgentError::ConnectionResolution(
-                "OpenAI realtime sideband requires resolved inline credential material".to_string(),
-            )
-        })?;
+        let secret = connection
+            .resolved_secret()
+            .ok_or(BuildAgentError::LlmClient(FactoryError::ClientBuild(
+                meerkat_llm_core::provider_runtime::ProviderClientError::NoCredentialMaterial,
+            )))?;
         let live = Arc::new(meerkat_client::OpenAiLiveClient::new(secret))
             as Arc<dyn meerkat_client::OpenAiLiveSessionFactory>;
         Ok(
@@ -1982,7 +2045,12 @@ impl AgentFactory {
             ));
         };
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        if let Some(store) = self.token_store.clone() {
+        // A faulted credential backend is a hard typed fault, never folded
+        // into the inherit-mode `Ok(None)` degradation.
+        if let Some(store) = self
+            .resolution_token_store()
+            .map_err(BuildAgentError::LlmClient)?
+        {
             env = env.with_token_store(store);
         }
         if let Some(coord) = self.refresh_coord.clone() {
@@ -2075,7 +2143,7 @@ impl AgentFactory {
             #[cfg(feature = "comms")]
             comms_runtime: None,
             #[cfg(not(target_arch = "wasm32"))]
-            token_store: None,
+            token_store: TokenStoreAttachment::Detached,
             #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
             external_auth_resolvers: BTreeMap::new(),
@@ -2085,17 +2153,21 @@ impl AgentFactory {
 
     /// Create a new factory with the required session store path.
     ///
-    /// The default file-backed TokenStore is attached when available.
+    /// The default file-backed TokenStore is attached when it opens cleanly.
     /// OAuth-backed bindings read persisted tokens written by `rkat auth login`
     /// and REST/RPC OAuth completion handlers out of the box. If the default
-    /// TokenStore location is unavailable (for example no `$XDG_CONFIG_HOME`),
-    /// the field stays `None` and OAuth bindings surface
+    /// TokenStore fails to open (for example a corrupt credential backend),
+    /// the typed open fault is retained and the first provider resolution
+    /// fails with `FactoryError::TokenStore` — never silently degraded to
     /// `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let token_store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        let token_store = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
             .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
-            .ok();
+        {
+            Ok(store) => TokenStoreAttachment::Attached(store),
+            Err(err) => TokenStoreAttachment::OpenFailed(Arc::new(err)),
+        };
         Self {
             store_path: store_path.into(),
             runtime_root: None,
@@ -2134,8 +2206,37 @@ impl AgentFactory {
         mut self,
         store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
     ) -> Self {
-        self.token_store = Some(store);
+        self.token_store = TokenStoreAttachment::Attached(store);
         self
+    }
+
+    /// Detach any persistent `TokenStore` from this factory. Callers that
+    /// deliberately resolve without persisted credentials (e.g. tests
+    /// pinning the no-store path) use this instead of poking the typed
+    /// attachment state directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn without_token_store(mut self) -> Self {
+        self.token_store = TokenStoreAttachment::Detached;
+        self
+    }
+
+    /// Resolve the token store to attach to a `ResolverEnvironment`.
+    ///
+    /// `Detached` → `Ok(None)`, `Attached` → `Ok(Some(store))`, and a
+    /// retained default-store open failure propagates as the typed
+    /// [`FactoryError::TokenStore`] fault — provider resolution with a
+    /// faulted credential backend fails closed (mirroring the REST
+    /// surface, which fails startup on the same condition) instead of
+    /// proceeding with silently-absent persisted-auth truth.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolution_token_store(
+        &self,
+    ) -> Result<Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>, FactoryError> {
+        match &self.token_store {
+            TokenStoreAttachment::Detached => Ok(None),
+            TokenStoreAttachment::Attached(store) => Ok(Some(Arc::clone(store))),
+            TokenStoreAttachment::OpenFailed(err) => Err(FactoryError::TokenStore(Arc::clone(err))),
+        }
     }
 
     pub fn provider_runtime_registry(
@@ -2154,12 +2255,12 @@ impl AgentFactory {
 
     /// Register an external auth resolver that surfaces bindings whose
     /// `CredentialSourceSpec::ExternalResolver { handle }` matches the
-    /// supplied `handle`. Used by WASM hosts (browser OAuth flow owned
-    /// by the page) and by SDK users embedding meerkat inside an
-    /// existing auth story.
+    /// supplied typed [`meerkat_core::ExternalResolverId`]. Used by WASM
+    /// hosts (browser OAuth flow owned by the page) and by SDK users
+    /// embedding meerkat inside an existing auth story.
     pub fn with_external_auth_resolver(
         mut self,
-        handle: impl Into<String>,
+        handle: impl Into<meerkat_core::ExternalResolverId>,
         resolver: Arc<dyn meerkat_providers::ExternalAuthResolverHandle>,
     ) -> Self {
         self.external_auth_resolvers.insert(handle.into(), resolver);
@@ -2184,7 +2285,7 @@ impl AgentFactory {
         mut self,
     ) -> Result<Self, meerkat_providers::auth_store::TokenStoreError> {
         let store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()?.open()?;
-        self.token_store = Some(store);
+        self.token_store = TokenStoreAttachment::Attached(store);
         Ok(self)
     }
 
@@ -2759,7 +2860,7 @@ impl AgentFactory {
             identity.auth_binding.as_ref(),
             None,
         )
-        .map_err(FactoryError::ClientCreationFailed)?;
+        .map_err(FactoryError::ConnectionTarget)?;
         let lease_auth_binding = if auth_binding.is_env_default()
             && identity
                 .auth_binding
@@ -2776,7 +2877,7 @@ impl AgentFactory {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(store) = self.token_store.clone() {
+            if let Some(store) = self.resolution_token_store()? {
                 env = env.with_token_store(store);
             }
             if let Some(coord) = self.refresh_coord.clone() {
@@ -3005,7 +3106,7 @@ impl AgentFactory {
             let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
             #[cfg(not(target_arch = "wasm32"))]
             {
-                if let Some(store) = self.token_store.clone() {
+                if let Some(store) = self.resolution_token_store()? {
                     env = env.with_token_store(store);
                 }
                 if let Some(coord) = self.refresh_coord.clone() {
@@ -3072,7 +3173,7 @@ impl AgentFactory {
                     Some(auth_binding),
                     None,
                 )
-                .map_err(FactoryError::ClientCreationFailed)?;
+                .map_err(FactoryError::ConnectionTarget)?;
             return Ok((
                 realm,
                 resolved_auth_binding.clone(),
@@ -3620,7 +3721,10 @@ impl AgentFactory {
                         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            if let Some(store) = self.token_store.clone() {
+                            if let Some(store) = self
+                                .resolution_token_store()
+                                .map_err(BuildAgentError::LlmClient)?
+                            {
                                 env = env.with_token_store(store);
                             }
                             if let Some(coord) = self.refresh_coord.clone() {
@@ -3632,7 +3736,9 @@ impl AgentFactory {
                         }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
-                        let mut first_resolution_error: Option<String> = None;
+                        let mut first_resolution_error: Option<
+                            meerkat_llm_core::provider_runtime::ProviderAuthError,
+                        > = None;
                         let mut resolved = None;
                         let candidates = Self::resolve_realm_binding_candidates_for_provider(
                             config,
@@ -3640,7 +3746,9 @@ impl AgentFactory {
                             build_config.auth_binding.as_ref(),
                             build_config.realm_id.as_ref(),
                         )
-                        .map_err(BuildAgentError::ConnectionResolution)?;
+                        .map_err(|e| {
+                            BuildAgentError::LlmClient(FactoryError::ConnectionTarget(e))
+                        })?;
                         for target in candidates {
                             let resolved_auth_binding = target.auth_binding.clone();
                             let lease_auth_binding = if resolved_auth_binding.is_env_default()
@@ -3664,11 +3772,12 @@ impl AgentFactory {
                             {
                                 Ok(connection) => {
                                     if connection.provider != provider {
-                                        return Err(BuildAgentError::ConnectionResolution(
-                                            format!(
-                                                "auth binding for provider '{}' resolved connection for provider '{}'",
-                                                provider.as_str(),
-                                                connection.provider.as_str()
+                                        return Err(BuildAgentError::LlmClient(
+                                            FactoryError::ProviderAuth(
+                                                meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
+                                                    expected: provider,
+                                                    resolved: connection.provider,
+                                                },
                                             ),
                                         ));
                                     }
@@ -3691,7 +3800,7 @@ impl AgentFactory {
                                     break;
                                 }
                                 Err(err) => {
-                                    first_resolution_error.get_or_insert_with(|| err.to_string());
+                                    first_resolution_error.get_or_insert(err);
                                     if explicit_auth_binding {
                                         break;
                                     }
@@ -3700,14 +3809,16 @@ impl AgentFactory {
                         }
                         let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
                             resolved.ok_or_else(|| {
-                                BuildAgentError::ConnectionResolution(
+                                BuildAgentError::LlmClient(FactoryError::ProviderAuth(
                                     first_resolution_error.unwrap_or_else(|| {
-                                        format!(
-                                            "no auth binding candidates resolved for provider '{}'",
-                                            provider.as_str()
+                                        meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                                            format!(
+                                                "no auth binding candidates resolved for provider '{}'",
+                                                provider.as_str()
+                                            ),
                                         )
                                     }),
-                                )
+                                ))
                             })?;
                         build_config.model = resolved_model;
 
@@ -3731,7 +3842,7 @@ impl AgentFactory {
                             auto_image_generation_executor = provider_registry
                                 .build_image_generation_executor(connection.clone())
                                 .map_err(|e| {
-                                    BuildAgentError::ConnectionResolution(e.to_string())
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
                                 })?;
                         }
 
@@ -3751,43 +3862,41 @@ impl AgentFactory {
                             && is_openai_realtime_capable(&build_config.model);
                         #[cfg(not(feature = "openai-realtime"))]
                         if realtime_route {
-                            return Err(BuildAgentError::ConnectionResolution(format!(
-                                "model '{}' advertises ModelCapabilities.realtime=true; \
-                             the meerkat facade must be built with the \
-                             `openai-realtime` feature to route text turns over the \
-                             Realtime WebSocket",
-                                build_config.model
+                            return Err(BuildAgentError::LlmClient(FactoryError::ClientBuild(
+                                meerkat_llm_core::provider_runtime::ProviderClientError::MissingFeature(
+                                    "openai-realtime",
+                                ),
                             )));
                         }
                         #[cfg(feature = "openai-realtime")]
                         if realtime_route {
                             if is_azure_openai_connection(&connection) {
-                                return Err(BuildAgentError::ConnectionResolution(format!(
-                                    "model '{}' advertises ModelCapabilities.realtime=true, \
+                                return Err(BuildAgentError::LlmClient(
+                                    FactoryError::UnsupportedProvider(format!(
+                                        "model '{}' advertises ModelCapabilities.realtime=true, \
                                      but azure_openai does not support the OpenAI realtime \
                                      text adapter in Meerkat v1",
-                                    build_config.model
-                                )));
+                                        build_config.model
+                                    )),
+                                ));
                             }
-                            let secret = connection.resolved_secret().ok_or_else(|| {
-                                BuildAgentError::ConnectionResolution(
-                                    "openai realtime text adapter requires an inline API key (\
-                                 dynamic authorizers for realtime WS are not yet supported)"
-                                        .to_string(),
-                                )
-                            })?;
+                            let secret = connection.resolved_secret().ok_or(
+                                BuildAgentError::LlmClient(FactoryError::ClientBuild(
+                                    meerkat_llm_core::provider_runtime::ProviderClientError::NoCredentialMaterial,
+                                )),
+                            )?;
                             Arc::new(meerkat_openai::OpenAiRealtimeTextAdapter::new(secret))
                                 as Arc<dyn LlmClient>
                         } else {
-                            provider_registry
-                                .build_client(connection)
-                                .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                            provider_registry.build_client(connection).map_err(|e| {
+                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                            })?
                         }
                         #[cfg(not(feature = "openai-realtime"))]
                         {
-                            provider_registry
-                                .build_client(connection)
-                                .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                            provider_registry.build_client(connection).map_err(|e| {
+                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                            })?
                         }
                     }
                 }
@@ -3820,7 +3929,10 @@ impl AgentFactory {
                 let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(store) = self.token_store.clone() {
+                    if let Some(store) = self
+                        .resolution_token_store()
+                        .map_err(BuildAgentError::LlmClient)?
+                    {
                         env = env.with_token_store(store);
                     }
                     if let Some(coord) = self.refresh_coord.clone() {
@@ -3931,55 +4043,32 @@ impl AgentFactory {
                 })?;
         }
         let event_tap = meerkat_core::new_event_tap();
-        let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
-            build_config.agent_llm_client_override.take()
-        {
-            agent_client
-        } else {
-            let llm_client = llm_client.ok_or_else(|| {
-                BuildAgentError::Config(
-                    "internal error: missing LLM client for adapter build".to_string(),
-                )
-            })?;
-            let mut llm_adapter_inner = match build_config.event_tx.clone() {
-                Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
-                None => LlmClientAdapter::new(llm_client, model.clone()),
-            };
-            llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
-            if let Some(params_value) = build_config.provider_params.as_ref() {
-                // Project the legacy `Option<serde_json::Value>` per-turn
-                // blob into the typed `ProviderTag` the adapter wants.
-                // Per-provider `from_legacy_value` maps well-known shapes;
-                // unknown keys surface as `LegacyProviderParamsError`
-                // (lossless round-trip via `ProviderTag::Unknown { bag }`
-                // is the runtime-boundary responsibility, not this seam).
-                use meerkat_core::lifecycle::run_primitive::{
-                    AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
-                };
-                let typed_tag = match provider {
-                    Provider::Anthropic => AnthropicProviderTag::from_legacy_value(params_value)
-                        .map(ProviderTag::Anthropic),
-                    Provider::OpenAI => {
-                        OpenAiProviderTag::from_legacy_value(params_value).map(ProviderTag::OpenAi)
-                    }
-                    Provider::Gemini => {
-                        GeminiProviderTag::from_legacy_value(params_value).map(ProviderTag::Gemini)
-                    }
-                    Provider::SelfHosted | Provider::Other => {
-                        // Self-hosted and Other route through OpenAI-compatible
-                        // APIs; use the OpenAI shape for per-turn overrides.
-                        OpenAiProviderTag::from_legacy_value(params_value).map(ProviderTag::OpenAi)
-                    }
-                }
-                .map_err(|e| {
-                    BuildAgentError::Config(format!(
-                        "invalid provider_params for provider {provider:?}: {e}"
-                    ))
+        let llm_adapter: Arc<dyn AgentLlmClient> =
+            if let Some(agent_client) = build_config.agent_llm_client_override.take() {
+                agent_client
+            } else {
+                let llm_client = llm_client.ok_or_else(|| {
+                    BuildAgentError::Config(
+                        "internal error: missing LLM client for adapter build".to_string(),
+                    )
                 })?;
-                llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
-            }
-            Arc::new(llm_adapter_inner)
-        };
+                let mut llm_adapter_inner = match build_config.event_tx.clone() {
+                    Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
+                    None => LlmClientAdapter::new(llm_client, model.clone()),
+                };
+                llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
+                // K2: the build config carries the typed `ProviderParamsOverride`
+                // end-to-end; the adapter default is its provider tag (no legacy
+                // JSON-bag projection at this seam).
+                if let Some(typed_tag) = build_config
+                    .provider_params
+                    .as_ref()
+                    .and_then(|params| params.provider_tag.clone())
+                {
+                    llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
+                }
+                Arc::new(llm_adapter_inner)
+            };
         let llm_adapter = Self::decorate_agent_llm_client(
             llm_adapter,
             build_config.agent_llm_client_decorator.as_ref(),
@@ -5019,6 +5108,11 @@ impl AgentFactory {
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {
                 registry: Arc::new(registry.clone()),
             }))
+            // Config-owned tool execution policy (per-call timeout, per-tool
+            // overrides, dispatch concurrency) reaches the agent loop through
+            // this seam; without it every factory-built agent silently ran on
+            // `ToolsConfig::default()`.
+            .with_tools_config(config.tools.clone())
             .with_call_timeout_override(effective_call_timeout_override);
 
         if let Some(defaults) = provider_tool_defaults_for(
@@ -5072,7 +5166,6 @@ impl AgentFactory {
         }
 
         // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
-        #[allow(unused_variables)]
         let effective_memory = build_config.override_memory.resolve(self.enable_memory);
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
@@ -5117,6 +5210,18 @@ impl AgentFactory {
                     });
                 }
             }
+        }
+        #[cfg(not(feature = "memory-store-session"))]
+        if effective_memory {
+            // Mirror of the open-failure arm above: an effective memory
+            // enable on a build without the `memory-store-session` feature
+            // can never deliver the promised `memory_search` tool. Fail
+            // closed instead of silently producing a memory-less agent that
+            // misreports the session's capability truth.
+            return Err(BuildAgentError::CapabilityUnavailable {
+                capability: "memory",
+                reason: "meerkat was built without the `memory-store-session` feature".to_string(),
+            });
         }
 
         // 12c. Wire compactor (when session-compaction is enabled)
@@ -5305,6 +5410,33 @@ mod tests {
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    /// A faulted default TokenStore must surface its typed open fault at the
+    /// resolution seam — never collapse to "no store attached" (which would
+    /// launder the fault into `AuthError::InteractiveLoginRequired`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn faulted_default_token_store_propagates_typed_open_fault() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions"));
+        factory.token_store = TokenStoreAttachment::OpenFailed(Arc::new(
+            meerkat_providers::auth_store::TokenStoreError::Unavailable(
+                "injected open failure".into(),
+            ),
+        ));
+
+        let Err(err) = factory.resolution_token_store() else {
+            panic!("a faulted credential backend must fail resolution typed");
+        };
+        assert!(
+            matches!(err, FactoryError::TokenStore(_)),
+            "expected FactoryError::TokenStore, got: {err:?}"
+        );
+
+        // Deliberately-detached factories resolve cleanly to "no store".
+        let detached = AgentFactory::minimal();
+        assert!(detached.resolution_token_store().unwrap().is_none());
+    }
 
     fn session_with_raw_metadata(
         session: Session,
@@ -5708,7 +5840,16 @@ mod tests {
             .expect("OpenAI request policy");
         assert_eq!(
             openai_policy.provider_tool_defaults,
-            Some(serde_json::json!({"web_search": {"type": "web_search"}})),
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::json!({"type": "web_search"}),
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ),),
             "owned OpenAI web-search defaults should still resolve"
         );
 
@@ -5771,7 +5912,16 @@ mod tests {
         );
         assert_eq!(
             enabled,
-            Some(serde_json::json!({"web_search": {"type": "web_search"}})),
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::json!({"type": "web_search"}),
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ),),
             "Inherit must leave owned web-search defaults intact"
         );
 
@@ -5928,8 +6078,12 @@ mod tests {
         .expect_err("env_default is a synthetic fallback, not a durable identity");
 
         assert!(
-            err.contains("env_default"),
-            "error should name the rejected synthetic realm: {err}"
+            matches!(
+                &err,
+                meerkat_core::ConnectionTargetError::UnknownRealm(realm)
+                    if realm == "env_default"
+            ),
+            "typed error should name the rejected synthetic realm: {err}"
         );
     }
 

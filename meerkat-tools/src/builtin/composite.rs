@@ -18,7 +18,7 @@ use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindE
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ContentBlock, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -39,18 +39,22 @@ pub enum CompositeDispatcherError {
     ToolInitFailed { name: String, message: String },
 }
 
-/// Render a `ToolOutput::Json` value into its tool-result text content.
+/// Convert a `ToolOutput::Json` success into typed tool-result content.
 ///
-/// A bare JSON string is carried verbatim; any other value is serialized.
-/// Serialization failure is propagated as a typed [`ToolError`] rather than
-/// being collapsed into empty successful output — a structured success must
-/// never launder a serialization fault into a silently-empty result.
-fn json_output_content(name: &str, value: &Value) -> Result<String, ToolError> {
+/// A bare JSON string is text content and is carried verbatim as a `Text`
+/// block; every other JSON shape is preserved as a typed
+/// [`ContentBlock::Structured`] payload — structured success is never
+/// collapsed into serialized text. A serialization fault is propagated as a
+/// typed [`ToolError`] rather than being laundered into silently-empty
+/// successful output.
+fn json_output_blocks(name: &str, value: &Value) -> Result<Vec<ContentBlock>, ToolError> {
     match value {
-        Value::String(s) => Ok(s.clone()),
-        _ => serde_json::to_string(value).map_err(|err| ToolError::ExecutionFailed {
-            message: format!("failed to serialize JSON tool output for '{name}': {err}"),
-        }),
+        Value::String(s) => Ok(ContentBlock::text_vec(s.clone())),
+        _ => ContentBlock::structured(value)
+            .map(|block| vec![block])
+            .map_err(|err| ToolError::ExecutionFailed {
+                message: format!("failed to serialize JSON tool output for '{name}': {err}"),
+            }),
     }
 }
 
@@ -502,9 +506,9 @@ impl CompositeDispatcher {
         let async_ops = tool.async_ops_for_output(&output);
         match output {
             ToolOutput::Json(value) => {
-                let content = json_output_content(call.name, &value)?;
+                let content = json_output_blocks(call.name, &value)?;
                 Ok(ToolDispatchOutcome::new(
-                    ToolResult::new(call.id.to_string(), content, false),
+                    ToolResult::with_blocks(call.id.to_string(), content, false),
                     async_ops,
                     vec![],
                 ))
@@ -513,9 +517,9 @@ impl CompositeDispatcher {
                 value,
                 session_effects,
             } => {
-                let content = json_output_content(call.name, &value)?;
+                let content = json_output_blocks(call.name, &value)?;
                 Ok(ToolDispatchOutcome::new(
-                    ToolResult::new(call.id.to_string(), content, false),
+                    ToolResult::with_blocks(call.id.to_string(), content, false),
                     async_ops,
                     session_effects,
                 ))
@@ -1365,8 +1369,10 @@ mod tests {
         )
         .expect("composite dispatcher should build");
 
-        // Builtin JSON outputs should be serialized into text content without
-        // losing object structure.
+        // Builtin JSON outputs arrive as typed Structured blocks; the text
+        // projection of that block is the raw JSON, so text-oriented
+        // consumers keep a lossless view without the dispatcher collapsing
+        // the structured payload itself.
         let call_json = serde_json::value::RawValue::from_string(r"{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-str",
@@ -1384,23 +1390,32 @@ mod tests {
     }
 
     #[test]
-    fn json_output_content_carries_string_verbatim_and_serializes_objects() {
-        // Bare strings carry verbatim (no JSON quoting).
-        let s = json_output_content("t", &Value::String("hello".into()))
+    fn json_output_blocks_keeps_strings_text_and_objects_structured() {
+        // Bare strings carry verbatim as text content (no JSON quoting).
+        let s = json_output_blocks("t", &Value::String("hello".into()))
             .expect("string content should render");
-        assert_eq!(s, "hello");
+        assert_eq!(
+            s,
+            vec![ContentBlock::Text {
+                text: "hello".into()
+            }]
+        );
 
-        // Objects are serialized; the result must be non-empty and valid JSON,
-        // never the empty-string collapse the old unwrap_or_default() produced.
-        let obj = json_output_content("t", &serde_json::json!({"k": 1}))
+        // K1 invariant: structured JSON success stays a typed Structured
+        // block — never collapsed into serialized text.
+        let blocks = json_output_blocks("t", &serde_json::json!({"k": 1}))
             .expect("object content should serialize");
-        assert!(!obj.is_empty());
-        let parsed: Value = serde_json::from_str(&obj).expect("serialized object is valid JSON");
+        assert_eq!(blocks.len(), 1);
+        let raw = blocks[0]
+            .structured_data()
+            .expect("object output must be a Structured block, not Text");
+        let parsed: Value =
+            serde_json::from_str(raw.get()).expect("structured payload is valid JSON");
         assert_eq!(parsed["k"], 1);
     }
 
     #[tokio::test]
-    async fn dispatch_json_object_produces_serialized_text() {
+    async fn dispatch_json_object_produces_structured_block() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = CompositeDispatcher::new(
             store,
@@ -1413,7 +1428,9 @@ mod tests {
         )
         .expect("composite dispatcher should build");
 
-        // datetime returns a JSON object - verify it's serialized to text
+        // datetime returns a JSON object — verify it round-trips as a typed
+        // Structured block through dispatch (K1 invariant: structured success
+        // is never collapsed to text).
         let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-obj",
@@ -1425,8 +1442,12 @@ mod tests {
             .await
             .expect("dispatch should succeed");
         assert!(!result.result.is_error);
-        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
-            .expect("content should be valid JSON");
+        assert_eq!(result.result.content.len(), 1);
+        let raw = result.result.content[0]
+            .structured_data()
+            .expect("JSON-object tool output must arrive as a Structured block");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.get()).expect("structured payload is valid JSON");
         assert!(
             parsed.get("iso8601").is_some(),
             "should contain iso8601 field"
@@ -1950,9 +1971,10 @@ mod tests {
         async fn invoke_function(
             &self,
             key: &meerkat_core::skills::SkillKey,
-            _function_name: &str,
-            _arguments: serde_json::Value,
-        ) -> Result<serde_json::Value, meerkat_core::skills::SkillError> {
+            _function_name: &meerkat_core::skills::SkillFunctionName,
+            _arguments: meerkat_core::ToolCallArguments,
+        ) -> Result<meerkat_core::skills::SkillFunctionOutput, meerkat_core::skills::SkillError>
+        {
             Err(meerkat_core::skills::SkillError::NotFound { key: key.clone() })
         }
     }

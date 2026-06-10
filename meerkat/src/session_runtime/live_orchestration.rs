@@ -614,14 +614,12 @@ mod orchestrator {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt,
-                render_metadata: None,
                 // Project the typed per-request policy back to the wire
                 // `Option<String>` field. `Disable` cannot be expressed at this
                 // boundary yet (it projects to `None`) — see row #337 note.
                 system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy,
                 build: Some(build),

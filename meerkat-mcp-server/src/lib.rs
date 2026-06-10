@@ -238,7 +238,7 @@ pub struct MeerkatRunInput {
     pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -1089,7 +1089,7 @@ pub struct MeerkatResumeInput {
     pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -2739,29 +2739,26 @@ async fn handle_meerkat_mcp_reload(
                 .map_err(|e| format!("failed to stage reload: {e}"))?;
         }
         None => {
-            // Staging is sequential and each accepted intent is durable in
-            // the surface owner (there is no unstage input), so a mid-loop
-            // rejection cannot roll earlier intents back. The fault must be
-            // explicit: the error names the servers whose reload is already
-            // staged — those reloads WILL still apply at the next boundary —
-            // so a partial staging is never laundered into an apparently
-            // effect-free failure.
-            let mut staged: Vec<String> = Vec::new();
-            for name in adapter.active_server_names().await {
-                if let Err(e) = adapter
-                    .stage_reload(McpReloadTarget::ServerName(name.clone()))
-                    .await
-                {
-                    return Err(if staged.is_empty() {
-                        format!("failed to stage reload for '{name}': {e}")
-                    } else {
-                        format!(
-                            "failed to stage reload for '{name}': {e}; reload already staged for [{}] and will still apply at the next boundary",
-                            staged.join(", ")
-                        )
-                    });
-                }
-                staged.push(name);
+            // K14: the lifecycle owner's reload-all primitive stages the whole
+            // roster under one router lock and returns the typed per-server
+            // report; a non-clean report is an explicit fault naming both the
+            // staged servers (whose reloads WILL still apply at the next
+            // boundary) and the rejected ones.
+            let report = adapter
+                .stage_reload_all()
+                .await
+                .map_err(|e| format!("failed to stage reload-all: {e}"))?;
+            if !report.is_clean() {
+                let failed = report
+                    .failed
+                    .iter()
+                    .map(|failure| format!("{}: {}", failure.server, failure.error))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!(
+                    "failed to stage reload for [{failed}]; reload already staged for [{}] and will still apply at the next boundary",
+                    report.staged.join(", ")
+                ));
             }
         }
     }
@@ -3431,6 +3428,16 @@ async fn handle_meerkat_run(
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         input.enable_mob,
     ));
+    // Dogma K10: initial-turn skill references ride the ONE typed carrier
+    // (`build.initial_turn_metadata`), not a request-level duplicate.
+    if let Some(refs) = skill_references.clone() {
+        build
+            .initial_turn_metadata
+            .get_or_insert_with(Default::default)
+            .skill_references
+            .get_or_insert_with(Vec::new)
+            .extend(refs);
+    }
 
     reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
         archive_with_mcp_machine_authority(
@@ -3449,12 +3456,10 @@ async fn handle_meerkat_run(
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
-        render_metadata: None,
         system_prompt: input.system_prompt,
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
 
-        skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -3918,7 +3923,17 @@ async fn handle_meerkat_resume(
                 }
             };
         mcp_adapter = Some(adapter);
-        let build = build_session_options(resume_bindings, external_tools);
+        let mut build = build_session_options(resume_bindings, external_tools);
+        // Dogma K10: initial-turn skill references ride the ONE typed carrier
+        // (`build.initial_turn_metadata`), not a request-level duplicate.
+        if let Some(refs) = skill_references.clone() {
+            build
+                .initial_turn_metadata
+                .get_or_insert_with(Default::default)
+                .skill_references
+                .get_or_insert_with(Vec::new)
+                .extend(refs);
+        }
         reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
             ingress
                 .clear_session_if_new_locked(
@@ -3933,12 +3948,9 @@ async fn handle_meerkat_resume(
         let req = CreateSessionRequest {
             model,
             prompt: prompt.clone().into(),
-            render_metadata: None,
             system_prompt: input.system_prompt.clone(),
             max_tokens,
             event_tx: event_tx.clone(),
-
-            skill_references: skill_references.clone(),
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -3994,10 +4006,15 @@ async fn handle_meerkat_resume(
         let turn_keep_alive_metadata =
             keep_alive.then(
                 || meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(30),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                    }),
+                    keep_alive: Some(
+                        meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(30),
+                                policy:
+                                    meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                            },
+                        ),
+                    ),
                     ..Default::default()
                 },
             );
@@ -4106,7 +4123,18 @@ async fn handle_meerkat_resume(
                     }
                 };
                 mcp_adapter = Some(adapter);
-                let build = build_session_options(resume_bindings, external_tools);
+                let mut build = build_session_options(resume_bindings, external_tools);
+                // Dogma K10: initial-turn skill references ride the ONE typed
+                // carrier (`build.initial_turn_metadata`), not a request-level
+                // duplicate.
+                if let Some(refs) = skill_references.clone() {
+                    build
+                        .initial_turn_metadata
+                        .get_or_insert_with(Default::default)
+                        .skill_references
+                        .get_or_insert_with(Vec::new)
+                        .extend(refs);
+                }
                 reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
                     ingress
                         .clear_session_if_new_locked(
@@ -4121,12 +4149,10 @@ async fn handle_meerkat_resume(
                 let req = CreateSessionRequest {
                     model,
                     prompt: prompt.into(),
-                    render_metadata: None,
                     system_prompt: input.system_prompt.clone(),
                     max_tokens,
                     event_tx: event_tx.clone(),
 
-                    skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
@@ -4410,12 +4436,16 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        // K1: callback ingress goes through the typed tool-argument contract.
+        // Malformed / non-object args fail closed with a typed
+        // `InvalidArguments` error — never a `Value::String` wrap that would
+        // silently reach the callback consumer.
+        let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
+            .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
         // Check if this is a callback tool
         if self.callback_tools.contains(call.name) {
             // Return a special error that signals the agent loop should pause
-            Err(ToolError::callback_pending(call.name, args))
+            Err(ToolError::callback_pending(call.name, args.into_value()))
         } else {
             Err(ToolError::not_found(call.name))
         }
@@ -6208,11 +6238,9 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(4096),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -6333,11 +6361,9 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(4096),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -7059,11 +7085,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {

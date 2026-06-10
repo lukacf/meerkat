@@ -104,7 +104,10 @@ fn make_request(from: &str, intent: &str) -> InboxInteraction {
         from: from.into(),
         content: InteractionContent::Request {
             intent: intent.into(),
-            params: serde_json::json!({}),
+            // K15: lifecycle-classed requests must carry the typed peer
+            // subject (a missing subject is rejected at ingress); the field
+            // is inert payload for non-lifecycle intents.
+            params: serde_json::json!({ "peer": from }),
             blocks: None,
         },
         rendered_text: format!("[{from}]: request ({intent})"),

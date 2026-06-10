@@ -326,7 +326,7 @@ fn openai_realtime_runtime_system_context_text(append: &PendingSystemContextAppe
         text.push_str(source);
     }
     text.push_str("\n\n");
-    text.push_str(&append.text);
+    text.push_str(&append.content.render_text());
     text
 }
 
@@ -339,9 +339,8 @@ fn openai_realtime_authoritative_system_context(
         .collect::<Vec<_>>();
     let raw_lines = runtime_system_context
         .iter()
-        .map(|append| append.text.trim())
+        .map(|append| append.content.render_text().trim().to_owned())
         .filter(|text| !text.is_empty())
-        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     if summaries.is_empty() && raw_lines.is_empty() {
         return None;
@@ -4774,7 +4773,9 @@ mod tests {
             ],
         )
         .with_runtime_system_context(vec![PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string()
+            ),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5101,7 +5102,9 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5132,12 +5135,14 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {
   \"request_intent\": \"checksum_token\",
   \"request_subject\": \"alpha beta gamma\",
   \"token\": \"birch seventeen\"
 }"
-            .to_string(),
+            .to_string()
+            ),
             source: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                     .to_string(),
@@ -5208,7 +5213,9 @@ mod tests {
             }),
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string()
+            ),
             source: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                     .to_string(),
@@ -5386,7 +5393,9 @@ mod tests {
             },
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string()
+            ),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -8490,7 +8499,9 @@ mod tests {
         );
 
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "peer terminal: pty=42".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "peer terminal: pty=42".to_string(),
+            ),
             source: Some("peer_terminal".to_string()),
             idempotency_key: Some("k1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,

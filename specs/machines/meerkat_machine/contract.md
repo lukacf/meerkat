@@ -34,6 +34,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `runtime_completion_result_run_id`: `Option<RunId>`
 - `extraction_attempts`: `u64`
 - `max_extraction_retries`: `u64`
+- `extraction_active`: `Bool`
 - `llm_retry_attempt`: `u64`
 - `llm_retry_max_retries`: `u64`
 - `llm_retry_selected_delay_ms`: `u64`
@@ -6776,6 +6777,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -6785,6 +6787,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -6794,6 +6797,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
@@ -6803,6 +6807,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -6812,6 +6817,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -6821,6 +6827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Retired`
 
@@ -6830,6 +6837,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Stopped`
 
@@ -6839,6 +6847,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
@@ -6848,6 +6857,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -6857,6 +6867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -6866,6 +6877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Retired`
 
@@ -6875,6 +6887,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Stopped`
 
@@ -6884,6 +6897,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
@@ -6983,6 +6997,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -6992,6 +7007,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -7001,6 +7017,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
@@ -7010,6 +7027,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -7019,6 +7037,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Retired`
 
@@ -7028,6 +7047,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Stopped`
 
@@ -7037,6 +7057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -7046,6 +7067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
@@ -7055,6 +7077,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Idle`
 
@@ -7064,6 +7087,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Retired`
 
@@ -7073,6 +7097,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Stopped`
 
@@ -7082,6 +7107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
@@ -7091,6 +7117,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
+  - `lifecycle_peer_subject_present`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 

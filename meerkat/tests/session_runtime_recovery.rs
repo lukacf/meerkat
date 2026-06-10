@@ -66,11 +66,9 @@ fn recovered_create_request_holds_registration_flag() {
     let request = CreateSessionRequest {
         model: "test-model".into(),
         prompt: ContentInput::from("hello"),
-        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::default(),
         build: None,

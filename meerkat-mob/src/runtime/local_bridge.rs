@@ -310,7 +310,7 @@ mod tests {
         CoreExecutorInterruptHandle,
     };
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-    use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceipt, RunId};
+    use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceiptDraft, RunId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -425,13 +425,12 @@ mod tests {
                 self.allow_finish.notified().await;
                 self.apply_finished.notify_waiters();
                 Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
+                    receipt: RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,
                         contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     session_snapshot: None,
                     terminal: None,

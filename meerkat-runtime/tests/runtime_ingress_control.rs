@@ -8,7 +8,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, Core
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::lifecycle::{InputId, RunId, RuntimeExecutionKind};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::service::TurnToolOverlay;
@@ -68,13 +68,12 @@ impl CoreExecutor for ResultExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         Ok(CoreApplyOutput::with_run_result(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
             make_run_result("runtime ingress ok"),
@@ -107,13 +106,12 @@ impl CoreExecutor for RecordingBatchExecutor {
             .await
             .push(primitive.contributing_input_ids().to_vec());
         Ok(CoreApplyOutput::with_run_result(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
             make_run_result("batched runtime ingress ok"),

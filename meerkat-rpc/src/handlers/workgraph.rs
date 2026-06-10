@@ -154,8 +154,23 @@ pub async fn handle_list(
         Err(response) => return response,
     };
     match service.list(filter).await {
-        Ok(items) => RpcResponse::success(id, serde_json::json!({ "items": items })),
+        Ok(items) => work_items_response(id, &items),
         Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+/// Serialize a typed work-item list into the contracts `WorkItemsResult`
+/// wire payload, failing closed on serialization (K17).
+fn work_items_response<T: serde::Serialize>(id: Option<RpcId>, items: &[T]) -> RpcResponse {
+    let items: Result<Vec<serde_json::Value>, serde_json::Error> =
+        items.iter().map(serde_json::to_value).collect();
+    match items {
+        Ok(items) => RpcResponse::success(id, meerkat_contracts::WorkItemsResult { items }),
+        Err(err) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to serialize workgraph items: {err}"),
+        ),
     }
 }
 
@@ -182,7 +197,7 @@ pub async fn handle_ready(
         Err(response) => return response,
     };
     match service.ready(filter).await {
-        Ok(items) => RpcResponse::success(id, serde_json::json!({ "items": items })),
+        Ok(items) => work_items_response(id, &items),
         Err(error) => map_workgraph_error(id, error),
     }
 }
@@ -238,7 +253,20 @@ pub async fn handle_events(
         Err(response) => return response,
     };
     match service.events(filter).await {
-        Ok(events) => RpcResponse::success(id, serde_json::json!({ "events": events })),
+        Ok(events) => {
+            let events: Result<Vec<serde_json::Value>, serde_json::Error> =
+                events.iter().map(serde_json::to_value).collect();
+            match events {
+                Ok(events) => {
+                    RpcResponse::success(id, meerkat_contracts::WorkEventsResult { events })
+                }
+                Err(err) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize workgraph events: {err}"),
+                ),
+            }
+        }
         Err(error) => map_workgraph_error(id, error),
     }
 }

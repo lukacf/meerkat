@@ -412,6 +412,13 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeKeepAliveRequest",
                 &["Enable", "Disable", "Preserve"],
             ),
+            // Dogma K13: machine-resolved persistence decision replaces the
+            // former `persist_keep_alive: bool` effect payload that collapsed
+            // Disable and Preserve.
+            NamedTypeBinding::string_enum(
+                "RuntimeKeepAlivePersistenceDecision",
+                &["PersistEnabled", "PersistDisabled", "PreserveExisting"],
+            ),
             NamedTypeBinding::string_enum("TurnHandlingMode", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "StartTurnExecutionKind",
@@ -2474,6 +2481,9 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("TargetBindingId"),
             NamedTypeBinding::string("ClaimOwner"),
             NamedTypeBinding::string("CorrelationId"),
+            // Dogma K8: runtime-outcome receipt key is a typed identity, not
+            // a raw String in canonical machine state.
+            NamedTypeBinding::string("RuntimeOutcomeKey"),
             NamedTypeBinding::string_enum(
                 "DeliveryReceiptStage",
                 &[

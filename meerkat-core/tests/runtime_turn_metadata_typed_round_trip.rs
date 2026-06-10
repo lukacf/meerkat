@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use meerkat_core::connection::{AuthBindingRef, BindingOrigin};
 use meerkat_core::lifecycle::run_primitive::{
-    AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
-    OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
-    ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata, TurnInstruction,
-    TurnInstructionKind, TurnMetadataMergeConflict, TurnMetadataOverride,
+    AnthropicProviderTag, GeminiProviderTag, KeepAliveDirective, KeepAliveMode, KeepAlivePolicy,
+    ModelId, OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride,
+    ProviderTag, ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata,
+    TurnInstruction, TurnInstructionKind, TurnMetadataMergeConflict, TurnMetadataOverride,
 };
 use meerkat_core::provider::Provider;
 use meerkat_core::service::TurnToolOverlay;
@@ -58,10 +58,10 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             profile: None,
             origin: BindingOrigin::Configured,
         })),
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::Pinned,
-        }),
+        })),
         render_metadata: Some(RenderMetadata {
             class: RenderClass::ExternalEvent,
             salience: RenderSalience::Urgent,
@@ -441,17 +441,17 @@ fn merge_refuses_auth_binding_set_and_clear() {
 #[test]
 fn merge_scalar_conflict_refuses_keep_alive() {
     let mut left = RuntimeTurnMetadata {
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
             ttl: Duration::from_secs(10),
             policy: KeepAliveMode::Pinned,
-        }),
+        })),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::PolicyDriven,
-        }),
+        })),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");

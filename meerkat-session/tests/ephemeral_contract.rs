@@ -66,7 +66,9 @@ impl SessionAgent for MockAgent {
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id: self.session_id.clone(),
-                prompt: meerkat_core::ContentInput::Text("test".to_string()),
+                input: meerkat_core::types::RunInput::Content {
+                    content: meerkat_core::ContentInput::Text("test".to_string()),
+                },
             })
             .await;
 
@@ -853,12 +855,10 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
 
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
@@ -1717,7 +1717,10 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
         .expect("shared system-context state");
     let state = state.snapshot();
     assert_eq!(state.pending_len(), 1, "duplicate must not enqueue twice");
-    assert_eq!(state.pending()[0].text, "Observe the orchestrator handoff.");
+    assert_eq!(
+        state.pending()[0].content.render_text(),
+        "Observe the orchestrator handoff."
+    );
     assert_eq!(state.pending()[0].source.as_deref(), Some("mob"));
     let seen = state
         .seen()

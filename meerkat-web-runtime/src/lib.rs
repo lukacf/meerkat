@@ -44,10 +44,10 @@
 //! - `mob_cancel_flow(mob_id, run_id)`
 //!
 //! ### Event Streaming
-//! - `mob_member_subscribe(mob_id, agent_identity)` → handle (per-member)
-//! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
-//! - `poll_subscription(handle)` → JSON events
-//! - `close_subscription(handle)`
+//! - `mob_member_subscribe(mob_id, agent_identity)` → stream_id (per-member)
+//! - `mob_subscribe_events(mob_id)` → stream_id (mob-wide)
+//! - `poll_subscription(stream_id)` → JSON events
+//! - `close_subscription(stream_id)`
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -528,9 +528,7 @@ thread_local! {
 
 fn clear_subscription_registry() {
     SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        registry.subscriptions.clear();
-        registry.next_handle = 1;
+        cell.borrow_mut().subscriptions.clear();
     });
 }
 
@@ -735,40 +733,28 @@ fn err_invalid_session_handle(handle: u32) -> JsValue {
 }
 
 /// Parse a caller-supplied prompt into typed [`meerkat_core::types::ContentInput`],
-/// failing closed when the prompt is structured-but-malformed content.
+/// failing closed on anything that is not the tagged prompt-input wire shape.
 ///
-/// The Web SDK serializes a `ContentBlock[]` prompt as a JSON array
-/// (`WireContentInput::Blocks`) and a plain text prompt as a bare string. Both
-/// `ContentInput` and `WireContentInput` are `#[serde(untagged)]` (string OR
-/// array), so the JSON shape is the discriminator.
-///
-/// Rule 4 / Rule 8: a JSON value that is block-shaped (array or object) but does
-/// not deserialize into `ContentInput` must surface `INVALID_PARAMS` rather than
-/// being silently misread as a single plain-text block. Only a prompt that is
-/// genuinely not structured JSON (a non-JSON string, or a JSON string literal)
-/// is treated as text.
+/// K19: content-bearing exports take the discriminated contract shape
+/// `{"text": "..."}` | `{"blocks": [...]}` (`WirePromptInput`); the tag is
+/// the discriminator, never JSON shape-sniffing of a raw string. A plain-text
+/// prompt whose body happens to be valid block-array JSON can therefore never
+/// be misread as structured blocks, and a malformed tagged payload surfaces
+/// `INVALID_PARAMS` instead of being downgraded to text.
 fn parse_prompt_content_input(
     prompt: &str,
 ) -> Result<meerkat_core::types::ContentInput, serde_json::Value> {
-    match serde_json::from_str::<serde_json::Value>(prompt) {
-        // A JSON array is the only block-shaped `ContentInput`/`WireContentInput`
-        // form (the Web SDK emits `ContentBlock[]` as a JSON array). Deserialize
-        // it strictly and fail closed — a malformed block array must never be
-        // silently downgraded to a single plain-text block.
-        Ok(value @ serde_json::Value::Array(_)) => {
-            serde_json::from_value::<meerkat_core::types::ContentInput>(value).map_err(|e| {
-                err_value(
-                    "INVALID_PARAMS",
-                    format!("prompt is structured block content but not valid ContentInput: {e}"),
-                )
-            })
-        }
-        // Anything else (a plain non-JSON string, a JSON object/number/bool, or a
-        // bare JSON string literal) is treated as plain text. The SDK never
-        // JSON-encodes plain text, so a non-array value is the caller's literal
-        // text rather than structured block content.
-        _ => Ok(meerkat_core::types::ContentInput::from(prompt)),
-    }
+    let wire: meerkat_contracts::WirePromptInput = serde_json::from_str(prompt).map_err(|e| {
+        err_value(
+            "INVALID_PARAMS",
+            format!(
+                "prompt must be the tagged content-input wire shape \
+                 {{\"text\": ...}} or {{\"blocks\": [...]}}: {e}"
+            ),
+        )
+    })?;
+    meerkat_core::types::ContentInput::try_from(wire)
+        .map_err(|e| err_value("INVALID_PARAMS", format!("invalid content blocks: {e}")))
 }
 
 async fn resolve_mob_member_bridge_session_id(
@@ -1447,12 +1433,10 @@ fn build_session_request_with_auth_binding(
     Ok(meerkat_core::service::CreateSessionRequest {
         model: config.model.clone(),
         prompt: "".into(),
-        render_metadata: None,
         system_prompt,
         max_tokens: Some(config.max_tokens),
         event_tx: None,
 
-        skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_config.to_session_build_options()),
@@ -1564,7 +1548,7 @@ fn system_context_request_from_append(
     append: &meerkat_core::PendingSystemContextAppend,
 ) -> meerkat_core::AppendSystemContextRequest {
     meerkat_core::AppendSystemContextRequest {
-        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(append.text.clone()),
+        content: append.content.clone(),
         source: append.source.clone(),
         idempotency_key: append.idempotency_key.clone(),
         source_kind: append.source_kind,
@@ -1862,8 +1846,17 @@ pub fn poll_events(handle: u32) -> Result<String, JsValue> {
                 ),
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                    events.push(SubscriptionLaggedItem::new(skipped).to_value()?);
+                Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(dropped)) => {
+                    // K19: the lag gap is the generated `StreamTruncated`
+                    // event (payload-shaped, matching this stream's items).
+                    events.push(
+                        serde_json::to_value(meerkat_core::event::AgentEvent::StreamTruncated {
+                            reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
+                                dropped,
+                            },
+                        })
+                        .map_err(|err| err_str("serialize_error", err))?,
+                    );
                 }
             }
         }
@@ -2380,41 +2373,40 @@ pub async fn mob_respawn(
         .map(|message| parse_prompt_content_input(&message))
         .transpose()
         .map_err(js_from_value)?;
-    match mob_state.mob_respawn(&id, mid, initial_message).await {
-        Ok(receipt) => {
-            let identity_str = receipt.identity.to_string();
-            let result = serde_json::json!({
-                "status": "completed",
-                "receipt": {
-                    "identity": identity_str,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
-                        id.as_str(),
-                        &identity_str,
-                    ),
-                },
-            });
-            Ok(JsValue::from_str(&result.to_string()))
+    fn respawn_receipt_wire(
+        mob_id: &MobId,
+        receipt: &meerkat_mob::MemberRespawnReceipt,
+    ) -> meerkat_contracts::MobRespawnReceipt {
+        let identity_str = receipt.identity.to_string();
+        meerkat_contracts::MobRespawnReceipt {
+            identity: identity_str.clone(),
+            member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         }
+    }
+
+    // K19: serialize the generated `MobRespawnResult` contract twin (the same
+    // shape RPC's `mob/respawn` returns) instead of a hand-shaped envelope.
+    let result = match mob_state.mob_respawn(&id, mid, initial_message).await {
+        Ok(receipt) => meerkat_contracts::MobRespawnResult {
+            status: meerkat_contracts::WireMobRespawnOutcome::Completed,
+            receipt: respawn_receipt_wire(&id, &receipt),
+            failed_peer_ids: Vec::new(),
+        },
         Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
             receipt,
             failed_peer_ids,
-        }) => {
-            let identity_str = receipt.identity.to_string();
-            let result = serde_json::json!({
-                "status": "topology_restore_failed",
-                "receipt": {
-                    "identity": identity_str,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
-                        id.as_str(),
-                        &identity_str,
-                    ),
-                },
-                "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
-            });
-            Ok(JsValue::from_str(&result.to_string()))
-        }
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
-    }
+        }) => meerkat_contracts::MobRespawnResult {
+            status: meerkat_contracts::WireMobRespawnOutcome::TopologyRestoreFailed,
+            receipt: respawn_receipt_wire(&id, &receipt),
+            failed_peer_ids: failed_peer_ids
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        },
+        Err(e) => return Err(JsValue::from_str(&e.to_string())),
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Force-cancel an active mob member turn.
@@ -2565,8 +2557,14 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 
 /// Subscription inner type: per-member broadcast or mob-wide mpsc.
 enum SubscriptionInner {
-    /// Per-member session broadcast receiver.
-    Member(std::cell::RefCell<meerkat_session::BroadcastEventReceiver>),
+    /// Per-member session broadcast receiver, with the bridge session
+    /// identity retained so lag gaps surface as the generated
+    /// `AgentEvent::StreamTruncated` envelope (the same contract the RPC
+    /// event stream emits).
+    Member {
+        session_id: meerkat_core::SessionId,
+        rx: std::cell::RefCell<meerkat_session::BroadcastEventReceiver>,
+    },
     /// Mob-wide attributed event receiver from the event router.
     /// The entire handle is stored to keep the router task alive (Drop cancels it).
     MobWide(std::cell::RefCell<meerkat_mob::MobEventRouterHandle>),
@@ -2579,28 +2577,78 @@ struct EventSubscription {
     inner: SubscriptionInner,
 }
 
+/// Typed owner of a WASM subscription stream identity.
+///
+/// K19: mirrors the RPC router's `StreamRef` seam — a stream identity is
+/// minted once on subscribe (`StreamRef::mint`), parsed fail-closed from the
+/// untrusted wire `stream_id` on every poll/close (`StreamRef::parse`), and
+/// its canonical wire form is the `Display` string. There is no helper-local
+/// `u32` handle counter: the identity is unguessable and collision-free by
+/// construction, not by registry bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct StreamRef(uuid::Uuid);
+
+impl StreamRef {
+    /// Mint a fresh stream identity on subscribe.
+    fn mint() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Parse the untrusted wire `stream_id`, failing closed on malformed
+    /// values. The error is a typed message; callers at the wasm boundary
+    /// project it into a `JsValue` (`JsValue` construction aborts off
+    /// wasm32, so the parse itself stays host-testable).
+    fn parse(raw: &str) -> Result<Self, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|e| format!("malformed subscription stream id '{raw}': {e}"))
+    }
+
+    /// Boundary projection of a parse fault into the wasm error shape.
+    fn parse_js(raw: &str) -> Result<Self, JsValue> {
+        Self::parse(raw).map_err(|message| err_js("invalid_stream_id", &message))
+    }
+}
+
+impl std::fmt::Display for StreamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Default)]
 struct SubscriptionRegistry {
-    next_handle: u32,
-    subscriptions: BTreeMap<u32, EventSubscription>,
+    subscriptions: BTreeMap<StreamRef, EventSubscription>,
 }
 
 thread_local! {
     static SUBSCRIPTIONS: RefCell<SubscriptionRegistry> = const { RefCell::new(SubscriptionRegistry {
-        next_handle: 1,
         subscriptions: BTreeMap::new(),
     }) };
 }
 
+/// Register a subscription under a freshly minted [`StreamRef`] and return
+/// the canonical wire `stream_id`.
+fn register_subscription(inner: SubscriptionInner) -> String {
+    let stream_ref = StreamRef::mint();
+    SUBSCRIPTIONS.with(|cell| {
+        cell.borrow_mut()
+            .subscriptions
+            .insert(stream_ref, EventSubscription { inner });
+    });
+    stream_ref.to_string()
+}
+
 /// Subscribe to a mob member's session event stream.
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// `poll_subscription(stream_id)` to drain buffered events. Each call returns
+/// all events since the last poll.
 ///
 /// The subscription captures ALL agent activity: text deltas, tool calls
 /// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<u32, JsValue> {
+pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
@@ -2625,37 +2673,23 @@ pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<
         .await
         .map_err(|e| err_str("subscribe_error", e))?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-        registry.subscriptions.insert(
-            h,
-            EventSubscription {
-                inner: SubscriptionInner::Member(std::cell::RefCell::new(raw_rx)),
-            },
-        );
-        h
-    });
-
-    Ok(handle)
+    Ok(register_subscription(SubscriptionInner::Member {
+        session_id: bridge_session_id,
+        rx: std::cell::RefCell::new(raw_rx),
+    }))
 }
 
 /// Subscribe to mob-wide events (all members, continuously updated).
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// `poll_subscription(stream_id)` to drain buffered events. Each call returns
+/// all events since the last poll.
 ///
 /// Unlike `mob_member_subscribe` which streams a single member's agent events,
 /// this streams [`AttributedEvent`]s tagged with source runtime identity and role
 /// for every member in the mob, automatically tracking roster changes.
 #[wasm_bindgen]
-pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
+pub async fn mob_subscribe_events(mob_id: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
 
@@ -2664,25 +2698,9 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
         .await
         .map_err(err_mob)?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-        registry.subscriptions.insert(
-            h,
-            EventSubscription {
-                inner: SubscriptionInner::MobWide(std::cell::RefCell::new(router_handle)),
-            },
-        );
-        h
-    });
-
-    Ok(handle)
+    Ok(register_subscription(SubscriptionInner::MobWide(
+        std::cell::RefCell::new(router_handle),
+    )))
 }
 
 /// Poll a subscription for new events.
@@ -2693,34 +2711,42 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
 /// `serialize_error` instead of silently omitting the event.
 ///
 /// For per-member subscriptions (`mob_member_subscribe`), returns
-/// `EventEnvelope<AgentEvent>` objects. For mob-wide subscriptions
-/// (`mob_subscribe_events`), returns `AttributedEvent` objects with
-/// `source`, `profile`, and `envelope` fields.
+/// `EventEnvelope<AgentEvent>` objects — a lagging receiver yields the
+/// generated `AgentEvent::StreamTruncated` envelope, exactly like the RPC
+/// event stream. For mob-wide subscriptions (`mob_subscribe_events`), returns
+/// `AttributedEvent` objects with `source`, `profile`, and `envelope` fields.
 #[wasm_bindgen]
-pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
+pub fn poll_subscription(stream_id: &str) -> Result<String, JsValue> {
+    let stream_ref = StreamRef::parse_js(stream_id)?;
     SUBSCRIPTIONS.with(|cell| {
         let registry = cell.borrow();
-        let sub = registry.subscriptions.get(&handle).ok_or_else(|| {
+        let sub = registry.subscriptions.get(&stream_ref).ok_or_else(|| {
             err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
+                "invalid_stream_id",
+                &format!("unknown subscription stream id: {stream_id}"),
             )
         })?;
 
         let mut events: Vec<serde_json::Value> = Vec::new();
         match &sub.inner {
-            SubscriptionInner::Member(rx_cell) => {
+            SubscriptionInner::Member { session_id, rx } => {
                 use crate::tokio::sync::broadcast::error::TryRecvError;
-                let mut rx = rx_cell.borrow_mut();
+                let mut rx = rx.borrow_mut();
                 loop {
                     match rx.try_recv() {
                         Ok(event) => events.push(
                             serialize_subscription_item(&event, "subscription agent event")
                                 .map_err(|message| err_js("serialize_error", &message))?,
                         ),
-                        Err(TryRecvError::Lagged(n)) => {
-                            tracing::warn!(skipped = n, "subscription lagged");
-                            events.push(SubscriptionLaggedItem::new(n).to_value()?);
+                        Err(TryRecvError::Lagged(dropped)) => {
+                            tracing::warn!(skipped = dropped, "subscription lagged");
+                            events.push(
+                                serialize_subscription_item(
+                                    &stream_lagged_envelope(session_id.clone(), dropped),
+                                    "subscription lag marker",
+                                )
+                                .map_err(|message| err_js("serialize_error", &message))?,
+                            );
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2769,53 +2795,36 @@ fn serialize_subscription_item<T: Serialize + ?Sized>(
     serde_json::to_value(item).map_err(|e| format!("failed to serialize {projection}: {e}"))
 }
 
-/// Typed lag-fault sentinel for the subscription/poll stream.
+/// Build the generated lag-gap marker for a lagging broadcast receiver.
 ///
-/// Rule 4 / Rule 9: the lag fault is a typed item, not an ad-hoc
-/// `json!({type:'lagged',skipped:n})` literal duplicated at every poll site. A
-/// single typed owner serializes the `{ type: "lagged", skipped: <u64> }`
-/// schema consumed by `@rkat/web`'s `SubscriptionLaggedEvent`.
-///
-/// NOTE: the fully-generated cross-language contract (typed `EventEnvelope` +
-/// `Lagged` variant emitted from `meerkat-contracts` through SDK codegen) is the
-/// canonical destination per remediation row #204; this in-lane struct removes
-/// the dual hand-modeling on the Rust side until that contract lands.
-#[derive(Debug, Clone, Copy, Serialize)]
-struct SubscriptionLaggedItem {
-    #[serde(rename = "type")]
-    kind: SubscriptionLaggedKind,
-    skipped: u64,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SubscriptionLaggedKind {
-    Lagged,
-}
-
-impl SubscriptionLaggedItem {
-    fn new(skipped: u64) -> Self {
-        Self {
-            kind: SubscriptionLaggedKind::Lagged,
-            skipped,
-        }
-    }
-
-    /// Serialize the typed sentinel into the stream's `serde_json::Value`.
-    fn to_value(self) -> Result<serde_json::Value, JsValue> {
-        serde_json::to_value(self).map_err(|e| err_str("serialize_error", e))
-    }
+/// K19: a lag gap is the generated `AgentEvent::StreamTruncated` envelope
+/// (`StreamTruncationReason::StreamLagged`), the same contract the RPC event
+/// stream emits — the handwritten `{type:"lagged"}` sentinel and the @rkat/web
+/// `SubscriptionLaggedEvent` hand twin are deleted.
+fn stream_lagged_envelope(
+    session_id: meerkat_core::SessionId,
+    dropped: u64,
+) -> meerkat_core::EventEnvelope<meerkat_core::event::AgentEvent> {
+    meerkat_core::EventEnvelope::new_session(
+        session_id,
+        0,
+        None,
+        meerkat_core::event::AgentEvent::StreamTruncated {
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+        },
+    )
 }
 
 /// Close a subscription and free resources.
 #[wasm_bindgen]
-pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
+pub fn close_subscription(stream_id: &str) -> Result<(), JsValue> {
+    let stream_ref = StreamRef::parse_js(stream_id)?;
     SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        registry.subscriptions.remove(&handle).ok_or_else(|| {
+        registry.subscriptions.remove(&stream_ref).ok_or_else(|| {
             err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
+                "invalid_stream_id",
+                &format!("unknown subscription stream id: {stream_id}"),
             )
         })?;
         Ok(())
@@ -2827,11 +2836,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
-        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, SubscriptionLaggedItem,
-        close_subscription, destroy_session_with_services, merge_runtime_system_context_state,
-        mob_destroy_error_value, parse_js_tool_result, parse_mob_event_cursor,
-        parse_mob_lifecycle_action_arg, parse_mobpack, parse_prompt_content_input,
-        poll_subscription, serialize_subscription_item, session_error_envelope,
+        StreamRef, SubscriptionInner, close_subscription, destroy_session_with_services,
+        merge_runtime_system_context_state, mob_destroy_error_value, parse_js_tool_result,
+        parse_mob_event_cursor, parse_mob_lifecycle_action_arg, parse_mobpack,
+        parse_prompt_content_input, poll_subscription, serialize_subscription_item,
+        session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2862,9 +2871,7 @@ mod tests {
         append: &PendingSystemContextAppend,
     ) -> meerkat_core::AppendSystemContextRequest {
         meerkat_core::AppendSystemContextRequest {
-            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                append.text.clone(),
-            ),
+            content: append.content.clone(),
             source: append.source.clone(),
             idempotency_key: append.idempotency_key.clone(),
             source_kind: append.source_kind,
@@ -3044,7 +3051,7 @@ capabilities = [{capability_values}]
         let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
 
         let initial_pending = PendingSystemContextAppend {
-            text: "initial".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("initial"),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-initial".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -3052,7 +3059,7 @@ capabilities = [{capability_values}]
             peer_response_terminal: None,
         };
         let concurrent_pending = PendingSystemContextAppend {
-            text: "concurrent".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("concurrent"),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-concurrent".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -3217,7 +3224,7 @@ capabilities = [{capability_values}]
             Some("ctx-worker-1")
         );
         assert_eq!(
-            system_context_state.pending()[0].text,
+            system_context_state.pending()[0].content.render_text(),
             "Prioritize coordinating with the lead."
         );
     }
@@ -3436,11 +3443,9 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -3480,11 +3485,9 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -3614,20 +3617,12 @@ capabilities = [{capability_values}]
     fn poll_subscription_empty_success_is_clean_empty_array() {
         let (_tx, rx) = crate::tokio::sync::broadcast::channel(1);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
-                },
-            );
-            handle
+        let stream_id = super::register_subscription(SubscriptionInner::Member {
+            session_id: meerkat_core::SessionId::new(),
+            rx: std::cell::RefCell::new(rx),
         });
 
-        let payload = poll_subscription(handle).expect("empty poll should succeed");
+        let payload = poll_subscription(&stream_id).expect("empty poll should succeed");
         let parsed: serde_json::Value =
             serde_json::from_str(&payload).expect("empty poll should be json");
         assert_eq!(
@@ -3636,7 +3631,7 @@ capabilities = [{capability_values}]
             "clean empty poll must remain a successful empty array"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
     }
 
@@ -3703,11 +3698,13 @@ capabilities = [{capability_values}]
         assert_eq!(parsed["envelope"]["payload"]["delta"], "hello");
     }
 
-    // ── Row #39: content-bearing prompt parsing fails closed ───────────────
+    // ── Row #39 / K19: content-bearing prompt ingress is the tagged
+    // contract shape, parsed fail-closed ────────────────────────────────────
 
     #[test]
-    fn parse_prompt_content_input_plain_string_is_text() {
-        let parsed = parse_prompt_content_input("hello world").expect("plain text parses");
+    fn parse_prompt_content_input_tagged_text_is_text() {
+        let tagged = json!({ "text": "hello world" }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("tagged text parses");
         assert_eq!(
             parsed,
             meerkat_core::types::ContentInput::Text("hello world".to_string())
@@ -3715,9 +3712,9 @@ capabilities = [{capability_values}]
     }
 
     #[test]
-    fn parse_prompt_content_input_valid_blocks_parse_to_blocks() {
-        let blocks_json = json!([{ "type": "text", "text": "hi" }]).to_string();
-        let parsed = parse_prompt_content_input(&blocks_json).expect("valid blocks parse");
+    fn parse_prompt_content_input_tagged_blocks_parse_to_blocks() {
+        let tagged = json!({ "blocks": [{ "type": "text", "text": "hi" }] }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("valid blocks parse");
         let blocks = match parsed {
             meerkat_core::types::ContentInput::Blocks(blocks) => blocks,
             meerkat_core::types::ContentInput::Text(text) => {
@@ -3729,22 +3726,31 @@ capabilities = [{capability_values}]
 
     #[test]
     fn parse_prompt_content_input_malformed_blocks_fail_closed() {
-        // Block-shaped JSON (an array) that is NOT a valid ContentInput must
-        // error with INVALID_PARAMS, never be misread as a single text block.
-        let malformed = json!([{ "type": "image", "media_type": 12345 }]).to_string();
+        // Tagged block content that is NOT valid ContentInput must error with
+        // INVALID_PARAMS, never be misread as a single text block.
+        let malformed = json!({ "blocks": [{ "type": "image", "media_type": 12345 }] }).to_string();
         let err = parse_prompt_content_input(&malformed)
             .expect_err("malformed block JSON must fail closed");
         assert_eq!(err["code"], "INVALID_PARAMS");
     }
 
+    /// K19 regression: a text prompt whose body is itself valid block-array
+    /// JSON stays TEXT — the tag is the discriminator, never shape-sniffing.
     #[test]
-    fn parse_prompt_content_input_non_array_json_is_text() {
-        // A bare number/boolean is not block-shaped content; it is plain text.
-        let parsed = parse_prompt_content_input("42").expect("number text parses");
-        assert_eq!(
-            parsed,
-            meerkat_core::types::ContentInput::Text("42".to_string())
-        );
+    fn parse_prompt_content_input_text_that_looks_like_blocks_stays_text() {
+        let sneaky_body = json!([{ "type": "text", "text": "hi" }]).to_string();
+        let tagged = json!({ "text": sneaky_body }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("tagged text parses");
+        assert_eq!(parsed, meerkat_core::types::ContentInput::Text(sneaky_body));
+    }
+
+    #[test]
+    fn parse_prompt_content_input_untagged_raw_string_fails_closed() {
+        // A bare untagged string is not the contract shape — fail closed
+        // rather than guessing text vs blocks from the payload's JSON shape.
+        let err = parse_prompt_content_input("hello world")
+            .expect_err("untagged raw prompt must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
     }
 
     // ── Row #40: provider-aware default model resolution ───────────────────
@@ -4080,17 +4086,35 @@ capabilities = [{capability_values}]
         assert_eq!(err["code"], "untrusted_mobpack");
     }
 
-    // ── Row #204: lagged sentinel serializes to the typed schema ───────────
+    // ── Row #204 / K19: lag gaps are the generated StreamTruncated event ───
 
     #[test]
-    fn lagged_sentinel_serializes_to_typed_schema() {
-        // A cursor beyond u32::MAX proves the skipped count is carried as u64.
-        let skipped = u64::from(u32::MAX) + 5;
-        let value = SubscriptionLaggedItem::new(skipped)
-            .to_value()
-            .expect("lagged sentinel serializes");
-        assert_eq!(value["type"], "lagged");
-        assert_eq!(value["skipped"].as_u64(), Some(skipped));
+    fn lag_marker_is_generated_stream_truncated_envelope() {
+        // A drop count beyond u32::MAX proves the count is carried as u64.
+        let dropped = u64::from(u32::MAX) + 5;
+        let envelope = stream_lagged_envelope(meerkat_core::SessionId::new(), dropped);
+        let value = serde_json::to_value(&envelope).expect("generated lag envelope serializes");
+        assert_eq!(value["payload"]["type"], "stream_truncated");
+        assert_eq!(value["payload"]["reason"]["kind"], "stream_lagged");
+        assert_eq!(
+            value["payload"]["reason"]["dropped"].as_u64(),
+            Some(dropped)
+        );
+    }
+
+    // ── K19: stream ids are minted StreamRefs, parsed fail-closed ──────────
+
+    #[test]
+    fn stream_ref_round_trips_and_rejects_malformed_ids() {
+        let minted = StreamRef::mint();
+        let wire = minted.to_string();
+        let parsed = StreamRef::parse(&wire).expect("canonical wire form parses back");
+        assert_eq!(parsed, minted);
+        assert!(
+            StreamRef::parse("42").is_err(),
+            "legacy numeric handles are not stream ids"
+        );
+        assert!(StreamRef::parse("not-a-uuid").is_err());
     }
 
     // ── Row #217: mob event cursor round-trips u64 / fails closed ──────────
@@ -4119,21 +4143,10 @@ capabilities = [{capability_values}]
     #[wasm_bindgen_test::wasm_bindgen_test]
     #[allow(clippy::expect_used)]
     fn poll_subscription_fails_closed_when_projection_serialization_fails() {
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::InjectedProjectionFailure,
-                },
-            );
-            handle
-        });
+        let stream_id = super::register_subscription(SubscriptionInner::InjectedProjectionFailure);
 
         let error =
-            poll_subscription(handle).expect_err("projection failure must fail public poll");
+            poll_subscription(&stream_id).expect_err("projection failure must fail public poll");
         let error_json = error.as_string().expect("typed error json");
         let parsed: serde_json::Value =
             serde_json::from_str(&error_json).expect("typed error should be json");
@@ -4146,7 +4159,7 @@ capabilities = [{capability_values}]
             "projection failure should surface the serialization cause"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
     }
 
@@ -4173,20 +4186,12 @@ capabilities = [{capability_values}]
         ))
         .unwrap_or(0);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
-                },
-            );
-            handle
+        let stream_id = super::register_subscription(SubscriptionInner::Member {
+            session_id: meerkat_core::SessionId::new(),
+            rx: std::cell::RefCell::new(rx),
         });
 
-        let payload_result = poll_subscription(handle);
+        let payload_result = poll_subscription(&stream_id);
         assert!(payload_result.is_ok());
         let payload = match payload_result {
             Ok(payload) => payload,
@@ -4204,12 +4209,15 @@ capabilities = [{capability_values}]
             Some(items) => items,
             None => unreachable!(),
         };
-        assert_eq!(items[0]["type"], "lagged");
-        assert_eq!(items[0]["skipped"], 1);
+        // K19: the lag gap is the generated StreamTruncated envelope — the
+        // same wire contract the RPC event stream emits for a lagged stream.
+        assert_eq!(items[0]["payload"]["type"], "stream_truncated");
+        assert_eq!(items[0]["payload"]["reason"]["kind"], "stream_lagged");
+        assert_eq!(items[0]["payload"]["reason"]["dropped"], 1);
         assert_eq!(items[1]["payload"]["type"], "text_delta");
         assert_eq!(items[1]["payload"]["delta"], "second");
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
     }
 

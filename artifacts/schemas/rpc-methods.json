@@ -2,7 +2,8 @@
   "methods": [
     {
       "description": "Handshake, returns server capabilities",
-      "name": "initialize"
+      "name": "initialize",
+      "result_type": "ServerCapabilities"
     },
     {
       "description": "Create session + run first turn",
@@ -74,23 +75,29 @@
       "description": "Cancel in-flight turn",
       "name": "turn/interrupt",
       "params_type": "InterruptParams",
-      "result_type": "Value"
+      "result_type": "InterruptResult"
     },
     {
       "description": "Read config",
-      "name": "config/get"
+      "name": "config/get",
+      "result_type": "ConfigEnvelope"
     },
     {
       "description": "Replace config",
-      "name": "config/set"
+      "name": "config/set",
+      "params_type": "ConfigSetParams",
+      "result_type": "ConfigWriteResult"
     },
     {
       "description": "Merge-patch config",
-      "name": "config/patch"
+      "name": "config/patch",
+      "params_type": "ConfigPatchParams",
+      "result_type": "ConfigWriteResult"
     },
     {
       "description": "Get runtime capabilities",
-      "name": "capabilities/get"
+      "name": "capabilities/get",
+      "result_type": "CapabilitiesResponse"
     },
     {
       "description": "Get read-only runtime host information",
@@ -360,13 +367,13 @@
       "description": "List WorkGraph items",
       "name": "workgraph/list",
       "params_type": "WorkItemFilter",
-      "result_type": "WorkGraphItemsResponse"
+      "result_type": "WorkItemsResult"
     },
     {
       "description": "List ready WorkGraph items",
       "name": "workgraph/ready",
       "params_type": "ReadyWorkFilter",
-      "result_type": "WorkGraphItemsResponse"
+      "result_type": "WorkItemsResult"
     },
     {
       "description": "Read a WorkGraph snapshot",
@@ -378,7 +385,7 @@
       "description": "List WorkGraph events",
       "name": "workgraph/events",
       "params_type": "WorkGraphEventFilter",
-      "result_type": "WorkGraphEventsResponse"
+      "result_type": "WorkEventsResult"
     },
     {
       "description": "Read WorkGraph goal item and attention status",
@@ -394,7 +401,8 @@
     },
     {
       "description": "List available skills",
-      "name": "skills/list"
+      "name": "skills/list",
+      "result_type": "SkillListResponse"
     },
     {
       "description": "Open a live audio/text channel for a session",

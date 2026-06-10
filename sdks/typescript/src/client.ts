@@ -47,6 +47,15 @@ import {
   WORK_GRAPH_STATUSES,
   WORK_GRAPH_PRIORITIES,
   type AttentionBindingRequest,
+  type CapabilitiesResponse,
+  type ConfigPatchParams,
+  type ConfigSetParams,
+  type ConfigWriteResult,
+  type InterruptResult,
+  type ServerCapabilities,
+  type SkillListResponse,
+  type WorkEventsResult,
+  type WorkItemsResult,
   type LiveChannelParams,
   type LiveCloseResult,
   type LiveCommitInputParams,
@@ -615,8 +624,10 @@ export class MeerkatClient {
     this.rl = createInterface({ input: this.process.stdout! });
     this.rl.on("line", (line: string) => this.handleLine(line));
 
-    // Handshake
-    const initResult = await this.request("initialize", {});
+    // Handshake — `initialize` returns the generated `ServerCapabilities`
+    // contract; fields are validated below.
+    const initResult = (await this.request("initialize", {})) as Partial<ServerCapabilities> &
+      Record<string, unknown>;
     const serverVersion = String(initResult.contract_version ?? "");
     if (!MeerkatClient.checkVersionCompatible(serverVersion, CONTRACT_VERSION)) {
       throw new MeerkatError(
@@ -630,8 +641,9 @@ export class MeerkatClient {
         : [],
     );
 
-    // Fetch capabilities
-    const capsResult = await this.request("capabilities/get", {});
+    // Fetch capabilities — generated `CapabilitiesResponse` contract.
+    const capsResult = (await this.request("capabilities/get", {})) as Partial<CapabilitiesResponse> &
+      Record<string, unknown>;
     if (!Array.isArray(capsResult.capabilities)) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
@@ -1058,32 +1070,32 @@ export class MeerkatClient {
   // -- Config -------------------------------------------------------------
 
   async getConfig(): Promise<ConfigEnvelope> {
-    const raw = await this.request("config/get", {});
-    return MeerkatClient.parseConfigEnvelope(raw);
+    // The wire body IS the generated `ConfigEnvelope` contract.
+    return (await this.request("config/get", {})) as unknown as ConfigEnvelope;
   }
 
   async setConfig(
     config: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<ConfigEnvelope> {
-    const params: Record<string, unknown> = { config };
+  ): Promise<ConfigWriteResult> {
+    const params: ConfigSetParams & Record<string, unknown> = { config };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    const raw = await this.request("config/set", params);
-    return MeerkatClient.parseConfigEnvelope(raw);
+    // The wire body IS the generated `ConfigWriteResult` contract (envelope
+    // plus the live-propagation report).
+    return (await this.request("config/set", params)) as unknown as ConfigWriteResult;
   }
 
   async patchConfig(
     patch: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<ConfigEnvelope> {
-    const params: Record<string, unknown> = { patch };
+  ): Promise<ConfigWriteResult> {
+    const params: ConfigPatchParams & Record<string, unknown> = { patch };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    const raw = await this.request("config/patch", params);
-    return MeerkatClient.parseConfigEnvelope(raw);
+    return (await this.request("config/patch", params)) as unknown as ConfigWriteResult;
   }
 
   async mcpAdd(params: McpAddParams): Promise<McpLiveOpResponse> {
@@ -1120,7 +1132,8 @@ export class MeerkatClient {
   // -- Skills ---------------------------------------------------------------
 
   async listSkills(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request("skills/list", {});
+    const result = (await this.request("skills/list", {})) as Partial<SkillListResponse> &
+      Record<string, unknown>;
     return (result.skills as Array<Record<string, unknown>>) ?? [];
   }
 
@@ -1303,28 +1316,24 @@ export class MeerkatClient {
     return MeerkatClient.parseWorkItem(result);
   }
 
-  async listWorkGraphItems(
-    filter: WorkItemFilter = {},
-  ): Promise<WorkGraphItemsResponse> {
+  async listWorkGraphItems(filter: WorkItemFilter = {}): Promise<WorkItemsResult> {
     const result = await this.request("workgraph/list", filter);
     return {
       items: MeerkatClient.requireRecordArray(
         result.items,
         "Invalid workgraph item list",
       ),
-    } as unknown as WorkGraphItemsResponse;
+    } as unknown as WorkItemsResult;
   }
 
-  async listReadyWorkGraphItems(
-    filter: ReadyWorkFilter = {},
-  ): Promise<WorkGraphItemsResponse> {
+  async listReadyWorkGraphItems(filter: ReadyWorkFilter = {}): Promise<WorkItemsResult> {
     const result = await this.request("workgraph/ready", filter);
     return {
       items: MeerkatClient.requireRecordArray(
         result.items,
         "Invalid workgraph item list",
       ),
-    } as unknown as WorkGraphItemsResponse;
+    } as unknown as WorkItemsResult;
   }
 
   async getWorkGraphSnapshot(
@@ -1333,16 +1342,14 @@ export class MeerkatClient {
     return this.request<WorkGraphSnapshot>("workgraph/snapshot", filter);
   }
 
-  async listWorkGraphEvents(
-    filter: WorkGraphEventFilter = {},
-  ): Promise<WorkGraphEventsResponse> {
+  async listWorkGraphEvents(filter: WorkGraphEventFilter = {}): Promise<WorkEventsResult> {
     const result = await this.request("workgraph/events", filter);
     return {
       events: MeerkatClient.requireRecordArray(
         result.events,
         "Invalid workgraph event list",
       ),
-    } as unknown as WorkGraphEventsResponse;
+    } as unknown as WorkEventsResult;
   }
 
   async getWorkGraphGoalStatus(
@@ -1411,7 +1418,10 @@ export class MeerkatClient {
 
   async listMobMembers(mobId: string): Promise<MobMember[]> {
     const result = await this.request("mob/members", { mob_id: mobId });
-    const members = (result.members as Array<Record<string, unknown>>) ?? [];
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/members response",
+    );
     return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       const memberRef =
@@ -1911,10 +1921,11 @@ export class MeerkatClient {
       params.timeout_ms = options.timeoutMs;
     }
     const result = await this.request("mob/wait_kickoff", params);
-    const members = Array.isArray(result.members) ? result.members : [];
-    return members.map((entry) => {
-      const member =
-        entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/wait_kickoff response",
+    );
+    return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       if (!agentIdentity) {
         throw new MeerkatError(
@@ -1981,10 +1992,11 @@ export class MeerkatClient {
       params.timeout_ms = options.timeoutMs;
     }
     const result = await this.request("mob/wait_ready", params);
-    const members = Array.isArray(result.members) ? result.members : [];
-    return members.map((entry) => {
-      const member =
-        entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/wait_ready response",
+    );
+    return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       if (!agentIdentity) {
         throw new MeerkatError(
@@ -2549,8 +2561,10 @@ export class MeerkatClient {
   }
 
   /** @internal */
-  async _interrupt(sessionId: string): Promise<void> {
-    await this.request("turn/interrupt", { session_id: sessionId });
+  async _interrupt(sessionId: string): Promise<InterruptResult> {
+    return (await this.request("turn/interrupt", {
+      session_id: sessionId,
+    })) as unknown as InterruptResult;
   }
 
   /** @internal */
@@ -3441,29 +3455,6 @@ export class MeerkatClient {
     };
   }
 
-  static parseConfigEnvelope(data: Record<string, unknown>): ConfigEnvelope {
-    const rawConfig =
-      data.config && typeof data.config === "object"
-        ? (data.config as Record<string, unknown>)
-        : {};
-    const rawResolvedPaths =
-      data.resolved_paths && typeof data.resolved_paths === "object"
-        ? (data.resolved_paths as Record<string, unknown>)
-        : undefined;
-    const resolvedPaths = rawResolvedPaths
-      ? Object.fromEntries(
-          Object.entries(rawResolvedPaths).map(([key, value]) => [key, String(value)]),
-        )
-      : undefined;
-    return {
-      config: rawConfig,
-      generation: Number(data.generation ?? 0),
-      realmId: data.realm_id != null ? String(data.realm_id) : undefined,
-      instanceId: data.instance_id != null ? String(data.instance_id) : undefined,
-      backend: data.backend != null ? String(data.backend) : undefined,
-      resolvedPaths,
-    };
-  }
 
   static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendReceipt {
     return {
@@ -4310,6 +4301,14 @@ export class MeerkatClient {
           throw new MeerkatError(
             "INVALID_RESPONSE",
             `${context}: is_error must be a boolean`,
+          );
+        }
+        // `WireToolResult.content` is mandatory on the wire; a frame without
+        // it is malformed and must not be coalesced into an empty transcript.
+        if (result.content === undefined || result.content === null) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: tool result missing content`,
           );
         }
         return {

@@ -4,6 +4,7 @@ mod approval;
 mod artifact;
 mod auth;
 mod comms;
+mod config;
 mod connection;
 mod error;
 mod event;
@@ -16,6 +17,7 @@ mod mob;
 mod models;
 mod params;
 mod realtime;
+mod rest;
 mod result;
 mod rpc_surface;
 pub mod runtime;
@@ -25,6 +27,7 @@ pub mod skills;
 mod stream_read;
 pub mod supervisor_bridge;
 mod usage;
+mod workgraph;
 
 pub use approval::{
     ApprovalActionKind, ApprovalDecideParams, ApprovalDecision, ApprovalDecisionRecord,
@@ -37,12 +40,19 @@ pub use comms::{
     CommsChecksumTokenParams, CommsChecksumTokenResult, CommsChecksumTokenResultIntent,
     CommsCommandError, CommsCommandProjectionError, CommsCommandRequest, CommsPeerEntry,
     CommsPeerLifecycleParams, CommsPeerRequestIntent, CommsPeerRequestParams,
-    CommsPeerResponseResult, CommsPeersParams, CommsPeersResult, CommsSendParams, CommsSendResult,
-    HandlingMode as WireCommsHandlingMode, InputSource as WireCommsInputSource,
-    InputStreamMode as WireCommsInputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    CommsPeerResponseResult, CommsPeerUnreachableReason, CommsPeersParams, CommsPeersResult,
+    CommsSendErrorData, CommsSendParams, CommsSendResult, HandlingMode as WireCommsHandlingMode,
+    InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
     ResponseStatus as WireCommsResponseStatus,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use config::ConfigWriteResult;
+pub use config::{
+    ConfigPatchParams, ConfigSetParams, WireLiveChannelCloseFailure, WireLiveChannelRefreshFailure,
+    WireLiveCloseFailure, WireLiveConfigPropagationReport, WireLiveHotSwapSkip,
+    WireLiveHotSwapSkipReason, WireLiveRefreshFailure, WireLiveSwapFailure,
 };
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
@@ -57,6 +67,7 @@ pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, DeferredCreateResult, InjectSystemContextParams,
     InjectSystemContextResult, InterruptParams, ListSessionsParams, ListSessionsResult,
     ReadSessionHistoryParams, ReadSessionParams, ScheduleToolCallParams, ScheduleToolsResult,
+    ServerCapabilities, ServerInfo,
 };
 
 pub use artifact::{
@@ -131,15 +142,18 @@ pub use mob::{
     MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams, MobUnwireParams,
     MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireParams, MobWireResult,
-    MobWiringRulesInput, SupervisorRotationReportWire, WireAgentRuntimeId,
-    WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext, WireHandlingMode,
-    WireMemberLaunchMode, WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind,
-    WireMobError, WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus,
-    WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome, WireMobResumeOverrideField,
-    WireMobRun, WireMobRunStatus, WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction,
-    WirePeerConnectivity, WirePeerConnectivitySnapshot, WireRenderClass, WireRenderMetadata,
-    WireRenderSalience, WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter,
-    WireTrustedPeerIdentity, WireTrustedPeerSpec, WireUnreachablePeer, WireWorkOrigin,
+    MobWiringRulesInput, SupervisorRotationIncompleteDataWire,
+    SupervisorRotationIncompleteDetailsWire, SupervisorRotationIncompleteKind,
+    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
+    WireAgentRuntimeId, WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext,
+    WireHandlingMode, WireMemberLaunchMode, WireMemberRef, WireMemberRefError, WireMemberState,
+    WireMobBackendKind, WireMobError, WireMobLifecycleAction, WireMobLifecycleStatus,
+    WireMobMemberStatus, WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome,
+    WireMobResumeOverrideField, WireMobRun, WireMobRunStatus, WireMobRuntimeMode,
+    WireMobToolConfig, WireMobWireAction, WirePeerConnectivity, WirePeerConnectivitySnapshot,
+    WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
+    WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
+    WireUnreachablePeer, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
@@ -150,6 +164,13 @@ pub use realtime::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
     RealtimeVideoChunk,
+};
+pub use rest::{
+    RestAppendSystemContextRequest, RestAuthBindingTestRequest, RestAuthProfileCreateRequest,
+    RestContinueSessionRequest, RestCreateSessionRequest, RestMobForkHelperRequest,
+    RestMobHelperRequest, RestMobWaitRequest, RestMobWireMembersBatchRequest,
+    RestPatchConfigRequest, RestPeerResponseTerminalRequest, RestSessionDetailsResponse,
+    RestSetConfigRequest,
 };
 pub use result::{
     WireCallbackPending, WireCallbackPendingStatus, WirePendingToolCall, WireRunResult,
@@ -174,11 +195,12 @@ pub use schedule::{
     ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 pub use session::{
-    ForkSessionAtParams, ForkSessionReplaceParams, ReadSessionTranscriptRevisionParams,
-    RestoreSessionTranscriptRevisionParams, RevisionId, RevisionSelector,
-    RewriteSessionTranscriptParams, SessionStreamCloseParams, SessionStreamCloseResult,
-    SessionStreamOpenParams, SessionStreamOpenResult, TranscriptRewriteMessage, WireAssistantBlock,
-    WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
+    ForkSessionAtParams, ForkSessionReplaceParams, InterruptResult,
+    ReadSessionTranscriptRevisionParams, RestoreSessionTranscriptRevisionParams, RevisionId,
+    RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
+    SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
+    TranscriptRewriteMessage, WireAssistantBlock, WireContentBlock, WireContentInput,
+    WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
     WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision, WireStopReason,
     WireToolResult, WireToolResultContent, WireTranscriptSource,
 };
@@ -199,3 +221,4 @@ pub use supervisor_bridge::{
     supervisor_bridge_supported_protocol_versions,
 };
 pub use usage::WireUsage;
+pub use workgraph::{WorkEventsResult, WorkItemsResult};

@@ -1966,10 +1966,12 @@ impl SessionService for MockSessionService {
                             None,
                             AgentEvent::RunFailed {
                                 session_id,
-                                error_class: meerkat_core::event::AgentErrorClass::Internal,
-                                error: "mock flow turn failure".to_string(),
                                 terminal_cause_kind: None,
-                                error_report: None,
+                                error_report: meerkat_core::event::AgentErrorReport {
+                                    class: meerkat_core::event::AgentErrorClass::Internal,
+                                    reason: None,
+                                    message: "mock flow turn failure".to_string(),
+                                },
                             },
                         ))
                         .await;
@@ -2475,13 +2477,12 @@ impl MobSessionService for MockSessionService {
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
         <Self as SessionService>::start_turn(self, session_id, req).await?;
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                 run_id,
                 boundary,
                 contributing_input_ids,
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: None,
@@ -4676,14 +4677,17 @@ async fn spawn_live_external_peer_with_transport(
                             // Non-bridge lifecycle messages
                             match intent.as_str() {
                                 "mob.peer_added" => {
+                                    // K15: lifecycle params are the typed wire
+                                    // contract; `peer_spec` is a `BridgePeerSpec`.
+                                    let lifecycle: meerkat_contracts::CommsPeerLifecycleParams =
+                                        serde_json::from_value(params.clone())
+                                            .expect("typed peer_added lifecycle params");
                                     let peer_spec: meerkat_core::comms::TrustedPeerDescriptor =
-                                        serde_json::from_value(
-                                            params
-                                                .get("peer_spec")
-                                                .cloned()
-                                                .expect("peer_added peer_spec"),
-                                        )
-                                        .expect("peer_added trusted peer spec");
+                                        lifecycle
+                                            .peer_spec
+                                            .expect("peer_added peer_spec")
+                                            .try_into()
+                                            .expect("peer_added trusted peer spec");
                                     apply_test_peer_projection_trust(
                                         responder_runtime.as_ref(),
                                         peer_spec,
@@ -4693,14 +4697,15 @@ async fn spawn_live_external_peer_with_transport(
                                     serde_json::json!({ "ok": true })
                                 }
                                 "mob.peer_unwired" | "mob.peer_retired" => {
+                                    let lifecycle: meerkat_contracts::CommsPeerLifecycleParams =
+                                        serde_json::from_value(params.clone())
+                                            .expect("typed peer lifecycle params");
                                     let peer_spec: meerkat_core::comms::TrustedPeerDescriptor =
-                                        serde_json::from_value(
-                                            params
-                                                .get("peer_spec")
-                                                .cloned()
-                                                .expect("peer lifecycle peer_spec"),
-                                        )
-                                        .expect("peer lifecycle trusted peer spec");
+                                        lifecycle
+                                            .peer_spec
+                                            .expect("peer lifecycle peer_spec")
+                                            .try_into()
+                                            .expect("peer lifecycle trusted peer spec");
                                     remove_test_peer_projection_trust(
                                         responder_runtime.as_ref(),
                                         &peer_spec.peer_id.to_string(),
@@ -12850,7 +12855,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "orphan".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -12858,7 +12862,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
                 comms_name: Some("test-mob/worker/orphan".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -13776,9 +13779,19 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .expect("seeded session metadata should exist");
     metadata.model = "gpt-5.4-pro".to_string();
     metadata.provider = Provider::OpenAI;
-    metadata.provider_params = Some(serde_json::json!({
-        "reasoning": { "effort": "high" }
-    }));
+    metadata.provider_params = Some(
+        meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                    reasoning_effort: Some(
+                        meerkat_core::lifecycle::run_primitive::ReasoningEffort::High,
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        },
+    );
     metadata.max_tokens = 8192;
     metadata.tooling.builtins = ToolCategoryOverride::Disable;
     metadata.tooling.shell = ToolCategoryOverride::Enable;
@@ -13917,7 +13930,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
-            render_metadata: None,
             system_prompt: Some("Persisted resume prompt".to_string()),
             max_tokens: Some(4096),
             event_tx: None,
@@ -13925,7 +13937,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -14060,7 +14071,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
-            render_metadata: None,
             system_prompt: Some("Persisted resume prompt".to_string()),
             max_tokens: Some(4096),
             event_tx: None,
@@ -14068,7 +14078,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -20841,7 +20850,6 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort absent cleanup".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -20851,7 +20859,6 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
                 keep_alive: true,
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -20912,7 +20919,6 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort archive failure".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -20922,7 +20928,6 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
                 keep_alive: true,
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -20990,13 +20995,12 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
             self.allow_finish.notified().await;
 
             Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 session_snapshot: None,
                 terminal: None,
@@ -21032,7 +21036,6 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "retire active runtime turn".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -21042,7 +21045,6 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
                 keep_alive: true,
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -21544,7 +21546,6 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
             create_session: CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "local binding provision".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -21554,7 +21555,6 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
                     keep_alive: true,
                     ..Default::default()
                 }),
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 labels: None,
@@ -21586,7 +21586,6 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter boundary".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -21595,7 +21594,6 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
                 keep_alive: true,
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -21644,7 +21642,6 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter unsupported boundary".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -21653,7 +21650,6 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
                 keep_alive: true,
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -21698,7 +21694,6 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter hard cancel".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -21706,7 +21701,6 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
                 comms_name: Some("test-mob/worker/w-hard-cancel".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -27479,9 +27473,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 self.append_system_context(
                     session_id,
                     AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            append.text,
-                        ),
+                        content: append.content,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -27536,13 +27528,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         self.active_runtime_runs.write().await.remove(session_id);
 
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                 run_id,
                 boundary,
                 contributing_input_ids,
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: None,
@@ -27574,9 +27565,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 appends
                     .into_iter()
                     .map(|append| AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            append.text,
-                        ),
+                        content: append.content,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -27586,13 +27575,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
 
         Ok(
             meerkat_core::lifecycle::core_executor::CoreApplyOutput::without_terminal(
-                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
                     contributing_input_ids,
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
             ),
@@ -27608,9 +27596,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             self.append_system_context(
                 session_id,
                 AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        append.text,
-                    ),
+                    content: append.content,
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,

@@ -35,11 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_session(CreateSessionRequest {
             model: config.agent.model.clone(),
             prompt: "Say ok".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(64),
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: None,

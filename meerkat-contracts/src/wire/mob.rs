@@ -156,7 +156,7 @@ pub enum WireMobResumeOverrideField {
 }
 
 /// Profile override for `mob/spawn`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireMobProfile {
@@ -194,7 +194,7 @@ pub struct WireMobProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1905,7 +1905,8 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<WireTurnMetadataOverride<Value>>,
+    pub provider_params:
+        Option<WireTurnMetadataOverride<crate::wire::runtime::WireProviderParamsOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
 }
@@ -2055,6 +2056,63 @@ pub struct SupervisorRotationReportWire {
     pub previous_epoch: u64,
     pub current_epoch: u64,
     pub public_peer_id: String,
+}
+
+/// Discriminator kind for the supervisor-rotation-incomplete error details.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationIncompleteKind {
+    SupervisorRotationIncomplete,
+}
+
+/// Which authority a supervisor-rotation retry validates against.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationRetryAuthority {
+    PendingRotation,
+    ProcessLocalPendingRotation,
+    PreRotation,
+}
+
+/// Durability scope of a supervisor-rotation retry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationRetryScope {
+    Durable,
+    SameProcess,
+    PreRotation,
+}
+
+/// Typed details of `MobError::SupervisorRotationIncomplete` on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SupervisorRotationIncompleteDetailsWire {
+    pub kind: SupervisorRotationIncompleteKind,
+    pub previous_epoch: u64,
+    pub attempted_epoch: u64,
+    pub attempted_public_peer_id: String,
+    pub rotated_peer_count: usize,
+    pub rollback_succeeded: bool,
+    pub pending_authority_recorded: bool,
+    pub pending_authority_process_local: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_error: Option<String>,
+    pub retry_authority: SupervisorRotationRetryAuthority,
+    pub retry_scope: SupervisorRotationRetryScope,
+}
+
+/// JSON-RPC `error.data` payload for an incomplete supervisor rotation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SupervisorRotationIncompleteDataWire {
+    pub code: String,
+    pub message: String,
+    pub details: SupervisorRotationIncompleteDetailsWire,
 }
 
 /// Shared request payload for mob readiness waits.

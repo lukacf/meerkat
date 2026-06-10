@@ -1505,7 +1505,10 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
 /// hand-authored `json!` schema literals that could drift from the deserialize
 /// path (remediation rows #32/#157).
 fn typed_schema<T: JsonSchema>() -> Value {
-    serde_json::to_value(schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+    // K1: ONE infallible schema generator (the core schema module owns the
+    // tool-input schema contract) — no fail-open `{"type": "object"}` null
+    // schema fallback.
+    meerkat_core::schema::tool_input_schema_for::<T>()
 }
 
 #[cfg(test)]
@@ -2897,13 +2900,12 @@ mod tests {
             let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
             Ok(
                 meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                         run_id,
                         boundary,
                         contributing_input_ids,
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     None,
                     run_result,

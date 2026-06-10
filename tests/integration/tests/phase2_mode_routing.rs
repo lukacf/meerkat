@@ -291,13 +291,12 @@ impl MobSessionService for MockSessionService {
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
         <Self as SessionService>::start_turn(self, session_id, req).await?;
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                 run_id,
                 boundary,
                 contributing_input_ids,
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: None,

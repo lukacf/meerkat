@@ -2390,7 +2390,7 @@ fn receipt_from_pending_authority(
         dsl.delivery_correlation_id.as_ref().map(|id| id.0.as_str()),
         detail.as_deref(),
         failure_class,
-        runtime_outcome_key.as_deref(),
+        runtime_outcome_key.as_ref().map(|key| key.0.as_str()),
         materialized_session_id.as_ref(),
     )
     .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?;
@@ -2440,8 +2440,8 @@ fn receipt_from_recorded_authority(
         .transpose()?;
     if dsl.runtime_outcome_key != runtime_outcome_key {
         return Err(OccurrenceLifecycleError::RuntimeOutcomeKeyMismatch {
-            machine_key: dsl.runtime_outcome_key.clone(),
-            snapshot_key: runtime_outcome_key,
+            machine_key: dsl.runtime_outcome_key.clone().map(|key| key.0),
+            snapshot_key: runtime_outcome_key.map(|key| key.0),
         });
     }
     let receipt_id = delivery_receipt_id_from_authority(
@@ -2454,7 +2454,7 @@ fn receipt_from_recorded_authority(
             .map(|id| id.0.as_str()),
         detail.as_deref(),
         failure_class,
-        dsl.runtime_outcome_key.as_deref(),
+        dsl.runtime_outcome_key.as_ref().map(|key| key.0.as_str()),
         materialized_session_id.as_ref(),
     )
     .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?;
@@ -2525,8 +2525,9 @@ fn from_dsl_receipt_stage(stage: occ_dsl::DeliveryReceiptStage) -> DeliveryRecei
 
 fn runtime_outcome_authority_key(
     outcome: &RuntimeDeliveryOutcome,
-) -> Result<String, SemanticKeySerializationError> {
+) -> Result<occ_dsl::RuntimeOutcomeKey, SemanticKeySerializationError> {
     semantic_json_key("runtime_outcome", "runtime_outcome", outcome)
+        .map(occ_dsl::RuntimeOutcomeKey::from)
 }
 
 fn misfire_policy_authority_key(

@@ -1095,25 +1095,6 @@ impl McpSessionRuntimeExecutor {
     }
 }
 
-fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
-                .model_projection_text()
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        _ => String::new(),
-    }
-}
-
 fn pending_system_context_appends(
     appends: &[ConversationContextAppend],
 ) -> Vec<PendingSystemContextAppend> {
@@ -1121,7 +1102,7 @@ fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
@@ -1563,7 +1544,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_context_append_text(&content),
+            content.render_text(),
             meerkat_core::SystemNoticeMessage::with_blocks(
                 meerkat_core::types::SystemNoticeKind::Comms,
                 Some("Peer terminal response context".to_string()),
@@ -1580,11 +1561,9 @@ mod tests {
         CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(1024),
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(meerkat_core::service::SessionBuildOptions::default()),
@@ -1677,11 +1656,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(1024),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions::default()),
@@ -1725,11 +1702,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(1024),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions::default()),
@@ -1799,7 +1774,10 @@ mod tests {
         assert!(
             system_context.applied().iter().any(|append| {
                 append.source.as_deref() == Some("mcp-context-recovery")
-                    && append.text.contains("mcp recovered context")
+                    && append
+                        .content
+                        .render_text()
+                        .contains("mcp recovered context")
             }),
             "context-only recovery should persist MCP runtime context append: {system_context:?}"
         );
@@ -1814,11 +1792,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(1024),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions::default()),
@@ -2557,11 +2533,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(1024),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions::default()),

@@ -40,7 +40,7 @@ use meerkat_core::error::AgentError;
 use meerkat_core::image_content::{externalize_deferred_turn_state, externalize_messages_from};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest, InitialTurnPolicy,
     MobToolAuthorityContext, SessionControlError, SessionError, SessionForkAtRequest,
@@ -1593,7 +1593,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         session: &Session,
         contributing_input_ids: &[InputId],
-    ) -> Result<RunBoundaryReceipt, SessionError> {
+    ) -> Result<RunBoundaryReceiptDraft, SessionError> {
         if self.runtime_store.is_none() {
             let persisted = self.save_normalized_session(session.clone()).await?;
             return Self::build_runtime_receipt(
@@ -4189,9 +4189,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(|append| {
                 (
                     AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            append.text,
-                        ),
+                        content: append.content,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
@@ -4499,7 +4497,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
         session: &Session,
-    ) -> Result<RunBoundaryReceipt, SessionError> {
+    ) -> Result<RunBoundaryReceiptDraft, SessionError> {
         let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize session for runtime receipt digest: {err}"
@@ -4507,19 +4505,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         })?;
         let digest = format!("{:x}", Sha256::digest(encoded_messages));
 
-        Ok(RunBoundaryReceipt {
+        // Dogma K10: the boundary sequence is machine-owned; the session
+        // service returns an UNSEQUENCED draft and the runtime driver mints
+        // the final receipt from the generated per-run boundary counter.
+        Ok(RunBoundaryReceiptDraft {
             run_id,
             boundary,
             contributing_input_ids,
             conversation_digest: Some(digest),
             message_count: session.messages().len(),
-            // Read-only projection of the machine-owned boundary counter, not
-            // a producer: `RecordBoundarySeq` derives the durable sequence
-            // from `live_boundary_context_sequence_by_run` inside the
-            // generated machine and ignores receipt-carried values. Direct
-            // service turns have no live-boundary counter entry, so the
-            // machine derives the same base sequence 0 projected here.
-            sequence: 0,
         })
     }
 
@@ -5651,6 +5645,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     ) -> Result<(), SessionError> {
         self.inner.record_live_terminal_error(id, cause).await
     }
+
+    /// Route the typed live output-audio degradation onto the session's owned
+    /// event stream via the inner ephemeral service (K16).
+    async fn record_live_output_audio_degraded(
+        &self,
+        id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .record_live_output_audio_degraded(id, dropped)
+            .await
+    }
 }
 
 #[async_trait]
@@ -6408,7 +6414,9 @@ mod tests {
                 None,
                 AgentEvent::RunStarted {
                     session_id: session_id.clone(),
-                    prompt: ContentInput::Text("seed".to_string()),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: ContentInput::Text("seed".to_string()),
+                    },
                 },
             )
         };
@@ -6483,7 +6491,9 @@ mod tests {
                 None,
                 AgentEvent::RunStarted {
                     session_id: session_id.clone(),
-                    prompt: ContentInput::Text("seed".to_string()),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: ContentInput::Text("seed".to_string()),
+                    },
                 },
             ))
             .await?;
@@ -7729,7 +7739,9 @@ mod tests {
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
                     session_id: session_id.clone(),
-                    prompt: prompt.clone(),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: prompt.clone(),
+                    },
                 })
                 .await;
             let result = self.inner.run_with_events(prompt, event_tx.clone()).await?;
@@ -8991,11 +9003,9 @@ mod tests {
             model: "test".to_string(),
             prompt: prompt.to_string().into(),
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             build: None,
             labels: None,
@@ -9135,11 +9145,17 @@ mod tests {
             .session_snapshot
             .clone()
             .map(|session_snapshot| meerkat_runtime::store::SessionDelta { session_snapshot });
+        // K10: executors mint a sequence-less draft; the boundary commit
+        // mints the final receipt from the machine-owned per-run boundary
+        // counter. This fixture has no live boundary checkpoints, so it
+        // sequences the draft at the counter's base value exactly as the
+        // driver would (`run_boundary_sequence` for a run with no entry).
+        let receipt = output.receipt.clone().into_sequenced(0);
         runtime_store
             .atomic_apply(
                 &runtime_id,
                 session_delta,
-                output.receipt.clone(),
+                receipt,
                 Vec::new(),
                 Some(session_id.clone()),
             )
@@ -9181,7 +9197,7 @@ mod tests {
             .stage_append(
                 &AppendSystemContextRequest {
                     content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        append.text,
+                        append.content.render_text(),
                     ),
                     source: append.source,
                     idempotency_key: append.idempotency_key,
@@ -10914,7 +10930,9 @@ mod tests {
 
         let mut req = start_turn_request("runtime failed turn");
         req.runtime.pre_turn_context_appends = vec![PendingSystemContextAppend {
-            text: "failed-turn context must not leak".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "failed-turn context must not leak".to_string(),
+            ),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11052,7 +11070,9 @@ mod tests {
                 &created.session_id,
                 run_id.clone(),
                 vec![PendingSystemContextAppend {
-                    text: "context-only apply waits for machine commit".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "context-only apply waits for machine commit".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("deferred-context-only-apply".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11149,7 +11169,9 @@ mod tests {
                 &created.session_id,
                 run_id.clone(),
                 vec![PendingSystemContextAppend {
-                    text: "reserved context apply waits for machine commit".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "reserved context apply waits for machine commit".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("deferred-reserved-context-apply".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11616,7 +11638,9 @@ mod tests {
         durable
             .set_system_context_state(applied_system_context_state(
                 PendingSystemContextAppend {
-                    text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string()
+            ),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
                             .to_string(),
@@ -11654,7 +11678,7 @@ mod tests {
             runtime_context
                 .applied()
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "realtime open snapshot should preserve durable runtime context: {runtime_context:?}"
         );
         assert!(
@@ -11686,7 +11710,9 @@ mod tests {
         durable
             .set_system_context_state(applied_system_context_state(
                 PendingSystemContextAppend {
-                    text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string()
+            ),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
                             .to_string(),
@@ -11728,7 +11754,7 @@ mod tests {
             runtime_context
                 .applied()
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "live persistence after realtime open must not erase durable runtime context: {runtime_context:?}"
         );
     }
@@ -14837,7 +14863,9 @@ mod tests {
                 &candidate.session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "capacity-bounded context append".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "capacity-bounded context append".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("ctx-capacity".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -14864,7 +14892,9 @@ mod tests {
                 &candidate.session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "capacity-bounded context append after archive".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "capacity-bounded context append after archive".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("ctx-capacity-after-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15424,7 +15454,9 @@ mod tests {
                     &apply_id,
                     RunId::new(),
                     vec![PendingSystemContextAppend {
-                        text: "context during archive".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            "context during archive".to_string(),
+                        ),
                         source: Some("test".to_string()),
                         idempotency_key: Some("archive-race".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15882,7 +15914,7 @@ mod tests {
             .system_context_state()
             .expect("restored row should contain pending system-context state");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "runtime notice");
+        assert_eq!(state.pending()[0].content.render_text(), "runtime notice");
     }
 
     #[tokio::test]
@@ -15982,7 +16014,10 @@ mod tests {
             .system_context_state()
             .expect("exported session should include merged system-context state");
         assert_eq!(exported_state.pending().len(), 1);
-        assert_eq!(exported_state.pending()[0].text, "queued live append");
+        assert_eq!(
+            exported_state.pending()[0].content.render_text(),
+            "queued live append"
+        );
         assert!(
             exported_state.seen().contains_key("ctx-export-merge"),
             "exported session should include the staged idempotency key"
@@ -16524,7 +16559,7 @@ mod tests {
             .expect("runtime authority should carry the committed append");
         assert_eq!(append_state.pending().len(), 1);
         assert_eq!(
-            append_state.pending()[0].text,
+            append_state.pending()[0].content.render_text(),
             "runtime-backed control context"
         );
         let append_raw = store
@@ -16692,7 +16727,10 @@ mod tests {
             .system_context_state()
             .expect("runtime-backed append should persist pending context");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "Remember runtime-backed context");
+        assert_eq!(
+            state.pending()[0].content.render_text(),
+            "Remember runtime-backed context"
+        );
     }
 
     #[tokio::test]
@@ -16720,7 +16758,9 @@ mod tests {
             .apply_runtime_system_context(
                 &result.session_id,
                 vec![PendingSystemContextAppend {
-                    text: "uncommitted live context".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "uncommitted live context".to_string(),
+                    ),
                     source: Some("live".to_string()),
                     idempotency_key: Some("uncommitted".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16760,7 +16800,10 @@ mod tests {
             .system_context_state()
             .expect("runtime-backed append should persist pending control state");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "durable pending context");
+        assert_eq!(
+            state.pending()[0].content.render_text(),
+            "durable pending context"
+        );
         let raw = store
             .load(&result.session_id)
             .await
@@ -16774,7 +16817,10 @@ mod tests {
             .system_context_state()
             .expect("projection should mirror committed control state");
         assert_eq!(raw_state.pending().len(), 1);
-        assert_eq!(raw_state.pending()[0].text, "durable pending context");
+        assert_eq!(
+            raw_state.pending()[0].content.render_text(),
+            "durable pending context"
+        );
     }
 
     #[tokio::test]
@@ -16835,7 +16881,7 @@ mod tests {
             .expect("runtime snapshot should carry pending control state");
         assert_eq!(state.pending().len(), 1);
         assert_eq!(
-            state.pending()[0].text,
+            state.pending()[0].content.render_text(),
             "control snapshot should not mint a receipt"
         );
     }
@@ -16925,7 +16971,7 @@ mod tests {
             .system_context_state()
             .expect("append should persist pending control state");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "runtime append");
+        assert_eq!(state.pending()[0].content.render_text(), "runtime append");
     }
 
     #[tokio::test]
@@ -16999,7 +17045,10 @@ mod tests {
             .system_context_state()
             .expect("runtime authority should carry pending context");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "persisted runtime append");
+        assert_eq!(
+            state.pending()[0].content.render_text(),
+            "persisted runtime append"
+        );
 
         let view = service
             .read(&result.session_id)
@@ -17048,7 +17097,10 @@ mod tests {
         let resumed_state = resumed_live
             .system_context_state()
             .expect("resumed session should preserve runtime-authoritative pending context");
-        assert_eq!(resumed_state.pending()[0].text, "persisted runtime append");
+        assert_eq!(
+            resumed_state.pending()[0].content.render_text(),
+            "persisted runtime append"
+        );
     }
 
     #[tokio::test]
@@ -18012,7 +18064,7 @@ mod tests {
             .system_context_state()
             .expect("append should persist pending control state");
         assert_eq!(state.pending().len(), 1);
-        assert_eq!(state.pending()[0].text, "prefer store");
+        assert_eq!(state.pending()[0].content.render_text(), "prefer store");
     }
 
     #[tokio::test]
@@ -18379,7 +18431,9 @@ mod tests {
                 &id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "recover me".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "recover me".to_string(),
+                    ),
                     source: Some("system-generated:test".to_string()),
                     idempotency_key: None,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -18513,7 +18567,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string()
+            ),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -18539,8 +18595,12 @@ mod tests {
             .expect("run_started timeout")
             .expect("run_started event should exist");
         match started.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.text_content().to_lowercase();
+            AgentEvent::RunStarted { input, .. } => {
+                let normalized = input
+                    .content()
+                    .expect("content-bearing run input")
+                    .text_content()
+                    .to_lowercase();
                 assert!(
                     normalized.contains(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
@@ -18610,7 +18670,9 @@ mod tests {
             },
         );
         req.runtime.pre_turn_context_appends = vec![PendingSystemContextAppend {
-            text: "Peer terminal response\nPayload: {\"token\":\"birch seventeen\"}".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response\nPayload: {\"token\":\"birch seventeen\"}".to_string(),
+            ),
             source: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string(),
             ),
@@ -18647,7 +18709,7 @@ mod tests {
             context
                 .applied()
                 .iter()
-                .any(|append| append.text.contains("birch seventeen")),
+                .any(|append| append.content.render_text().contains("birch seventeen")),
             "no-pending terminal snapshot should preserve pre-turn context: {context:?}"
         );
 
@@ -18656,8 +18718,12 @@ mod tests {
             .expect("run_started timeout")
             .expect("run_started event should exist");
         match started.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.text_content().to_lowercase();
+            AgentEvent::RunStarted { input, .. } => {
+                let normalized = input
+                    .content()
+                    .expect("content-bearing run input")
+                    .text_content()
+                    .to_lowercase();
                 assert!(
                     normalized.contains("birch seventeen"),
                     "run_started prompt should expose no-pending runtime context: {normalized}"
@@ -18699,7 +18765,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "project this durable event".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "project this durable event".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("test".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,

@@ -142,10 +142,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
         // The wire input already carries a typed, validated OutputSchema; keep
         // its typed MeerkatSchema instead of erasing it back to JSON.
         output_schema: input.output_schema.map(|schema| schema.schema),
-        provider_params: input
-            .provider_params
-            .map(|wire| serde_json::to_value(wire).map_err(|error| error.to_string()))
-            .transpose()?,
+        provider_params: input.provider_params.map(Into::into),
     })
 }
 

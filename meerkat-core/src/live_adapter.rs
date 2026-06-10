@@ -1174,7 +1174,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![crate::session::PendingSystemContextAppend {
-                text: "peer terminal: pty=42".into(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "peer terminal: pty=42",
+                ),
                 source: Some("peer_terminal".into()),
                 idempotency_key: Some("k1".into()),
                 source_kind: crate::session::SystemContextSource::Normal,
@@ -1188,7 +1190,7 @@ mod tests {
         let deser: LiveProjectionSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.runtime_system_context.len(), 1);
         assert_eq!(
-            deser.runtime_system_context[0].text,
+            deser.runtime_system_context[0].content.render_text(),
             "peer terminal: pty=42"
         );
         assert_eq!(

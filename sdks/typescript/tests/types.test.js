@@ -3072,6 +3072,60 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
           /invalid member status/.test(String(error.message)),
       );
     });
+
+    it("rejects malformed (non-object) member entries instead of skipping them", async () => {
+      const client = membersClient(["not-an-object"]);
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a missing members collection instead of returning empty success", async () => {
+      const client = new MeerkatClient();
+      client.request = async () => ({});
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /expected array/.test(String(error.message)),
+      );
+    });
+  });
+
+  // Malformed kickoff/ready member collections are contract violations and
+  // must raise — never be silently collapsed into empty success.
+  describe("waitMobKickoff/waitMobReady malformed collections", () => {
+    for (const [label, invoke] of [
+      ["waitMobKickoff", (client) => client.waitMobKickoff("mob-1")],
+      ["waitMobReady", (client) => client.waitMobReady("mob-1")],
+    ]) {
+      it(`${label} rejects a missing members collection`, async () => {
+        const client = new MeerkatClient();
+        client.request = async () => ({});
+        await assert.rejects(
+          () => invoke(client),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE" &&
+            /expected array/.test(String(error.message)),
+        );
+      });
+
+      it(`${label} rejects malformed member entries`, async () => {
+        const client = new MeerkatClient();
+        client.request = async () => ({ members: [42] });
+        await assert.rejects(
+          () => invoke(client),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE",
+        );
+      });
+    }
   });
 
   // SITE 4 — respawnMobMember: status must be present and in the closed set;
@@ -3750,6 +3804,17 @@ describe("Session transcript fail-closed parsing", () => {
           results: [{ content: "missing tool_use_id" }],
         }),
       /missing tool_use_id/,
+    );
+    // Tool result missing mandatory content — must not be coalesced into
+    // an empty transcript string.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "tool_results",
+          created_at: "2026-05-26T10:00:00Z",
+          results: [{ tool_use_id: "tc_1", is_error: false }],
+        }),
+      /missing content/,
     );
     // Present-but-non-list blocks.
     assert.throws(

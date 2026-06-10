@@ -120,8 +120,11 @@ impl AgentBuilder {
         self
     }
 
-    /// Set provider-specific parameters.
-    pub fn provider_params(mut self, params: serde_json::Value) -> Self {
+    /// Set typed provider-specific parameter overrides.
+    pub fn provider_params(
+        mut self,
+        params: meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+    ) -> Self {
         self.build_config.provider_params = Some(params);
         self
     }

@@ -1717,10 +1717,12 @@ mod tests {
             panic!("expected assistant image blocks effect");
         };
         assert!(matches!(blocks.as_slice(), [AssistantBlock::Image { .. }]));
-        let ContentBlock::Text { text } = &outcome.result.content[0] else {
-            panic!("expected JSON text tool result");
+        // K1: structured JSON success is a typed `Structured` block — never
+        // collapsed into serialized text.
+        let ContentBlock::Structured { data } = &outcome.result.content[0] else {
+            panic!("expected structured JSON tool result");
         };
-        let result: ImageGenerationToolResult = serde_json::from_str(text).unwrap();
+        let result: ImageGenerationToolResult = serde_json::from_str(data.get()).unwrap();
         assert!(matches!(
             result.terminal,
             ImageOperationTerminalClass::Generated

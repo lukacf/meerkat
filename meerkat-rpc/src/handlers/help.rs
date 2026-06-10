@@ -2,14 +2,15 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
 use serde_json::value::RawValue;
 
+use super::session::CreateSessionParams;
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat_core::ContentInput;
 
 pub async fn handle_ask(
     id: Option<RpcId>,
@@ -28,32 +29,46 @@ pub async fn handle_ask(
         Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     };
 
-    let create_params = json!({
-        "prompt": prompt,
-        "system_prompt": meerkat::help::help_system_prompt(),
-        "model": request.model,
-        "provider": request.provider,
-        "max_tokens": request.max_tokens,
-        "preload_skills": meerkat::help::platform_preload_skills(),
-        "enable_builtins": false,
-        "enable_shell": false,
-        "enable_memory": false,
-        "enable_mob": false,
-    });
-    let raw = match serde_json::value::to_raw_value(&create_params) {
-        Ok(raw) => raw,
-        Err(err) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("failed to encode help session params: {err}"),
-            );
-        }
+    // K17: construct the typed `session/create` params directly and delegate
+    // to the shared typed entrypoint — no hand-shaped JSON round trip between
+    // handlers.
+    let create_params = CreateSessionParams {
+        prompt: ContentInput::Text(prompt),
+        initial_turn: None,
+        model: request.model,
+        provider: request.provider,
+        max_tokens: request.max_tokens,
+        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
+        output_schema: None,
+        structured_output_retries: None,
+        hooks_override: None,
+        enable_builtins: Some(false),
+        enable_shell: Some(false),
+        keep_alive: false,
+        comms_name: None,
+        peer_meta: None,
+        enable_memory: Some(false),
+        enable_schedule: None,
+        enable_mob: Some(false),
+        enable_web_search: None,
+        tool_filter: None,
+        enable_workgraph: None,
+        budget_limits: None,
+        provider_params: None,
+        auth_binding: None,
+        preload_skills: Some(meerkat::help::platform_preload_skills()),
+        skill_refs: None,
+        skill_references: None,
+        labels: None,
+        additional_instructions: None,
+        app_context: None,
+        shell_env: None,
+        external_tools: None,
     };
 
-    super::session::handle_create(
+    super::session::create_session_with_params(
         id,
-        Some(raw.as_ref()),
+        create_params,
         runtime,
         notification_sink,
         runtime_adapter,

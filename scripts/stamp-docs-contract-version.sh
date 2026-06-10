@@ -65,6 +65,25 @@ MARKERS = [
     (re.compile(r'^\s*meerkat(?:-[a-z-]+)?\s*=\s*(?:"|\{)'), "docs/"),
 ]
 
+# `ContractVersion` also serializes in struct form
+# (`{"major": .., "minor": .., "patch": ..}`); docs showing that wire shape
+# are projections of the same fact and are stamped from the core
+# (pre-release-stripped) version.
+STRUCT_FORM = re.compile(
+    r'("contract_version"\s*:\s*\{\s*"major"\s*:\s*)(\d+)'
+    r'(\s*,\s*"minor"\s*:\s*)(\d+)(\s*,\s*"patch"\s*:\s*)(\d+)'
+)
+
+core_version = version.split("-", 1)[0]
+major, minor, patch = core_version.split(".")
+
+
+def stamp_struct_form(match: "re.Match[str]") -> str:
+    return (
+        f"{match.group(1)}{major}{match.group(3)}{minor}{match.group(5)}{patch}"
+    )
+
+
 changed = []
 stale = []
 for path in sorted(root.joinpath("docs").rglob("*.mdx")) + sorted(
@@ -81,6 +100,12 @@ for path in sorted(root.joinpath("docs").rglob("*.mdx")) + sorted(
         )
         if is_marker and SEMVER.search(line):
             new_line = SEMVER.sub(version, line)
+            if new_line != line:
+                file_changed = True
+                stale.append(f"{rel}:{lineno}: {line.strip()}")
+            rewritten.append(new_line)
+        elif rel.startswith("docs/") and STRUCT_FORM.search(line):
+            new_line = STRUCT_FORM.sub(stamp_struct_form, line)
             if new_line != line:
                 file_changed = True
                 stale.append(f"{rel}:{lineno}: {line.strip()}")

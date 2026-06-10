@@ -7,73 +7,18 @@ import type {
 } from './generated/events.js';
 import type { WireMobMemberStatus } from './generated/mob.js';
 
-// ─── Bootstrap config ───────────────────────────────────────────
-
-/** Configuration for {@link MeerkatRuntime.init}. */
-export interface RuntimeConfig {
-  /** Anthropic API key. */
-  anthropicApiKey?: string;
-  /** OpenAI API key. */
-  openaiApiKey?: string;
-  /** Gemini API key. */
-  geminiApiKey?: string;
-  /** Default model for new sessions. */
-  model?: string;
-  /** Maximum concurrent sessions. Default: 100000 (matches the WASM runtime
-   * `default_max_sessions` / `MAX_SESSIONS`). */
-  maxSessions?: number;
-  /** Anthropic base URL (e.g. for proxy deployments). */
-  anthropicBaseUrl?: string;
-  /** OpenAI base URL. */
-  openaiBaseUrl?: string;
-  /** Gemini base URL. */
-  geminiBaseUrl?: string;
-}
-
-/** Result from runtime initialization. */
-export interface InitResult {
-  status: 'initialized';
-  model: string;
-  providers: string[];
-  max_sessions?: number;
-}
-
-// ─── Session config ─────────────────────────────────────────────
-
-/** Structural reference to a realm binding. */
-export interface AuthBindingRef {
-  realm: string;
-  binding: string;
-  profile?: string;
-}
-
-/** Configuration for creating a direct (non-mob) session.
- *
- * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
- * deleted. Credentials flow from bootstrap-populated realm config
- * (`initRuntimeFromConfig`) or the host's registered external-auth
- * resolver (`register_external_auth_resolver`).
- */
-export interface SessionConfig {
-  /** LLM model identifier. */
-  model: string;
-  /** Optional structural auth binding reference. */
-  authBinding?: AuthBindingRef;
-  /** System prompt. */
-  systemPrompt?: string;
-  /** Max tokens per response. Default: 4096. */
-  maxTokens?: number;
-  /** Enable comms for this session. */
-  commsName?: string;
-  /** Whether this session runs in keep-alive mode. */
-  keepAlive?: boolean;
-  /** Application-defined labels. */
-  labels?: Record<string, string>;
-  /** Additional instruction sections appended to the system prompt. */
-  additionalInstructions?: string[];
-  /** Opaque application context. */
-  appContext?: unknown;
-}
+// ─── Bootstrap / session config (generated wire parity) ─────────
+//
+// K19: RuntimeConfig / InitResult / SessionConfig / AuthBindingRef are
+// generated wire types (sdk-codegen `runtime` module), not hand-modeled
+// here. The generated module also owns the fail-closed parse guards
+// (`parseInitResult`) consumed by `runtime.ts`.
+export type {
+  AuthBindingRef,
+  InitResult,
+  RuntimeConfig,
+  SessionConfig,
+} from './generated/runtime.js';
 
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
@@ -522,17 +467,17 @@ export interface EventEnvelope {
   payload: AgentEvent | { type: string; [key: string]: unknown };
 }
 
-/** Poll/subscribe lag sentinel emitted by the browser runtime. */
-export interface SubscriptionLaggedEvent {
-  type: 'lagged';
-  skipped: number;
-}
-
-/** Direct-session event item. */
-export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
+/**
+ * Direct-session event item.
+ *
+ * K19: a lagged receiver surfaces the generated `stream_truncated` AgentEvent
+ * (reason `stream_lagged`) — the handwritten `{type:'lagged'}` sentinel is
+ * deleted; the lag contract is the same generated event the RPC stream emits.
+ */
+export type SessionEvent = AgentEvent;
 
 /** Member subscription item from the browser runtime. */
-export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
+export type MemberEventItem = EventEnvelope;
 
 /** Runtime identity for one mob member incarnation. */
 export interface AgentRuntimeId {
@@ -549,7 +494,7 @@ export interface AttributedEvent {
 }
 
 /** Mob-wide subscription item from the browser runtime. */
-export type AttributedEventItem = AttributedEvent | SubscriptionLaggedEvent;
+export type AttributedEventItem = AttributedEvent;
 
 /** Structural mob event from the mob event log. */
 export interface MobEvent {

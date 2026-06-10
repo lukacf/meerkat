@@ -2450,6 +2450,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             runtime_completion_result_run_id: Option<RunId>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
+            // Dogma K9: machine-owned, total answer to "is this turn inside
+            // the structured-output extraction sub-flow". Set by
+            // EnterExtraction, cleared on every turn-terminal transition and
+            // on run start. The shell must read THIS instead of deriving
+            // in-extraction from loop-local scratch (extraction_state).
+            extraction_active: bool,
             llm_retry_attempt: u64,
             llm_retry_max_retries: u64,
             llm_retry_selected_delay_ms: u64,
@@ -2903,6 +2909,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             runtime_completion_result_run_id = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
+            extraction_active = false,
             llm_retry_attempt = 0,
             llm_retry_max_retries = 0,
             llm_retry_selected_delay_ms = 0,
@@ -11109,6 +11116,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -11118,13 +11128,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11140,6 +11144,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -11149,13 +11156,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11171,6 +11172,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -11180,13 +11184,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11202,6 +11200,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -11211,13 +11212,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11233,6 +11228,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -11242,13 +11240,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11264,6 +11256,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Retired
             emit EnqueueClassifiedEntry
@@ -11273,13 +11268,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11295,6 +11284,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Stopped
             emit EnqueueClassifiedEntry
@@ -11304,13 +11296,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11326,6 +11312,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -11335,13 +11324,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11357,6 +11340,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -11366,13 +11352,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11388,6 +11368,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -11397,13 +11380,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11419,6 +11396,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Retired
             emit EnqueueClassifiedEntry
@@ -11428,13 +11408,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11450,6 +11424,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Stopped
             emit EnqueueClassifiedEntry
@@ -11459,13 +11436,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11481,6 +11452,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Request
                 && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -11490,13 +11464,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: Some(item_id),
                 response_terminality: None
             }
@@ -11772,6 +11740,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -11781,13 +11752,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11803,6 +11768,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -11812,13 +11780,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11834,6 +11796,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -11843,13 +11808,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11865,6 +11824,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -11874,13 +11836,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11896,6 +11852,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Retired
             emit EnqueueClassifiedEntry
@@ -11905,13 +11864,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11927,6 +11880,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Stopped
             emit EnqueueClassifiedEntry
@@ -11936,13 +11892,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11958,6 +11908,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -11967,13 +11920,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -11989,6 +11936,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -11998,13 +11948,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12020,6 +11964,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Idle
             emit EnqueueClassifiedEntry
@@ -12029,13 +11976,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12051,6 +11992,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Retired
             emit EnqueueClassifiedEntry
@@ -12060,13 +12004,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12082,6 +12020,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Stopped
             emit EnqueueClassifiedEntry
@@ -12091,13 +12032,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12113,6 +12048,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
@@ -12122,13 +12060,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12144,6 +12076,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 envelope_kind == PeerIngressEnvelopeClass::Lifecycle
                 && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
             }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -12153,13 +12088,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
-                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
-                    && lifecycle_peer_param.get("value") != ""
-                {
-                    lifecycle_peer_param.get("value")
-                } else {
-                    from_peer
-                }),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None
             }
@@ -12505,6 +12434,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12550,6 +12480,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12595,6 +12526,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12639,6 +12571,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12678,6 +12611,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12716,6 +12650,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12753,6 +12688,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12792,6 +12728,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12830,6 +12767,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12867,6 +12805,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -12905,6 +12844,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -12926,6 +12866,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -13051,6 +12992,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -13067,6 +13009,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -13084,6 +13027,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -13099,6 +13043,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Extracting;
                 self.max_extraction_retries = max_extraction_retries;
+                self.extraction_active = true;
             }
             to Running
         }
@@ -13122,6 +13067,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {
                 self.turn_phase = TurnPhase::Completed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -13151,6 +13097,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Completed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
             }
@@ -13173,6 +13120,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Completed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
             }
@@ -13229,6 +13177,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "terminal_failure_source_known" { terminal_failure_source != RunFailureSourceKind::Unknown }
             update {
                 self.turn_phase = TurnPhase::Failed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalOutcome::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalOutcome::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } });
                 self.terminal_cause_kind = Some(if terminal_failure_source == RunFailureSourceKind::HookDenied { TurnTerminalCauseKind::HookDenied } else { if terminal_failure_source == RunFailureSourceKind::HookTimeout || terminal_failure_source == RunFailureSourceKind::HookExecutionFailed || terminal_failure_source == RunFailureSourceKind::HookConfigInvalid { TurnTerminalCauseKind::HookFailure } else { if terminal_failure_source == RunFailureSourceKind::Llm { TurnTerminalCauseKind::LlmFailure } else { if terminal_failure_source == RunFailureSourceKind::ToolError || terminal_failure_source == RunFailureSourceKind::InvalidToolAccess { TurnTerminalCauseKind::ToolFailure } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalCauseKind::StructuredOutputValidationFailed } else { if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalCauseKind::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalCauseKind::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::LlmRetryExhausted { TurnTerminalCauseKind::RetryExhausted } else { if terminal_failure_source == RunFailureSourceKind::MaxTurnsReached { TurnTerminalCauseKind::TurnLimitReached } else { TurnTerminalCauseKind::FatalFailure } } } } } } } } });
             }
@@ -13292,6 +13241,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_cancelling" { self.turn_phase == TurnPhase::Cancelling }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -13323,6 +13273,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.terminal_outcome = Some(outcome);
                 self.terminal_cause_kind = None;
                 self.extraction_attempts = 0;
+                self.extraction_active = false;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
                 self.llm_retry_max_retries = 0;
@@ -13339,6 +13290,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
             }
@@ -13357,6 +13309,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::BudgetExhausted);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
             }
@@ -13375,6 +13328,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::TimeBudgetExceeded);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
             }
@@ -13393,6 +13347,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "turn_ready" { self.turn_phase == TurnPhase::Ready }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -13408,6 +13363,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.turn_phase != TurnPhase::Cancelled
                 {
                     self.turn_phase = TurnPhase::Completed;
+                    self.extraction_active = false;
                     self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 }
                 self.runtime_completion_result_run_id = Some(run_id);
@@ -13470,6 +13426,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "terminal_failure_source_known_if_present" { terminal_failure_source != Some(RunFailureSourceKind::Unknown) }
             update {
                 self.turn_phase = TurnPhase::Failed;
+                self.extraction_active = false;
                 if self.terminal_outcome == None || self.terminal_outcome == Some(TurnTerminalOutcome::None) {
                     self.terminal_outcome = Some(
                         if terminal_failure_source == Some(RunFailureSourceKind::TokenBudgetExceeded)
@@ -13564,6 +13521,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
+                self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
                 self.runtime_completion_result_run_id = Some(run_id);
             }

@@ -13,7 +13,6 @@ use meerkat_core::{
     ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef,
     ToolResult, agent::AgentToolDispatcher,
 };
-use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -21,8 +20,57 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
-use crate::{McpApplyResult, McpReloadTarget, McpRouter};
+use crate::{McpApplyResult, McpError, McpReloadTarget, McpRouter};
 use meerkat_core::McpServerConfig;
+
+/// Typed fail-closed outcome of [`McpRouterAdapter::wait_until_ready`] when
+/// MCP servers are still pending at the deadline (K14).
+///
+/// Callers that documented "wait until every server finishes connecting"
+/// must treat this as a fault that prevents the first turn — never as a
+/// warn-and-proceed.
+#[derive(Debug, thiserror::Error)]
+#[error("MCP servers still pending after {waited:?}: {pending:?}")]
+pub struct McpNotReady {
+    /// Servers still connecting when the deadline expired.
+    pub pending: Vec<String>,
+    /// Notices drained while waiting (completed/failed servers observed
+    /// before the deadline) so they are not lost with the fault.
+    pub notices: Vec<ExternalToolDelta>,
+    /// How long the caller actually waited.
+    pub waited: Duration,
+}
+
+/// Typed report from [`McpRouterAdapter::stage_reload_all`] (K14).
+///
+/// One reload primitive owns the whole-roster stage under a single router
+/// lock; per-server stage rejections are typed entries, so callers surface a
+/// non-clean report as a wire fault instead of `?`-aborting a hand-rolled
+/// loop halfway through the roster.
+#[derive(Debug, Default)]
+pub struct McpReloadReport {
+    /// Servers whose reload was staged (the boundary apply happens at the
+    /// next turn boundary, and per-server reconnect outcomes flow through
+    /// the canonical lifecycle-action channel).
+    pub staged: Vec<String>,
+    /// Servers whose reload stage was rejected, with the typed fault.
+    pub failed: Vec<McpReloadFailure>,
+}
+
+impl McpReloadReport {
+    /// True when every active server's reload was staged.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
+/// One per-server typed stage rejection inside an [`McpReloadReport`].
+#[derive(Debug)]
+pub struct McpReloadFailure {
+    pub server: String,
+    pub error: McpError,
+}
 
 /// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
 ///
@@ -47,6 +95,56 @@ pub struct McpRouterAdapter {
     /// runtime-backed session builds replace the slot with the session-owned
     /// handle.
     external_surface_handle: Option<Arc<StdRwLock<Arc<dyn ExternalToolSurfaceHandle>>>>,
+}
+
+/// Fail-closed MCP server-lifecycle mirror installed when the pre-bind seed
+/// replay is rejected by the session DSL (K14).
+///
+/// The seeded pre-bind pending servers stay visibly pending (so the
+/// `[MCP_PENDING]` notice never goes silently quiet on a diverged mirror)
+/// and every subsequent lifecycle apply returns the typed seed rejection,
+/// which the router's notify paths propagate fail-closed.
+struct PoisonedMcpServerLifecycleHandle {
+    reason: DslTransitionError,
+    pending: BTreeSet<String>,
+}
+
+impl PoisonedMcpServerLifecycleHandle {
+    fn reject(&self, context: &'static str) -> DslTransitionError {
+        DslTransitionError::guard_rejected(
+            context,
+            format!(
+                "MCP lifecycle mirror is poisoned by a rejected bind seed: {}",
+                self.reason
+            ),
+        )
+    }
+}
+
+impl McpServerLifecycleHandle for PoisonedMcpServerLifecycleHandle {
+    fn apply_connect_pending(&self, _server_id: &str) -> Result<(), DslTransitionError> {
+        Err(self.reject("PoisonedMcpServerLifecycleHandle::apply_connect_pending"))
+    }
+
+    fn apply_connected(&self, _server_id: &str) -> Result<(), DslTransitionError> {
+        Err(self.reject("PoisonedMcpServerLifecycleHandle::apply_connected"))
+    }
+
+    fn apply_failed(&self, _server_id: &str, _error: &str) -> Result<(), DslTransitionError> {
+        Err(self.reject("PoisonedMcpServerLifecycleHandle::apply_failed"))
+    }
+
+    fn apply_disconnected(&self, _server_id: &str) -> Result<(), DslTransitionError> {
+        Err(self.reject("PoisonedMcpServerLifecycleHandle::apply_disconnected"))
+    }
+
+    fn apply_reload(&self, _server_id: &str) -> Result<(), DslTransitionError> {
+        Err(self.reject("PoisonedMcpServerLifecycleHandle::apply_reload"))
+    }
+
+    fn pending_server_ids(&self) -> BTreeSet<String> {
+        self.pending.clone()
+    }
 }
 
 struct PoisonedExternalToolSurfaceHandle {
@@ -465,30 +563,63 @@ impl McpRouterAdapter {
         Ok(router.has_removing_servers())
     }
 
-    /// Block until all pending MCP connections complete or timeout expires.
+    /// Block until all pending MCP connections complete or the timeout
+    /// expires.
     ///
-    /// Returns notices for completed/failed servers. Useful for CLI `--wait-for-mcp`
-    /// and SDK `wait_for_mcp` workflows where the caller needs tools to be available
-    /// before the first agent turn.
-    pub async fn wait_until_ready(&self, timeout: std::time::Duration) -> Vec<ExternalToolDelta> {
+    /// Returns notices for completed/failed servers. Useful for CLI
+    /// `--wait-for-mcp` and SDK `wait_for_mcp` workflows where the caller
+    /// needs tools to be available before the first agent turn.
+    ///
+    /// K14: the deadline is fail-closed — if servers are still pending when
+    /// it expires, the typed [`McpNotReady`] fault (carrying the pending set
+    /// and the notices drained so far) is returned so callers abort the
+    /// first turn instead of warn-and-proceeding into it.
+    pub async fn wait_until_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ExternalToolDelta>, McpNotReady> {
         let mut all_notices = Vec::new();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let started = tokio::time::Instant::now();
+        let deadline = started + timeout;
         loop {
             let update = self.poll_external_updates().await;
             all_notices.extend(update.notices);
             if update.pending.is_empty() {
-                break;
+                return Ok(all_notices);
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    "wait_until_ready timed out after {}s with pending servers",
-                    timeout.as_secs()
-                );
-                break;
+                return Err(McpNotReady {
+                    pending: update.pending,
+                    notices: all_notices,
+                    waited: started.elapsed(),
+                });
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        all_notices
+    }
+
+    /// Stage a reload for every active MCP server under one router lock and
+    /// return the typed per-server report (K14).
+    ///
+    /// This is the lifecycle owner's reload-all primitive: surfaces (RPC,
+    /// REST, MCP server) consume the [`McpReloadReport`] and project a
+    /// non-clean report as a typed wire fault, instead of hand-rolling
+    /// per-server stage loops that abort halfway with partial staging.
+    pub async fn stage_reload_all(&self) -> Result<McpReloadReport, McpError> {
+        let mut router = self.router.write().await;
+        let router = router.as_mut().ok_or(McpError::RouterShutDown)?;
+        let mut report = McpReloadReport::default();
+        for name in router.active_server_names() {
+            match router.stage_reload(McpReloadTarget::ServerName(name.clone())) {
+                Ok(()) => report.staged.push(name),
+                Err(error) => report.failed.push(McpReloadFailure {
+                    server: name,
+                    error,
+                }),
+            }
+        }
+        self.sync_router_projection(router);
+        Ok(report)
     }
 
     /// Test helper for cross-crate lifecycle integration tests.
@@ -568,10 +699,13 @@ impl AgentToolDispatcher for McpRouterAdapter {
         let guard = self.router.read().await;
         match &*guard {
             Some(router) => {
-                let args: Value = serde_json::from_str(call.args.get())
-                    .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+                // K1: external dispatch goes through the typed tool-argument
+                // contract — malformed / non-object args fail closed instead
+                // of being wrapped into a `Value::String` and forwarded.
+                let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
+                    .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
                 let blocks = router
-                    .call_tool(call.name, &args)
+                    .call_tool(call.name, args.as_value())
                     .await
                     .map_err(|e| ToolError::execution_failed(e.to_string()))?;
                 Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
@@ -630,17 +764,35 @@ impl AgentToolDispatcher for McpRouterAdapter {
         // from the DSL would return empty even while the shell router has
         // real background connections in flight — the `[MCP_PENDING]` notice
         // would then go silent immediately after bind.
+        //
+        // K14: a rejected seed apply means the session DSL refused to mirror
+        // real router state — fail closed by binding a poisoned handle that
+        // (a) keeps the seeded servers visibly pending so the `[MCP_PENDING]`
+        // notice never goes silently quiet, and (b) returns the typed seed
+        // rejection for every subsequent lifecycle apply, which propagates
+        // through the router's fail-closed notify paths.
         let pending_before_bind: Vec<String> =
             self.cached_pending_sources().iter().cloned().collect();
+        let mut seed_fault = None;
         for server_name in &pending_before_bind {
             if let Err(error) = handle.apply_connect_pending(server_name) {
-                tracing::debug!(
-                    server = %server_name,
-                    error = %error,
-                    "seed apply_connect_pending on bind rejected by DSL"
-                );
+                seed_fault = Some(error);
+                break;
             }
         }
+        let handle = match seed_fault {
+            None => handle,
+            Some(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "seed apply_connect_pending on bind rejected by DSL; poisoning MCP lifecycle mirror"
+                );
+                Arc::new(PoisonedMcpServerLifecycleHandle {
+                    reason: error,
+                    pending: pending_before_bind.into_iter().collect(),
+                }) as Arc<dyn McpServerLifecycleHandle>
+            }
+        };
 
         // Write into the shared slot cloned from the inner router; no async
         // lock is acquired. Subsequent router handshake events flow through
@@ -1027,7 +1179,10 @@ mod tests {
             .apply_staged()
             .await
             .expect("apply staged after bind");
-        adapter.wait_until_ready(async_connect_test_timeout()).await;
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("server should connect before the wait deadline");
 
         let snapshot = handle
             .surface_snapshot("late-bind-pending")
@@ -1246,7 +1401,10 @@ mod tests {
 
         let adapter = McpRouterAdapter::new(router);
 
-        let notices = adapter.wait_until_ready(async_connect_test_timeout()).await;
+        let notices = adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("server should connect before the wait deadline");
 
         // Server should have connected successfully.
         assert!(
@@ -1266,6 +1424,226 @@ mod tests {
         );
 
         adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_pending_at_deadline_is_typed_mcp_not_ready() {
+        // K14: a server still connecting at the deadline must surface as the
+        // typed `McpNotReady` fault (carrying the pending set), never as a
+        // warn-and-proceed empty success. (Fails-old: the deadline arm broke
+        // out of the loop with a `tracing::warn!` and returned notices as if
+        // the wait had succeeded.)
+        let mut router = generated_surface_router();
+        // `/bin/sleep` accepts the stdio handshake write but never answers,
+        // so the connect task stays pending past the wait deadline.
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "hang-srv",
+                "/bin/sleep",
+                vec!["60".to_string()],
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+
+        let not_ready = adapter
+            .wait_until_ready(Duration::from_millis(200))
+            .await
+            .expect_err("hanging server must fail the wait typed");
+        assert_eq!(
+            not_ready.pending,
+            vec!["hang-srv".to_string()],
+            "the typed fault must carry the pending server set"
+        );
+
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stage_reload_all_returns_typed_report_and_fails_closed_on_shutdown() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+        let mut router = generated_surface_router();
+        router
+            .stage_add(test_server_config("reload-srv", &server_path))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("server should connect before the wait deadline");
+
+        // K14: one reload primitive stages the whole active roster under a
+        // single router lock and returns the typed per-server report.
+        let report = adapter
+            .stage_reload_all()
+            .await
+            .expect("reload-all on a live adapter");
+        assert!(
+            report.is_clean(),
+            "unexpected failures: {:?}",
+            report.failed
+        );
+        assert_eq!(report.staged, vec!["reload-srv".to_string()]);
+
+        adapter.shutdown().await;
+        let error = adapter
+            .stage_reload_all()
+            .await
+            .expect_err("reload-all after shutdown must fail typed");
+        assert!(matches!(error, crate::McpError::RouterShutDown));
+    }
+
+    // Rejecting MCP server-lifecycle mirror used to pin K14 fail-closed
+    // behavior.
+    struct RejectingMcpServerLifecycleHandle;
+
+    impl meerkat_core::handles::McpServerLifecycleHandle for RejectingMcpServerLifecycleHandle {
+        fn apply_connect_pending(
+            &self,
+            _server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::guard_rejected(
+                "RejectingMcpServerLifecycleHandle::apply_connect_pending",
+                "injected lifecycle mirror rejection",
+            ))
+        }
+        fn apply_connected(
+            &self,
+            _server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::guard_rejected(
+                "RejectingMcpServerLifecycleHandle::apply_connected",
+                "injected lifecycle mirror rejection",
+            ))
+        }
+        fn apply_failed(
+            &self,
+            _server_id: &str,
+            _error: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::guard_rejected(
+                "RejectingMcpServerLifecycleHandle::apply_failed",
+                "injected lifecycle mirror rejection",
+            ))
+        }
+        fn apply_disconnected(
+            &self,
+            _server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::guard_rejected(
+                "RejectingMcpServerLifecycleHandle::apply_disconnected",
+                "injected lifecycle mirror rejection",
+            ))
+        }
+        fn apply_reload(
+            &self,
+            _server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::guard_rejected(
+                "RejectingMcpServerLifecycleHandle::apply_reload",
+                "injected lifecycle mirror rejection",
+            ))
+        }
+        fn pending_server_ids(&self) -> std::collections::BTreeSet<String> {
+            std::collections::BTreeSet::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_add_rejected_lifecycle_mirror_propagates_and_leaves_shell_unchanged() {
+        // K14: a rejected lifecycle mirror apply is a typed `McpError::
+        // LifecycleMirrorRejected` and the staged payload is NOT installed —
+        // the staged intent then fails explicitly at apply_staged instead of
+        // silently proceeding with a diverged mirror. (Fails-old: the
+        // rejection was `tracing::debug!`-swallowed and staging proceeded.)
+        let mut router = generated_surface_router();
+        let handle_slot = router.mcp_lifecycle_handle_slot();
+        {
+            let mut slot = handle_slot.write().unwrap();
+            *slot = Some(Arc::new(RejectingMcpServerLifecycleHandle)
+                as Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>);
+        }
+
+        let error = router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "srv-rejected",
+                "/bin/echo",
+                Vec::<String>::new(),
+                HashMap::new(),
+            ))
+            .expect_err("rejected lifecycle mirror apply must propagate typed");
+        assert!(
+            matches!(
+                &error,
+                crate::McpError::LifecycleMirrorRejected { server, .. } if server == "srv-rejected"
+            ),
+            "expected LifecycleMirrorRejected, got {error}"
+        );
+
+        // The shell mirror was not mutated: the staged intent exists on the
+        // owner but carries no payload, so the boundary apply surfaces the
+        // explicit missing-payload protocol fault instead of connecting.
+        let apply_error = router
+            .apply_staged()
+            .await
+            .expect_err("staged intent without payload must fail explicitly");
+        assert!(
+            apply_error
+                .to_string()
+                .contains("missing its staged payload"),
+            "expected missing-payload protocol error, got {apply_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_seed_rejection_poisons_lifecycle_mirror_fail_closed() {
+        // K14: a rejected pre-bind seed apply poisons the lifecycle mirror —
+        // subsequent lifecycle applies fail typed and the seeded servers stay
+        // visibly pending — instead of being `tracing::debug!`-swallowed and
+        // binding a silently diverged handle. (Fails-old: the seed rejection
+        // was logged at debug level and the handle was bound anyway.)
+        let adapter = McpRouterAdapter::new(generated_surface_router());
+        adapter.set_pending_sources_cache(Arc::from(["pre-bind-srv".to_string()]));
+
+        adapter.bind_mcp_server_lifecycle_handle(Arc::new(RejectingMcpServerLifecycleHandle)
+            as Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>);
+
+        let bound = adapter
+            .mcp_lifecycle_handle
+            .read()
+            .unwrap()
+            .clone()
+            .expect("bind installs a handle");
+        assert_eq!(
+            bound.pending_server_ids(),
+            std::iter::once("pre-bind-srv".to_string()).collect(),
+            "poisoned mirror must keep the seeded servers visibly pending"
+        );
+        let apply_error = bound
+            .apply_connected("pre-bind-srv")
+            .expect_err("poisoned mirror must reject subsequent applies typed");
+        assert!(
+            apply_error.to_string().contains("poisoned"),
+            "expected poisoned mirror rejection, got {apply_error}"
+        );
+
+        let stage_error = adapter
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "post-poison-srv",
+                "/bin/echo",
+                Vec::<String>::new(),
+                HashMap::new(),
+            ))
+            .await
+            .expect_err("staging through a poisoned mirror must fail typed");
+        assert!(
+            stage_error.contains("lifecycle mirror"),
+            "expected lifecycle-mirror rejection through the adapter, got {stage_error}"
+        );
     }
 
     #[tokio::test]

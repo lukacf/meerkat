@@ -170,9 +170,9 @@ impl SkillSource for SourceNode {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, meerkat_core::skills::SkillError> {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<meerkat_core::skills::SkillFunctionOutput, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.invoke_function(key, function_name, arguments).await,
             #[cfg(not(target_arch = "wasm32"))]

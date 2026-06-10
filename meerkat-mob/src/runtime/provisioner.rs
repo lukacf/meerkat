@@ -1496,11 +1496,9 @@ mod tests {
         let mut req = meerkat_core::service::CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(meerkat_core::service::SessionBuildOptions {
@@ -1657,26 +1655,6 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
-                .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
-#[cfg(feature = "runtime-adapter")]
 fn pending_system_context_appends_for_runtime_executor(
     appends: &[meerkat_core::lifecycle::run_primitive::ConversationContextAppend],
 ) -> Vec<PendingSystemContextAppend> {
@@ -1687,7 +1665,7 @@ fn pending_system_context_appends_for_runtime_executor(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_runtime_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             // Durable keyed conversation context append — not a transient steer.

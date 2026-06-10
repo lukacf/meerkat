@@ -591,6 +591,55 @@ impl From<meerkat_core::comms::SendReceipt> for CommsSendResult {
     }
 }
 
+/// Why a peer was unreachable for a `comms/send` dispatch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CommsPeerUnreachableReason {
+    OfflineOrNoAck,
+    TransportError,
+}
+
+/// Typed error data for `comms/send` failures.
+///
+/// The error taxonomy is owned here (K17): surfaces serialize this contract
+/// as JSON-RPC `error.data` instead of hand-shaping per-surface payloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CommsSendErrorData {
+    PeerNotFoundOrNotTrusted {
+        peer: String,
+        message: String,
+    },
+    PeerUnreachable {
+        peer: String,
+        reason: CommsPeerUnreachableReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+    },
+    SendFailed {
+        message: String,
+    },
+    InvalidCommand {
+        message: String,
+    },
+}
+
+impl CommsSendErrorData {
+    /// Human-readable message carried by every variant.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::PeerNotFoundOrNotTrusted { message, .. }
+            | Self::PeerUnreachable { message, .. }
+            | Self::SendFailed { message }
+            | Self::InvalidCommand { message } => message,
+        }
+    }
+}
+
 pub type CommsPeerEntry = PeerDirectoryEntry;
 
 /// Response payload for `comms/peers`.

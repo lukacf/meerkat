@@ -275,13 +275,11 @@ impl RuntimeBackedScheduleSessionHost {
         Ok(CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: prompt_system_prompt
                 .map(str::to_owned)
                 .or_else(|| create.system_prompt.clone()),
             max_tokens: create.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),

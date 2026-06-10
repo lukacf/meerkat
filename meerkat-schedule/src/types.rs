@@ -595,7 +595,9 @@ fn last_receipt_from_machine_projection(
         .transpose()?;
     let runtime_outcome_key = runtime_outcome
         .as_ref()
-        .map(|outcome| semantic_json_key("runtime_outcome", outcome))
+        .map(|outcome| {
+            semantic_json_key("runtime_outcome", outcome).map(occ_dsl::RuntimeOutcomeKey::from)
+        })
         .transpose()?;
     if runtime_outcome_key != machine.runtime_outcome_key {
         return Err(format!(
@@ -614,7 +616,10 @@ fn last_receipt_from_machine_projection(
             .map(|id| id.0.as_str()),
         machine.last_receipt_detail.as_deref(),
         failure_class,
-        machine.runtime_outcome_key.as_deref(),
+        machine
+            .runtime_outcome_key
+            .as_ref()
+            .map(|key| key.0.as_str()),
         materialized_session_id.as_ref(),
     )?;
     Ok(Some(DeliveryReceipt {
@@ -1237,7 +1242,7 @@ pub struct SessionMaterializationSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2233,7 +2238,7 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
                 .last_receipt_materialized_session_id
                 .as_ref()
                 .map(|session_id| session_id.0.clone()),
-            runtime_outcome_key: state.runtime_outcome_key.clone(),
+            runtime_outcome_key: state.runtime_outcome_key.as_ref().map(|key| key.0.clone()),
             receipt_stage: state
                 .receipt_stage
                 .map(occurrence_receipt_stage_to_wire)
@@ -2305,7 +2310,9 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             last_receipt_materialized_session_id: wire
                 .last_receipt_materialized_session_id
                 .map(occ_dsl::SessionId),
-            runtime_outcome_key: wire.runtime_outcome_key,
+            runtime_outcome_key: wire
+                .runtime_outcome_key
+                .map(occ_dsl::RuntimeOutcomeKey::from),
             receipt_stage: wire
                 .receipt_stage
                 .as_deref()

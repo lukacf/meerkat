@@ -30,4 +30,4 @@ pub use run_primitive::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
     RunApplyBoundary, RunPrimitive, RuntimeExecutionKind, StagedRunInput,
 };
-pub use run_receipt::RunBoundaryReceipt;
+pub use run_receipt::{RunBoundaryReceipt, RunBoundaryReceiptDraft};

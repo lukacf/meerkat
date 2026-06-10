@@ -295,7 +295,10 @@ struct PublicTool {
 }
 
 fn typed_schema<T: JsonSchema>() -> Value {
-    serde_json::to_value(schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+    // K1: ONE infallible schema generator (the core schema module owns the
+    // tool-input schema contract) — no fail-open `{"type": "object"}` null
+    // schema fallback.
+    meerkat_core::schema::tool_input_schema_for::<T>()
 }
 
 static PUBLIC_TOOLS: &[PublicTool] = &[

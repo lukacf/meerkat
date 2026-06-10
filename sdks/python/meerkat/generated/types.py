@@ -189,6 +189,75 @@ class McpLiveOpResponse:
 
 
 @dataclass
+class ConfigEnvelope:
+    """Wire envelope returned by config APIs across surfaces."""
+    config: Any
+    generation: int
+    backend: Optional[str] = None
+    instance_id: Optional[str] = None
+    realm_id: Optional[str] = None
+    resolved_paths: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class ConfigPatchParams:
+    """Parameters for the RPC `config/patch` method — RFC-7386 merge-patch
+(bare patch or wrapped with an optimistic-concurrency generation)."""
+    expected_generation: Optional[int] = None
+    patch: Optional[Any] = None
+
+
+@dataclass
+class ConfigWriteResult:
+    """Result of a `config/set` or `config/patch` write."""
+    config: Any
+    generation: int
+    backend: Optional[str] = None
+    instance_id: Optional[str] = None
+    live_propagation: Optional[dict[str, Any]] = None
+    realm_id: Optional[str] = None
+    resolved_paths: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class InterruptResult:
+    """Shared interrupt result wire contract (REST and RPC)."""
+    interrupted: bool
+    result: Literal['interrupted', 'staged_noop']
+    session_id: str
+
+
+@dataclass
+class ServerCapabilities:
+    """Capabilities returned by the RPC server during `initialize`."""
+    contract_version: str
+    methods: list[str]
+    server_info: dict[str, Any]
+
+
+@dataclass
+class SkillListResponse:
+    """Wire response for listing skills with introspection data."""
+    skills: list[dict[str, Any]]
+
+
+@dataclass
+class WorkEventsResult:
+    """Result envelope for work-event list reads (`workgraph/events`)."""
+    events: list[Any]
+
+
+@dataclass
+class WorkItemsResult:
+    """Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`)."""
+    items: list[Any]
+
+
+# Parameters for the RPC `config/set` method — replace the config (bare
+# config or wrapped with an optimistic-concurrency generation).
+ConfigSetParams = dict[str, Any] | Any
+
+@dataclass
 class MobWireParams:
     """Request payload for `mob/wire`."""
     member: str

@@ -607,6 +607,71 @@ impl TryFrom<WireContentInput> for ContentInput {
     }
 }
 
+/// Discriminated (externally tagged) prompt-input wire shape.
+///
+/// Unlike [`WireContentInput`] (untagged, for transcripts that already know
+/// their shape), this is the ingress contract for content-bearing surface
+/// exports: `{"text": "..."}` or `{"blocks": [...]}`. The tag is the
+/// discriminator — a plain-text prompt whose body happens to be valid
+/// block-array JSON can never be misread as structured blocks (K19).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WirePromptInput {
+    Text(String),
+    Blocks(Vec<WireContentBlock>),
+}
+
+impl TryFrom<WirePromptInput> for ContentInput {
+    type Error = &'static str;
+
+    fn try_from(input: WirePromptInput) -> Result<Self, Self::Error> {
+        match input {
+            WirePromptInput::Text(text) => Ok(ContentInput::Text(text)),
+            WirePromptInput::Blocks(blocks) => Ok(ContentInput::Blocks(
+                blocks
+                    .into_iter()
+                    .map(ContentBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+        }
+    }
+}
+
+/// Non-error outcome of a user interrupt request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInterruptOutcome {
+    /// A live in-flight turn was cancelled.
+    Interrupted,
+    /// The session was staged with no live run — the interrupt is a typed
+    /// no-op terminal, not a fabricated live cancellation.
+    StagedNoop,
+}
+
+/// Shared interrupt result wire contract (REST and RPC).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InterruptResult {
+    pub session_id: String,
+    /// `true` only when a live turn was actually cancelled.
+    pub interrupted: bool,
+    pub result: WireInterruptOutcome,
+}
+
+impl InterruptResult {
+    /// Project the typed interrupt outcome into the wire result.
+    #[must_use]
+    pub fn from_outcome(session_id: String, outcome: WireInterruptOutcome) -> Self {
+        Self {
+            session_id,
+            interrupted: matches!(outcome, WireInterruptOutcome::Interrupted),
+            result: outcome,
+        }
+    }
+}
+
 /// Wire-safe tool result content that handles both legacy string and array formats.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

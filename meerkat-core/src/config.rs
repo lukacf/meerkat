@@ -770,25 +770,25 @@ pub struct AgentConfig {
     pub budget_warning_threshold: f32,
     /// Maximum turns before forced stop
     pub max_turns: Option<u32>,
-    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
+    /// Typed provider parameter carrier (explicit overrides + build-derived
+    /// provider-native tool defaults).
     ///
-    /// This is a generic JSON bag that providers can extract provider-specific
-    /// options from. Each provider implementation is responsible for reading
-    /// and applying relevant parameters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
-    /// Provider-native tool defaults resolved at factory build time.
+    /// Parsed FAIL-CLOSED at config ingress: a malformed or unknown-keyed
+    /// provider-params shape is rejected when the config is read, never
+    /// deferred to the first LLM call. The explicit `params` half is
+    /// persisted; `tool_defaults` is `#[serde(skip)]` inside the carrier and
+    /// re-derived on every build (including resume) from
+    /// `Config.provider_tools` + `ModelProfile.supports_web_search`, so config
+    /// changes (e.g. disabling web search) take effect immediately on resumed
+    /// sessions. The per-turn effective params come from the carrier's typed
+    /// field-wise merge ([`ProviderParamsCarrier::effective_params`]).
     ///
-    /// **Intentionally non-persisted** (`#[serde(skip)]`): re-derived on every
-    /// build (including resume) from `Config.provider_tools` +
-    /// `ModelProfile.supports_web_search`. This means config changes (e.g.,
-    /// disabling web search) take effect immediately on resumed sessions without
-    /// requiring session recreation. Explicit per-request overrides live in
-    /// `provider_params` which IS persisted.
-    ///
-    /// Merged with `provider_params` per-turn via RFC 7396 merge-patch.
-    #[serde(skip)]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    /// [`ProviderParamsCarrier::effective_params`]: crate::lifecycle::run_primitive::ProviderParamsCarrier::effective_params
+    #[serde(
+        default,
+        skip_serializing_if = "crate::lifecycle::run_primitive::ProviderParamsCarrier::serializes_empty"
+    )]
+    pub provider_params: crate::lifecycle::run_primitive::ProviderParamsCarrier,
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
@@ -826,8 +826,7 @@ impl Default for AgentConfig {
                 .and_then(|cfg| cfg.budget_warning_threshold)
                 .unwrap_or_default(),
             max_turns: None,
-            provider_params: None,
-            provider_tool_defaults: None,
+            provider_params: crate::lifecycle::run_primitive::ProviderParamsCarrier::default(),
             output_schema: None,
             structured_output_retries: default_structured_output_retries(),
             extraction_prompt: None,
@@ -1192,8 +1191,9 @@ pub struct SelfHostedConfig {
 
 /// Per-provider defaults for provider-native tools (web search, etc.).
 ///
-/// These defaults are resolved at factory build time and injected as
-/// non-persisted `AgentConfig.provider_tool_defaults`. The `enabled` flags
+/// These defaults are resolved at factory build time and injected as the
+/// non-persisted `tool_defaults` half of `AgentConfig.provider_params`
+/// (a typed `ProviderTag`). The `enabled` flags
 /// here control whether the factory injects tool config for models whose
 /// `ModelProfile.supports_web_search` is `true`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -3024,20 +3024,69 @@ model = "custom-model"
         assert!(config.provider_tools.gemini.google_search);
     }
 
-    // ---- AgentConfig.provider_tool_defaults serialization test ----
+    // ---- AgentConfig.provider_params carrier serialization tests ----
 
     #[test]
     fn test_provider_tool_defaults_not_serialized() {
+        use crate::lifecycle::run_primitive::{
+            AnthropicProviderTag, OpaqueProviderBody, ProviderParamsCarrier, ProviderTag,
+        };
+
         let agent_config = AgentConfig {
-            provider_tool_defaults: Some(
-                serde_json::json!({"web_search": {"type": "web_search_20250305"}}),
-            ),
+            provider_params: ProviderParamsCarrier {
+                params: Default::default(),
+                tool_defaults: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                        "type": "web_search_20250305"
+                    }))),
+                    ..Default::default()
+                })),
+            },
             ..Default::default()
         };
         let json = serde_json::to_value(&agent_config).unwrap();
+        // The carrier is transparent over `params`; build-derived tool
+        // defaults never persist, and an empty params half serializes nothing.
         assert!(
-            json.get("provider_tool_defaults").is_none(),
-            "provider_tool_defaults must not be serialized: {json}"
+            json.get("provider_params").is_none(),
+            "build-derived tool defaults must not be serialized: {json}"
         );
+    }
+
+    /// K2 invariant: malformed provider params are rejected at CONFIG PARSE,
+    /// not deferred to the first LLM call.
+    #[test]
+    fn test_malformed_provider_params_rejected_at_config_parse() {
+        // Unknown key inside the typed override shape.
+        let unknown_key = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": { "not_a_known_knob": true }
+        });
+        assert!(
+            serde_json::from_value::<AgentConfig>(unknown_key).is_err(),
+            "unknown provider-params key must fail closed at config ingress"
+        );
+
+        // Wrong type for a known knob.
+        let wrong_type = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": { "temperature": "hot" }
+        });
+        assert!(
+            serde_json::from_value::<AgentConfig>(wrong_type).is_err(),
+            "mistyped provider-params knob must fail closed at config ingress"
+        );
+
+        // Well-formed typed shape parses.
+        let typed = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": {
+                "temperature": 0.2,
+                "provider_tag": { "provider": "anthropic", "effort": "high" }
+            }
+        });
+        let parsed: AgentConfig =
+            serde_json::from_value(typed).expect("typed provider params parse");
+        assert_eq!(parsed.provider_params.params.temperature, Some(0.2));
     }
 }

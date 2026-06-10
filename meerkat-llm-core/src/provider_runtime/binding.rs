@@ -109,8 +109,18 @@ impl NormalizedAuthMethod {
     /// (RPC/REST/CLI) that holds a resolved `AuthProfile`, replacing the
     /// per-surface inline `provider -> *AuthMethod::parse` copies.
     pub fn from_auth_profile(auth_profile: &meerkat_core::AuthProfile) -> Option<Self> {
-        let raw = auth_profile.auth_method.as_str();
-        match auth_profile.provider {
+        Self::parse_for_provider(auth_profile.provider, auth_profile.auth_method.as_str())
+    }
+
+    /// Parse a raw `auth_method` string through the given provider's typed
+    /// matrix enum. Returns `None` for `Provider::Other` or a method that is
+    /// not a member of that provider's auth matrix.
+    ///
+    /// This is the single auth-method-string ingress for every surface that
+    /// holds a provider identity but no resolved `AuthProfile` (e.g. CLI
+    /// non-interactive login).
+    pub fn parse_for_provider(provider: Provider, raw: &str) -> Option<Self> {
+        match provider {
             Provider::OpenAI => OpenAiAuthMethod::parse(raw).map(Self::OpenAi),
             Provider::Anthropic => AnthropicAuthMethod::parse(raw).map(Self::Anthropic),
             Provider::Gemini => GoogleAuthMethod::parse(raw).map(Self::Google),

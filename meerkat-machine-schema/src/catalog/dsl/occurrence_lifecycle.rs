@@ -36,7 +36,7 @@ machine! {
             last_receipt_detail: Option<String>,
             last_receipt_correlation_id: Option<CorrelationId>,
             last_receipt_materialized_session_id: Option<SessionId>,
-            runtime_outcome_key: Option<String>,
+            runtime_outcome_key: Option<RuntimeOutcomeKey>,
             receipt_stage: Option<Enum<DeliveryReceiptStage>>,
             receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
             receipt_detail: Option<String>,
@@ -126,7 +126,7 @@ machine! {
                 correlation_id: Option<CorrelationId>,
                 detail: Option<String>,
                 materialized_session_id: Option<SessionId>,
-                runtime_outcome_key: Option<String>
+                runtime_outcome_key: Option<RuntimeOutcomeKey>
             },
             ClassifyDue { now_utc_ms: u64 },
             // Terminality classification. This machine owns the lifecycle_phase
@@ -1790,6 +1790,17 @@ impl<T: Into<String>> From<T> for ClaimToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionId(pub String);
 impl<T: Into<String>> From<T> for SessionId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed runtime-outcome receipt key (UUID-backed at the shell seam). Ties an
+/// occurrence's recorded receipt to the runtime completion outcome it
+/// projects; never a raw `String` the machine could confuse with detail text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOutcomeKey(pub String);
+impl<T: Into<String>> From<T> for RuntimeOutcomeKey {
     fn from(s: T) -> Self {
         Self(s.into())
     }

@@ -1035,9 +1035,8 @@ pub(crate) fn context_append_to_pending_system_context_append(
     append: &ConversationContextAppend,
     peer_response_terminal: Option<&meerkat_core::PeerResponseTerminalFact>,
 ) -> meerkat_core::PendingSystemContextAppend {
-    let text = render_core_context_for_pending_system_context(&append.content);
     meerkat_core::PendingSystemContextAppend {
-        text,
+        content: append.content.clone(),
         source: Some(append.key.clone()),
         idempotency_key: Some(append.key.clone()),
         // Durable keyed context append (peer responses, etc.) — not a steer.
@@ -1060,7 +1059,7 @@ pub(crate) fn projection_to_pending_system_context_appends(
             append,
             projection.peer_response_terminal.as_ref(),
         ))
-        .filter(|append| !append.text.trim().is_empty())
+        .filter(|append| !append.content.render_text().trim().is_empty())
         .collect();
     }
 
@@ -1075,7 +1074,7 @@ pub(crate) fn projection_to_pending_system_context_appends(
             // retained only as a stable per-input idempotency identifier.
             let key = format!("runtime:steer:{input_id}");
             meerkat_core::PendingSystemContextAppend {
-                text: render_core_context_for_pending_system_context(&append.content),
+                content: append.content.clone(),
                 source: Some(key.clone()),
                 idempotency_key: Some(key),
                 source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
@@ -1085,31 +1084,8 @@ pub(crate) fn projection_to_pending_system_context_appends(
             }
         })
         .into_iter()
-        .filter(|append| !append.text.trim().is_empty())
+        .filter(|append| !append.content.render_text().trim().is_empty())
         .collect()
-}
-
-fn render_core_context_for_pending_system_context(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) => format!("{label}: {uri}"),
-            None => uri.clone(),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -1353,7 +1329,10 @@ mod tests {
         let appends = projection_to_pending_system_context_appends(&input_id, &projection);
 
         assert_eq!(appends.len(), 1);
-        assert_eq!(appends[0].text, "terminal response is ready");
+        assert_eq!(
+            appends[0].content.render_text(),
+            "terminal response is ready"
+        );
         assert_eq!(
             appends[0].source.as_deref(),
             Some("peer_response_terminal:peer:req")
@@ -1389,7 +1368,10 @@ mod tests {
         let appends = projection_to_pending_system_context_appends(input.id(), &projection);
 
         assert_eq!(appends.len(), 1);
-        assert_eq!(appends[0].text, "WorkGraph attention projection");
+        assert_eq!(
+            appends[0].content.render_text(),
+            "WorkGraph attention projection"
+        );
         assert_eq!(
             appends[0].source.as_deref(),
             Some("workgraph_attention:binding-1:2:5")
@@ -1434,12 +1416,10 @@ mod tests {
         let appends = projection_to_pending_system_context_appends(&input_id, &projection);
 
         assert_eq!(appends.len(), 1);
+        let rendered = appends[0].content.render_text();
         assert!(
-            appends[0]
-                .text
-                .contains("please look at this while you work"),
-            "peer message append should be renderable as live system context: {:?}",
-            appends[0].text
+            rendered.contains("please look at this while you work"),
+            "peer message append should be renderable as live system context: {rendered:?}"
         );
         assert_eq!(
             appends[0].source.as_deref(),

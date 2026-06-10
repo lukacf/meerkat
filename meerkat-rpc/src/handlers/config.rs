@@ -16,42 +16,124 @@ use meerkat_core::{
 // propagate body. `config/set` and `config/patch` both gate on this;
 // `config/set` previously did not propagate at all (P2 under-apply),
 // `config/patch` previously propagated unconditionally (P1 over-apply).
-use meerkat::session_runtime::live_orchestration::should_fire_live_propagation;
+use meerkat::session_runtime::live_orchestration::{
+    LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
+    LiveHotSwapSkipReason, should_fire_live_propagation,
+};
+use meerkat_contracts::wire::{
+    ConfigWriteResult, WireLiveChannelCloseFailure, WireLiveChannelRefreshFailure,
+    WireLiveCloseFailure, WireLiveConfigPropagationReport, WireLiveHotSwapSkip,
+    WireLiveHotSwapSkipReason, WireLiveRefreshFailure, WireLiveSwapFailure,
+};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum ConfigSetRequest {
-    Wrapped {
-        config: Config,
-        #[serde(default)]
-        expected_generation: Option<u64>,
-    },
-    Direct(Config),
+/// Parameters for `config/set` / `config/patch` — canonical wire contracts
+/// from `meerkat-contracts` (K20); the names match the generated RPC catalog
+/// descriptors and the emitted schemas.
+pub use meerkat_contracts::wire::{ConfigPatchParams, ConfigSetParams};
+
+fn config_envelope(snapshot: ConfigSnapshot) -> ConfigEnvelope {
+    ConfigEnvelope::from_snapshot(snapshot, ConfigEnvelopePolicy::Diagnostic)
 }
 
-#[derive(serde::Deserialize)]
-struct ConfigPatchPayload {
-    #[serde(default)]
-    patch: Option<Value>,
-    #[serde(default)]
-    expected_generation: Option<u64>,
-}
-
-fn config_response_body(snapshot: ConfigSnapshot) -> Value {
-    serde_json::to_value(ConfigEnvelope::from_snapshot(
-        snapshot,
-        ConfigEnvelopePolicy::Diagnostic,
-    ))
-    .unwrap_or_else(|err| {
-        serde_json::json!({
-            "error": format!("Failed to serialize config response: {err}")
-        })
-    })
+/// Project the typed live-channel propagation report into its generated wire
+/// twin so `config/set` and `config/patch` responses carry the propagation
+/// outcome instead of laundering per-channel faults into `tracing::warn!`
+/// while the RPC reports an unqualified success.
+fn wire_live_propagation_report(
+    report: &LiveConfigPropagationReport,
+) -> WireLiveConfigPropagationReport {
+    WireLiveConfigPropagationReport {
+        clean: report.is_clean(),
+        swapped: report.swapped.iter().map(ToString::to_string).collect(),
+        skipped: report
+            .skipped
+            .iter()
+            .map(|(session_id, reason)| WireLiveHotSwapSkip {
+                session_id: session_id.to_string(),
+                reason: match reason {
+                    LiveHotSwapSkipReason::NoOpOrOverride => {
+                        WireLiveHotSwapSkipReason::NoOpOrOverride
+                    }
+                    LiveHotSwapSkipReason::IdentityLookupFailed(error) => {
+                        WireLiveHotSwapSkipReason::IdentityLookupFailed {
+                            error: error.clone(),
+                        }
+                    }
+                },
+            })
+            .collect(),
+        swap_failed: report
+            .swap_failed
+            .iter()
+            .map(|(session_id, error)| WireLiveSwapFailure {
+                session_id: session_id.to_string(),
+                error: error.clone(),
+            })
+            .collect(),
+        refreshed: report.refreshed.iter().map(ToString::to_string).collect(),
+        closed: report.closed.iter().map(ToString::to_string).collect(),
+        refresh_failed: report
+            .refresh_failed
+            .iter()
+            .map(|(session_id, failure)| WireLiveRefreshFailure {
+                session_id: session_id.to_string(),
+                failure: match failure {
+                    LiveChannelRefreshFailure::OpenConfigBuildFailed(error) => {
+                        WireLiveChannelRefreshFailure::OpenConfigBuildFailed {
+                            error: error.clone(),
+                        }
+                    }
+                    LiveChannelRefreshFailure::SnapshotVersionFailed(error) => {
+                        WireLiveChannelRefreshFailure::SnapshotVersionFailed {
+                            error: error.clone(),
+                        }
+                    }
+                    LiveChannelRefreshFailure::EnqueueFailed(error) => {
+                        WireLiveChannelRefreshFailure::EnqueueFailed {
+                            error: error.clone(),
+                        }
+                    }
+                    LiveChannelRefreshFailure::QueueAcceptanceRejected(error) => {
+                        WireLiveChannelRefreshFailure::QueueAcceptanceRejected {
+                            error: error.clone(),
+                        }
+                    }
+                },
+            })
+            .collect(),
+        close_failed: report
+            .close_failed
+            .iter()
+            .map(|(session_id, failure)| WireLiveCloseFailure {
+                session_id: session_id.to_string(),
+                failure: match failure {
+                    LiveChannelCloseFailure::SignalFailed(error) => {
+                        WireLiveChannelCloseFailure::SignalFailed {
+                            error: error.clone(),
+                        }
+                    }
+                    LiveChannelCloseFailure::CloseAuthorityRejected(error) => {
+                        WireLiveChannelCloseFailure::CloseAuthorityRejected {
+                            error: error.clone(),
+                        }
+                    }
+                    LiveChannelCloseFailure::CommitHandoffMissing => {
+                        WireLiveChannelCloseFailure::CommitHandoffMissing
+                    }
+                    LiveChannelCloseFailure::HostCommitFailed(error) => {
+                        WireLiveChannelCloseFailure::HostCommitFailed {
+                            error: error.clone(),
+                        }
+                    }
+                },
+            })
+            .collect(),
+    }
 }
 
 fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcResponse {
@@ -142,14 +224,14 @@ pub async fn handle_get(
 ) -> RpcResponse {
     if let Some(runtime) = config_runtime {
         match runtime.get().await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Ok(snapshot) => RpcResponse::success(id, config_envelope(snapshot)),
             Err(e) => runtime_error_to_response(id, e),
         }
     } else {
         match config_store.get().await {
             Ok(config) => RpcResponse::success(
                 id,
-                config_response_body(snapshot_from_store(config, config_store)),
+                config_envelope(snapshot_from_store(config, config_store)),
             ),
             Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         }
@@ -169,12 +251,12 @@ pub async fn handle_set(
         Err(resp) => return resp.with_id(id),
     };
 
-    let (config, expected_generation) = match serde_json::from_value::<ConfigSetRequest>(value) {
-        Ok(ConfigSetRequest::Wrapped {
+    let (config, expected_generation) = match serde_json::from_value::<ConfigSetParams>(value) {
+        Ok(ConfigSetParams::Wrapped {
             config,
             expected_generation,
         }) => (config, expected_generation),
-        Ok(ConfigSetRequest::Direct(config)) => (config, None),
+        Ok(ConfigSetParams::Direct(config)) => (config, None),
         Err(e) => {
             return RpcResponse::error(
                 id,
@@ -230,20 +312,25 @@ pub async fn handle_set(
                 // that legitimately swapped `agent.model` left active
                 // live sessions stale until the SDK reconnected. See
                 // the helper for the exact field set.
-                if should_fire_live_propagation(&prior, &snapshot.config) {
+                //
+                // K17: the typed propagation report is carried in the wire
+                // result (`live_propagation`), not reduced to tracing — a
+                // non-clean fan-out is visible to the caller.
+                let live_propagation = if should_fire_live_propagation(&prior, &snapshot.config) {
                     let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
-                    if !report.is_clean() {
-                        tracing::warn!(
-                            swap_failed = ?report.swap_failed,
-                            refresh_failed = ?report.refresh_failed,
-                            close_failed = ?report.close_failed,
-                            "live config propagation to active channels reported failures"
-                        );
-                    }
-                }
-                RpcResponse::success(id, config_response_body(snapshot))
+                    Some(wire_live_propagation_report(&report))
+                } else {
+                    None
+                };
+                RpcResponse::success(
+                    id,
+                    ConfigWriteResult {
+                        envelope: config_envelope(snapshot),
+                        live_propagation,
+                    },
+                )
             }
             Err(e) => runtime_error_to_response(id, e),
         }
@@ -265,22 +352,20 @@ pub async fn handle_set(
         match config_store.set(config.clone()).await {
             Ok(()) => {
                 runtime.set_skill_identity_registry(registry);
-                if should_fire_live_propagation(&prior, &config) {
+                let live_propagation = if should_fire_live_propagation(&prior, &config) {
                     let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
-                    if !report.is_clean() {
-                        tracing::warn!(
-                            swap_failed = ?report.swap_failed,
-                            refresh_failed = ?report.refresh_failed,
-                            close_failed = ?report.close_failed,
-                            "live config propagation to active channels reported failures"
-                        );
-                    }
-                }
+                    Some(wire_live_propagation_report(&report))
+                } else {
+                    None
+                };
                 RpcResponse::success(
                     id,
-                    config_response_body(snapshot_from_store(config, config_store)),
+                    ConfigWriteResult {
+                        envelope: config_envelope(snapshot_from_store(config, config_store)),
+                        live_propagation,
+                    },
                 )
             }
             Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
@@ -301,7 +386,7 @@ pub async fn handle_patch(
         Err(resp) => return resp.with_id(id),
     };
     let (patch, expected_generation) =
-        if let Ok(payload) = serde_json::from_value::<ConfigPatchPayload>(value.clone()) {
+        if let Ok(payload) = serde_json::from_value::<ConfigPatchParams>(value.clone()) {
             match payload.patch {
                 Some(patch) => (patch, payload.expected_generation),
                 None => (value, None),
@@ -379,20 +464,24 @@ pub async fn handle_patch(
                 // close live sessions whose model differed from global.
                 // See `should_fire_live_propagation` for the exact
                 // field set.
-                if should_fire_live_propagation(&current, &snapshot.config) {
+                //
+                // K17: the typed propagation report is carried in the wire
+                // result (`live_propagation`), not reduced to tracing.
+                let live_propagation = if should_fire_live_propagation(&current, &snapshot.config) {
                     let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
-                    if !report.is_clean() {
-                        tracing::warn!(
-                            swap_failed = ?report.swap_failed,
-                            refresh_failed = ?report.refresh_failed,
-                            close_failed = ?report.close_failed,
-                            "live config propagation to active channels reported failures"
-                        );
-                    }
-                }
-                RpcResponse::success(id, config_response_body(snapshot))
+                    Some(wire_live_propagation_report(&report))
+                } else {
+                    None
+                };
+                RpcResponse::success(
+                    id,
+                    ConfigWriteResult {
+                        envelope: config_envelope(snapshot),
+                        live_propagation,
+                    },
+                )
             }
             Err(e) => runtime_error_to_response(id, e),
         }
@@ -440,25 +529,73 @@ pub async fn handle_patch(
                 //
                 // R3-2-4 (P1): gate on prior-vs-new diff. See
                 // `should_fire_live_propagation` for the field set.
-                if should_fire_live_propagation(&current, &config) {
+                //
+                // K17: the typed propagation report is carried in the wire
+                // result (`live_propagation`), not reduced to tracing.
+                let live_propagation = if should_fire_live_propagation(&current, &config) {
                     let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
-                    if !report.is_clean() {
-                        tracing::warn!(
-                            swap_failed = ?report.swap_failed,
-                            refresh_failed = ?report.refresh_failed,
-                            close_failed = ?report.close_failed,
-                            "live config propagation to active channels reported failures"
-                        );
-                    }
-                }
+                    Some(wire_live_propagation_report(&report))
+                } else {
+                    None
+                };
                 RpcResponse::success(
                     id,
-                    config_response_body(snapshot_from_store(config, config_store)),
+                    ConfigWriteResult {
+                        envelope: config_envelope(snapshot_from_store(config, config_store)),
+                        live_propagation,
+                    },
                 )
             }
             Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod live_propagation_wire_tests {
+    use super::*;
+
+    /// K17 regression: a non-clean live propagation report must surface its
+    /// per-channel faults typed in the wire projection — the previous handler
+    /// reduced the typed report to `tracing::warn!` and returned an
+    /// unqualified RPC success.
+    #[test]
+    fn non_clean_propagation_report_carries_typed_faults_on_the_wire() {
+        let session = meerkat_core::SessionId::new();
+        let mut report = LiveConfigPropagationReport::default();
+        report.swapped.push(session.clone());
+        report.refresh_failed.push((
+            session.clone(),
+            LiveChannelRefreshFailure::EnqueueFailed("channel gone".to_string()),
+        ));
+        report.close_failed.push((
+            session.clone(),
+            LiveChannelCloseFailure::CommitHandoffMissing,
+        ));
+
+        let wire = wire_live_propagation_report(&report);
+        assert!(!wire.clean);
+        assert_eq!(wire.swapped, vec![session.to_string()]);
+        assert_eq!(wire.refresh_failed.len(), 1);
+        assert_eq!(wire.refresh_failed[0].session_id, session.to_string());
+        assert_eq!(
+            wire.refresh_failed[0].failure,
+            WireLiveChannelRefreshFailure::EnqueueFailed {
+                error: "channel gone".to_string()
+            }
+        );
+        assert_eq!(
+            wire.close_failed[0].failure,
+            WireLiveChannelCloseFailure::CommitHandoffMissing
+        );
+
+        // A clean report projects clean and omits fault lists.
+        let clean = wire_live_propagation_report(&LiveConfigPropagationReport::default());
+        assert!(clean.clean);
+        assert!(clean.refresh_failed.is_empty());
+        assert!(clean.close_failed.is_empty());
+        assert!(clean.swap_failed.is_empty());
     }
 }

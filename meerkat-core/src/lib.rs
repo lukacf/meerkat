@@ -212,14 +212,18 @@ pub use interaction::{
     PeerIngressReceiveFacts, PeerIngressReceiveOutcome, PeerIngressRuntimeSnapshot, PeerInputClass,
     ResponseStatus, SendResponseCallProjection, TerminalDisposition, TerminalityClass,
     format_external_event_projection, format_peer_ack_projection, format_peer_message_projection,
-    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
+    format_peer_request_projection, format_peer_response_projection,
     render_peer_ingress_admitted_text,
+};
+pub use lifecycle::run_primitive::{
+    ProviderParamsCarrier, ProviderParamsMergeError, ProviderParamsOverride, ProviderTag,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
     CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
     CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle, CoreRenderable,
-    InputId, RunApplyBoundary, RunBoundaryReceipt, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    InputId, RunApplyBoundary, RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId,
+    RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;
@@ -319,7 +323,7 @@ pub use turn_execution_authority::{
 pub use types::{
     ArtifactRef, AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock,
     ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
-    MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunResult,
+    MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput, RunResult,
     SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,

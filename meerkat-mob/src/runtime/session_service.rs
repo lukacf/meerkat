@@ -8,7 +8,7 @@ use meerkat_core::Session;
 use meerkat_core::ToolScopeSnapshot;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{AppendSystemContextRequest, StartTurnRequest};
 use meerkat_core::service::{
     SessionControlError, SessionError, SessionServiceCommsExt, SessionServiceControlExt,
@@ -26,19 +26,18 @@ fn build_runtime_receipt(
     boundary: RunApplyBoundary,
     contributing_input_ids: Vec<InputId>,
     session: &Session,
-) -> Result<RunBoundaryReceipt, SessionError> {
+) -> Result<RunBoundaryReceiptDraft, SessionError> {
     let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
         SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
             "failed to serialize session for runtime receipt digest: {err}"
         )))
     })?;
-    Ok(RunBoundaryReceipt {
+    Ok(RunBoundaryReceiptDraft {
         run_id,
         boundary,
         contributing_input_ids,
         conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
         message_count: session.messages().len(),
-        sequence: 0,
     })
 }
 
@@ -317,9 +316,7 @@ pub trait MobSessionService:
             self.append_system_context(
                 session_id,
                 AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        append.text,
-                    ),
+                    content: append.content,
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: append.source_kind,
@@ -331,13 +328,12 @@ pub trait MobSessionService:
         }
 
         Ok(CoreApplyOutput::without_terminal(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary,
                 contributing_input_ids,
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
         ))

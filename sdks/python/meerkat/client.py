@@ -42,6 +42,15 @@ from .generated.version_compat import is_compatible_with as _generated_is_compat
 from .generated.types import (
     AttentionListRequest,
     AttentionListResult,
+    CapabilitiesResponse,
+    ConfigPatchParams,
+    ConfigSetParams,
+    ConfigWriteResult,
+    InterruptResult,
+    ServerCapabilities,
+    SkillListResponse,
+    WorkEventsResult,
+    WorkItemsResult,
     GoalStatusRequest,
     GoalStatusResult,
     LiveCloseResult,
@@ -482,7 +491,10 @@ class MeerkatClient:
             self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
 
-        result = await self._request("initialize", {})
+        # `initialize` returns the generated `ServerCapabilities` contract.
+        result: ServerCapabilities | dict[str, Any] = await self._request("initialize", {})
+        if isinstance(result, ServerCapabilities):  # pragma: no cover - typing aid
+            result = result.__dict__
         server_version = result.get("contract_version", "")
         if not self._check_version_compatible(server_version, CONTRACT_VERSION):
             raise MeerkatError(
@@ -491,7 +503,13 @@ class MeerkatClient:
             )
         self._methods = {str(method) for method in result.get("methods", [])}
 
-        caps_result = await self._request("capabilities/get", {})
+        # `capabilities/get` returns the generated `CapabilitiesResponse`
+        # contract; entries are validated field-wise below.
+        caps_result: CapabilitiesResponse | dict[str, Any] = await self._request(
+            "capabilities/get", {}
+        )
+        if isinstance(caps_result, CapabilitiesResponse):  # pragma: no cover - typing aid
+            caps_result = caps_result.__dict__
         self._capabilities = [
             Capability(
                 id=c.get("id", ""),
@@ -1241,8 +1259,8 @@ class MeerkatClient:
         config: dict[str, Any],
         *,
         expected_generation: int | None = None,
-    ) -> ConfigEnvelope:
-        params: dict[str, Any] = {"config": config}
+    ) -> ConfigWriteResult:
+        params: ConfigSetParams = {"config": config}
         if expected_generation is not None:
             params["expected_generation"] = expected_generation
         return await self._request("config/set", params)
@@ -1252,8 +1270,8 @@ class MeerkatClient:
         patch: dict[str, Any],
         *,
         expected_generation: int | None = None,
-    ) -> ConfigEnvelope:
-        params: dict[str, Any] = {"patch": patch}
+    ) -> ConfigWriteResult:
+        params: ConfigPatchParams | dict[str, Any] = {"patch": patch}
         if expected_generation is not None:
             params["expected_generation"] = expected_generation
         return await self._request("config/patch", params)
@@ -1340,24 +1358,24 @@ class MeerkatClient:
     async def list_workgraph_items(
         self,
         filter: WorkItemFilter | None = None,
-    ) -> WorkGraphItemsResponse:
+    ) -> WorkItemsResult:
         raw = await self._request("workgraph/list", _wire_params(filter or {}))
-        return {
-            "items": MeerkatClient._require_list_field(
+        return WorkItemsResult(
+            items=MeerkatClient._require_list_field(
                 raw, "items", "Invalid workgraph/list response"
             )
-        }
+        )
 
     async def list_ready_workgraph_items(
         self,
         filter: ReadyWorkFilter | None = None,
-    ) -> WorkGraphItemsResponse:
+    ) -> WorkItemsResult:
         raw = await self._request("workgraph/ready", _wire_params(filter or {}))
-        return {
-            "items": MeerkatClient._require_list_field(
+        return WorkItemsResult(
+            items=MeerkatClient._require_list_field(
                 raw, "items", "Invalid workgraph/ready response"
             )
-        }
+        )
 
     async def get_workgraph_snapshot(
         self,
@@ -1368,13 +1386,13 @@ class MeerkatClient:
     async def list_workgraph_events(
         self,
         filter: WorkGraphEventFilter | None = None,
-    ) -> WorkGraphEventsResponse:
+    ) -> WorkEventsResult:
         raw = await self._request("workgraph/events", _wire_params(filter or {}))
-        return {
-            "events": MeerkatClient._require_list_field(
+        return WorkEventsResult(
+            events=MeerkatClient._require_list_field(
                 raw, "events", "Invalid workgraph/events response"
             )
-        }
+        )
 
     async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
         return await self._request("workgraph/goal/status", _wire_params(params))
@@ -1457,7 +1475,9 @@ class MeerkatClient:
         return McpLiveOpResponse(**raw)
 
     async def list_skills(self) -> list[dict[str, Any]]:
-        result = await self._request("skills/list", {})
+        result: SkillListResponse | dict[str, Any] = await self._request("skills/list", {})
+        if isinstance(result, SkillListResponse):  # pragma: no cover - typing aid
+            result = result.__dict__
         return result.get("skills", [])
 
     async def subscribe_session_events(self, session_id: str) -> EventSubscription:
@@ -1504,7 +1524,10 @@ class MeerkatClient:
         normalized: list[MobMember] = []
         for entry in members:
             if not isinstance(entry, dict):
-                continue
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/members response: member entry must be an object",
+                )
             member_ref = entry.get("member_ref")
             if not isinstance(member_ref, str) or not member_ref:
                 raise MeerkatError(
@@ -2005,7 +2028,10 @@ class MeerkatClient:
         normalized: list[MobKickoffMemberSnapshot] = []
         for entry in members:
             if not isinstance(entry, dict):
-                continue
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/wait_kickoff response: member entry must be an object",
+                )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2071,7 +2097,10 @@ class MeerkatClient:
         normalized: list[MobReadyMemberSnapshot] = []
         for entry in members:
             if not isinstance(entry, dict):
-                continue
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/wait_ready response: member entry must be an object",
+                )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2499,8 +2528,27 @@ class MeerkatClient:
     @staticmethod
     def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:
         context = "Invalid attributed mob event"
+        # The runtime wire shape (meerkat-mob AttributedEvent) carries a typed
+        # source ``{identity, generation}`` record (AgentRuntimeId) and a
+        # ``role`` (ProfileName) string — NOT a free-form ``source`` string.
+        # Mirror the TypeScript/web parsers: validate the source record
+        # (require non-empty ``identity`` + non-negative integer
+        # ``generation``) and the ``role`` field, raising on
+        # absence/malformation. The public ``AttributedEvent`` dataclass
+        # exposes ``source: str``, so the validated ``identity`` is projected
+        # into it. Nothing is coalesced to "" — malformed frames fail closed.
+        source = MeerkatClient._require_dict(raw.get("source"), "source", context)
+        identity = MeerkatClient._require_string_field(source, "identity", context)
+        generation = MeerkatClient._require_number_field(
+            source, "generation", context
+        )
+        if not isinstance(generation, int) or generation < 0:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: source generation must be a non-negative integer",
+            )
         return AttributedEvent(
-            source=MeerkatClient._require_string_field(raw, "source", context),
+            source=identity,
             role=MeerkatClient._require_string_field(raw, "role", context),
             envelope=MeerkatClient._parse_agent_event_envelope(
                 MeerkatClient._require_dict(
@@ -2618,8 +2666,8 @@ class MeerkatClient:
             session=_session,
         )
 
-    async def _interrupt(self, session_id: str) -> None:
-        await self._request("turn/interrupt", {"session_id": session_id})
+    async def _interrupt(self, session_id: str) -> InterruptResult:
+        return await self._request("turn/interrupt", {"session_id": session_id})
 
     async def _archive(self, session_id: str) -> None:
         await self._request("session/archive", {"session_id": session_id})
@@ -3534,7 +3582,10 @@ class MeerkatClient:
         if isinstance(raw_quarantined, list):
             for item in raw_quarantined:
                 if not isinstance(item, dict):
-                    continue
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        "Invalid skill diagnostics: quarantined entry must be an object",
+                    )
                 quarantined_items.append(
                     SkillQuarantineDiagnostic(
                         source_uuid=str(item.get("source_uuid", "")),
@@ -3774,11 +3825,17 @@ class MeerkatClient:
             raise MeerkatError(
                 "INVALID_RESPONSE", f"{context}: is_error must be a boolean"
             )
+        # `WireToolResult.content` is mandatory on the wire; a frame without
+        # it is malformed and must not be coalesced into an empty transcript.
+        if "content" not in result:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: tool result missing content"
+            )
         return SessionToolResult(
             tool_use_id=MeerkatClient._require_string_field(
                 result, "tool_use_id", context
             ),
-            content=MeerkatClient._parse_content_input(result.get("content", "")),
+            content=MeerkatClient._parse_content_input(result["content"]),
             is_error=is_error,
         )
 

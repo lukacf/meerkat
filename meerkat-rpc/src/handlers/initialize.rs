@@ -1,23 +1,9 @@
 //! `initialize` / `initialized` handshake handlers.
 
-use serde::Serialize;
-
 use crate::protocol::{RpcId, RpcResponse};
 
-/// Capabilities returned by the server during the initialize handshake.
-#[derive(Debug, Clone, Serialize)]
-pub struct ServerCapabilities {
-    pub server_info: ServerInfo,
-    pub contract_version: String,
-    pub methods: Vec<String>,
-}
-
-/// Basic server identity.
-#[derive(Debug, Clone, Serialize)]
-pub struct ServerInfo {
-    pub name: String,
-    pub version: String,
-}
+/// Canonical wire contracts for the `initialize` handshake (K20).
+pub use meerkat_contracts::wire::{ServerCapabilities, ServerInfo};
 
 /// Handle the `initialize` method.
 ///

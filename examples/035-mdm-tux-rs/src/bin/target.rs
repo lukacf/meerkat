@@ -310,13 +310,11 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                render_metadata: None,
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
                     .or_else(|| create.system_prompt.clone()),
                 max_tokens: create.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -991,11 +989,9 @@ async fn setup_session(
     let req = CreateSessionRequest {
         model: model.to_string(),
         prompt: ContentInput::Text(String::new()),
-        render_metadata: None,
         system_prompt: Some(system_prompt.to_string()),
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_opts),
@@ -2463,11 +2459,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
-            render_metadata: None,
             system_prompt: Some("test target".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2610,11 +2604,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: Some("cleanup".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2828,11 +2820,9 @@ mod tests {
         let req2 = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            render_metadata: None,
             system_prompt: Some("test".into()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2965,11 +2955,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            render_metadata: None,
             system_prompt: Some("test".into()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {

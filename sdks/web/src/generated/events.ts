@@ -239,6 +239,13 @@ export type RevisedPromptDisposition = {
 
 export type RevisedPromptSource = "provider" | "meerkat_projection";
 
+export type RunInput = {
+  content: ContentInput;
+  kind: "content";
+} | {
+  kind: "pending_tool_results";
+};
+
 export interface SchemaWarning {
   message: string;
   path: string;
@@ -317,6 +324,9 @@ export type StreamTruncationReason = {
 } | {
   dropped: number;
   kind: "stream_lagged";
+} | {
+  dropped: number;
+  kind: "output_audio_degraded";
 };
 
 export interface SystemTime {
@@ -409,7 +419,7 @@ export type Usage = {
 };
 
 export interface RunStartedEvent {
-  prompt: ContentInput;
+  input: RunInput;
   session_id: SessionId;
   type: "run_started";
 }
@@ -440,9 +450,7 @@ export interface ExtractionFailedEvent {
 }
 
 export interface RunFailedEvent {
-  error: string;
-  error_class: AgentErrorClass;
-  error_report?: AgentErrorReport | null;
+  error_report: AgentErrorReport;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";

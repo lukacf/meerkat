@@ -36,7 +36,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelAfterBoundaryAuthorized`
 - `StartTurnDispositionResolved`(disposition: StartTurnDisposition)
 - `StartTurnPublicTerminalResolved`(terminal: StartTurnPublicTerminal)
-- `RuntimeKeepAliveResolved`(persist_keep_alive: Bool)
+- `RuntimeKeepAliveResolved`(decision: RuntimeKeepAlivePersistenceDecision)
 - `LiveInterruptRequired`(required: Bool)
 
 ## Helpers

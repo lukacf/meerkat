@@ -154,11 +154,9 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
         .create_session(SvcCreateSessionRequest {
             model: default_model,
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(state.max_tokens),
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {

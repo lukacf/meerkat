@@ -22,7 +22,6 @@ use crate::tool_scope::{
     INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
-use serde_json::Value;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::any::Any;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
@@ -305,15 +304,21 @@ impl AgentBuilder {
         self
     }
 
-    /// Set provider-specific parameters
-    pub fn provider_params(mut self, params: Value) -> Self {
-        self.config.provider_params = Some(params);
+    /// Set typed provider-specific parameter overrides.
+    pub fn provider_params(
+        mut self,
+        params: crate::lifecycle::run_primitive::ProviderParamsOverride,
+    ) -> Self {
+        self.config.provider_params.params = params;
         self
     }
 
-    /// Set provider-native tool defaults (resolved at build time, not persisted).
-    pub fn provider_tool_defaults(mut self, defaults: Value) -> Self {
-        self.config.provider_tool_defaults = Some(defaults);
+    /// Set typed provider-native tool defaults (resolved at build time, not persisted).
+    pub fn provider_tool_defaults(
+        mut self,
+        defaults: crate::lifecycle::run_primitive::ProviderTag,
+    ) -> Self {
+        self.config.provider_params.tool_defaults = Some(defaults);
         self
     }
 

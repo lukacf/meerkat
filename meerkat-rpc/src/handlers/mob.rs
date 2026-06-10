@@ -12,10 +12,18 @@ use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
 use meerkat_contracts::{
-    ErrorCode, MobCreateParams, MobCreateResult, MobMemberListEntryWire, MobRotateSupervisorResult,
-    MobSpawnManyResult, MobSpawnManyResultEntry, MobWireMembersBatchEdge,
-    MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
-    WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
+    ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
+    MobCreateParams, MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult,
+    MobFlowRunResult, MobFlowsResult, MobForceCancelResult, MobHelperResult, MobLifecycleResult,
+    MobListResult, MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult,
+    MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRotateSupervisorResult,
+    MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry, MobSpawnResult,
+    MobStatusResult, MobUnwireResult, MobWaitMembersResult, MobWireMembersBatchEdge,
+    MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
+    SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
+    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
+    WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome,
+    WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
@@ -49,41 +57,47 @@ fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse
         } => {
             let code = ErrorCode::SupervisorRotationIncomplete;
             let message = err.to_string();
-            let details = serde_json::json!({
-                "kind": "supervisor_rotation_incomplete",
-                "previous_epoch": previous_epoch,
-                "attempted_epoch": attempted_epoch,
-                "attempted_public_peer_id": attempted_public_peer_id,
-                "rotated_peer_count": rotated_peer_count,
-                "rollback_succeeded": rollback_succeeded,
-                "pending_authority_recorded": pending_authority_recorded,
-                "pending_authority_process_local": pending_authority_process_local,
-                "rollback_error": rollback_error,
-                "retry_authority": if *pending_authority_recorded {
-                    "pending_rotation"
+            let details = SupervisorRotationIncompleteDetailsWire {
+                kind: meerkat_contracts::SupervisorRotationIncompleteKind::SupervisorRotationIncomplete,
+                previous_epoch: *previous_epoch,
+                attempted_epoch: *attempted_epoch,
+                attempted_public_peer_id: attempted_public_peer_id.clone(),
+                rotated_peer_count: *rotated_peer_count,
+                rollback_succeeded: *rollback_succeeded,
+                pending_authority_recorded: *pending_authority_recorded,
+                pending_authority_process_local: *pending_authority_process_local,
+                rollback_error: rollback_error.clone(),
+                retry_authority: if *pending_authority_recorded {
+                    SupervisorRotationRetryAuthority::PendingRotation
                 } else if *pending_authority_process_local {
-                    "process_local_pending_rotation"
+                    SupervisorRotationRetryAuthority::ProcessLocalPendingRotation
                 } else {
-                    "pre_rotation"
+                    SupervisorRotationRetryAuthority::PreRotation
                 },
-                "retry_scope": if *pending_authority_recorded {
-                    "durable"
+                retry_scope: if *pending_authority_recorded {
+                    SupervisorRotationRetryScope::Durable
                 } else if *pending_authority_process_local {
-                    "same_process"
+                    SupervisorRotationRetryScope::SameProcess
                 } else {
-                    "pre_rotation"
+                    SupervisorRotationRetryScope::PreRotation
                 },
-            });
-            RpcResponse::error_with_data(
-                id,
-                code.jsonrpc_code(),
-                message.clone(),
-                serde_json::json!({
-                    "code": code.to_string(),
-                    "message": message,
-                    "details": details,
-                }),
-            )
+            };
+            let data = SupervisorRotationIncompleteDataWire {
+                code: code.to_string(),
+                message: message.clone(),
+                details,
+            };
+            match serde_json::to_value(&data) {
+                Ok(data) => RpcResponse::error_with_data(id, code.jsonrpc_code(), message, data),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "failed to serialize supervisor rotation incomplete error data: \
+                         {serialize_error}"
+                    ),
+                ),
+            }
         }
         _ => invalid_params(id, err.to_string()),
     }
@@ -170,7 +184,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         runtime_mode: mob_runtime_mode_from_wire(profile.runtime_mode),
         max_inline_peer_notifications: profile.max_inline_peer_notifications,
         output_schema,
-        provider_params: profile.provider_params,
+        provider_params: profile.provider_params.map(Into::into),
     })
 }
 
@@ -182,13 +196,13 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
     Ok(MobId::from(raw))
 }
 
-fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Value {
+fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> MobSpawnResult {
     let identity_str = result.agent_identity.to_string();
-    serde_json::json!({
-        "mob_id": mob_id,
-        "agent_identity": result.agent_identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
-    })
+    MobSpawnResult {
+        mob_id: mob_id.to_string(),
+        agent_identity: identity_str.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+    }
 }
 
 /// Project a domain `MobMemberStatus` into its wire twin.
@@ -300,14 +314,12 @@ pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResp
         .mob_list()
         .await
         .into_iter()
-        .map(|(mob_id, status)| {
-            serde_json::json!({
-                "mob_id": mob_id,
-                "status": meerkat_mob_mcp::wire_mob_lifecycle_status(status),
-            })
+        .map(|(mob_id, status)| MobStatusResult {
+            mob_id: mob_id.to_string(),
+            status: meerkat_mob_mcp::wire_mob_lifecycle_status(status),
         })
         .collect::<Vec<_>>();
-    RpcResponse::success(id, serde_json::json!({"mobs": mobs}))
+    RpcResponse::success(id, MobListResult { mobs })
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,10 +343,10 @@ pub async fn handle_status(
     match state.mob_status(&mob_id).await {
         Ok(status) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "status": meerkat_mob_mcp::wire_mob_lifecycle_status(status),
-            }),
+            MobStatusResult {
+                mob_id: mob_id.to_string(),
+                status: meerkat_mob_mcp::wire_mob_lifecycle_status(status),
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -367,7 +379,10 @@ pub async fn handle_members(
             match typed {
                 Ok(typed) => RpcResponse::success(
                     id,
-                    serde_json::json!({"mob_id": mob_id, "members": typed}),
+                    MobMembersResult {
+                        mob_id: mob_id.to_string(),
+                        members: typed,
+                    },
                 ),
                 Err(projection_error) => {
                     RpcResponse::error(id, error::INTERNAL_ERROR, projection_error)
@@ -600,10 +615,7 @@ pub async fn handle_spawn_many(
                     Err(err) => MobSpawnManyResultEntry::failed(err.cause(), err.to_string()),
                 })
                 .collect();
-            RpcResponse::success(
-                id,
-                serde_json::json!(MobSpawnManyResult { results: entries }),
-            )
+            RpcResponse::success(id, MobSpawnManyResult { results: entries })
         }
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -632,7 +644,7 @@ pub async fn handle_retire(
         .mob_retire(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"retired": true})),
+        Ok(()) => RpcResponse::success(id, MobRetireResult { retired: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -671,18 +683,18 @@ pub async fn handle_respawn(
     }
 }
 
-fn respawn_receipt_value(mob_id: &MobId, receipt: &MemberRespawnReceipt) -> serde_json::Value {
+fn respawn_receipt_wire(mob_id: &MobId, receipt: &MemberRespawnReceipt) -> MobRespawnReceipt {
     let identity_str = receipt.identity.to_string();
     // App-facing respawn receipt exposes only identity-native fields and the
     // server-resolved `member_ref`. Binding-era fence tokens are retired per
     // dogma #10 — callers never reason about incarnation counters. The
-    // `status: "completed"` envelope field on the parent response communicates
-    // success; clients that need "before vs after" observability should track
-    // their own state around the call.
-    serde_json::json!({
-        "identity": receipt.identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
-    })
+    // typed `status` outcome on the parent response communicates success;
+    // clients that need "before vs after" observability should track their
+    // own state around the call.
+    MobRespawnReceipt {
+        identity: identity_str.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+    }
 }
 
 fn respawn_result_response(
@@ -693,24 +705,25 @@ fn respawn_result_response(
     match result {
         Ok(receipt) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "status": "completed",
-                "receipt": respawn_receipt_value(mob_id, &receipt),
-            }),
+            MobRespawnResult {
+                status: WireMobRespawnOutcome::Completed,
+                receipt: respawn_receipt_wire(mob_id, &receipt),
+                failed_peer_ids: Vec::new(),
+            },
         ),
         Err(MobRespawnError::TopologyRestoreFailed {
             receipt,
             failed_peer_ids,
         }) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "status": "topology_restore_failed",
-                "receipt": respawn_receipt_value(mob_id, &receipt),
-                "failed_peer_ids": failed_peer_ids
+            MobRespawnResult {
+                status: WireMobRespawnOutcome::TopologyRestoreFailed,
+                receipt: respawn_receipt_wire(mob_id, &receipt),
+                failed_peer_ids: failed_peer_ids
                     .iter()
                     .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>(),
-            }),
+                    .collect(),
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -745,7 +758,7 @@ pub async fn handle_wire(
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"wired": true})),
+        Ok(()) => RpcResponse::success(id, MobWireResult { wired: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -826,7 +839,7 @@ pub async fn handle_unwire(
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"unwired": true})),
+        Ok(()) => RpcResponse::success(id, MobUnwireResult { unwired: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -874,20 +887,24 @@ pub async fn handle_lifecycle(
             Err(MobMcpDestroyError::Mob(err)) => return invalid_params(id, err.to_string()),
         },
     };
-    let mut body = serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true});
-    if let Some(report) = destroy_report
-        && let Some(obj) = body.as_object_mut()
-    {
-        match serde_json::to_value(&report) {
-            Ok(value) => {
-                obj.insert("destroy_report".to_string(), value);
-            }
+    let destroy_report = match destroy_report {
+        Some(report) => match serde_json::to_value(&report) {
+            Ok(value) => Some(value),
             Err(err) => {
                 return invalid_params(id, format!("destroy report serialize: {err}"));
             }
-        }
-    }
-    RpcResponse::success(id, body)
+        },
+        None => None,
+    };
+    RpcResponse::success(
+        id,
+        MobLifecycleResult {
+            mob_id: mob_id.to_string(),
+            action: params.action,
+            ok: true,
+            destroy_report,
+        },
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1070,11 +1087,11 @@ pub async fn handle_append_system_context(
     {
         Ok((_bridge_session_id, result)) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-                "status": result.status,
-            }),
+            MobAppendSystemContextResult {
+                mob_id: mob_id.to_string(),
+                agent_identity: agent_identity.to_string(),
+                status: result.status.into(),
+            },
         ),
         Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
@@ -1120,7 +1137,18 @@ pub async fn handle_events(
             .await
     };
     match result {
-        Ok(events) => RpcResponse::success(id, serde_json::json!({ "events": events })),
+        Ok(events) => {
+            let events: Result<Vec<Value>, serde_json::Error> =
+                events.iter().map(serde_json::to_value).collect();
+            match events {
+                Ok(events) => RpcResponse::success(id, MobEventsResult { events }),
+                Err(err) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize mob events: {err}"),
+                ),
+            }
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1139,9 +1167,13 @@ pub async fn handle_flows(
         Err(resp) => return resp,
     };
     match state.mob_list_flows(&mob_id).await {
-        Ok(flows) => {
-            RpcResponse::success(id, serde_json::json!({"mob_id": mob_id, "flows": flows}))
-        }
+        Ok(flows) => RpcResponse::success(
+            id,
+            MobFlowsResult {
+                mob_id: mob_id.to_string(),
+                flows,
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1175,7 +1207,12 @@ pub async fn handle_flow_run(
         )
         .await
     {
-        Ok(run_id) => RpcResponse::success(id, serde_json::json!({"run_id": run_id})),
+        Ok(run_id) => RpcResponse::success(
+            id,
+            MobFlowRunResult {
+                run_id: run_id.to_string(),
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1236,7 +1273,7 @@ pub async fn handle_flow_cancel(
         Err(err) => return invalid_params(id, format!("Invalid run_id: {err}")),
     };
     match state.mob_cancel_flow(&mob_id, run_id).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"canceled": true})),
+        Ok(()) => RpcResponse::success(id, MobFlowCancelResult { canceled: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1297,15 +1334,15 @@ pub async fn handle_spawn_helper(
             let identity_str = result.agent_identity.to_string();
             RpcResponse::success(
                 id,
-                serde_json::json!({
-                    "output": result.output,
-                    "tokens_used": result.tokens_used,
-                    "agent_identity": result.agent_identity,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                MobHelperResult {
+                    output: result.output,
+                    tokens_used: result.tokens_used,
+                    agent_identity: identity_str.clone(),
+                    member_ref: meerkat_contracts::WireMemberRef::encode(
                         mob_id.as_str(),
                         &identity_str,
                     ),
-                }),
+                },
             )
         }
         Err(err) => invalid_params(id, err.to_string()),
@@ -1381,15 +1418,15 @@ pub async fn handle_fork_helper(
             let identity_str = result.agent_identity.to_string();
             RpcResponse::success(
                 id,
-                serde_json::json!({
-                    "output": result.output,
-                    "tokens_used": result.tokens_used,
-                    "agent_identity": result.agent_identity,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                MobHelperResult {
+                    output: result.output,
+                    tokens_used: result.tokens_used,
+                    agent_identity: identity_str.clone(),
+                    member_ref: meerkat_contracts::WireMemberRef::encode(
                         mob_id.as_str(),
                         &identity_str,
                     ),
-                }),
+                },
             )
         }
         Err(err) => invalid_params(id, err.to_string()),
@@ -1417,7 +1454,7 @@ pub async fn handle_force_cancel(
         .mob_force_cancel(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"cancelled": true})),
+        Ok(()) => RpcResponse::success(id, MobForceCancelResult { cancelled: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1455,11 +1492,11 @@ pub async fn handle_destroy(
             };
             RpcResponse::success(
                 id,
-                serde_json::json!({
-                    "mob_id": mob_id,
-                    "ok": true,
-                    "destroy_report": report_value,
-                }),
+                MobDestroyResult {
+                    mob_id: mob_id.to_string(),
+                    ok: true,
+                    destroy_report: report_value,
+                },
             )
         }
         Err(MobMcpDestroyError::Incomplete { report }) => destroy_incomplete_response(id, &report),
@@ -1489,21 +1526,28 @@ pub async fn handle_snapshot(
         Err(resp) => return resp,
     };
     let status = match state.mob_status(&mob_id).await {
-        Ok(status) => status.to_string(),
+        Ok(status) => meerkat_mob_mcp::wire_mob_lifecycle_status(status),
         Err(err) => return invalid_params(id, err.to_string()),
     };
     let members = match state.mob_list_members(&mob_id).await {
         Ok(members) => members,
         Err(err) => return invalid_params(id, err.to_string()),
     };
-    RpcResponse::success(
-        id,
-        serde_json::json!({
-            "mob_id": mob_id,
-            "status": status,
-            "members": members,
-        }),
-    )
+    let members: Result<Vec<MobMemberListEntryWire>, String> = members
+        .iter()
+        .map(|entry| member_list_entry_wire(&mob_id, entry))
+        .collect();
+    match members {
+        Ok(members) => RpcResponse::success(
+            id,
+            MobSnapshotResult {
+                mob_id: mob_id.to_string(),
+                status,
+                members,
+            },
+        ),
+        Err(projection_error) => RpcResponse::error(id, error::INTERNAL_ERROR, projection_error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,8 +1571,9 @@ pub async fn handle_rotate_supervisor(
         Err(resp) => return resp,
     };
     match state.mob_rotate_supervisor(&mob_id).await {
-        Ok(report) => {
-            let result = MobRotateSupervisorResult {
+        Ok(report) => RpcResponse::success(
+            id,
+            MobRotateSupervisorResult {
                 mob_id: mob_id.to_string(),
                 ok: true,
                 report: SupervisorRotationReportWire {
@@ -1536,18 +1581,8 @@ pub async fn handle_rotate_supervisor(
                     current_epoch: report.current_epoch,
                     public_peer_id: report.public_peer_id,
                 },
-            };
-            let result_value = match serde_json::to_value(result) {
-                Ok(v) => v,
-                Err(err) => {
-                    return invalid_params(
-                        id,
-                        format!("failed to serialize MobRotateSupervisorResult: {err}"),
-                    );
-                }
-            };
-            RpcResponse::success(id, result_value)
-        }
+            },
+        ),
         Err(err) => mob_rotate_supervisor_error(id, &err),
     }
 }
@@ -1668,7 +1703,13 @@ pub async fn handle_cancel_work(
         }
     };
     match state.mob_cancel_work(&mob_id, work_ref).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Ok(()) => RpcResponse::success(
+            id,
+            MobCancelWorkResult {
+                mob_id: mob_id.to_string(),
+                ok: true,
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1691,7 +1732,13 @@ pub async fn handle_cancel_all_work(
         .mob_cancel_all_work(&mob_id, runtime_id, fence_token)
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Ok(()) => RpcResponse::success(
+            id,
+            MobCancelAllWorkResult {
+                mob_id: mob_id.to_string(),
+                ok: true,
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1768,8 +1815,23 @@ pub async fn handle_wait_kickoff(
         .mob_wait_kickoff(&mob_id, member_ids, params.timeout_ms)
         .await
     {
-        Ok(members) => RpcResponse::success(id, serde_json::json!({ "members": members })),
+        Ok(members) => wait_members_response(id, &members),
         Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+/// Serialize a typed kickoff/ready snapshot list into the contracts
+/// `MobWaitMembersResult` wire payload, failing closed on serialization.
+fn wait_members_response<T: serde::Serialize>(id: Option<RpcId>, members: &[T]) -> RpcResponse {
+    let members: Result<Vec<Value>, serde_json::Error> =
+        members.iter().map(serde_json::to_value).collect();
+    match members {
+        Ok(members) => RpcResponse::success(id, MobWaitMembersResult { members }),
+        Err(err) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to serialize mob wait members result: {err}"),
+        ),
     }
 }
 
@@ -1806,7 +1868,7 @@ pub async fn handle_wait_ready(
         .mob_wait_ready(&mob_id, member_ids, params.timeout_ms)
         .await
     {
-        Ok(members) => RpcResponse::success(id, serde_json::json!({ "members": members })),
+        Ok(members) => wait_members_response(id, &members),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1931,7 +1993,10 @@ pub async fn handle_profile_delete(
     {
         Ok(deleted) => RpcResponse::success(
             id,
-            serde_json::json!({"name": deleted.name, "deleted_revision": deleted.revision}),
+            MobProfileDeleteResult {
+                name: deleted.name,
+                deleted_revision: deleted.revision,
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -2874,12 +2939,7 @@ mod tests {
         else {
             panic!("provider_params should be a Set override");
         };
-        assert_eq!(
-            provider_params
-                .get("temperature")
-                .and_then(serde_json::Value::as_f64),
-            Some(0.2)
-        );
+        assert_eq!(provider_params.temperature, Some(0.2));
         let Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(auth_binding)) =
             params.auth_binding.as_ref()
         else {
@@ -2972,12 +3032,7 @@ mod tests {
         else {
             panic!("provider_params should be a Set override");
         };
-        assert_eq!(
-            provider_params
-                .get("temperature")
-                .and_then(serde_json::Value::as_f64),
-            Some(0.2)
-        );
+        assert_eq!(provider_params.temperature, Some(0.2));
         let Some(TurnMetadataOverride::Set(auth_binding)) = turn_params.auth_binding.as_ref()
         else {
             panic!("auth_binding should be a Set override");

@@ -100,3 +100,40 @@ pub(crate) fn parse_session_id_for_runtime(
     }
     Ok(locator.session_id)
 }
+
+/// K17 ratchet: RPC handler responses are constructed ONLY from
+/// `meerkat-contracts` wire types — no hand-shaped `serde_json::json!`
+/// payloads in production handler code. Test modules may use `json!` to
+/// build fixtures/assertions.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod no_hand_shaped_handler_payloads {
+    #[test]
+    fn handlers_production_code_has_no_json_macro() {
+        let handlers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers");
+        let mut violations = Vec::new();
+        for entry in std::fs::read_dir(&handlers_dir).expect("handlers dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("handler source");
+            // Scan only the production region: everything before the first
+            // test-module marker.
+            let production_end = text
+                .find("#[cfg(test)]")
+                .or_else(|| text.find("mod tests"))
+                .unwrap_or(text.len());
+            for (idx, line) in text[..production_end].lines().enumerate() {
+                if line.contains("json!(") {
+                    violations.push(format!("{}:{}: {}", path.display(), idx + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "hand-shaped json! payloads in production RPC handler code (K17):\n{}",
+            violations.join("\n")
+        );
+    }
+}

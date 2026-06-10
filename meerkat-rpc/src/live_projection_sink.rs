@@ -851,6 +851,21 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
+    async fn signal_output_audio_degraded(
+        &self,
+        session_id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), LiveProjectionError> {
+        // K16: transport delivery degradation is a typed session-observable
+        // fact, projected onto the session's owned event stream through the
+        // canonical seam — mirroring `signal_terminal_error`, never a
+        // transport-local counter or a tracing-only warning.
+        self.runtime
+            .record_live_output_audio_degraded(session_id, dropped)
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
     async fn append_realtime_transcript(
         &self,
         session_id: &SessionId,
@@ -1030,6 +1045,7 @@ mod tests {
         interrupts: StdMutex<Vec<(SessionId, Option<String>)>>,
         completed: StdMutex<Vec<SessionId>>,
         terminals: StdMutex<Vec<(SessionId, LiveAdapterErrorCode)>>,
+        output_audio_degraded: StdMutex<Vec<(SessionId, u64)>>,
     }
 
     #[async_trait]
@@ -1133,6 +1149,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((session_id.clone(), response_id.map(|s| s.to_string())));
+            Ok(())
+        }
+
+        async fn signal_output_audio_degraded(
+            &self,
+            session_id: &SessionId,
+            dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            self.output_audio_degraded
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), dropped));
             Ok(())
         }
         async fn signal_turn_completed(

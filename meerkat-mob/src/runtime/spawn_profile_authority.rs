@@ -120,7 +120,7 @@ pub(super) fn require_authorized_effect(
     )))
 }
 
-fn optional_value_digest(value: Option<&serde_json::Value>) -> Result<Option<String>, MobError> {
+fn optional_value_digest<T: Serialize>(value: Option<&T>) -> Result<Option<String>, MobError> {
     value.map(digest_serializable).transpose()
 }
 

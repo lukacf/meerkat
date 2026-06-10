@@ -58,7 +58,9 @@ pub struct SessionLlmReconfigureRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     /// Optional realm-scoped connection override resolved through the tri-state:
     /// `Some(Set)` swaps the binding, `Some(Clear)` removes it, `None` preserves
     /// the session's existing `SessionLlmIdentity.auth_binding`.

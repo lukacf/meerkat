@@ -34,11 +34,9 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -217,11 +215,9 @@ mod tests {
         CreateSessionRequest {
             model: "mock-model".to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: None,

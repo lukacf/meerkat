@@ -53,7 +53,7 @@ pub struct ToolConfig {
 ///
 /// Profiles can be defined inline (the existing behavior) or reference
 /// a reusable realm-scoped profile by name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProfileBinding {
     /// Reference to a realm-scoped profile by name.
@@ -97,7 +97,7 @@ impl ProfileBinding {
 ///
 /// Controls how the child's tool surface is determined at spawn time.
 /// External/public spawn remains role-based; this enum is for agent-owned spawns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SpawnTooling {
     /// Inherit the parent's currently visible tools (ToolScope snapshot).
@@ -125,7 +125,7 @@ pub enum SpawnTooling {
 }
 
 /// Source of a profile for spawn tooling resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProfileSource {
     /// Reference a realm-scoped reusable profile by name.
@@ -141,7 +141,7 @@ pub enum ProfileSource {
 ///
 /// Each profile defines the model, skills, tool configuration, and
 /// communication properties for a class of mob members.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     /// LLM model name (e.g. "claude-opus-4-8").
     pub model: String,
@@ -230,7 +230,7 @@ pub struct Profile {
     /// for model/provider knobs such as Gemini `thinking_budget` or OpenAI
     /// `reasoning_effort`.
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
 }
 
 /// Profile fields that may override durable session metadata on resume.
@@ -564,15 +564,42 @@ resume_overrides = ["model", "everything"]
 
     #[test]
     fn test_profile_toml_parses_provider_params() {
+        // K2: profile provider_params parse fail-closed into the typed
+        // `ProviderParamsOverride` carrier at profile ingress.
         let toml_str = r#"
 model = "gemini-3-pro-preview"
-provider_params = { thinking_budget = 8192, top_k = 20 }
+provider_params = { provider_tag = { provider = "gemini", thinking_budget = 8192, top_k = 20 } }
 "#;
         let profile: Profile = toml::from_str(toml_str).unwrap();
         assert_eq!(
             profile.provider_params,
-            Some(serde_json::json!({"thinking_budget": 8192, "top_k": 20}))
+            Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                            meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                                thinking_budget: Some(8192),
+                                top_k: Some(20),
+                                ..Default::default()
+                            },
+                        )
+                    ),
+                    ..Default::default()
+                }
+            )
         );
+    }
+
+    #[test]
+    fn test_profile_toml_rejects_legacy_flat_provider_params() {
+        // K2 fail-closed: the retired flat JSON-bag form is rejected at
+        // profile parse, not at the first LLM call.
+        let toml_str = r#"
+model = "gemini-3-pro-preview"
+provider_params = { thinking_budget = 8192, top_k = 20 }
+"#;
+        toml::from_str::<Profile>(toml_str)
+            .expect_err("legacy flat provider_params must fail profile parse");
     }
 
     // -----------------------------------------------------------------------

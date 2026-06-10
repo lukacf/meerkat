@@ -706,16 +706,8 @@ pub async fn list_auth_profiles(
     }
 }
 
-#[derive(serde::Deserialize)]
-pub struct CreateAuthProfileBody {
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-    pub provider: String,
-    pub auth_method: String,
-    pub secret: String,
-}
+/// K20: canonical wire contract for `POST /auth/profiles`.
+pub use meerkat_contracts::wire::RestAuthProfileCreateRequest as CreateAuthProfileBody;
 
 /// Create an auth credential entry by writing the secret into the
 /// TokenStore under the binding-scoped `AuthBindingRef`. The resolved
@@ -908,12 +900,8 @@ pub async fn delete_auth_profile(
         .into_response()
 }
 
-#[derive(serde::Deserialize)]
-pub struct TestBindingBody {
-    pub realm_id: RealmId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/bindings/{binding_id}/test`.
+pub use meerkat_contracts::wire::RestAuthBindingTestRequest as TestBindingBody;
 
 pub async fn test_auth_binding(
     State(state): State<AppState>,
@@ -991,22 +979,44 @@ pub async fn test_auth_binding(
 // The server owns the state -> PKCE verifier correlation. The client receives
 // only the authorize URL and state, then posts the provider code with that state.
 
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginStartBody {
-    pub provider: String,
-    /// Client-provided redirect URI (typically a loopback binding that
-    /// the caller has already bound). The authorize URL will embed this.
-    pub redirect_uri: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
+/// Parse the wire identity triple into the typed owners at handler ingress
+/// (fail-closed; the wire params are the shared contracts shapes).
+fn parse_auth_identity_triple(
+    realm_id: &str,
+    binding_id: &str,
+    profile_id: Option<&str>,
+) -> Result<(RealmId, BindingId, Option<ProfileId>), String> {
+    let realm_id = RealmId::parse(realm_id).map_err(|e| format!("invalid realm_id: {e}"))?;
+    let binding_id =
+        BindingId::parse(binding_id).map_err(|e| format!("invalid binding_id: {e}"))?;
+    let profile_id = profile_id
+        .map(|p| ProfileId::parse(p).map_err(|e| format!("invalid profile_id: {e}")))
+        .transpose()?;
+    Ok((realm_id, binding_id, profile_id))
 }
+
+/// K20: canonical wire contract for `POST /auth/login/start` (shared with
+/// the RPC `auth/login/start` method).
+pub use meerkat_contracts::wire::LoginStartParams as LoginStartBody;
 
 pub async fn start_login(
     State(state): State<AppState>,
     Json(body): Json<LoginStartBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -1020,9 +1030,9 @@ pub async fn start_login(
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1075,22 +1085,27 @@ pub async fn start_login(
         .into_response()
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginCompleteBody {
-    pub provider: String,
-    pub code: String,
-    pub state: String,
-    pub redirect_uri: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/complete`.
+pub use meerkat_contracts::wire::LoginCompleteParams as LoginCompleteBody;
 
 pub async fn complete_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCompleteBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -1105,9 +1120,9 @@ pub async fn complete_login(
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1279,19 +1294,27 @@ pub async fn complete_login(
         .into_response()
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DeviceStartBody {
-    pub provider: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/device/start`.
+pub use meerkat_contracts::wire::DeviceStartParams as DeviceStartBody;
 
 pub async fn start_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceStartBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
         Err(e) => {
@@ -1317,9 +1340,9 @@ pub async fn start_device_login(
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1381,15 +1404,8 @@ pub async fn start_device_login(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DeviceCompleteBody {
-    pub provider: String,
-    pub device_code: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/device/complete`.
+pub use meerkat_contracts::wire::DeviceCompleteParams as DeviceCompleteBody;
 
 /// Device-code flow completion leg. Single-poll semantics — the caller
 /// runs the outer retry loop using the `interval` returned from
@@ -1403,6 +1419,20 @@ pub async fn complete_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceCompleteBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
         Err(e) => {
@@ -1429,9 +1459,9 @@ pub async fn complete_device_login(
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -2436,8 +2466,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2493,8 +2523,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2535,8 +2565,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2580,8 +2610,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2620,8 +2650,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2659,8 +2689,8 @@ mod tests {
             State(state.clone()),
             Json(DeviceStartBody {
                 provider: "google".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2698,8 +2728,8 @@ mod tests {
             State(state.clone()),
             Json(DeviceStartBody {
                 provider: "google".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2740,8 +2770,8 @@ mod tests {
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2778,8 +2808,8 @@ mod tests {
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2814,8 +2844,8 @@ mod tests {
             Json(DeviceCompleteBody {
                 provider: "google".to_string(),
                 device_code: "missing-device-code".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2850,8 +2880,8 @@ mod tests {
             Json(DeviceCompleteBody {
                 provider: "google".to_string(),
                 device_code: "missing-device-code".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )

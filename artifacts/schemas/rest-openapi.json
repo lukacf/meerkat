@@ -1,6 +1,145 @@
 {
   "components": {
     "schemas": {
+      "AnthropicCompactionConfig": {
+        "description": "Typed shape of Anthropic's automatic-compaction knob.",
+        "oneOf": [
+          {
+            "description": "`\"auto\"` — provider picks trigger and instructions.",
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided edit body merged into the compact edit shape.\nFields like `trigger` / `instructions` are preserved verbatim.",
+            "properties": {
+              "edit": {
+                "$ref": "#/components/schemas/OpaqueProviderBody"
+              },
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicContextWindow": {
+        "description": "Typed shape of Anthropic's context-window opt-in.",
+        "oneOf": [
+          {
+            "const": "one_megabyte",
+            "description": "1M-token beta context window (2025-08-07 beta header).",
+            "type": "string"
+          }
+        ]
+      },
+      "AnthropicEffort": {
+        "description": "Typed shape of Anthropic's response-effort knob.\n`XHigh` is the Opus 4.8 / 4.7 extended-high effort level.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "x_high"
+        ],
+        "type": "string"
+      },
+      "AnthropicInferenceGeo": {
+        "description": "Typed shape of Anthropic's data-residency knob.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided region string — providers may accept region codes\nthis typed variant does not yet enumerate.",
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicThinkingConfig": {
+        "description": "Typed shape of Anthropic's extended-thinking knob.",
+        "oneOf": [
+          {
+            "description": "Adaptive thinking — provider picks the budget.",
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Explicit budget — model emits at most `budget_tokens` tokens of\nreasoning before the assistant text.",
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "AssistantImageId": {
         "type": "string"
       },
@@ -1096,6 +1235,41 @@
         ],
         "title": "BridgeReply"
       },
+      "BudgetLimits": {
+        "description": "Resource limits for an agent run",
+        "properties": {
+          "max_duration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Duration"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Maximum duration"
+          },
+          "max_tokens": {
+            "description": "Maximum tokens to consume",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_tool_calls": {
+            "description": "Maximum tool calls",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "CalendarFieldSpec": {
         "oneOf": [
           {
@@ -1376,6 +1550,30 @@
           "tier"
         ],
         "title": "CatalogModelEntry",
+        "type": "object"
+      },
+      "CommandRuntimeConfig": {
+        "description": "Typed payload for a [`HookRuntimeKind::Command`] adapter.",
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "command"
+        ],
         "type": "object"
       },
       "CommsChecksumTokenParams": {
@@ -1882,33 +2080,77 @@
         "title": "CommsSendResult"
       },
       "ConfigEnvelope": {
+        "description": "Wire envelope returned by config APIs across surfaces.",
         "properties": {
           "backend": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "config": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
+          "config": true,
           "generation": {
+            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
           "instance_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "realm_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "resolved_paths": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigResolvedPaths"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "config",
           "generation"
+        ],
+        "title": "ConfigEnvelope",
+        "type": "object"
+      },
+      "ConfigResolvedPaths": {
+        "description": "Resolved paths attached to a config store context.",
+        "properties": {
+          "config_path": {
+            "type": "string"
+          },
+          "manifest_path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sessions_jsonl_dir": {
+            "type": "string"
+          },
+          "sessions_sqlite_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "manifest_path",
+          "config_path",
+          "sessions_jsonl_dir"
         ],
         "type": "object"
       },
@@ -2114,6 +2356,179 @@
         "title": "ContractVersion",
         "type": "object"
       },
+      "CoreRenderable": {
+        "description": "Renderable content that can be appended to a conversation.",
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/ContentBlock"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "blocks",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "blocks"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "JSON-structured content. Uses `Value` because the runtime layer constructs\nthese from various typed sources (peer messages, external events) and core\nneeds to render them into conversation messages — not a pass-through boundary.",
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Typed runtime-authored system notice content.",
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/SystemNoticeBlock"
+                },
+                "type": "array"
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SystemNoticeKind"
+              },
+              "type": {
+                "const": "system_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reference to an external artifact.",
+            "properties": {
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "reference",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CreateScheduleRequest": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "misfire_policy": {
+            "$ref": "#/components/schemas/MisfirePolicy",
+            "default": {
+              "type": "skip"
+            }
+          },
+          "missing_target_policy": {
+            "$ref": "#/components/schemas/MissingTargetPolicy",
+            "default": "mark_misfired"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overlap_policy": {
+            "$ref": "#/components/schemas/OverlapPolicy",
+            "default": "skip_if_running"
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSpec"
+          }
+        },
+        "required": [
+          "trigger",
+          "target"
+        ],
+        "title": "CreateScheduleRequest",
+        "type": "object"
+      },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
         "properties": {
@@ -2284,6 +2699,25 @@
         "title": "DeviceStartParams",
         "type": "object"
       },
+      "Duration": {
+        "properties": {
+          "nanos": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs",
+          "nanos"
+        ],
+        "type": "object"
+      },
       "ErrorCategory": {
         "description": "Error category for grouping.",
         "enum": [
@@ -2416,6 +2850,50 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "GeminiThinkingConfig": {
+        "additionalProperties": false,
+        "description": "Typed shape of Gemini's thinking knob.",
+        "properties": {
+          "include_thoughts": {
+            "description": "Whether reasoning output is included in the response.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "description": "Reasoning token budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Gemini 3 reasoning level."
+          }
+        },
+        "type": "object"
+      },
+      "GeminiThinkingLevel": {
+        "description": "Gemini 3 reasoning levels accepted by the API.",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "GoalStatusRequest": {
         "properties": {
@@ -2645,6 +3123,197 @@
         },
         "type": "object"
       },
+      "HookAdapterConfig": {
+        "description": "Closed, typed set of hook runtime adapters the engine can dispatch to.\n\nThis is the single typed owner of \"which runtime adapter and its config\".\nIt is deserialized once at the config-layering boundary; the hook engine\nreads the typed variant directly rather than re-parsing an opaque JSON\npayload on every execution. A malformed command/HTTP payload therefore fails\nclosed at config-deserialization time, not at hook-execution time.\n\nWire format is internally tagged on `type` (`in_process`, `command`,\n`http`), with the variant payload flattened alongside the tag, e.g.\n`{\"type\":\"command\",\"command\":\"sh\",\"args\":[\"-c\",\"...\"]}`.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/HookInProcessRuntimeConfig",
+            "properties": {
+              "type": {
+                "const": "in_process",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/CommandRuntimeConfig",
+            "properties": {
+              "type": {
+                "const": "command",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/HttpRuntimeConfig",
+            "properties": {
+              "type": {
+                "const": "http",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HookCapability": {
+        "description": "Declared capability determines default failure behavior and constraints.",
+        "oneOf": [
+          {
+            "enum": [
+              "observe",
+              "guardrail"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "rewrite",
+            "description": "Legacy fail-closed capability label. Semantic patch authority has been\nremoved from hooks; retained entries may observe and deny only.",
+            "type": "string"
+          }
+        ]
+      },
+      "HookEntryConfig": {
+        "description": "One hook registration entry.",
+        "properties": {
+          "capability": {
+            "$ref": "#/components/schemas/HookCapability",
+            "default": "observe"
+          },
+          "enabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "$ref": "#/components/schemas/HookId",
+            "default": "hook"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/HookExecutionMode",
+            "default": "foreground"
+          },
+          "point": {
+            "$ref": "#/components/schemas/HookPoint",
+            "default": "turn_boundary"
+          },
+          "priority": {
+            "default": 100,
+            "format": "int32",
+            "type": "integer"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/HookAdapterConfig",
+            "default": {
+              "handler": "noop",
+              "type": "in_process"
+            }
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "HookExecutionMode": {
+        "description": "Foreground hooks block loop progression; background hooks run asynchronously.",
+        "enum": [
+          "foreground",
+          "background"
+        ],
+        "type": "string"
+      },
+      "HookId": {
+        "description": "Stable identifier for a configured hook.",
+        "type": "string"
+      },
+      "HookInProcessHandlerId": {
+        "description": "Stable identity for an in-process hook handler registered with the runtime.",
+        "type": "string"
+      },
+      "HookInProcessRuntimeConfig": {
+        "description": "Typed payload for [`HookRuntimeKind::InProcess`].\n\n`name` remains accepted for existing configs, but runtime dispatch uses the\ntyped handler id rather than fishing a string out of opaque adapter config.",
+        "properties": {
+          "handler": {
+            "$ref": "#/components/schemas/HookInProcessHandlerId",
+            "default": "noop"
+          }
+        },
+        "type": "object"
+      },
+      "HookPoint": {
+        "description": "Hook points available in V1.",
+        "enum": [
+          "run_started",
+          "run_completed",
+          "run_failed",
+          "pre_llm_request",
+          "post_llm_response",
+          "pre_tool_execution",
+          "post_tool_execution",
+          "turn_boundary"
+        ],
+        "type": "string"
+      },
+      "HookRunOverrides": {
+        "description": "Run-scoped hook overrides.",
+        "properties": {
+          "disable": {
+            "default": [],
+            "description": "Hook ids disabled for this run.",
+            "items": {
+              "$ref": "#/components/schemas/HookId"
+            },
+            "type": "array"
+          },
+          "entries": {
+            "default": [],
+            "description": "Additional hooks appended after layered config entries.",
+            "items": {
+              "$ref": "#/components/schemas/HookEntryConfig"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "HttpRuntimeConfig": {
+        "description": "Typed payload for a [`HookRuntimeKind::Http`] adapter.",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "method": {
+            "default": "POST",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
       "InputSource": {
         "description": "Source for an input event posted to an agent.",
         "enum": [
@@ -2703,7 +3372,8 @@
       "JsonValue": {
         "description": "Arbitrary JSON value."
       },
-      "ListSessionsResponse": {
+      "ListSessionsResult": {
+        "description": "Result for `session/list`.",
         "properties": {
           "sessions": {
             "items": {
@@ -2715,6 +3385,7 @@
         "required": [
           "sessions"
         ],
+        "title": "ListSessionsResult",
         "type": "object"
       },
       "LoginCompleteParams": {
@@ -2754,6 +3425,37 @@
           "binding_id"
         ],
         "title": "LoginCompleteParams",
+        "type": "object"
+      },
+      "LoginStartParams": {
+        "description": "Request payload for `auth/login/start`.",
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "redirect_uri",
+          "realm_id",
+          "binding_id"
+        ],
+        "title": "LoginStartParams",
         "type": "object"
       },
       "McpAddParams": {
@@ -3394,6 +4096,10 @@
         ],
         "type": "string"
       },
+      "OpaqueProviderBody": {
+        "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -3729,37 +4435,438 @@
           }
         ]
       },
-      "PublicTurnToolOverlay": {
+      "ProviderParamsOverride": {
         "additionalProperties": false,
+        "description": "Typed per-turn provider parameter overrides.\n\nReplaces the legacy untyped `serde_json::Value` bag. Every knob exposed\nby the runtime on a per-turn seam must have a typed field here. Anything\nprovider-specific enough to not fit goes on [`ProviderTag`]; anything\nthat is fundamentally per-binding (not per-turn) lives on the auth /\nbackend profile and never traverses this seam.",
         "properties": {
-          "allowed_tools": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
             "anyOf": [
               {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/components/schemas/ProviderTag"
               },
               {
                 "type": "null"
               }
             ]
           },
-          "blocked_tools": {
+          "reasoning": {
             "anyOf": [
               {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/components/schemas/ReasoningMode"
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
-        "required": [],
+        "type": "object"
+      },
+      "ProviderTag": {
+        "description": "Provider-specific typed override payload carried on a single turn.\n\nEach provider family gets its own typed variant. Anything that does not\nfit a typed field belongs on the per-binding auth/backend profile, not\non the per-turn override — the per-turn seam carries only scalars the\nruntime can route authoritatively.\n\n`Unknown { bag }` is the typed escape hatch for V3 legacy-row\ndeserialize (see C-TM-V3): the untyped `serde_json::Value` thinking\ncarrier from pre-wave rows projects into `StructuredProviderExtension`\nrather than being silently dropped (persistence-migration.md §3.1,\nadversarial review flaw 5).",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Automatic compaction configuration."
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Context-window opt-in (1M beta)."
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Response-effort knob."
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Data-residency override for inference routing."
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces JSON-schema output envelope)."
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request even\nwhen the model profile says unsupported. Used by proxied /\ncustom deployments.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Extended-thinking configuration."
+              },
+              "thinking_budget_tokens": {
+                "description": "Legacy flat `thinking_budget_tokens` — preserved for V3\npersistence round-trip (single-key legacy projector) and for\ncallers that cannot express the full `thinking` shape.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "description": "Override top-k sampling.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside\n`tools` at the provider-runtime boundary."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.",
+            "properties": {
+              "chat_template_kwargs": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: `chat_template_kwargs` passthrough."
+              },
+              "frequency_penalty": {
+                "description": "Frequency penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "description": "Presence penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "seed": {
+                "description": "Deterministic-sampling seed.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces `text.format.json_schema`)."
+              },
+              "supports_reasoning_override": {
+                "description": "Internal override: force-enable reasoning payload for this\nrequest (used by client_compatible endpoints).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: vendor-specific `thinking` body\nforwarded verbatim."
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside `tools`."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
+            "properties": {
+              "candidate_count": {
+                "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native google_search grounding tool body."
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema."
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Thinking configuration (Gemini 3+ models)."
+              },
+              "thinking_budget": {
+                "description": "Legacy flat `thinking_budget` — preserved for V3 persistence\nround-trip.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Gemini 3 flat thinking level override."
+              },
+              "top_k": {
+                "description": "Top-K sampling override.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "description": "Top-P (nucleus) sampling override.",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Opaque pass-through for legacy-row knobs that don't (yet) map to a\ntyped variant. Carries the namespaced bag so a later wave can\npromote the structure to a typed variant without losing data.",
+            "properties": {
+              "bag": {
+                "$ref": "#/components/schemas/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PublicTurnToolOverlay": {
+        "description": "Public caller-safe per-turn tool overlay.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "QuarantinedSkillIdentity": {
@@ -3783,6 +4890,37 @@
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
+      },
+      "ReasoningEffort": {
+        "description": "Typed projection of OpenAI's reasoning-effort knob.",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "ReasoningMode": {
+        "description": "Typed mode for generalized reasoning emission.",
+        "oneOf": [
+          {
+            "const": "emit",
+            "description": "Reasoning output is emitted inline to the caller.",
+            "type": "string"
+          },
+          {
+            "const": "silent",
+            "description": "Reasoning is performed but not emitted.",
+            "type": "string"
+          },
+          {
+            "const": "off",
+            "description": "Reasoning is disabled entirely for this turn.",
+            "type": "string"
+          }
+        ]
       },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
@@ -3836,140 +4974,228 @@
         "type": "string"
       },
       "RestAppendSystemContextRequest": {
+        "description": "`POST /sessions/{id}/system_context` — append runtime system context.\n\nThe body is the typed [`CoreRenderable`] owner rather than a bare `text`\nstring; a plain-text client payload still deserializes via\n`CoreRenderable`'s tagged `text` variant.",
         "properties": {
           "content": {
-            "additionalProperties": true,
-            "description": "Typed CoreRenderable body (tagged by `type`). A plain-text payload is `{\"type\":\"text\",\"text\":\"...\"}`.",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "type": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
-            ],
-            "type": "object"
+            "$ref": "#/components/schemas/CoreRenderable"
           },
           "idempotency_key": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "content"
         ],
+        "title": "RestAppendSystemContextRequest",
         "type": "object"
       },
-      "RestAuthLoginStartRequest": {
+      "RestAuthBindingTestRequest": {
+        "description": "`POST /auth/bindings/{binding_id}/test` — test a binding resolve path.",
         "properties": {
-          "binding_id": {
-            "type": "string"
-          },
           "profile_id": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "realm_id": {
-            "type": "string"
-          },
-          "redirect_uri": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "redirect_uri",
-          "realm_id",
-          "binding_id"
-        ],
-        "type": "object"
-      },
-      "RestAuthProfileCreateRequest": {
-        "additionalProperties": true,
-        "required": [
-          "realm_id",
-          "binding_id",
-          "auth_method"
-        ],
-        "type": "object"
-      },
-      "RestContinueSessionRequest": {
-        "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "comms_name": {
-            "type": "string"
-          },
-          "flow_tool_overlay": {
-            "$ref": "#/components/schemas/PublicTurnToolOverlay"
-          },
-          "hooks_override": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "keep_alive": {
             "anyOf": [
               {
-                "type": "boolean"
+                "$ref": "#/components/schemas/ProfileId"
               },
               {
                 "type": "null"
               }
             ]
           },
-          "max_tokens": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "model": {
+          "realm_id": {
+            "$ref": "#/components/schemas/RealmId"
+          }
+        },
+        "required": [
+          "realm_id"
+        ],
+        "title": "RestAuthBindingTestRequest",
+        "type": "object"
+      },
+      "RestAuthProfileCreateRequest": {
+        "description": "`POST /auth/profiles` — store binding-scoped credentials.",
+        "properties": {
+          "auth_method": {
             "type": "string"
           },
-          "output_schema": {
-            "$ref": "#/components/schemas/JsonValue"
+          "binding_id": {
+            "$ref": "#/components/schemas/BindingId"
           },
-          "peer_meta": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "prompt": {
-            "oneOf": [
+          "profile_id": {
+            "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/ProfileId"
               },
               {
-                "$ref": "#/components/schemas/WireContentInput"
+                "type": "null"
               }
             ]
           },
           "provider": {
             "type": "string"
           },
+          "realm_id": {
+            "$ref": "#/components/schemas/RealmId"
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "provider",
+          "auth_method",
+          "secret"
+        ],
+        "title": "RestAuthProfileCreateRequest",
+        "type": "object"
+      },
+      "RestContinueSessionRequest": {
+        "description": "`POST /sessions/{id}/messages` — continue a session with a new message.",
+        "properties": {
+          "additional_instructions": {
+            "description": "Additional instruction sections prepended as system notices.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "comms_name": {
+            "description": "Agent name for inter-agent communication. Required for keep_alive.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enable_web_search": {
+            "description": "Enable Meerkat-owned fallback web search. Omit to inherit.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicTurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-turn flow tool overlay (caller-safe public shape;\nruntime-owned dispatch metadata is not accepted at this boundary)."
+          },
+          "hooks_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HookRunOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional run-scoped hook overrides."
+          },
+          "keep_alive": {
+            "description": "Keep session alive after turn completes, listening for comms messages.\nNone = inherit persisted session intent, Some(true) = enable,\nSome(false) = disable.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "JSON schema for structured output extraction (wrapper or raw schema)."
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Friendly metadata for peer discovery."
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/ContentInput"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "session_id": {
             "type": "string"
           },
           "skill_refs": {
+            "description": "Structured refs for per-turn skill injection.",
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillRef"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "structured_output_retries": {
+            "description": "Max retries for structured output validation.\nOmit to inherit the current/persisted session value.",
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "verbose": {
+            "default": false,
+            "description": "Enable verbose event logging (server-side).",
             "type": "boolean"
           }
         },
@@ -3977,144 +5203,284 @@
           "session_id",
           "prompt"
         ],
+        "title": "RestContinueSessionRequest",
         "type": "object"
       },
       "RestCreateSessionRequest": {
+        "description": "`POST /sessions` — create a session and run the first turn.",
         "properties": {
           "additional_instructions": {
+            "description": "Additional instruction sections appended to the system prompt.",
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "app_context": {
-            "$ref": "#/components/schemas/JsonValue"
+            "description": "Opaque application context passed through to custom builders."
           },
           "budget_limits": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "comms_name": {
-            "type": "string"
-          },
-          "enable_builtins": {
-            "type": "boolean"
-          },
-          "enable_memory": {
-            "type": "boolean"
-          },
-          "enable_mob": {
-            "type": "boolean"
-          },
-          "enable_schedule": {
-            "type": "boolean"
-          },
-          "enable_shell": {
-            "type": "boolean"
-          },
-          "enable_workgraph": {
-            "type": "boolean"
-          },
-          "hooks_override": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "keep_alive": {
             "anyOf": [
               {
-                "type": "boolean"
+                "$ref": "#/components/schemas/BudgetLimits"
               },
               {
                 "type": "null"
               }
+            ],
+            "description": "Explicit budget limits for this run."
+          },
+          "comms_name": {
+            "description": "Agent name for inter-agent communication. Required for keep_alive.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enable_builtins": {
+            "description": "Enable built-in tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_memory": {
+            "description": "Enable semantic memory. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_mob": {
+            "description": "Enable mob tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_schedule": {
+            "description": "Enable schedule tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_shell": {
+            "description": "Enable shell tool. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_web_search": {
+            "description": "Enable Meerkat-owned fallback web search. Omit to keep hidden.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_workgraph": {
+            "description": "Enable WorkGraph tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "hooks_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HookRunOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional run-scoped hook overrides."
+          },
+          "keep_alive": {
+            "description": "Keep session alive after turn completes, listening for comms messages.\nNone = inherit persisted session intent, Some(true) = enable,\nSome(false) = disable. Requires comms_name when enabled.",
+            "type": [
+              "boolean",
+              "null"
             ]
           },
           "labels": {
             "additionalProperties": {
               "type": "string"
             },
-            "type": "object"
+            "description": "Optional key-value labels attached at session creation.",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "max_tokens": {
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "model": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "output_schema": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "peer_meta": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "type": "array"
-          },
-          "prompt": {
-            "oneOf": [
+            "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/OutputSchema"
               },
               {
-                "$ref": "#/components/schemas/WireContentInput"
+                "type": "null"
+              }
+            ],
+            "description": "JSON schema for structured output extraction (wrapper or raw schema)."
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Friendly metadata for peer discovery."
+          },
+          "preload_skills": {
+            "description": "Skills to preload into the system prompt.",
+            "items": {
+              "$ref": "#/components/schemas/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/ContentInput"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
               }
             ]
           },
-          "provider": {
-            "type": "string"
-          },
           "provider_params": {
-            "$ref": "#/components/schemas/JsonValue"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed provider-specific parameter overrides (for example reasoning\nconfig). Parsed fail-closed at the wire boundary (K2)."
           },
           "shell_env": {
             "additionalProperties": {
               "type": "string"
             },
-            "type": "object"
+            "description": "Per-agent environment variables injected into shell tool subprocesses.",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "skill_refs": {
+            "description": "Structured refs for per-turn skill injection.",
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillRef"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "structured_output_retries": {
+            "description": "Max retries for structured output validation.\nOmit to use the product default.",
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "verbose": {
+            "default": false,
+            "description": "Enable verbose event logging (server-side).",
             "type": "boolean"
           }
         },
         "required": [
           "prompt"
         ],
+        "title": "RestCreateSessionRequest",
         "type": "object"
       },
       "RestMobForkHelperRequest": {
+        "description": "`POST /mob/{id}/fork-helper` — fork a helper member from an existing one.",
         "properties": {
           "agent_identity": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backend": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "fork_context": {
-            "$ref": "#/components/schemas/JsonValue"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireForkContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "type": "string"
           },
           "role_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime_mode": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "source_member_id": {
             "type": "string"
@@ -4124,48 +5490,80 @@
           "source_member_id",
           "prompt"
         ],
+        "title": "RestMobForkHelperRequest",
         "type": "object"
       },
       "RestMobHelperRequest": {
+        "description": "`POST /mob/{id}/spawn-helper` — spawn a short-lived helper member.",
         "properties": {
           "agent_identity": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backend": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "type": "string"
           },
           "role_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime_mode": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "prompt"
         ],
+        "title": "RestMobHelperRequest",
         "type": "object"
       },
       "RestMobWaitRequest": {
+        "description": "`POST /mob/{id}/wait-kickoff` — wait for the kickoff completion barrier.",
         "properties": {
           "member_ids": {
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "timeout_ms": {
+            "format": "uint64",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
-        "required": [],
+        "title": "RestMobWaitRequest",
         "type": "object"
       },
       "RestMobWireMembersBatchRequest": {
+        "description": "`POST /mob/{id}/wire-members-batch` — wire multiple local member edges.",
         "properties": {
           "edges": {
             "items": {
@@ -4177,35 +5575,46 @@
         "required": [
           "edges"
         ],
+        "title": "RestMobWireMembersBatchRequest",
         "type": "object"
       },
       "RestPatchConfigRequest": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/JsonValue"
-          },
+        "anyOf": [
           {
             "properties": {
               "expected_generation": {
+                "format": "uint64",
                 "minimum": 0,
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
-              "patch": {
-                "$ref": "#/components/schemas/JsonValue"
-              }
+              "patch": true
             },
             "required": [
               "patch"
             ],
             "type": "object"
-          }
-        ]
+          },
+          true
+        ],
+        "description": "`PATCH /config` — RFC-7386 merge-patch (bare patch or wrapped with an\noptimistic-concurrency generation).",
+        "title": "RestPatchConfigRequest"
       },
       "RestPeerResponseTerminalRequest": {
         "additionalProperties": false,
+        "description": "`POST /sessions/{id}/peer-response-terminal` — admit a correlated\nterminal peer response through the typed runtime ingress.",
         "properties": {
           "display_name": {
-            "$ref": "#/components/schemas/PeerName"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerName"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_id": {
             "$ref": "#/components/schemas/PeerId"
@@ -4213,9 +5622,7 @@
           "request_id": {
             "$ref": "#/components/schemas/PeerCorrelationId"
           },
-          "result": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
+          "result": true,
           "status": {
             "$ref": "#/components/schemas/PeerResponseTerminalStatusWire"
           }
@@ -4226,43 +5633,75 @@
           "status",
           "result"
         ],
+        "title": "RestPeerResponseTerminalRequest",
         "type": "object"
       },
-      "RestScheduleToolCallRequest": {
+      "RestSessionDetailsResponse": {
+        "description": "`GET /sessions/{id}` — session details response.",
         "properties": {
-          "arguments": {
-            "$ref": "#/components/schemas/JsonValue"
+          "created_at": {
+            "type": "string"
           },
-          "name": {
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "message_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": "string"
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated_at": {
             "type": "string"
           }
         },
         "required": [
-          "name"
+          "session_id",
+          "session_ref",
+          "created_at",
+          "updated_at",
+          "message_count",
+          "total_tokens"
         ],
+        "title": "RestSessionDetailsResponse",
         "type": "object"
       },
       "RestSetConfigRequest": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/JsonValue"
-          },
+        "anyOf": [
           {
             "properties": {
-              "config": {
-                "$ref": "#/components/schemas/JsonValue"
-              },
+              "config": true,
               "expected_generation": {
+                "format": "uint64",
                 "minimum": 0,
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
               "config"
             ],
             "type": "object"
-          }
-        ]
+          },
+          true
+        ],
+        "description": "`PUT /config` — replace the config (bare config or wrapped with an\noptimistic-concurrency generation).",
+        "title": "RestSetConfigRequest"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -4830,6 +6269,36 @@
         ],
         "type": "string"
       },
+      "ScheduleToolCallParams": {
+        "description": "Parameters for `schedule/call`.",
+        "properties": {
+          "arguments": {
+            "default": null
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ScheduleToolCallParams",
+        "type": "object"
+      },
+      "ScheduleToolsResult": {
+        "description": "Result for `schedule/tools`.",
+        "properties": {
+          "tools": {
+            "items": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "title": "ScheduleToolsResult",
+        "type": "object"
+      },
       "ScheduledMobAction": {
         "oneOf": [
           {
@@ -4985,45 +6454,6 @@
         ],
         "type": "object"
       },
-      "SessionDetailsResponse": {
-        "properties": {
-          "created_at": {
-            "type": "string"
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "message_count": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "session_id": {
-            "type": "string"
-          },
-          "session_ref": {
-            "type": "string"
-          },
-          "total_tokens": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "updated_at": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "session_id",
-          "session_ref",
-          "created_at",
-          "updated_at",
-          "message_count",
-          "total_tokens"
-        ],
-        "type": "object"
-      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -5120,7 +6550,16 @@
               }
             ]
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "realm_id": {
             "type": [
               "string",
@@ -5742,6 +7181,29 @@
       },
       "StatusResponse": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
         "type": "object"
       },
       "SystemNoticeBlock": {
@@ -6401,6 +7863,231 @@
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "UpdateScheduleRequest": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "misfire_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MisfirePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing_target_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MissingTargetPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overlap_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OverlapPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TargetBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriggerSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "UpdateScheduleRequest",
+        "type": "object"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -7257,6 +8944,80 @@
         "title": "WireError",
         "type": "object"
       },
+      "WireForkContext": {
+        "description": "Conversation history scope used when forking a mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireForkContext"
+      },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
         "properties": {
@@ -7333,6 +9094,20 @@
         ],
         "title": "WireLoginStart",
         "type": "object"
+      },
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
       },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
@@ -7591,6 +9366,322 @@
           }
         ]
       },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/components/schemas/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireRealmConnectionSet": {
         "description": "Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned\nfrom the `realm/get` / `GET /realm/:id` endpoints.",
         "properties": {
@@ -7682,6 +9773,26 @@
           "binding_count"
         ],
         "type": "object"
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
       },
       "WireRunResult": {
         "description": "Canonical run result for wire protocol.",
@@ -8944,7 +11055,6 @@
         "type": "string"
       },
       "WorkStatus": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "enum": [
           "open",
           "in_progress",
@@ -8953,7 +11063,6 @@
           "cancelled",
           "failed"
         ],
-        "title": "WorkStatus",
         "type": "string"
       }
     }
@@ -9127,6 +11236,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestAuthBindingTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -9273,7 +11392,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestAuthLoginStartRequest"
+                "$ref": "#/components/schemas/LoginStartParams"
               }
             }
           },
@@ -10220,7 +12339,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestScheduleToolCallRequest"
+                "$ref": "#/components/schemas/ScheduleToolCallParams"
               }
             }
           },
@@ -10259,7 +12378,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ScheduleToolsResult"
                 }
               }
             },
@@ -10312,7 +12431,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/CreateScheduleRequest"
               }
             }
           },
@@ -10323,7 +12442,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10361,7 +12480,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10397,7 +12516,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10432,7 +12551,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/UpdateScheduleRequest"
               }
             }
           },
@@ -10443,7 +12562,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10519,7 +12638,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10557,7 +12676,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -10585,7 +12704,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListSessionsResponse"
+                  "$ref": "#/components/schemas/ListSessionsResult"
                 }
               }
             },
@@ -10695,7 +12814,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionDetailsResponse"
+                  "$ref": "#/components/schemas/RestSessionDetailsResponse"
                 }
               }
             },

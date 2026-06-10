@@ -700,6 +700,12 @@ pub struct TurnStateSnapshot {
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
+    /// Machine-owned total answer to "is this turn inside the
+    /// structured-output extraction sub-flow" (dogma K9). Set by
+    /// `EnterExtraction`, cleared on every turn-terminal transition and on
+    /// run start. Consumers must read this — never derive in-extraction from
+    /// loop-local scratch like `extraction_state.primary_output`.
+    pub extraction_active: bool,
     pub llm_retry_attempt: u32,
     pub llm_retry_max_retries: u32,
     pub llm_retry_selected_delay_ms: u64,

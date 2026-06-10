@@ -1101,6 +1101,14 @@ mod tests {
             Ok(())
         }
 
+        async fn signal_output_audio_degraded(
+            &self,
+            _session_id: &SessionId,
+            _dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
         async fn signal_turn_completed(
             &self,
             _session_id: &SessionId,

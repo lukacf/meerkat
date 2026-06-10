@@ -1,4 +1,5 @@
 import { EventSubscription } from './events.js';
+import { serializePromptContentInput } from './session.js';
 import { isKnownEvent } from './types.js';
 import type {
   AuthBindingRef,
@@ -29,7 +30,6 @@ import type {
   EventEnvelope,
   EventSourceIdentity,
   AgentRuntimeId,
-  SubscriptionLaggedEvent,
 } from './types.js';
 import type {
   MobAppendSystemContextResult as WireMobAppendSystemContextResult,
@@ -72,10 +72,10 @@ interface MobWasmBindings {
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (streamId: string) => string;
+  close_subscription: (streamId: string) => void;
 }
 
 function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
@@ -508,16 +508,6 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
   };
 }
 
-function parseSubscriptionLaggedEvent(
-  record: Record<string, unknown>,
-  context: string,
-): SubscriptionLaggedEvent {
-  return {
-    type: 'lagged',
-    skipped: requireNumberField(record, 'skipped', `${context}: lagged skipped must be number`),
-  };
-}
-
 function normalizeEventSourceIdentity(raw: unknown, context: string): EventSourceIdentity {
   const source = requireRecord(raw, `${context}: missing source`);
   const sourceType = requireStringField(source, 'type', `${context}: source missing type`);
@@ -631,11 +621,9 @@ function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
 }
 
 function parseMemberEventItem(raw: unknown, context: string): MemberEventItem {
-  const record = requireRecord(raw, `${context}: malformed event item`);
-  if (record.type === 'lagged') {
-    return parseSubscriptionLaggedEvent(record, context);
-  }
-  return parseEventEnvelope(record, context);
+  // K19: a lagged receiver arrives as the generated `stream_truncated`
+  // envelope; every item is a full EventEnvelope, parsed fail-closed.
+  return parseEventEnvelope(raw, context);
 }
 
 function parseAttributedSource(raw: unknown, context: string): AgentRuntimeId {
@@ -651,9 +639,6 @@ function parseAttributedSource(raw: unknown, context: string): AgentRuntimeId {
 
 function parseAttributedEventItem(raw: unknown, context: string): AttributedEventItem {
   const record = requireRecord(raw, `${context}: malformed attributed event`);
-  if (record.type === 'lagged') {
-    return parseSubscriptionLaggedEvent(record, context);
-  }
   const source = parseAttributedSource(record.source, context);
   const role = requireStringField(record, 'role', `${context}: missing role`);
   const attributed = {
@@ -921,12 +906,12 @@ export class Member {
   }
 
   async subscribe(): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
+    const streamId = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 }
@@ -1086,11 +1071,12 @@ export class Mob {
     agentIdentity: string,
     initialMessage?: string | ContentBlock[],
   ): Promise<MobRespawnResult> {
+    // K19: the initial message crosses the WASM boundary as the tagged
+    // content-input wire shape — the tag is the discriminator, never JSON
+    // shape-sniffing of a raw string.
     const payload =
       initialMessage != null
-        ? typeof initialMessage === 'string'
-          ? initialMessage
-          : JSON.stringify(initialMessage)
+        ? serializePromptContentInput(initialMessage)
         : undefined;
     const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
     return parseMobRespawnResult(parseJsonPayload(json, 'Invalid mob respawn response'));
@@ -1235,23 +1221,23 @@ export class Mob {
 
   /** Subscribe to events for a specific member. */
   async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
+    const streamId = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 
   /** Subscribe to all mob-wide attributed events. */
   async subscribeEvents(): Promise<EventSubscription<AttributedEventItem>> {
-    const handle = await this.bindings.mob_subscribe_events(this.mobId);
+    const streamId = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob attributed subscription event', parseAttributedEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 

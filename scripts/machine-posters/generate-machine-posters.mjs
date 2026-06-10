@@ -2711,7 +2711,11 @@ function escapeHtml(value) {
 }
 
 function cleanGeneratedText(text) {
-  return text.replace(/[ \t]+$/gm, "");
+  // Strip trailing intra-line whitespace and terminate with exactly one
+  // newline so the rendered bytes are identical to the committed form
+  // (end-of-file-fixer becomes a no-op and the byte-equality freshness
+  // gate compares renderer truth, not hook-mutated bytes).
+  return `${text.replace(/[ \t]+$/gm, "").replace(/\n*$/u, "")}\n`;
 }
 
 main();

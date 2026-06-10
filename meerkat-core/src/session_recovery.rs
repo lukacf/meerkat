@@ -26,7 +26,8 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params:
+        Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
@@ -244,11 +245,9 @@ impl RecoveredSessionBuild {
         CreateSessionRequest {
             model: self.model,
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: self.system_prompt,
             max_tokens: self.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(self.build),
@@ -722,7 +721,10 @@ mod tests {
                 structured_output_retries: 3,
                 provider: Provider::Anthropic,
                 self_hosted_server_id: None,
-                provider_params: Some(json!({ "temperature": 0.1 })),
+                provider_params: Some(crate::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.1),
+                    ..Default::default()
+                }),
                 tooling: SessionTooling {
                     builtins: ToolCategoryOverride::Disable,
                     shell: ToolCategoryOverride::Enable,
@@ -887,7 +889,10 @@ mod tests {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some(Provider::OpenAI),
                 provider_params: Some(TurnMetadataOverride::Set(
-                    json!({ "reasoning": { "effort": "medium" } }),
+                    crate::lifecycle::run_primitive::ProviderParamsOverride {
+                        reasoning: Some(crate::lifecycle::run_primitive::ReasoningMode::Emit),
+                        ..Default::default()
+                    },
                 )),
                 max_tokens: Some(2048),
                 system_prompt: Some("override system prompt".to_string()),
@@ -914,7 +919,10 @@ mod tests {
         assert_eq!(build.provider, Some(Provider::OpenAI));
         assert_eq!(
             build.provider_params,
-            Some(json!({ "reasoning": { "effort": "medium" } }))
+            Some(crate::lifecycle::run_primitive::ProviderParamsOverride {
+                reasoning: Some(crate::lifecycle::run_primitive::ReasoningMode::Emit),
+                ..Default::default()
+            })
         );
         assert_eq!(build.structured_output_retries, Some(9));
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));

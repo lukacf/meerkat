@@ -250,6 +250,15 @@ impl DriverEntry {
         }
     }
 
+    /// Machine-owned per-run boundary counter — the single producer of the
+    /// run-boundary receipt sequence (dogma K10).
+    pub(crate) fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {
+        match self {
+            DriverEntry::Ephemeral(d) => d.run_boundary_sequence(run_id),
+            DriverEntry::Persistent(d) => d.inner_ref().run_boundary_sequence(run_id),
+        }
+    }
+
     pub(crate) fn as_driver_mut(&mut self) -> &mut dyn RuntimeDriver {
         match self {
             DriverEntry::Ephemeral(d) => d,
@@ -2660,7 +2669,7 @@ pub(crate) async fn commit_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
     consumed_input_ids: Vec<InputId>,
-    receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+    receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
     session_snapshot: Option<Vec<u8>>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
     let mut driver = driver.lock().await;
@@ -2669,6 +2678,10 @@ pub(crate) async fn commit_runtime_loop_run(
     // guards (input_id is informational), so firing once with any
     // contributing input is sufficient to flip `lifecycle_phase`.
     let commit_input_id = consumed_input_ids.first().cloned();
+    // Dogma K10: mint the final receipt from the machine-owned per-run
+    // boundary counter — the executor's draft carries no sequence, so the
+    // durable receipt can never diverge from `RecordBoundarySeq`'s value.
+    let receipt = receipt.into_sequenced(driver.run_boundary_sequence(&run_id));
     machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let completed_run_id = run_id.clone();

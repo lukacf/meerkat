@@ -1241,6 +1241,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -1619,6 +1654,26 @@
               },
               "kind": {
                 "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
                 "type": "string"
               }
             },
@@ -2048,8 +2103,9 @@
       {
         "description": "Agent run started",
         "properties": {
-          "prompt": {
-            "$ref": "#/$defs/ContentInput"
+          "input": {
+            "$ref": "#/$defs/RunInput",
+            "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -2062,7 +2118,7 @@
         "required": [
           "type",
           "session_id",
-          "prompt"
+          "input"
         ],
         "type": "object"
       },
@@ -2171,22 +2227,9 @@
       {
         "description": "Agent run failed",
         "properties": {
-          "error": {
-            "description": "Display projection of `error_report.message`.",
-            "type": "string"
-          },
-          "error_class": {
-            "$ref": "#/$defs/AgentErrorClass"
-          },
           "error_report": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/AgentErrorReport"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/AgentErrorReport",
+            "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -2209,8 +2252,7 @@
         "required": [
           "type",
           "session_id",
-          "error_class",
-          "error"
+          "error_report"
         ],
         "type": "object"
       },
@@ -3356,8 +3398,9 @@
           {
             "description": "Agent run started",
             "properties": {
-              "prompt": {
-                "$ref": "#/$defs/ContentInput"
+              "input": {
+                "$ref": "#/$defs/RunInput",
+                "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -3370,7 +3413,7 @@
             "required": [
               "type",
               "session_id",
-              "prompt"
+              "input"
             ],
             "type": "object"
           },
@@ -3479,22 +3522,9 @@
           {
             "description": "Agent run failed",
             "properties": {
-              "error": {
-                "description": "Display projection of `error_report.message`.",
-                "type": "string"
-              },
-              "error_class": {
-                "$ref": "#/$defs/AgentErrorClass"
-              },
               "error_report": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AgentErrorReport"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/AgentErrorReport",
+                "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -3517,8 +3547,7 @@
             "required": [
               "type",
               "session_id",
-              "error_class",
-              "error"
+              "error_report"
             ],
             "type": "object"
           },
@@ -5151,6 +5180,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -5572,6 +5636,26 @@
               },
               "kind": {
                 "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
                 "type": "string"
               }
             },

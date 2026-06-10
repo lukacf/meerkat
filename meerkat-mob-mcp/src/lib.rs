@@ -2489,7 +2489,9 @@ impl SessionService for LocalSessionService {
                 None,
                 AgentEvent::RunStarted {
                     session_id: id.clone(),
-                    prompt: effective_prompt.clone(),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: effective_prompt.clone(),
+                    },
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new_session(
@@ -2763,13 +2765,12 @@ impl MobSessionService for LocalSessionService {
         let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
         Ok(
             meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary,
                     contributing_input_ids,
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 run_result,
@@ -3031,8 +3032,8 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
 }
 
 fn lifecycle_input_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(MobLifecycleParams))
-        .unwrap_or_else(|_| json!({ "type": "object" }))
+    // K1: ONE infallible schema generator — no fail-open null-schema arm.
+    meerkat_core::schema::tool_input_schema_for::<MobLifecycleParams>()
 }
 
 fn content_input_schema() -> serde_json::Value {
@@ -4888,13 +4889,12 @@ mod tests {
             let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
             Ok(
                 meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                         run_id,
                         boundary,
                         contributing_input_ids,
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     None,
                     run_result,
@@ -4910,11 +4910,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -4953,11 +4951,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5009,8 +5005,11 @@ mod tests {
 
         let first = stream.next().await.expect("first event");
         match first.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let prompt = prompt.text_content();
+            AgentEvent::RunStarted { input, .. } => {
+                let prompt = input
+                    .content()
+                    .expect("content-bearing run input")
+                    .text_content();
                 assert!(prompt.contains("Remember the customer preference."));
                 assert!(prompt.contains("hello"));
             }
@@ -5030,11 +5029,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5118,11 +5115,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5166,11 +5161,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -7224,11 +7217,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -7283,11 +7274,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -7366,11 +7355,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "test".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,

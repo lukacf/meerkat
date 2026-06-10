@@ -379,8 +379,9 @@
           {
             "description": "Agent run started",
             "properties": {
-              "prompt": {
-                "$ref": "#/$defs/ContentInput"
+              "input": {
+                "$ref": "#/$defs/RunInput",
+                "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -393,7 +394,7 @@
             "required": [
               "type",
               "session_id",
-              "prompt"
+              "input"
             ],
             "type": "object"
           },
@@ -502,22 +503,9 @@
           {
             "description": "Agent run failed",
             "properties": {
-              "error": {
-                "description": "Display projection of `error_report.message`.",
-                "type": "string"
-              },
-              "error_class": {
-                "$ref": "#/$defs/AgentErrorClass"
-              },
               "error_report": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AgentErrorReport"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/AgentErrorReport",
+                "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -540,8 +528,7 @@
             "required": [
               "type",
               "session_id",
-              "error_class",
-              "error"
+              "error_report"
             ],
             "type": "object"
           },
@@ -2255,6 +2242,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -2633,6 +2655,26 @@
               },
               "kind": {
                 "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
                 "type": "string"
               }
             },
@@ -12239,6 +12281,105 @@
     "title": "CommsPeersResult",
     "type": "object"
   },
+  "CommsSendErrorData": {
+    "$defs": {
+      "CommsPeerUnreachableReason": {
+        "description": "Why a peer was unreachable for a `comms/send` dispatch.",
+        "enum": [
+          "offline_or_no_ack",
+          "transport_error"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed error data for `comms/send` failures.\n\nThe error taxonomy is owned here (K17): surfaces serialize this contract\nas JSON-RPC `error.data` instead of hand-shaping per-surface payloads.",
+    "oneOf": [
+      {
+        "properties": {
+          "code": {
+            "const": "peer_not_found_or_not_trusted",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "peer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "peer",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "code": {
+            "const": "peer_unreachable",
+            "type": "string"
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "peer": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/CommsPeerUnreachableReason"
+          }
+        },
+        "required": [
+          "code",
+          "peer",
+          "reason",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "code": {
+            "const": "send_failed",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "code": {
+            "const": "invalid_command",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CommsSendErrorData"
+  },
   "CommsSendResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `comms/send`.",
@@ -12354,6 +12495,508 @@
       }
     ],
     "title": "CommsSendResult"
+  },
+  "ConfigEnvelope": {
+    "$defs": {
+      "ConfigResolvedPaths": {
+        "description": "Resolved paths attached to a config store context.",
+        "properties": {
+          "config_path": {
+            "type": "string"
+          },
+          "manifest_path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sessions_jsonl_dir": {
+            "type": "string"
+          },
+          "sessions_sqlite_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "manifest_path",
+          "config_path",
+          "sessions_jsonl_dir"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire envelope returned by config APIs across surfaces.",
+    "properties": {
+      "backend": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "config": true,
+      "generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "instance_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "resolved_paths": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ConfigResolvedPaths"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "config",
+      "generation"
+    ],
+    "title": "ConfigEnvelope",
+    "type": "object"
+  },
+  "ConfigPatchParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the RPC `config/patch` method — RFC-7386 merge-patch\n(bare patch or wrapped with an optimistic-concurrency generation).",
+    "properties": {
+      "expected_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "patch": true
+    },
+    "title": "ConfigPatchParams",
+    "type": "object"
+  },
+  "ConfigSetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "properties": {
+          "config": true,
+          "expected_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "config"
+        ],
+        "type": "object"
+      },
+      true
+    ],
+    "description": "Parameters for the RPC `config/set` method — replace the config (bare\nconfig or wrapped with an optimistic-concurrency generation).",
+    "title": "ConfigSetParams"
+  },
+  "ConfigWriteResult": {
+    "$defs": {
+      "ConfigResolvedPaths": {
+        "description": "Resolved paths attached to a config store context.",
+        "properties": {
+          "config_path": {
+            "type": "string"
+          },
+          "manifest_path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sessions_jsonl_dir": {
+            "type": "string"
+          },
+          "sessions_sqlite_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "manifest_path",
+          "config_path",
+          "sessions_jsonl_dir"
+        ],
+        "type": "object"
+      },
+      "WireLiveChannelCloseFailure": {
+        "description": "Why a live channel close failed during config propagation.",
+        "oneOf": [
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "signal_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "close_authority_rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "commit_handoff_missing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "host_commit_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireLiveChannelRefreshFailure": {
+        "description": "Why a live channel refresh failed during config propagation.",
+        "oneOf": [
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "open_config_build_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "snapshot_version_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "enqueue_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "queue_acceptance_rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireLiveCloseFailure": {
+        "description": "A live channel whose close failed during config propagation.",
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/WireLiveChannelCloseFailure"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "failure"
+        ],
+        "type": "object"
+      },
+      "WireLiveConfigPropagationReport": {
+        "description": "Typed wire projection of the live-config propagation report.",
+        "properties": {
+          "clean": {
+            "description": "`true` when every targeted channel swapped/refreshed/closed cleanly.",
+            "type": "boolean"
+          },
+          "close_failed": {
+            "items": {
+              "$ref": "#/$defs/WireLiveCloseFailure"
+            },
+            "type": "array"
+          },
+          "closed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "refresh_failed": {
+            "items": {
+              "$ref": "#/$defs/WireLiveRefreshFailure"
+            },
+            "type": "array"
+          },
+          "refreshed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/$defs/WireLiveHotSwapSkip"
+            },
+            "type": "array"
+          },
+          "swap_failed": {
+            "items": {
+              "$ref": "#/$defs/WireLiveSwapFailure"
+            },
+            "type": "array"
+          },
+          "swapped": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clean",
+          "swapped",
+          "skipped",
+          "swap_failed",
+          "refreshed",
+          "closed",
+          "refresh_failed",
+          "close_failed"
+        ],
+        "type": "object"
+      },
+      "WireLiveHotSwapSkip": {
+        "description": "A live channel that was skipped during config propagation.",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/WireLiveHotSwapSkipReason"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "WireLiveHotSwapSkipReason": {
+        "description": "Reason a live channel was skipped during config propagation.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "no_op_or_override",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity_lookup_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireLiveRefreshFailure": {
+        "description": "A live channel whose refresh failed during config propagation.",
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/WireLiveChannelRefreshFailure"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "failure"
+        ],
+        "type": "object"
+      },
+      "WireLiveSwapFailure": {
+        "description": "A live channel whose hot-swap failed during config propagation.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "error"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result of a `config/set` or `config/patch` write.\n\n`cfg`-gated off wasm32 alongside `meerkat_core::config_runtime`, which\nowns the embedded envelope (the browser runtime serves no config writes).",
+    "properties": {
+      "backend": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "config": true,
+      "generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "instance_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "live_propagation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireLiveConfigPropagationReport"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Live-channel propagation outcome, present when the write fanned out\nto live channels."
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "resolved_paths": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ConfigResolvedPaths"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "config",
+      "generation"
+    ],
+    "title": "ConfigWriteResult",
+    "type": "object"
   },
   "ContractVersion": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12873,8 +13516,9 @@
           {
             "description": "Agent run started",
             "properties": {
-              "prompt": {
-                "$ref": "#/$defs/ContentInput"
+              "input": {
+                "$ref": "#/$defs/RunInput",
+                "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -12887,7 +13531,7 @@
             "required": [
               "type",
               "session_id",
-              "prompt"
+              "input"
             ],
             "type": "object"
           },
@@ -12996,22 +13640,9 @@
           {
             "description": "Agent run failed",
             "properties": {
-              "error": {
-                "description": "Display projection of `error_report.message`.",
-                "type": "string"
-              },
-              "error_class": {
-                "$ref": "#/$defs/AgentErrorClass"
-              },
               "error_report": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AgentErrorReport"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/AgentErrorReport",
+                "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -13034,8 +13665,7 @@
             "required": [
               "type",
               "session_id",
-              "error_class",
-              "error"
+              "error_report"
             ],
             "type": "object"
           },
@@ -14813,6 +15443,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "RuntimeMetadata": {
         "description": "Runtime-carried metadata projection.\n\nThis type intentionally wraps surface metadata instead of adding semantic\nmeaning. Runtime-owned facts belong in typed runtime state, not in labels.",
         "properties": {
@@ -15200,6 +15865,26 @@
               },
               "kind": {
                 "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
                 "type": "string"
               }
             },
@@ -19562,6 +20247,46 @@
       "status"
     ],
     "title": "InjectSystemContextResult",
+    "type": "object"
+  },
+  "InterruptResult": {
+    "$defs": {
+      "WireInterruptOutcome": {
+        "description": "Non-error outcome of a user interrupt request.",
+        "oneOf": [
+          {
+            "const": "interrupted",
+            "description": "A live in-flight turn was cancelled.",
+            "type": "string"
+          },
+          {
+            "const": "staged_noop",
+            "description": "The session was staged with no live run — the interrupt is a typed\nno-op terminal, not a fabricated live cancellation.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Shared interrupt result wire contract (REST and RPC).",
+    "properties": {
+      "interrupted": {
+        "description": "`true` only when a live turn was actually cancelled.",
+        "type": "boolean"
+      },
+      "result": {
+        "$ref": "#/$defs/WireInterruptOutcome"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "interrupted",
+      "result"
+    ],
+    "title": "InterruptResult",
     "type": "object"
   },
   "ListSessionsResult": {
@@ -24583,6 +25308,9 @@
   },
   "MobProfileListResult": {
     "$defs": {
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
       "MobProfileLookupResult": {
         "description": "Stored realm profile projection returned by `mob/profile/*`.",
         "properties": {
@@ -24629,6 +25357,41 @@
         ],
         "type": "object"
       },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
@@ -24637,6 +25400,206 @@
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -24711,7 +25674,16 @@
             ],
             "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resume_overrides": {
             "description": "Profile fields that win over durable session metadata on resume.",
             "items": {
@@ -24818,6 +25790,342 @@
           }
         },
         "type": "object"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -24838,6 +26146,44 @@
   },
   "MobProfileLookupResult": {
     "$defs": {
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
@@ -24846,6 +26192,206 @@
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -24920,7 +26466,16 @@
             ],
             "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resume_overrides": {
             "description": "Profile fields that win over durable session metadata on resume.",
             "items": {
@@ -25027,6 +26582,342 @@
           }
         },
         "type": "object"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -27275,6 +29166,145 @@
   },
   "Schedule": {
     "$defs": {
+      "AnthropicCompactionConfig": {
+        "description": "Typed shape of Anthropic's automatic-compaction knob.",
+        "oneOf": [
+          {
+            "description": "`\"auto\"` — provider picks trigger and instructions.",
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided edit body merged into the compact edit shape.\nFields like `trigger` / `instructions` are preserved verbatim.",
+            "properties": {
+              "edit": {
+                "$ref": "#/$defs/OpaqueProviderBody"
+              },
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicContextWindow": {
+        "description": "Typed shape of Anthropic's context-window opt-in.",
+        "oneOf": [
+          {
+            "const": "one_megabyte",
+            "description": "1M-token beta context window (2025-08-07 beta header).",
+            "type": "string"
+          }
+        ]
+      },
+      "AnthropicEffort": {
+        "description": "Typed shape of Anthropic's response-effort knob.\n`XHigh` is the Opus 4.8 / 4.7 extended-high effort level.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "x_high"
+        ],
+        "type": "string"
+      },
+      "AnthropicInferenceGeo": {
+        "description": "Typed shape of Anthropic's data-residency knob.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided region string — providers may accept region codes\nthis typed variant does not yet enumerate.",
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicThinkingConfig": {
+        "description": "Typed shape of Anthropic's extended-thinking knob.",
+        "oneOf": [
+          {
+            "description": "Adaptive thinking — provider picks the budget.",
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Explicit budget — model emits at most `budget_tokens` tokens of\nreasoning before the assistant text.",
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -27576,6 +29606,50 @@
           }
         ]
       },
+      "GeminiThinkingConfig": {
+        "additionalProperties": false,
+        "description": "Typed shape of Gemini's thinking knob.",
+        "properties": {
+          "include_thoughts": {
+            "description": "Whether reasoning output is included in the response.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "description": "Reasoning token budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/GeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Gemini 3 reasoning level."
+          }
+        },
+        "type": "object"
+      },
+      "GeminiThinkingLevel": {
+        "description": "Gemini 3 reasoning levels accepted by the API.",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
       "HelperOptionsSpec": {
         "additionalProperties": false,
         "properties": {
@@ -27810,6 +29884,10 @@
         "description": "Opaque identifier for a persisted occurrence.",
         "type": "string"
       },
+      "OpaqueProviderBody": {
+        "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+        "type": "string"
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -27882,6 +29960,443 @@
           "other"
         ],
         "type": "string"
+      },
+      "ProviderParamsOverride": {
+        "additionalProperties": false,
+        "description": "Typed per-turn provider parameter overrides.\n\nReplaces the legacy untyped `serde_json::Value` bag. Every knob exposed\nby the runtime on a per-turn seam must have a typed field here. Anything\nprovider-specific enough to not fit goes on [`ProviderTag`]; anything\nthat is fundamentally per-binding (not per-turn) lives on the auth /\nbackend profile and never traverses this seam.",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ProviderTag": {
+        "description": "Provider-specific typed override payload carried on a single turn.\n\nEach provider family gets its own typed variant. Anything that does not\nfit a typed field belongs on the per-binding auth/backend profile, not\non the per-turn override — the per-turn seam carries only scalars the\nruntime can route authoritatively.\n\n`Unknown { bag }` is the typed escape hatch for V3 legacy-row\ndeserialize (see C-TM-V3): the untyped `serde_json::Value` thinking\ncarrier from pre-wave rows projects into `StructuredProviderExtension`\nrather than being silently dropped (persistence-migration.md §3.1,\nadversarial review flaw 5).",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Automatic compaction configuration."
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Context-window opt-in (1M beta)."
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Response-effort knob."
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Data-residency override for inference routing."
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces JSON-schema output envelope)."
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request even\nwhen the model profile says unsupported. Used by proxied /\ncustom deployments.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Extended-thinking configuration."
+              },
+              "thinking_budget_tokens": {
+                "description": "Legacy flat `thinking_budget_tokens` — preserved for V3\npersistence round-trip (single-key legacy projector) and for\ncallers that cannot express the full `thinking` shape.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "description": "Override top-k sampling.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside\n`tools` at the provider-runtime boundary."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.",
+            "properties": {
+              "chat_template_kwargs": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: `chat_template_kwargs` passthrough."
+              },
+              "frequency_penalty": {
+                "description": "Frequency penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "description": "Presence penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "seed": {
+                "description": "Deterministic-sampling seed.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces `text.format.json_schema`)."
+              },
+              "supports_reasoning_override": {
+                "description": "Internal override: force-enable reasoning payload for this\nrequest (used by client_compatible endpoints).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: vendor-specific `thinking` body\nforwarded verbatim."
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside `tools`."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
+            "properties": {
+              "candidate_count": {
+                "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native google_search grounding tool body."
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema."
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Thinking configuration (Gemini 3+ models)."
+              },
+              "thinking_budget": {
+                "description": "Legacy flat `thinking_budget` — preserved for V3 persistence\nround-trip.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Gemini 3 flat thinking level override."
+              },
+              "top_k": {
+                "description": "Top-K sampling override.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "description": "Top-P (nucleus) sampling override.",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Opaque pass-through for legacy-row knobs that don't (yet) map to a\ntyped variant. Carries the namespaced bag so a later wave can\npromote the structure to a typed variant without losing data.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReasoningEffort": {
+        "description": "Typed projection of OpenAI's reasoning-effort knob.",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "ReasoningMode": {
+        "description": "Typed mode for generalized reasoning emission.",
+        "oneOf": [
+          {
+            "const": "emit",
+            "description": "Reasoning output is emitted inline to the caller.",
+            "type": "string"
+          },
+          {
+            "const": "silent",
+            "description": "Reasoning is performed but not emitted.",
+            "type": "string"
+          },
+          {
+            "const": "off",
+            "description": "Reasoning is disabled entirely for this turn.",
+            "type": "string"
+          }
+        ]
       },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
@@ -28222,7 +30737,16 @@
               }
             ]
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "realm_id": {
             "type": [
               "string",
@@ -28364,6 +30888,29 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
       },
       "TargetBinding": {
         "oneOf": [
@@ -28576,6 +31123,145 @@
   },
   "ScheduleListResult": {
     "$defs": {
+      "AnthropicCompactionConfig": {
+        "description": "Typed shape of Anthropic's automatic-compaction knob.",
+        "oneOf": [
+          {
+            "description": "`\"auto\"` — provider picks trigger and instructions.",
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided edit body merged into the compact edit shape.\nFields like `trigger` / `instructions` are preserved verbatim.",
+            "properties": {
+              "edit": {
+                "$ref": "#/$defs/OpaqueProviderBody"
+              },
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicContextWindow": {
+        "description": "Typed shape of Anthropic's context-window opt-in.",
+        "oneOf": [
+          {
+            "const": "one_megabyte",
+            "description": "1M-token beta context window (2025-08-07 beta header).",
+            "type": "string"
+          }
+        ]
+      },
+      "AnthropicEffort": {
+        "description": "Typed shape of Anthropic's response-effort knob.\n`XHigh` is the Opus 4.8 / 4.7 extended-high effort level.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "x_high"
+        ],
+        "type": "string"
+      },
+      "AnthropicInferenceGeo": {
+        "description": "Typed shape of Anthropic's data-residency knob.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided region string — providers may accept region codes\nthis typed variant does not yet enumerate.",
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicThinkingConfig": {
+        "description": "Typed shape of Anthropic's extended-thinking knob.",
+        "oneOf": [
+          {
+            "description": "Adaptive thinking — provider picks the budget.",
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Explicit budget — model emits at most `budget_tokens` tokens of\nreasoning before the assistant text.",
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -28877,6 +31563,50 @@
           }
         ]
       },
+      "GeminiThinkingConfig": {
+        "additionalProperties": false,
+        "description": "Typed shape of Gemini's thinking knob.",
+        "properties": {
+          "include_thoughts": {
+            "description": "Whether reasoning output is included in the response.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "description": "Reasoning token budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/GeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Gemini 3 reasoning level."
+          }
+        },
+        "type": "object"
+      },
+      "GeminiThinkingLevel": {
+        "description": "Gemini 3 reasoning levels accepted by the API.",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
       "HelperOptionsSpec": {
         "additionalProperties": false,
         "properties": {
@@ -29111,6 +31841,10 @@
         "description": "Opaque identifier for a persisted occurrence.",
         "type": "string"
       },
+      "OpaqueProviderBody": {
+        "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+        "type": "string"
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -29183,6 +31917,443 @@
           "other"
         ],
         "type": "string"
+      },
+      "ProviderParamsOverride": {
+        "additionalProperties": false,
+        "description": "Typed per-turn provider parameter overrides.\n\nReplaces the legacy untyped `serde_json::Value` bag. Every knob exposed\nby the runtime on a per-turn seam must have a typed field here. Anything\nprovider-specific enough to not fit goes on [`ProviderTag`]; anything\nthat is fundamentally per-binding (not per-turn) lives on the auth /\nbackend profile and never traverses this seam.",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ProviderTag": {
+        "description": "Provider-specific typed override payload carried on a single turn.\n\nEach provider family gets its own typed variant. Anything that does not\nfit a typed field belongs on the per-binding auth/backend profile, not\non the per-turn override — the per-turn seam carries only scalars the\nruntime can route authoritatively.\n\n`Unknown { bag }` is the typed escape hatch for V3 legacy-row\ndeserialize (see C-TM-V3): the untyped `serde_json::Value` thinking\ncarrier from pre-wave rows projects into `StructuredProviderExtension`\nrather than being silently dropped (persistence-migration.md §3.1,\nadversarial review flaw 5).",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Automatic compaction configuration."
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Context-window opt-in (1M beta)."
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Response-effort knob."
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Data-residency override for inference routing."
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces JSON-schema output envelope)."
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request even\nwhen the model profile says unsupported. Used by proxied /\ncustom deployments.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Extended-thinking configuration."
+              },
+              "thinking_budget_tokens": {
+                "description": "Legacy flat `thinking_budget_tokens` — preserved for V3\npersistence round-trip (single-key legacy projector) and for\ncallers that cannot express the full `thinking` shape.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "description": "Override top-k sampling.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside\n`tools` at the provider-runtime boundary."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.",
+            "properties": {
+              "chat_template_kwargs": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: `chat_template_kwargs` passthrough."
+              },
+              "frequency_penalty": {
+                "description": "Frequency penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "description": "Presence penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "seed": {
+                "description": "Deterministic-sampling seed.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces `text.format.json_schema`)."
+              },
+              "supports_reasoning_override": {
+                "description": "Internal override: force-enable reasoning payload for this\nrequest (used by client_compatible endpoints).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: vendor-specific `thinking` body\nforwarded verbatim."
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside `tools`."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
+            "properties": {
+              "candidate_count": {
+                "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native google_search grounding tool body."
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema."
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Thinking configuration (Gemini 3+ models)."
+              },
+              "thinking_budget": {
+                "description": "Legacy flat `thinking_budget` — preserved for V3 persistence\nround-trip.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Gemini 3 flat thinking level override."
+              },
+              "top_k": {
+                "description": "Top-K sampling override.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "description": "Top-P (nucleus) sampling override.",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Opaque pass-through for legacy-row knobs that don't (yet) map to a\ntyped variant. Carries the namespaced bag so a later wave can\npromote the structure to a typed variant without losing data.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReasoningEffort": {
+        "description": "Typed projection of OpenAI's reasoning-effort knob.",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "ReasoningMode": {
+        "description": "Typed mode for generalized reasoning emission.",
+        "oneOf": [
+          {
+            "const": "emit",
+            "description": "Reasoning output is emitted inline to the caller.",
+            "type": "string"
+          },
+          {
+            "const": "silent",
+            "description": "Reasoning is performed but not emitted.",
+            "type": "string"
+          },
+          {
+            "const": "off",
+            "description": "Reasoning is disabled entirely for this turn.",
+            "type": "string"
+          }
+        ]
       },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
@@ -29589,7 +32760,16 @@
               }
             ]
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "realm_id": {
             "type": [
               "string",
@@ -29731,6 +32911,29 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
       },
       "TargetBinding": {
         "oneOf": [
@@ -29891,6 +33094,145 @@
   },
   "ScheduleOccurrencesResult": {
     "$defs": {
+      "AnthropicCompactionConfig": {
+        "description": "Typed shape of Anthropic's automatic-compaction knob.",
+        "oneOf": [
+          {
+            "description": "`\"auto\"` — provider picks trigger and instructions.",
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided edit body merged into the compact edit shape.\nFields like `trigger` / `instructions` are preserved verbatim.",
+            "properties": {
+              "edit": {
+                "$ref": "#/$defs/OpaqueProviderBody"
+              },
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicContextWindow": {
+        "description": "Typed shape of Anthropic's context-window opt-in.",
+        "oneOf": [
+          {
+            "const": "one_megabyte",
+            "description": "1M-token beta context window (2025-08-07 beta header).",
+            "type": "string"
+          }
+        ]
+      },
+      "AnthropicEffort": {
+        "description": "Typed shape of Anthropic's response-effort knob.\n`XHigh` is the Opus 4.8 / 4.7 extended-high effort level.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "x_high"
+        ],
+        "type": "string"
+      },
+      "AnthropicInferenceGeo": {
+        "description": "Typed shape of Anthropic's data-residency knob.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Caller-provided region string — providers may accept region codes\nthis typed variant does not yet enumerate.",
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicThinkingConfig": {
+        "description": "Typed shape of Anthropic's extended-thinking knob.",
+        "oneOf": [
+          {
+            "description": "Adaptive thinking — provider picks the budget.",
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Explicit budget — model emits at most `budget_tokens` tokens of\nreasoning before the assistant text.",
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -30279,6 +33621,50 @@
             "type": "object"
           }
         ]
+      },
+      "GeminiThinkingConfig": {
+        "additionalProperties": false,
+        "description": "Typed shape of Gemini's thinking knob.",
+        "properties": {
+          "include_thoughts": {
+            "description": "Whether reasoning output is included in the response.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "description": "Reasoning token budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/GeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Gemini 3 reasoning level."
+          }
+        },
+        "type": "object"
+      },
+      "GeminiThinkingLevel": {
+        "description": "Gemini 3 reasoning levels accepted by the API.",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "HelperOptionsSpec": {
         "additionalProperties": false,
@@ -30692,6 +34078,10 @@
         ],
         "type": "string"
       },
+      "OpaqueProviderBody": {
+        "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+        "type": "string"
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -30764,6 +34154,443 @@
           "other"
         ],
         "type": "string"
+      },
+      "ProviderParamsOverride": {
+        "additionalProperties": false,
+        "description": "Typed per-turn provider parameter overrides.\n\nReplaces the legacy untyped `serde_json::Value` bag. Every knob exposed\nby the runtime on a per-turn seam must have a typed field here. Anything\nprovider-specific enough to not fit goes on [`ProviderTag`]; anything\nthat is fundamentally per-binding (not per-turn) lives on the auth /\nbackend profile and never traverses this seam.",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ProviderTag": {
+        "description": "Provider-specific typed override payload carried on a single turn.\n\nEach provider family gets its own typed variant. Anything that does not\nfit a typed field belongs on the per-binding auth/backend profile, not\non the per-turn override — the per-turn seam carries only scalars the\nruntime can route authoritatively.\n\n`Unknown { bag }` is the typed escape hatch for V3 legacy-row\ndeserialize (see C-TM-V3): the untyped `serde_json::Value` thinking\ncarrier from pre-wave rows projects into `StructuredProviderExtension`\nrather than being silently dropped (persistence-migration.md §3.1,\nadversarial review flaw 5).",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Automatic compaction configuration."
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Context-window opt-in (1M beta)."
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Response-effort knob."
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Data-residency override for inference routing."
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces JSON-schema output envelope)."
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request even\nwhen the model profile says unsupported. Used by proxied /\ncustom deployments.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Extended-thinking configuration."
+              },
+              "thinking_budget_tokens": {
+                "description": "Legacy flat `thinking_budget_tokens` — preserved for V3\npersistence round-trip (single-key legacy projector) and for\ncallers that cannot express the full `thinking` shape.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "description": "Override top-k sampling.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside\n`tools` at the provider-runtime boundary."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.",
+            "properties": {
+              "chat_template_kwargs": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: `chat_template_kwargs` passthrough."
+              },
+              "frequency_penalty": {
+                "description": "Frequency penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "description": "Presence penalty (-2.0 .. 2.0).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "seed": {
+                "description": "Deterministic-sampling seed.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema (forces `text.format.json_schema`)."
+              },
+              "supports_reasoning_override": {
+                "description": "Internal override: force-enable reasoning payload for this\nrequest (used by client_compatible endpoints).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "description": "Internal override: force-enable temperature for this request.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI-compatible endpoints: vendor-specific `thinking` body\nforwarded verbatim."
+              },
+              "web_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native web-search tool body, injected alongside `tools`."
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
+            "properties": {
+              "candidate_count": {
+                "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpaqueProviderBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Provider-native google_search grounding tool body."
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Structured-output schema."
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Thinking configuration (Gemini 3+ models)."
+              },
+              "thinking_budget": {
+                "description": "Legacy flat `thinking_budget` — preserved for V3 persistence\nround-trip.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Gemini 3 flat thinking level override."
+              },
+              "top_k": {
+                "description": "Top-K sampling override.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "description": "Top-P (nucleus) sampling override.",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Opaque pass-through for legacy-row knobs that don't (yet) map to a\ntyped variant. Carries the namespaced bag so a later wave can\npromote the structure to a typed variant without losing data.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReasoningEffort": {
+        "description": "Typed projection of OpenAI's reasoning-effort knob.",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "ReasoningMode": {
+        "description": "Typed mode for generalized reasoning emission.",
+        "oneOf": [
+          {
+            "const": "emit",
+            "description": "Reasoning output is emitted inline to the caller.",
+            "type": "string"
+          },
+          {
+            "const": "silent",
+            "description": "Reasoning is performed but not emitted.",
+            "type": "string"
+          },
+          {
+            "const": "off",
+            "description": "Reasoning is disabled entirely for this turn.",
+            "type": "string"
+          }
+        ]
       },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
@@ -31112,7 +34939,16 @@
               }
             ]
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "realm_id": {
             "type": [
               "string",
@@ -31254,6 +35090,29 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
       },
       "TargetBinding": {
         "oneOf": [
@@ -31425,6 +35284,49 @@
       "tools"
     ],
     "title": "ScheduleToolsResult",
+    "type": "object"
+  },
+  "ServerCapabilities": {
+    "$defs": {
+      "ServerInfo": {
+        "description": "Basic server identity advertised by the RPC `initialize` handshake.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Capabilities returned by the RPC server during `initialize`.",
+    "properties": {
+      "contract_version": {
+        "type": "string"
+      },
+      "methods": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "server_info": {
+        "$ref": "#/$defs/ServerInfo"
+      }
+    },
+    "required": [
+      "server_info",
+      "contract_version",
+      "methods"
+    ],
+    "title": "ServerCapabilities",
     "type": "object"
   },
   "SessionExternalEventEnvelope": {
@@ -32376,6 +36278,115 @@
       }
     ],
     "title": "StreamReadStatus"
+  },
+  "SupervisorRotationIncompleteDataWire": {
+    "$defs": {
+      "SupervisorRotationIncompleteDetailsWire": {
+        "description": "Typed details of `MobError::SupervisorRotationIncomplete` on the wire.",
+        "properties": {
+          "attempted_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "attempted_public_peer_id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/SupervisorRotationIncompleteKind"
+          },
+          "pending_authority_process_local": {
+            "type": "boolean"
+          },
+          "pending_authority_recorded": {
+            "type": "boolean"
+          },
+          "previous_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retry_authority": {
+            "$ref": "#/$defs/SupervisorRotationRetryAuthority"
+          },
+          "retry_scope": {
+            "$ref": "#/$defs/SupervisorRotationRetryScope"
+          },
+          "rollback_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rollback_succeeded": {
+            "type": "boolean"
+          },
+          "rotated_peer_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "previous_epoch",
+          "attempted_epoch",
+          "attempted_public_peer_id",
+          "rotated_peer_count",
+          "rollback_succeeded",
+          "pending_authority_recorded",
+          "pending_authority_process_local",
+          "retry_authority",
+          "retry_scope"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationIncompleteKind": {
+        "description": "Discriminator kind for the supervisor-rotation-incomplete error details.",
+        "enum": [
+          "supervisor_rotation_incomplete"
+        ],
+        "type": "string"
+      },
+      "SupervisorRotationRetryAuthority": {
+        "description": "Which authority a supervisor-rotation retry validates against.",
+        "enum": [
+          "pending_rotation",
+          "process_local_pending_rotation",
+          "pre_rotation"
+        ],
+        "type": "string"
+      },
+      "SupervisorRotationRetryScope": {
+        "description": "Durability scope of a supervisor-rotation retry.",
+        "enum": [
+          "durable",
+          "same_process",
+          "pre_rotation"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "JSON-RPC `error.data` payload for an incomplete supervisor rotation.",
+    "properties": {
+      "code": {
+        "type": "string"
+      },
+      "details": {
+        "$ref": "#/$defs/SupervisorRotationIncompleteDetailsWire"
+      },
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "message",
+      "details"
+    ],
+    "title": "SupervisorRotationIncompleteDataWire",
+    "type": "object"
   },
   "SupervisorRotationReportWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -41710,6 +45721,44 @@
   },
   "WireMobProfile": {
     "$defs": {
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
@@ -41718,6 +45767,206 @@
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -41789,6 +46038,342 @@
           }
         },
         "type": "object"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -41855,7 +46440,16 @@
         ],
         "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
       },
-      "provider_params": true,
+      "provider_params": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireProviderParamsOverride"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "resume_overrides": {
         "description": "Profile fields that win over durable session metadata on resume.",
         "items": {
@@ -42306,6 +46900,181 @@
     ],
     "title": "WirePendingToolCall",
     "type": "object"
+  },
+  "WirePromptInput": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Discriminated (externally tagged) prompt-input wire shape.\n\nUnlike [`WireContentInput`] (untagged, for transcripts that already know\ntheir shape), this is the ingress contract for content-bearing surface\nexports: `{\"text\": \"...\"}` or `{\"blocks\": [...]}`. The tag is the\ndiscriminator — a plain-text prompt whose body happens to be valid\nblock-array JSON can never be misread as structured blocks (K19).",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "blocks"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WirePromptInput"
   },
   "WireProviderBinding": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -51538,6 +56307,21 @@
     ],
     "title": "WorkCompletionPolicy"
   },
+  "WorkEventsResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result envelope for work-event list reads (`workgraph/events`).",
+    "properties": {
+      "events": {
+        "items": true,
+        "type": "array"
+      }
+    },
+    "required": [
+      "events"
+    ],
+    "title": "WorkEventsResult",
+    "type": "object"
+  },
   "WorkGraphEventsResponse": {
     "$defs": {
       "WorkGraphEvent": {
@@ -52996,6 +57780,21 @@
       "item_id"
     ],
     "title": "WorkItemRef",
+    "type": "object"
+  },
+  "WorkItemsResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`).",
+    "properties": {
+      "items": {
+        "items": true,
+        "type": "array"
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "title": "WorkItemsResult",
     "type": "object"
   }
 }

@@ -90,6 +90,23 @@ pub enum RuntimeKeepAliveRequest {
     Preserve,
 }
 
+/// Machine-resolved keep-alive persistence decision.
+///
+/// The former `persist_keep_alive: bool` effect payload collapsed `Disable`
+/// (persist keep-alive = false) and `Preserve` (leave the existing setting
+/// unchanged) into the same `false`, so an explicit disable could never reach
+/// the durable session metadata. This closed tri-state is the canonical
+/// decision the shell mirrors: `PersistEnabled` writes `keep_alive = true`,
+/// `PersistDisabled` writes `keep_alive = false`, `PreserveExisting` writes
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAlivePersistenceDecision {
+    PersistEnabled,
+    PersistDisabled,
+    #[default]
+    PreserveExisting,
+}
+
 machine! {
     machine SessionTurnAdmissionMachine {
         version: 1,
@@ -153,7 +170,7 @@ machine! {
             CancelAfterBoundaryAuthorized,
             StartTurnDispositionResolved { disposition: Enum<StartTurnDisposition> },
             StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
-            RuntimeKeepAliveResolved { persist_keep_alive: bool },
+            RuntimeKeepAliveResolved { decision: Enum<RuntimeKeepAlivePersistenceDecision> },
             LiveInterruptRequired { required: bool },
         }
 
@@ -582,7 +599,7 @@ machine! {
             }
             update {}
             to Admitted
-            emit RuntimeKeepAliveResolved { persist_keep_alive: true }
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PersistEnabled }
         }
 
         transition ResolveRuntimeKeepAliveDisable {
@@ -593,7 +610,7 @@ machine! {
             }
             update {}
             to Admitted
-            emit RuntimeKeepAliveResolved { persist_keep_alive: false }
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PersistDisabled }
         }
 
         transition ResolveRuntimeKeepAlivePreserve {
@@ -604,7 +621,7 @@ machine! {
             }
             update {}
             to Admitted
-            emit RuntimeKeepAliveResolved { persist_keep_alive: false }
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting }
         }
 
         transition ResolveLiveInterruptRequiredSteer {

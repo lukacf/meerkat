@@ -7,7 +7,6 @@ import type {
   SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
-  SubscriptionLaggedEvent,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -25,22 +24,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Serialize a prompt into the discriminated `WireContentInput` carried by the
- * WASM `start_turn` boundary.
+ * Serialize a prompt into the tagged content-input wire shape carried by the
+ * WASM content-bearing exports.
  *
- * Both `ContentInput` and `WireContentInput` are untagged (string OR
- * `ContentBlock[]`), so the JSON *shape* is the discriminator: a plain string is
- * passed through verbatim as text, and block content is emitted as a JSON array
- * (`WireContentInput::Blocks`). The block array is JSON-encoded so the Rust side
- * deserializes it strictly and fails closed on malformed blocks rather than
- * misreading them as a single plain-text block.
+ * K19: the discriminator is the tag — `{"text": ...}` for plain text and
+ * `{"blocks": [...]}` for structured blocks. The Rust side parses the tagged
+ * shape fail-closed, so a plain-text prompt whose body happens to be valid
+ * block-array JSON can never be misread as structured blocks, and malformed
+ * blocks surface INVALID_PARAMS instead of being downgraded to text.
  */
 export function serializePromptContentInput(
   prompt: string | ContentBlock[],
 ): string {
-  // Plain text is passed through unquoted (it is not JSON-encoded), so a
-  // genuine string is never confused with structured block JSON.
-  return typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+  return typeof prompt === 'string'
+    ? JSON.stringify({ text: prompt })
+    : JSON.stringify({ blocks: prompt });
 }
 
 /**
@@ -101,24 +99,13 @@ function parseErrorEnvelope(
   return { code, message };
 }
 
-function normalizeSessionLaggedEvent(record: Record<string, unknown>): SubscriptionLaggedEvent {
-  const skipped = record.skipped;
-  if (typeof skipped !== 'number' || !Number.isFinite(skipped)) {
-    throw new Error('Invalid session event: lagged event missing skipped count');
-  }
-  return {
-    type: 'lagged',
-    skipped,
-  };
-}
-
 function normalizeSessionEvent(raw: unknown): SessionEvent {
   if (!isRecord(raw)) {
     throw new Error('Invalid session event: expected object');
   }
-  if (raw.type === 'lagged') {
-    return normalizeSessionLaggedEvent(raw);
-  }
+  // K19: a lagged receiver arrives as the generated `stream_truncated`
+  // AgentEvent — it flows through the generated-event inventory check below
+  // like every other event; there is no hand-modeled lag sentinel.
   if (typeof raw.type !== 'string' || raw.type.length === 0) {
     throw new Error('Invalid session event: missing type');
   }

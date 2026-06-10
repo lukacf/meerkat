@@ -173,7 +173,9 @@ pub use meerkat_core::{
 };
 
 // Re-export client types
-pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_client::{
+    FactoryError, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse,
+};
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,
@@ -285,6 +287,9 @@ pub use meerkat_session::{
 pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
+// Durable stored-event row (typed envelope identity) for replay surfaces.
+#[cfg(feature = "session-store")]
+pub use meerkat_session::event_store::StoredEvent;
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

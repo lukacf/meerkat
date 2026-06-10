@@ -64,13 +64,25 @@ pub struct StartTurnParams {
     #[serde(default)]
     pub structured_output_retries: Option<u32>,
     #[serde(default)]
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     #[serde(default)]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
 /// Parameters for `turn/interrupt` — canonical wire type from contracts.
 pub use meerkat_contracts::wire::InterruptParams;
+
+/// Result for `turn/interrupt` — canonical wire type from contracts.
+///
+/// Carries the generated interrupt public-result tri-state: a live run was
+/// cancelled (`interrupted`), or a staged (not-yet-promoted) session interrupt
+/// was a typed no-op terminal (`staged_noop`). NotFound/SessionBusy/Conflict
+/// remain typed JSON-RPC errors. This mirrors the REST surface exactly — the
+/// previous hand-shaped `{"interrupted": true}` claimed a live cancellation
+/// for every non-error outcome.
+pub use meerkat_contracts::wire::{InterruptResult, WireInterruptOutcome};
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -104,7 +116,9 @@ pub struct TurnOverrides {
     pub system_prompt: Option<String>,
     pub output_schema: Option<serde_json::Value>,
     pub structured_output_retries: Option<u32>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
@@ -267,8 +281,47 @@ pub async fn handle_interrupt(
         Err(resp) => return resp,
     };
 
+    // `SessionRuntime::interrupt` surfaces the generated interrupt
+    // public-result tri-state (Interrupted vs StagedNoop) for non-error
+    // outcomes; NotFound/SessionBusy/Conflict arrive as typed RpcErrors.
+    // The handler serializes the contracts `InterruptResult` wire type —
+    // no hand-shaped payloads — so RPC reports a staged-session no-op
+    // honestly instead of fabricating a live cancellation.
     match runtime.interrupt(&session_id).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+        Ok(outcome) => RpcResponse::success(
+            id,
+            InterruptResult::from_outcome(session_id.to_string(), outcome),
+        ),
         Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod interrupt_wire_tests {
+    use super::{InterruptResult, WireInterruptOutcome};
+
+    /// K17 regression: a staged-session interrupt must serialize as the
+    /// honest tri-state (`interrupted: false`, `result: staged_noop`) — RPC
+    /// and REST share the same generated wire contract, so the previous RPC
+    /// divergence (`{"interrupted": true}` for every Ok) cannot reappear.
+    #[test]
+    fn staged_noop_interrupt_serializes_honest_tri_state() {
+        let staged = InterruptResult::from_outcome(
+            "session-1".to_string(),
+            WireInterruptOutcome::StagedNoop,
+        );
+        let value = serde_json::to_value(&staged).unwrap();
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["interrupted"], false);
+        assert_eq!(value["result"], "staged_noop");
+
+        let interrupted = InterruptResult::from_outcome(
+            "session-1".to_string(),
+            WireInterruptOutcome::Interrupted,
+        );
+        let value = serde_json::to_value(&interrupted).unwrap();
+        assert_eq!(value["interrupted"], true);
+        assert_eq!(value["result"], "interrupted");
     }
 }

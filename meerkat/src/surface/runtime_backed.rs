@@ -5,7 +5,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunPrimitive, RuntimeTurnMetadata,
+    ConversationContextAppend, RunPrimitive, RuntimeTurnMetadata,
 };
 use meerkat_core::service::{
     DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest, StartTurnRuntimeSemantics,
@@ -111,21 +111,14 @@ pub fn split_runtime_backed_eager_create_request(
         return (request, None);
     }
 
-    let mut turn_metadata = request
+    // Dogma K10: `build.initial_turn_metadata` is the sole carrier of
+    // initial-turn render/skill facts — there is no request-level duplicate
+    // left to fold in.
+    let turn_metadata = request
         .build
         .as_mut()
         .and_then(|build| build.initial_turn_metadata.take())
         .unwrap_or_default();
-    if turn_metadata.render_metadata.is_none() {
-        turn_metadata.render_metadata = request.render_metadata.take();
-    } else {
-        request.render_metadata = None;
-    }
-    if turn_metadata.skill_references.is_none() {
-        turn_metadata.skill_references = request.skill_references.take();
-    } else {
-        request.skill_references = None;
-    }
 
     let prompt = std::mem::replace(
         &mut request.prompt,
@@ -626,26 +619,7 @@ fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| meerkat_core::PendingSystemContextAppend {
-            text: match &append.content {
-                CoreRenderable::Text { text } => text.clone(),
-                CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-                CoreRenderable::Json { value } => {
-                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-                }
-                CoreRenderable::Reference { uri, label } => match label {
-                    Some(label) => format!("{label}: {uri}"),
-                    None => uri.clone(),
-                },
-                CoreRenderable::SystemNotice { kind, body, blocks } => {
-                    meerkat_core::types::SystemNoticeMessage::with_blocks(
-                        *kind,
-                        body.clone(),
-                        blocks.clone(),
-                    )
-                    .model_projection_text()
-                }
-                _ => String::new(),
-            },
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             // Durable keyed conversation context append — not a transient steer.
@@ -876,6 +850,7 @@ fn ensure_materialized_session_id_matches(
 #[cfg(test)]
 mod typed_transcript_contract_tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
 
     #[test]
     fn start_turn_request_carries_typed_turn_appends() {
@@ -914,6 +889,7 @@ mod typed_transcript_contract_tests {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
     use meerkat_core::service::SessionService;
 
     #[cfg(all(
@@ -1034,11 +1010,9 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: Some("surface runtime regression".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -1052,7 +1026,10 @@ mod tests {
             .unwrap_or_default()
             .applied()
             .iter()
-            .any(|append| append.source.as_deref() == Some(source) && append.text.contains(text))
+            .any(|append| {
+                append.source.as_deref() == Some(source)
+                    && append.content.render_text().contains(text)
+            })
     }
 
     fn runtime_output_session_snapshot(output: &CoreApplyOutput) -> Session {
@@ -2059,7 +2036,7 @@ mod tests {
 
         match failed {
             AgentEvent::RunFailed {
-                error_report: Some(report),
+                error_report: report,
                 ..
             } => {
                 assert_eq!(report.class, meerkat_core::event::AgentErrorClass::Llm);

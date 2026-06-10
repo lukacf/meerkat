@@ -337,7 +337,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             .output_schema
             .as_ref()
             .map(|schema| schema.as_value().clone()),
-        provider_params: profile.provider_params.clone(),
+        provider_params: profile.provider_params.clone().map(Into::into),
     }
 }
 
@@ -3797,12 +3797,10 @@ impl MobHandle {
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test generated mob operation owner"),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 labels: None,

@@ -666,6 +666,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             terminal_cause_kind: state.terminal_cause_kind.map(Into::into),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
+            extraction_active: state.extraction_active,
             llm_retry_attempt: u32::try_from(state.llm_retry_attempt)
                 .expect("generated MeerkatMachine llm_retry_attempt must fit u32"),
             llm_retry_max_retries: u32::try_from(state.llm_retry_max_retries)

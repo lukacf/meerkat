@@ -53,6 +53,14 @@ pub enum RuntimeKeepAliveRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAlivePersistenceDecision {
+    PersistEnabled,
+    PersistDisabled,
+    #[default]
+    PreserveExisting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum TurnHandlingMode {
     #[default]
     Queue,
@@ -109,7 +117,7 @@ pub enum SessionTurnAdmissionEffect {
         terminal: StartTurnPublicTerminal,
     },
     RuntimeKeepAliveResolved {
-        persist_keep_alive: bool,
+        decision: RuntimeKeepAlivePersistenceDecision,
     },
     LiveInterruptRequired {
         required: bool,
@@ -769,19 +777,19 @@ impl SessionTurnAdmissionMachineAuthority {
                     SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveEnable => {
                         self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
-                            persist_keep_alive: true,
+                            decision: RuntimeKeepAlivePersistenceDecision::PersistEnabled,
                         }])
                     }
                     SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveDisable => {
                         self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
-                            persist_keep_alive: false,
+                            decision: RuntimeKeepAlivePersistenceDecision::PersistDisabled,
                         }])
                     }
                     SessionTurnAdmissionTransition::ResolveRuntimeKeepAlivePreserve => {
                         self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
-                            persist_keep_alive: false,
+                            decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting,
                         }])
                     }
                     #[allow(unreachable_patterns)]

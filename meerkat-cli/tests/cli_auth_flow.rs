@@ -571,7 +571,7 @@ fn rkat_auth_profile_list_returns_cleanly_for_empty_realm() {
 }
 
 /// `rkat run --auth-binding realm:binding "hi"` without a configured
-/// realm must return a typed `ConnectionResolution` error, not an
+/// realm must return a typed `LlmClient` connection-target error, not an
 /// `unknown argument` or panic. This proves the flag is registered and
 /// flows into build_agent.
 ///

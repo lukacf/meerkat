@@ -13,7 +13,7 @@ use crate::session::TranscriptRewriteRecord;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
-use crate::types::{ContentBlock, ContentInput, ServerToolKind, SessionId, StopReason, Usage};
+use crate::types::{ContentBlock, RunInput, ServerToolKind, SessionId, StopReason, Usage};
 use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,11 @@ impl fmt::Display for ToolCallArgumentsError {
 impl std::error::Error for ToolCallArgumentsError {}
 
 impl ToolCallArguments {
+    /// The canonical empty argument object (`{}`).
+    pub fn empty() -> Self {
+        Self(Value::Object(serde_json::Map::new()))
+    }
+
     pub fn from_value(value: Value) -> Result<Self, ToolCallArgumentsError> {
         if value.is_object() {
             Ok(Self(value))
@@ -1544,6 +1549,15 @@ pub enum StreamTruncationReason {
         /// Number of events skipped by the lagging receiver.
         dropped: u64,
     },
+    /// A live transport failed to deliver queued output-audio packets
+    /// (e.g. WebRTC RTP pacing-queue backpressure). K16: delivery
+    /// degradation is a typed, session-observable fact — never a
+    /// transport-local counter.
+    OutputAudioDegraded {
+        /// Cumulative count of output-audio packets dropped on this
+        /// session's live channel.
+        dropped: u64,
+    },
 }
 
 impl std::fmt::Display for StreamTruncationReason {
@@ -1553,6 +1567,10 @@ impl std::fmt::Display for StreamTruncationReason {
             Self::StreamLagged { dropped } => write!(
                 f,
                 "event stream lagged; {dropped} events dropped (terminal event remains authoritative)"
+            ),
+            Self::OutputAudioDegraded { dropped } => write!(
+                f,
+                "live output-audio delivery degraded; {dropped} packets dropped"
             ),
         }
     }
@@ -1624,7 +1642,9 @@ pub enum AgentEvent {
     /// Agent run started
     RunStarted {
         session_id: SessionId,
-        prompt: ContentInput,
+        /// Typed run input: caller content, or the pending tool-results
+        /// continuation variant (no fabricated empty prompt).
+        input: RunInput,
     },
 
     /// Agent run completed successfully
@@ -1663,13 +1683,13 @@ pub enum AgentEvent {
     /// Agent run failed
     RunFailed {
         session_id: SessionId,
-        error_class: AgentErrorClass,
-        /// Display projection of `error_report.message`.
-        error: String,
+        /// Typed failure fact (class + reason + display message). This is the
+        /// single owner of the failure truth on the run boundary; there is no
+        /// separately-carried `error` string or `error_class` mirror — wire
+        /// consumers read `error_report.class` / `error_report.message`.
+        error_report: AgentErrorReport,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error_report: Option<AgentErrorReport>,
     },
 
     // === Hook Lifecycle ===
@@ -2566,7 +2586,7 @@ mod tests {
     #[cfg(feature = "schema")]
     #[test]
     fn tool_config_changed_payload_schema_requires_typed_status_authority() {
-        let schema = serde_json::to_value(schemars::schema_for!(ToolConfigChangedPayload)).unwrap();
+        let schema = crate::schema::tool_input_schema_for::<ToolConfigChangedPayload>();
         let required = schema["required"].as_array().expect("required array");
 
         assert!(
@@ -2589,7 +2609,9 @@ mod tests {
         let events = vec![
             AgentEvent::RunStarted {
                 session_id: SessionId::new(),
-                prompt: ContentInput::Text("Hello".to_string()),
+                input: RunInput::Content {
+                    content: crate::types::ContentInput::Text("Hello".to_string()),
+                },
             },
             AgentEvent::TextDelta {
                 delta: "chunk".to_string(),
@@ -2651,14 +2673,12 @@ mod tests {
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
-                error_class: AgentErrorClass::Budget,
-                error: "Budget exceeded".to_string(),
-                terminal_cause_kind: None,
-                error_report: Some(AgentErrorReport {
+                error_report: AgentErrorReport {
                     class: AgentErrorClass::Budget,
                     reason: None,
                     message: "Budget exceeded".to_string(),
-                }),
+                },
+                terminal_cause_kind: None,
             },
             AgentEvent::CompactionStarted {
                 input_tokens: 120_000,
@@ -2935,6 +2955,43 @@ mod tests {
         assert!(value.get("delay_ms").is_none());
     }
 
+    /// K3 invariant: `RunFailed` carries the typed `AgentErrorReport` as its
+    /// only failure truth — no bare `error` string or `error_class` mirror
+    /// travels beside it on the wire.
+    #[test]
+    fn run_failed_carries_typed_report_without_string_mirrors() {
+        let event = AgentEvent::RunFailed {
+            session_id: SessionId::new(),
+            error_report: AgentErrorReport {
+                class: AgentErrorClass::Llm,
+                reason: None,
+                message: "typed failure".to_string(),
+            },
+            terminal_cause_kind: None,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["error_report"]["class"], "llm");
+        assert_eq!(value["error_report"]["message"], "typed failure");
+        assert!(value.get("error").is_none(), "no error string mirror");
+        assert!(
+            value.get("error_class").is_none(),
+            "no error_class mirror beside the typed report"
+        );
+    }
+
+    /// K3 invariant: `RunStarted` for a pending-continuation run serializes
+    /// the typed variant, never an empty-string prompt.
+    #[test]
+    fn run_started_pending_tail_serializes_typed_variant() {
+        let event = AgentEvent::RunStarted {
+            session_id: SessionId::new(),
+            input: RunInput::PendingToolResults,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["input"]["kind"], "pending_tool_results");
+        assert!(value.get("prompt").is_none(), "no fabricated prompt field");
+    }
+
     #[test]
     fn skill_resolution_failed_carries_typed_key_and_reason_with_legacy_mirrors() {
         let key = SkillKey::builtin(SkillName::parse("test-skill").unwrap());
@@ -3111,7 +3168,9 @@ mod tests {
         let events = vec![
             AgentEvent::RunStarted {
                 session_id: SessionId::new(),
-                prompt: ContentInput::Text("Hello".to_string()),
+                input: RunInput::Content {
+                    content: crate::types::ContentInput::Text("Hello".to_string()),
+                },
             },
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
@@ -3123,14 +3182,12 @@ mod tests {
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
-                error_class: AgentErrorClass::Internal,
-                error: "failed".to_string(),
-                terminal_cause_kind: None,
-                error_report: Some(AgentErrorReport {
+                error_report: AgentErrorReport {
                     class: AgentErrorClass::Internal,
                     reason: None,
                     message: "failed".to_string(),
-                }),
+                },
+                terminal_cause_kind: None,
             },
             AgentEvent::HookStarted {
                 hook_id: HookId::new("hook-1"),

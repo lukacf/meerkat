@@ -2,13 +2,13 @@ import { Mob, parseMobStatusResult } from './mob.js';
 import { Session } from './session.js';
 import type {
   RuntimeConfig,
-  InitResult,
   SessionConfig,
   MobDefinition,
   JsonSchema,
   ToolCallback,
   MobStatus,
 } from './types.js';
+import { parseInitResult } from './generated/runtime.js';
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
@@ -138,10 +138,10 @@ export interface WasmModule {
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (streamId: string) => string;
+  close_subscription: (streamId: string) => void;
   wire_cross_mob: (
     mobA: string,
     meerkatA: string,
@@ -194,7 +194,8 @@ export class MeerkatRuntime {
 
     const configJson = JSON.stringify(toWasmConfig(config));
     const resultJson = wasm.init_runtime_from_config(configJson);
-    const result = JSON.parse(resultJson) as InitResult;
+    // K19: parse via the generated fail-closed guard — no blind cast.
+    const result = parseInitResult(resultJson);
 
     if (result.status !== 'initialized') {
       throw new Error(`Runtime initialization failed: ${resultJson}`);
@@ -227,7 +228,8 @@ export class MeerkatRuntime {
 
     const credentialsJson = JSON.stringify(toWasmConfig(config));
     const resultJson = wasm.init_runtime(mobpackBytes, credentialsJson);
-    const result = JSON.parse(resultJson) as InitResult;
+    // K19: parse via the generated fail-closed guard — no blind cast.
+    const result = parseInitResult(resultJson);
 
     if (result.status !== 'initialized') {
       throw new Error(`Runtime initialization failed: ${resultJson}`);

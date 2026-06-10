@@ -10,13 +10,13 @@ function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
     runtime_version: () => '0.7.0-alpha.0',
-    init_runtime_from_config: () => JSON.stringify({ status: 'initialized' }),
+    init_runtime_from_config: () => JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
       return JSON.parse(definitionJson).id;
     },
     async mob_subscribe_events() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return '[]';
@@ -63,10 +63,10 @@ function canonicalEnvelope(overrides = {}) {
 function makeSubscriptionMob(pollSubscription) {
   return new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription: pollSubscription,
     close_subscription: () => undefined,
@@ -92,7 +92,7 @@ async function runtimeWithMobList(payload) {
         return '0.7.0-alpha.0';
       },
       init_runtime_from_config() {
-        return JSON.stringify({ status: 'initialized' });
+        return JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] });
       },
       async mob_list() {
         return JSON.stringify(payload);
@@ -292,7 +292,7 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
 test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads', async () => {
   const envelope = canonicalEnvelope();
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([envelope]);
   });
 
@@ -319,7 +319,7 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
     envelope,
   };
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+    assert.equal(handle, 'stream-2');
     return JSON.stringify([attributed]);
   });
 
@@ -360,7 +360,7 @@ test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () 
     },
   };
   const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+    if (handle === 'stream-1') {
       return JSON.stringify([sourceIdOnly]);
     }
     return JSON.stringify([
@@ -390,7 +390,7 @@ test('Mob subscriptions reject malformed typed EventEnvelope source instead of t
     source_id: 'session:00000000-0000-4000-8000-000000000001',
   });
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([malformedSource]);
   });
 
@@ -407,7 +407,7 @@ test('Mob subscriptions keep legacy source_id inert when typed source disagrees'
     source_id: 'session:not-a-uuid',
   });
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([envelope]);
   });
 
@@ -433,7 +433,7 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
     },
   };
   const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+    if (handle === 'stream-1') {
       return JSON.stringify([legacyMemberEnvelope]);
     }
     return JSON.stringify([
@@ -457,7 +457,7 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
 
 test('Mob.subscribeEvents rejects legacy string sources instead of hiding runtime generation', async () => {
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+    assert.equal(handle, 'stream-2');
     return JSON.stringify([
       {
         source: 'worker-runtime',
@@ -507,10 +507,21 @@ test('Session direct polling fails closed on an unknown event type instead of ca
   );
 });
 
-test('Session direct polling preserves the lagged sentinel without event-type validation', () => {
-  const session = makeDirectSession(() => JSON.stringify([{ type: 'lagged', skipped: 3 }]));
+test('Session direct polling surfaces a lag gap as the generated stream_truncated event', () => {
+  // K19: the lag contract is the generated `stream_truncated` AgentEvent
+  // (reason `stream_lagged`) — the hand `{type:'lagged'}` sentinel is gone,
+  // and the legacy sentinel now fails event-type validation like any other
+  // unknown discriminant.
+  const truncated = {
+    type: 'stream_truncated',
+    reason: { kind: 'stream_lagged', dropped: 3 },
+  };
+  const session = makeDirectSession(() => JSON.stringify([truncated]));
 
-  assert.deepEqual(session.pollEvents(), [{ type: 'lagged', skipped: 3 }]);
+  assert.deepEqual(session.pollEvents(), [truncated]);
+
+  const legacy = makeDirectSession(() => JSON.stringify([{ type: 'lagged', skipped: 3 }]));
+  assert.throws(() => legacy.pollEvents(), /unknown event type "lagged"/);
 });
 
 test('Session direct polling fails closed on a structurally invalid skills_resolved event', () => {
@@ -971,7 +982,7 @@ test('Mob.respawn rejects legacy receipt carriers instead of projecting success'
 test('Mob event decoders reject malformed envelopes instead of synthesizing unknown events', async () => {
   const memberMob = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return JSON.stringify([{ event: { type: 'text_delta', delta: 'legacy' } }]);
@@ -986,7 +997,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const metadataLightMember = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 3;
+      return 'stream-3';
     },
     poll_subscription() {
       return JSON.stringify([{ payload: { type: 'turn_completed' } }]);
@@ -1003,7 +1014,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const mobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -1024,7 +1035,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const metadataLightMobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 4;
+      return 'stream-4';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -1063,7 +1074,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 test('Mob event decoders preserve generated payload envelopes', async () => {
   const memberMob = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -1090,7 +1101,7 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
 
   const mobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -1126,20 +1137,32 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
   assert.equal(mobEvent.envelope.payload.type, 'turn_completed');
 });
 
-// ── Row #39: prompt content is emitted as a discriminated WireContentInput ──
+// ── Row #39 / K19: prompt content is emitted as the tagged content-input
+// wire shape ({"text": ...} | {"blocks": [...]}) — the tag is the
+// discriminator, never JSON shape-sniffing of a raw string. ──────────────────
 
-test('serializePromptContentInput passes a plain string through as text', () => {
-  assert.equal(serializePromptContentInput('hello world'), 'hello world');
+test('serializePromptContentInput emits plain text as the tagged {text} shape', () => {
+  assert.deepEqual(JSON.parse(serializePromptContentInput('hello world')), {
+    text: 'hello world',
+  });
 });
 
-test('serializePromptContentInput emits block content as a JSON array (WireContentInput::Blocks)', () => {
+test('serializePromptContentInput emits block content as the tagged {blocks} shape', () => {
   const blocks = [{ type: 'text', text: 'hi' }];
-  const serialized = serializePromptContentInput(blocks);
-  // A JSON array is the untagged Blocks discriminator; round-trips losslessly.
-  assert.deepEqual(JSON.parse(serialized), blocks);
+  assert.deepEqual(JSON.parse(serializePromptContentInput(blocks)), { blocks });
 });
 
-test('Session.turn forwards discriminated block JSON to the WASM boundary', async () => {
+test('serializePromptContentInput keeps text that looks like block JSON as TEXT', () => {
+  // K19 regression: a plain-text prompt whose body is itself valid
+  // block-array JSON must stay tagged text — it can never be misread as
+  // structured blocks by the WASM boundary.
+  const sneaky = JSON.stringify([{ type: 'text', text: 'hi' }]);
+  assert.deepEqual(JSON.parse(serializePromptContentInput(sneaky)), {
+    text: sneaky,
+  });
+});
+
+test('Session.turn forwards tagged block JSON to the WASM boundary', async () => {
   let forwardedPrompt;
   const session = new Session(
     7,
@@ -1158,9 +1181,8 @@ test('Session.turn forwards discriminated block JSON to the WASM boundary', asyn
     { type: 'image', media_type: 'image/png', data: 'QUJD' },
   ];
   await session.turn(blocks);
-  // The Rust side deserializes this strictly; it is a JSON array, not a
-  // single plain-text block.
-  assert.deepEqual(JSON.parse(forwardedPrompt), blocks);
+  // The Rust side deserializes the tagged shape strictly and fails closed.
+  assert.deepEqual(JSON.parse(forwardedPrompt), { blocks });
 });
 
 // ── Row #215: destroyed/torn-down handles are classified by typed code ──────

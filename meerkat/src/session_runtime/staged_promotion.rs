@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
-use meerkat_core::lifecycle::run_primitive::{ConversationContextAppend, CoreRenderable};
+use meerkat_core::lifecycle::run_primitive::ConversationContextAppend;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::RunResult;
 use meerkat_core::types::SessionId;
@@ -54,36 +54,6 @@ pub type ReplayPromotedSystemContextFn = Arc<
 /// hook slot into this callback shape.
 pub type PreTurnHookFn = Arc<dyn Fn() -> BoxFut<'static, ()> + Send + Sync>;
 
-/// Render a [`CoreRenderable`] into the plain-text representation
-/// embedded in [`PendingSystemContextAppend::text`]. Mirrors the
-/// long-standing helper that lives next to
-/// `pending_system_context_appends`; pulled into a free function so the
-/// staged-promotion flow does not need to be re-imported by every
-/// surface that builds appends.
-#[must_use]
-pub fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
 /// Convert a slice of [`ConversationContextAppend`] entries into the
 /// runtime-side [`PendingSystemContextAppend`] vector that staged
 /// promotion replays into the session service after a turn commits.
@@ -95,7 +65,7 @@ pub fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             // Durable keyed conversation context append — not a transient steer.

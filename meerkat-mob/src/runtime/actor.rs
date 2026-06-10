@@ -18297,18 +18297,26 @@ impl MobActor {
                                 peer_spec.peer_id,
                                 peer_spec.name.clone(),
                             );
+                            // K15: lifecycle params are the typed wire
+                            // contract (`CommsPeerLifecycleParams`); no
+                            // shadow `peer_name`/`peer_id`/`address` mirrors.
+                            let params = meerkat_contracts::CommsPeerLifecycleParams {
+                                peer: agent_identity.as_str().to_string(),
+                                role: Some(role.as_str().to_string()),
+                                description: Some(peer_description),
+                                peer_spec: Some(
+                                    super::bridge_protocol::BridgePeerSpec::from(spawned_spec),
+                                ),
+                            };
+                            let params = serde_json::to_value(&params).map_err(|error| {
+                                MobError::WiringError(format!(
+                                    "failed to serialize peer lifecycle params for '{agent_identity}': {error}"
+                                ))
+                            })?;
                             let cmd = CommsCommand::PeerLifecycle {
                                 to: peer_route,
                                 kind: PeerLifecycleKind::PeerAdded,
-                                params: serde_json::json!({
-                                    "peer": agent_identity.as_str(),
-                                    "role": role.as_str(),
-                                    "description": peer_description,
-                                    "peer_name": spawned_spec.name,
-                                    "peer_id": spawned_spec.peer_id,
-                                    "address": spawned_spec.address,
-                                    "peer_spec": spawned_spec,
-                                }),
+                                params,
                             };
                             spawned_sender.send(cmd).await?;
                             Ok(())
@@ -18832,18 +18840,25 @@ impl MobActor {
         let peer_route =
             PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
 
+        // K15: lifecycle params are the typed wire contract
+        // (`CommsPeerLifecycleParams`) — `peer_spec` carries the canonical
+        // typed peer identity; no shadow `peer_name`/`peer_id`/`address`
+        // mirror fields.
+        let params = meerkat_contracts::CommsPeerLifecycleParams {
+            peer: new_peer_id.as_str().to_string(),
+            role: Some(new_peer_entry.role.as_str().to_string()),
+            description: Some(peer_description),
+            peer_spec: Some(super::bridge_protocol::BridgePeerSpec::from(new_peer_spec)),
+        };
+        let params = serde_json::to_value(&params).map_err(|error| {
+            MobError::WiringError(format!(
+                "failed to serialize peer lifecycle params for '{new_peer_id}': {error}"
+            ))
+        })?;
         let cmd = CommsCommand::PeerLifecycle {
             to: peer_route,
             kind: PeerLifecycleKind::PeerAdded,
-            params: serde_json::json!({
-                "peer": new_peer_id.as_str(),
-                "role": new_peer_entry.role.as_str(),
-                "description": peer_description,
-                "peer_name": new_peer_spec.name,
-                "peer_id": new_peer_spec.peer_id,
-                "address": new_peer_spec.address,
-                "peer_spec": new_peer_spec,
-            }),
+            params,
         };
 
         sender_comms.send(cmd).await?;
@@ -18887,14 +18902,23 @@ impl MobActor {
         let peer_route =
             PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
 
-        let params = serde_json::json!({
-            "peer": other_peer_id.as_str(),
-            "role": other_peer_entry.role.as_str(),
-            "peer_name": other_peer_spec.name.clone(),
-            "peer_id": other_peer_spec.peer_id,
-            "address": other_peer_spec.address.clone(),
-            "peer_spec": other_peer_spec.clone(),
-        });
+        // K15: lifecycle params are the typed wire contract
+        // (`CommsPeerLifecycleParams`) — `peer_spec` carries the canonical
+        // typed peer identity; no shadow `peer_name`/`peer_id`/`address`
+        // mirror fields.
+        let params = meerkat_contracts::CommsPeerLifecycleParams {
+            peer: other_peer_id.as_str().to_string(),
+            role: Some(other_peer_entry.role.as_str().to_string()),
+            description: None,
+            peer_spec: Some(super::bridge_protocol::BridgePeerSpec::from(
+                other_peer_spec.clone(),
+            )),
+        };
+        let params = serde_json::to_value(&params).map_err(|error| {
+            MobError::WiringError(format!(
+                "failed to serialize peer lifecycle params for '{other_peer_id}': {error}"
+            ))
+        })?;
 
         let cmd = match intent {
             "mob.peer_retired" => CommsCommand::PeerLifecycle {

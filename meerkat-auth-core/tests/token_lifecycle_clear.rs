@@ -2,10 +2,11 @@
 //!
 //! The durable token record carries the machine-stamped lifecycle marker, so
 //! `store.clear` is the single atomic durable boundary: one mutation destroys
-//! the credential and its lifecycle publication together. The in-process lease
-//! is a projection of that durable truth — these tests pin the durable-first
-//! ordering (no compensation window) and the rehydrate self-heal that releases
-//! a lease whose durable record is gone.
+//! the credential and its lifecycle publication together. The lease release
+//! is STAGED before that commit (and rolled back if the commit fails), so no
+//! lease operation ever runs after the durable credential is gone. These
+//! tests pin the stage-then-commit ordering and the rehydrate self-heal that
+//! releases a lease whose durable record is gone.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -85,9 +86,9 @@ fn lease_phase(
     (snapshot.credential_present, snapshot.phase)
 }
 
-/// A token store whose `clear` fails: used to prove the durable-first ordering
-/// leaves BOTH the durable record and the lease untouched on clear failure
-/// (no half-committed split, no compensation needed).
+/// A token store whose `clear` fails: used to prove a failed durable commit
+/// leaves the durable record untouched and rolls the staged lease release
+/// back to live — lease truth re-aligns with durable truth.
 struct FailingClearStore {
     inner: EphemeralTokenStore,
     fail_clear: AtomicBool,
@@ -156,9 +157,8 @@ async fn failed_clear_changes_nothing_durable_or_projected() {
         .expect_err("injected clear failure must propagate");
     assert!(matches!(err, TokenLifecycleClearError::TokenStoreClear(_)));
 
-    // Durable-first ordering: the failed clear is the FIRST step, so neither
-    // the durable record nor the lease projection moved — no split state, no
-    // compensation window.
+    // Stage-then-commit ordering: the durable commit failed, so the staged
+    // lease release is rolled back — durable record untouched, lease live.
     assert!(
         store.load(&key).await.unwrap().is_some(),
         "durable record must be untouched after failed clear"
@@ -166,7 +166,7 @@ async fn failed_clear_changes_nothing_durable_or_projected() {
     let (credential_present, phase) = lease_phase(&handle, &auth_binding);
     assert!(
         credential_present && phase.is_some_and(|p| p != AuthLeasePhase::Released),
-        "lease must remain live when the durable record was not cleared, got {phase:?}"
+        "staged release must be rolled back when the durable clear failed, got {phase:?}"
     );
 }
 

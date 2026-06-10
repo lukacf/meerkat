@@ -1296,18 +1296,22 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         "output_recorded",
         "node_condition_results",
     ];
+    // Forbidden projection CAS-writer *method names* — resolved structurally
+    // (method-call / UFCS callee idents in the AST), never as line-text
+    // substrings, so comments/strings cannot false-positive and a call split
+    // across lines is still caught.
     let forbidden_projection_cas_writes = [
-        ".cas_flow_state(",
-        ".cas_run_snapshot(",
-        ".cas_frame_state(",
-        ".cas_complete_step_and_record_output(",
-        ".cas_loop_state(",
-        ".cas_grant_node_slot(",
-        ".cas_start_loop(",
-        ".cas_grant_body_frame_start(",
-        ".cas_complete_body_frame(",
-        ".cas_loop_request_body_frame(",
-        ".cas_complete_loop(",
+        "cas_flow_state",
+        "cas_run_snapshot",
+        "cas_frame_state",
+        "cas_complete_step_and_record_output",
+        "cas_loop_state",
+        "cas_grant_node_slot",
+        "cas_start_loop",
+        "cas_grant_body_frame_start",
+        "cas_complete_body_frame",
+        "cas_loop_request_body_frame",
+        "cas_complete_loop",
     ];
 
     for path in production_rust_source_paths(root)? {
@@ -1318,27 +1322,28 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         let lines = contents.lines().collect::<Vec<_>>();
         let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
 
-        // The transition-call, reducer-`Input`-construction, and
-        // projection-field-write detections are AST-derived: the visitor
-        // matches the banned *semantic shape* (a call whose callee path
-        // resolves to `module::transition`, an enum-variant path under
-        // `module::Input`, a place-expression assignment / mutating method
-        // call into `.flow_state.<field>` / `.kernel_state.<field>`) rather
-        // than a substring of the raw line. A token rename that keeps the
-        // banned relationship still fails, a banned token in a comment/string
-        // no longer false-positives, and a write split across lines is still
-        // caught. Import aliases (`use module as alias`, `use module::{...}`,
-        // glob) are resolved structurally from the `use` AST. `#[cfg(test)]`
-        // items are dropped structurally before the walk, mirroring the
-        // peer-response-terminal AST visitors. The CAS store-write detection
-        // (which keys off a finely-tuned multi-line allow-list of typed
-        // outcome / store-plan commits) stays line-based below.
+        // The transition-call, reducer-`Input`-construction,
+        // projection-field-write, and CAS store-write detections are
+        // AST-derived: the visitor matches the banned *semantic shape* (a
+        // call whose callee path resolves to `module::transition`, an
+        // enum-variant path under `module::Input`, a place-expression
+        // assignment / mutating method call into `.flow_state.<field>` /
+        // `.kernel_state.<field>`, a method/UFCS call whose callee ident is a
+        // forbidden `cas_*` projection writer) rather than a substring of the
+        // raw line. A token rename that keeps the banned relationship still
+        // fails, a banned token in a comment/string no longer
+        // false-positives, and a write split across lines is still caught.
+        // Import aliases (`use module as alias`, `use module::{...}`, glob)
+        // are resolved structurally from the `use` AST. `#[cfg(test)]` items
+        // are dropped structurally before the walk, mirroring the
+        // peer-response-terminal AST visitors.
         if let Ok(parsed) = parse_production_file(&contents) {
             let aliases = collect_flow_reducer_use_aliases(&parsed, forbidden_modules);
             let mut visitor = FlowReducerTransitionVisitor::new(
                 &aliases,
                 &forbidden_flow_projection_fields,
                 &forbidden_frame_projection_fields,
+                &forbidden_projection_cas_writes,
             );
             visitor.visit_file(&parsed);
             for hit in visitor.hits {
@@ -1360,29 +1365,16 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
                         )
                     }
                     FlowReducerHitKind::ProjectionWrite => false,
+                    FlowReducerHitKind::CasStoreWrite => {
+                        flow_reducer_projection_commit_is_structurally_allowed(
+                            &rel, &lines, line_index,
+                        )
+                    }
                 };
                 if allowed {
                     continue;
                 }
                 mismatches.push(format!("{}: {rel}:{}", hit.message, hit.line));
-            }
-        }
-
-        for (line_index, line) in lines.iter().enumerate() {
-            if test_only_lines[line_index] {
-                continue;
-            }
-            for token in forbidden_projection_cas_writes {
-                if line.contains(token)
-                    && !flow_reducer_projection_commit_is_structurally_allowed(
-                        &rel, &lines, line_index,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
             }
         }
     }
@@ -1523,9 +1515,17 @@ impl<'ast> Visit<'ast> for FlowReducerUseVisitor<'_> {
 
 /// What kind of banned flow-reducer relationship a visitor hit represents.
 enum FlowReducerHitKind {
-    Transition { module: String },
-    Input { module: String },
+    Transition {
+        module: String,
+    },
+    Input {
+        module: String,
+    },
     ProjectionWrite,
+    /// A CAS store-write call (`.cas_flow_state(..)` and friends) — detected
+    /// structurally as a method call / UFCS call whose callee name is one of
+    /// the forbidden projection CAS writers, not as a line-text substring.
+    CasStoreWrite,
 }
 
 /// One AST-detected banned flow-reducer use, carrying the structural-allow-list
@@ -1546,6 +1546,7 @@ struct FlowReducerTransitionVisitor<'a> {
     aliases: &'a FlowReducerUseAliases,
     flow_fields: &'a [&'a str],
     frame_fields: &'a [&'a str],
+    cas_write_methods: &'a [&'a str],
     hits: Vec<FlowReducerHit>,
 }
 
@@ -1554,11 +1555,13 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
         aliases: &'a FlowReducerUseAliases,
         flow_fields: &'a [&'a str],
         frame_fields: &'a [&'a str],
+        cas_write_methods: &'a [&'a str],
     ) -> Self {
         Self {
             aliases,
             flow_fields,
             frame_fields,
+            cas_write_methods,
             hits: Vec::new(),
         }
     }
@@ -1702,6 +1705,21 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
         });
     }
 
+    fn push_cas_store_write(&mut self, span: proc_macro2::Span, method: &str) {
+        // Keep the `.method(` token shape so the report matches the prior
+        // text scanner exactly and the structural-allow windows keep keying
+        // off the same line.
+        let token = format!(".{method}(");
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::CasStoreWrite,
+            gate_token: token.clone(),
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+        });
+    }
+
     /// `true` for a method that mutates the receiver in place (the set the
     /// prior `projection_field_is_directly_written` text scanner recognized).
     fn is_mutating_method(name: &str) -> bool {
@@ -1711,13 +1729,21 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
 
 impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = node.func.as_ref()
-            && let Some((module, display)) = self.transition_call_for(&path.path)
-        {
-            if display.ends_with("::transition(") {
-                self.push_transition(node.span(), module, display);
-            } else {
-                self.push_transition_alias(node.span(), module, display);
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some((module, display)) = self.transition_call_for(&path.path) {
+                if display.ends_with("::transition(") {
+                    self.push_transition(node.span(), module, display);
+                } else {
+                    self.push_transition_alias(node.span(), module, display);
+                }
+            }
+            // UFCS form of a CAS store write (`Store::cas_flow_state(&store, ..)`)
+            // is the same banned semantic shape as the method-call form.
+            if let Some(last) = path.path.segments.last() {
+                let name = last.ident.to_string();
+                if self.cas_write_methods.contains(&name.as_str()) {
+                    self.push_cas_store_write(last.ident.span(), &name);
+                }
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -1751,6 +1777,10 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
             && let Some(token) = self.projection_field_token(&node.receiver)
         {
             self.push_projection_write(node.span(), token);
+        }
+        let method = node.method.to_string();
+        if self.cas_write_methods.contains(&method.as_str()) {
+            self.push_cas_store_write(node.method.span(), &method);
         }
         syn::visit::visit_expr_method_call(self, node);
     }

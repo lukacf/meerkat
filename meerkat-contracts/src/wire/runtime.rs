@@ -417,6 +417,39 @@ impl From<WireKeepAlivePolicy> for meerkat_core::lifecycle::run_primitive::KeepA
     }
 }
 
+/// Typed wire projection of
+/// [`meerkat_core::lifecycle::run_primitive::KeepAliveDirective`].
+///
+/// Tri-state with the carrying `Option`: `enable` / `disable` / absent
+/// (preserve). Dogma K13: the wire must carry the explicit `disable` intent
+/// instead of collapsing it into absence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "directive", rename_all = "snake_case")]
+pub enum WireKeepAliveDirective {
+    Enable(WireKeepAlivePolicy),
+    Disable,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::KeepAliveDirective> for WireKeepAliveDirective {
+    fn from(value: meerkat_core::lifecycle::run_primitive::KeepAliveDirective) -> Self {
+        use meerkat_core::lifecycle::run_primitive::KeepAliveDirective as Core;
+        match value {
+            Core::Enable(policy) => Self::Enable(policy.into()),
+            Core::Disable => Self::Disable,
+        }
+    }
+}
+
+impl From<WireKeepAliveDirective> for meerkat_core::lifecycle::run_primitive::KeepAliveDirective {
+    fn from(value: WireKeepAliveDirective) -> Self {
+        match value {
+            WireKeepAliveDirective::Enable(policy) => Self::Enable(policy.into()),
+            WireKeepAliveDirective::Disable => Self::Disable,
+        }
+    }
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstructionKind`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1172,7 +1205,7 @@ pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<WireKeepAlivePolicy>,
+    pub keep_alive: Option<WireKeepAliveDirective>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -3,9 +3,10 @@
 use crate::source::SourceNode;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
-    SkillIntrospectionEntry, SkillKey, SkillQuarantineDiagnostic, SkillSource,
-    SourceHealthSnapshot, SourceHealthState, SourceIdentityRecord, SourceIdentityRegistry,
-    SourceIdentityStatus, SourceTransportKind, SourceUuid, apply_filter,
+    SkillFunctionName, SkillFunctionOutput, SkillIntrospectionEntry, SkillKey,
+    SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot, SourceHealthState,
+    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
+    SourceUuid, apply_filter,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -215,9 +216,9 @@ impl SkillSource for CompositeSkillSource {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
+        function_name: &SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<SkillFunctionOutput, SkillError> {
         for named in &self.sources {
             match named
                 .source

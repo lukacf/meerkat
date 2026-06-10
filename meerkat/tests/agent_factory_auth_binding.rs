@@ -9,9 +9,9 @@
 //!
 //! This is the RCT Mini top-down test that drives Phase 3 implementation.
 //! It is written to fail at assertion, not at panic: unimplemented paths
-//! return typed `BuildAgentError::ConnectionResolution(_)` errors rather
-//! than `todo!()`/panic, so the test reaches its final assertion and
-//! fails with a useful diff.
+//! return typed `BuildAgentError::LlmClient(FactoryError::..)` errors
+//! rather than `todo!()`/panic, so the test reaches its final assertion
+//! and fails with a useful diff.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -234,7 +234,7 @@ async fn build_agent_with_google_auth_binding_resolves_through_registry() {
 // the feature on, `build_agent` succeeds (only the realtime branch
 // can produce an `Arc<dyn LlmClient>` here, since `realtime_route` is
 // true for this model); with the feature off, the same build returns
-// a typed `ConnectionResolution` naming the missing feature.
+// the typed `ProviderClientError::MissingFeature("openai-realtime")`.
 // ---------------------------------------------------------------------
 
 #[cfg(feature = "openai-realtime")]
@@ -270,22 +270,24 @@ async fn build_agent_with_gpt_realtime_without_feature_returns_typed_error() {
 
     let result = factory.build_agent(build, &config).await;
     match result {
-        Err(BuildAgentError::ConnectionResolution(msg)) => assert!(
-            msg.contains("openai-realtime") && msg.contains("feature"),
-            "error must name the missing feature; got: {msg}"
+        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::ClientBuild(
+            meerkat::ProviderClientError::MissingFeature(feature),
+        ))) => assert_eq!(
+            feature, "openai-realtime",
+            "typed error must name the missing feature"
         ),
-        Err(other) => panic!("expected ConnectionResolution, got {other:?}"),
+        Err(other) => panic!("expected typed MissingFeature(openai-realtime), got {other:?}"),
         Ok(_) => panic!("expected error when openai-realtime feature is absent"),
     }
 }
 
 // ---------------------------------------------------------------------
-// Negative: unknown binding → typed ConnectionResolution error (not a
-// silent fall-through to the flat path)
+// Negative: unknown binding → typed LlmClient(FactoryError) error (not a
+// silent fall-through to the flat path, never a stringified variant)
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn build_agent_unknown_binding_surfaces_connection_resolution_error() {
+async fn build_agent_unknown_binding_surfaces_typed_resolution_error() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = config_with_realm();
@@ -295,14 +297,17 @@ async fn build_agent_unknown_binding_surfaces_connection_resolution_error() {
 
     let result = factory.build_agent(build, &config).await;
     match result {
-        Err(BuildAgentError::ConnectionResolution(_)) => {}
-        Err(other) => panic!("expected ConnectionResolution, got {other:?}"),
+        Err(BuildAgentError::LlmClient(
+            meerkat_client::FactoryError::ConnectionTarget(_)
+            | meerkat_client::FactoryError::ProviderAuth(_),
+        )) => {}
+        Err(other) => panic!("expected typed ConnectionTarget/ProviderAuth, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
 
 #[tokio::test]
-async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
+async fn build_agent_unknown_realm_surfaces_typed_resolution_error() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     // Config has no realm at all → unknown realm path.
@@ -313,8 +318,10 @@ async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
 
     let result = factory.build_agent(build, &config).await;
     match result {
-        Err(BuildAgentError::ConnectionResolution(_)) => {}
-        Err(other) => panic!("expected ConnectionResolution for unknown realm, got {other:?}"),
+        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::ConnectionTarget(
+            meerkat_core::ConnectionTargetError::UnknownRealm(realm),
+        ))) => assert_eq!(realm, "dev"),
+        Err(other) => panic!("expected typed UnknownRealm for unknown realm, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -326,8 +333,8 @@ async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
 #[tokio::test]
 async fn llm_client_override_beats_auth_binding() {
     // Observable proof: auth_binding points to an invalid binding
-    // ("does_not_exist"). Without override, this returns
-    // ConnectionResolution. With override set, the build succeeds —
+    // ("does_not_exist"). Without override, this returns a typed
+    // LlmClient resolution error. With override set, the build succeeds —
     // proving the override path bypasses the registry dispatch entirely.
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);

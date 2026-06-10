@@ -1221,6 +1221,34 @@ impl std::fmt::Display for RuntimeCompletionOutcome {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct RuntimeOutcomeKey(pub String);
+impl From<String> for RuntimeOutcomeKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RuntimeOutcomeKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RuntimeOutcomeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ScheduleId(pub String);
 impl From<String> for ScheduleId {
     fn from(value: String) -> Self {
@@ -1371,7 +1399,7 @@ pub struct State {
     pub last_receipt_detail: Option<String>,
     pub last_receipt_correlation_id: Option<CorrelationId>,
     pub last_receipt_materialized_session_id: Option<SessionId>,
-    pub runtime_outcome_key: Option<String>,
+    pub runtime_outcome_key: Option<RuntimeOutcomeKey>,
     pub receipt_stage: Option<DeliveryReceiptStage>,
     pub receipt_failure_class: Option<OccurrenceFailureClass>,
     pub receipt_detail: Option<String>,
@@ -1419,7 +1447,7 @@ pub mod inputs {
         pub correlation_id: Option<CorrelationId>,
         pub detail: Option<String>,
         pub materialized_session_id: Option<SessionId>,
-        pub runtime_outcome_key: Option<String>,
+        pub runtime_outcome_key: Option<RuntimeOutcomeKey>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyDue {

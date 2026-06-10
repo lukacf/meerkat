@@ -4,7 +4,7 @@ use meerkat_core::{
     AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookAdapterConfig,
     HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation,
     HookLlmRequest, HookOutcome, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeKind,
-    HooksConfig, SessionId,
+    HooksConfig, RunInput, SessionId,
 };
 use serde_json::json;
 
@@ -44,7 +44,9 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         point: HookPoint::PreLlmRequest,
         session_id: SessionId::new(),
         turn_number: Some(1),
-        prompt_input: Some(ContentInput::Text("hello typed prompt".to_string())),
+        prompt_input: Some(RunInput::Content {
+            content: ContentInput::Text("hello typed prompt".to_string()),
+        }),
         error_report: Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
             reason: None,
@@ -54,7 +56,21 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         llm_request: Some(HookLlmRequest {
             max_tokens: 512,
             temperature: Some(0.1),
-            provider_params: Some(json!({"reasoning_effort": "high"})),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                            meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                                reasoning_effort: Some(
+                                    meerkat_core::lifecycle::run_primitive::ReasoningEffort::High,
+                                ),
+                                ..Default::default()
+                            },
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ),
             message_count: 2,
         }),
         llm_response: None,
@@ -89,7 +105,9 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
     assert_eq!(inv_rt, invocation);
     assert_eq!(
         inv_rt.prompt_input,
-        Some(ContentInput::Text("hello typed prompt".to_string()))
+        Some(RunInput::Content {
+            content: ContentInput::Text("hello typed prompt".to_string()),
+        })
     );
     assert_eq!(
         inv_rt.error_report,

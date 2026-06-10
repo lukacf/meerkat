@@ -36,6 +36,11 @@ pub struct PersistentRuntimeDriver {
     blob_store: Arc<dyn BlobStore>,
     /// Runtime ID for store operations.
     runtime_id: LogicalRuntimeId,
+    /// Test-only fault injection: forces the input-state snapshot step of
+    /// [`Self::commit_lifecycle_with_rollback`] to fail so tests can pin the
+    /// checkpoint-restore contract for that arm.
+    #[cfg(test)]
+    pub(crate) force_input_snapshot_failure_for_test: bool,
 }
 
 impl PersistentRuntimeDriver {
@@ -72,6 +77,8 @@ impl PersistentRuntimeDriver {
             store,
             blob_store,
             runtime_id,
+            #[cfg(test)]
+            force_input_snapshot_failure_for_test: false,
         }
     }
 
@@ -139,8 +146,38 @@ impl PersistentRuntimeDriver {
         target_state: RuntimeState,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self.lifecycle_commit_for_persistence()?;
+        // Contract: every fallible step between the staged DSL transition and
+        // the durable commit restores the caller's checkpoint on failure. A
+        // bare `?` here would leave the staged lifecycle (e.g. Destroy) live
+        // in driver state while reporting failure to the caller.
+        let input_states_result = self.inner.authorized_stored_input_states_snapshot();
+        #[cfg(test)]
+        let input_states_result = if self.force_input_snapshot_failure_for_test {
+            Err(RuntimeDriverError::Internal(
+                "forced input-state snapshot failure for checkpoint-restore contract test"
+                    .to_string(),
+            ))
+        } else {
+            input_states_result
+        };
+        let input_states = match input_states_result {
+            Ok(input_states) => input_states,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "{context} input-state snapshot failed: {err}"
+                )));
+            }
+        };
+        let commit = match self.lifecycle_commit_for_persistence() {
+            Ok(commit) => commit,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "{context} lifecycle commit classification failed: {err}"
+                )));
+            }
+        };
         let target_durable_state =
             match crate::meerkat_machine::classify_runtime_lifecycle_durable_state(target_state) {
                 Ok(target_durable_state) => target_durable_state,
@@ -856,5 +893,72 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 
     fn active_input_ids(&self) -> Vec<InputId> {
         self.inner.active_input_ids()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use meerkat_core::lifecycle::InputId;
+
+    fn make_prompt(text: &str) -> Input {
+        Input::Prompt(crate::input::PromptInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: text.into(),
+            blocks: None,
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        })
+    }
+
+    /// Dogma K11 (Persistent destroy / driver-side shadow truth): every
+    /// fallible step of `commit_lifecycle_with_rollback` AFTER the caller has
+    /// staged a DSL lifecycle transition must restore the caller's checkpoint.
+    /// The input-state snapshot read used to escape with a bare `?`, leaving
+    /// the staged lifecycle live in driver state while reporting failure.
+    #[tokio::test]
+    async fn commit_lifecycle_snapshot_failure_restores_checkpoint() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("commit-lifecycle-rollback-contract");
+        let mut driver = PersistentRuntimeDriver::new(rid, store, blob_store);
+
+        // Checkpoint BEFORE any state mutation (the caller's pre-stage view).
+        let checkpoint = driver.rollback_snapshot();
+
+        // Mutate driver state past the checkpoint (stands in for a staged
+        // Destroy/lifecycle transition awaiting durable commit).
+        let input = make_prompt("staged work");
+        let input_id = input.id().clone();
+        let outcome = driver.accept_input(input).await.unwrap();
+        assert!(outcome.is_accepted());
+        assert!(driver.input_phase(&input_id).is_some());
+
+        // Inject a failure into the input-state snapshot step.
+        driver.force_input_snapshot_failure_for_test = true;
+        let target_state = driver.inner_ref().runtime_state();
+        let result = driver
+            .commit_lifecycle_with_rollback(checkpoint, target_state, "test destroy")
+            .await;
+
+        // The failure must propagate typed AND the staged driver state must be
+        // rolled back to the checkpoint — no half-destroyed shadow truth.
+        assert!(result.is_err(), "forced snapshot failure must propagate");
+        assert!(
+            driver.input_phase(&input_id).is_none(),
+            "staged driver state must be restored to the pre-stage checkpoint"
+        );
+        assert!(driver.active_input_ids().is_empty());
     }
 }

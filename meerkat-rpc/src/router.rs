@@ -72,17 +72,26 @@ fn mob_destroy_cleanup_error_response(
     }
 }
 
+/// Shared typed `SessionError` → JSON-RPC error mapper for mob-owned session
+/// reads/archives. Only `NotFound` maps to `SESSION_NOT_FOUND`; store-layer
+/// and other service failures surface as typed internal errors instead of
+/// being laundered into "session not found" (K17).
 #[cfg(feature = "mob")]
-fn mob_archive_session_error_response(
+fn mob_session_service_error_response(
     id: Option<crate::protocol::RpcId>,
     session_id: &SessionId,
-    archive_error: SessionError,
+    service_error: SessionError,
 ) -> RpcResponse {
-    match archive_error {
+    match service_error {
         SessionError::NotFound { .. } => RpcResponse::error(
             id,
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
+        ),
+        SessionError::Busy { .. } => RpcResponse::error(
+            id,
+            error::SESSION_BUSY,
+            format!("Session is busy: {session_id}"),
         ),
         SessionError::FailedWithData { message, data } => {
             RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, data)
@@ -1455,11 +1464,9 @@ impl MethodRouter {
                 Some(RpcResponse::success(id, history))
             }
             Err(meerkat_core::service::SessionError::NotFound { .. }) => None,
-            Err(err) => Some(RpcResponse::error(
-                id,
-                error::SESSION_NOT_FOUND,
-                err.to_string(),
-            )),
+            // A store-layer failure must surface as a typed error, not be
+            // laundered into a "session not found" (K17).
+            Err(err) => Some(mob_session_service_error_response(id, session_id, err)),
         }
     }
 
@@ -2118,7 +2125,9 @@ impl MethodRouter {
                         });
                         RpcResponse::success(id, info)
                     }
-                    Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                    // A store-layer failure must surface as a typed error, not
+                    // be laundered into a "session not found" (K17).
+                    Err(err) => mob_session_service_error_response(id, &session_id, err),
                 }
             }
             None => RpcResponse::error(
@@ -2580,7 +2589,7 @@ impl MethodRouter {
                         format!("Session not found: {session_id}"),
                     )
                 }
-                Err(error) => mob_archive_session_error_response(id, &session_id, error),
+                Err(error) => mob_session_service_error_response(id, &session_id, error),
             },
             None => {
                 #[cfg(feature = "mob")]
@@ -3445,6 +3454,39 @@ mod tests {
     use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
+
+    /// K17 regression: mob session-service failures must keep their typed
+    /// identity on the wire. Only `NotFound` may map to `SESSION_NOT_FOUND`;
+    /// a store-layer fault is a typed internal error, not a fabricated
+    /// "session not found".
+    #[cfg(feature = "mob")]
+    #[test]
+    fn mob_session_store_error_is_not_laundered_to_not_found() {
+        let session_id = meerkat_core::SessionId::new();
+
+        let store_error = SessionError::Store("sqlite I/O failure".into());
+        let response =
+            mob_session_service_error_response(Some(RpcId::Num(1)), &session_id, store_error);
+        let err = response.error.expect("store failure must be an error");
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert_ne!(err.code, error::SESSION_NOT_FOUND);
+        assert!(err.message.contains("sqlite I/O failure"));
+
+        let not_found = SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        let response =
+            mob_session_service_error_response(Some(RpcId::Num(2)), &session_id, not_found);
+        let err = response.error.expect("not-found must be an error");
+        assert_eq!(err.code, error::SESSION_NOT_FOUND);
+
+        let busy = SessionError::Busy {
+            id: session_id.clone(),
+        };
+        let response = mob_session_service_error_response(Some(RpcId::Num(3)), &session_id, busy);
+        let err = response.error.expect("busy must be an error");
+        assert_eq!(err.code, error::SESSION_BUSY);
+    }
 
     #[cfg(feature = "mob")]
     struct StaticDispatcher {
@@ -4852,9 +4894,12 @@ mod tests {
                 if notif.params["event"]["payload"]["type"] != "run_started" {
                     continue;
                 }
-                break notif.params["event"]["payload"]["prompt"]
+                // K3: `run_started` carries the typed `RunInput`; a
+                // content-bearing run exposes its content under
+                // `input.content`.
+                break notif.params["event"]["payload"]["input"]["content"]
                     .as_str()
-                    .expect("run_started prompt")
+                    .expect("run_started content input")
                     .to_string();
             }
         })
@@ -9636,11 +9681,9 @@ mod tests {
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions {
@@ -9929,5 +9972,115 @@ mod tests {
 
         let resp = router.dispatch(req).await;
         assert!(resp.is_none(), "Notifications should return None");
+    }
+
+    /// K20: catalog-driven dispatch parity. Every method the generated RPC
+    /// catalog advertises for this build's feature set must DISPATCH (never
+    /// fall through to METHOD_NOT_FOUND), and an unknown method must reject
+    /// with METHOD_NOT_FOUND. This replaces source-regex parity: adding a
+    /// router arm without a catalog entry (or vice versa) turns this red.
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx) = test_router().await;
+        // Wire a live transport so the `live/*` catalog methods are
+        // dispatchable exactly as the catalog advertises them
+        // (`runtime_available` => live surface present).
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let close_feedback: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let status_feedback: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let token_authority: Arc<dyn meerkat_live::LiveWsTokenAuthority> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let live_ws = Arc::new(meerkat_live::LiveWsState::new(
+            host,
+            close_feedback,
+            status_feedback,
+            token_authority,
+        ));
+        let router = router.with_live_ws(Arc::clone(&live_ws), "ws://127.0.0.1:0".to_string());
+        #[cfg(feature = "live-webrtc")]
+        let router = {
+            let webrtc_host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                meerkat_live::NoOpProjectionSink,
+            )));
+            let webrtc_close: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+                crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &router.runtime,
+                )),
+            );
+            let webrtc_status: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+                crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &router.runtime,
+                )),
+            );
+            router.with_live_webrtc(Arc::new(meerkat_live::LiveWebrtcState::new(
+                webrtc_host,
+                webrtc_close,
+                webrtc_status,
+            )))
+        };
+        let options = meerkat_contracts::RpcMethodCatalogOptions {
+            runtime_available: true,
+            mob_enabled: cfg!(feature = "mob"),
+            mcp_enabled: cfg!(feature = "mcp"),
+            comms_enabled: cfg!(feature = "comms"),
+            blob_enabled: true,
+            session_events_enabled: true,
+            session_streams_enabled: true,
+            schedule_enabled: cfg!(feature = "schedule"),
+            workgraph_enabled: cfg!(feature = "workgraph"),
+            // The test runtime has no skill runtime bound; `skills/list`
+            // still dispatches (to a typed capability error), so the parity
+            // sweep covers it whenever the catalog advertises it.
+            skills_enabled: true,
+        };
+        let mut id = 0_i64;
+        for method in meerkat_contracts::rpc_method_names(options) {
+            id += 1;
+            let response = router
+                .dispatch(RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: method.clone(),
+                    params: Some(
+                        serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static JSON"),
+                    ),
+                    id: Some(RpcId::Num(id)),
+                })
+                .await
+                .unwrap_or_else(|| panic!("catalog method `{method}` produced no response"));
+            if let Some(err) = &response.error {
+                assert_ne!(
+                    err.code,
+                    error::METHOD_NOT_FOUND,
+                    "catalog method `{method}` fell through to METHOD_NOT_FOUND: {}",
+                    err.message
+                );
+            }
+        }
+
+        let response = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "definitely/not_a_method".to_string(),
+                params: None,
+                id: Some(RpcId::Num(id + 1)),
+            })
+            .await
+            .expect("unknown method must produce a response");
+        let err = response.error.expect("unknown method must be an error");
+        assert_eq!(err.code, error::METHOD_NOT_FOUND);
     }
 }

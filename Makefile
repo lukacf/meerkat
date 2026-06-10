@@ -510,11 +510,16 @@ verify-sdk-wrapper-freshness:
 	@scripts/verify-sdk-wrapper-freshness.sh
 
 # Verify the hand-authored machine posters cover every canonical machine
-# (or list it as an explicit known gap). Fails when a canonical machine is
-# added without a poster decision.
+# (or list it as an explicit known gap) AND only advertise states/triggers
+# that exist in the canonical machine alphabet. The alphabet is emitted at
+# check time from the compiled `canonical_machine_schemas()` catalog
+# (`xtask machine-alphabet`), so the content gate can never go stale.
 verify-machine-poster-coverage:
-	@echo "$(GREEN)Checking machine poster coverage...$(NC)"
-	@node scripts/machine-posters/generate-machine-posters.mjs --check
+	@echo "$(GREEN)Checking machine poster coverage + content...$(NC)"
+	@alphabet="$$(mktemp "$${TMPDIR:-/tmp}/machine-alphabet.XXXXXX")" && \
+	trap 'rm -f "$$alphabet"' EXIT && \
+	$(CARGO) run -q -p xtask -- machine-alphabet --emit "$$alphabet" && \
+	node scripts/machine-posters/generate-machine-posters.mjs --check --alphabet "$$alphabet"
 
 # Verify the publishable Rust workspace surface matches the release list and
 # release binary metadata matches the workspace version.
@@ -756,7 +761,7 @@ help:
 	@echo "  $(GREEN)verify-rpc-surface-alignment$(NC)- Check router/catalog/docs method parity"
 	@echo "  $(GREEN)verify-sdk-wrapper-freshness$(NC)- Check SDK wrapper coverage for catalog methods"
 	@echo "  $(GREEN)verify-sdk-event-inventory$(NC)- Check generated SDK event inventories cover schema event types"
-	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine"
+	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine and advertise only canonical states/triggers"
 	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
 	@echo "  $(GREEN)check-rust-release-packaging$(NC)- Verify release Rust crates package cleanly"
 	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"

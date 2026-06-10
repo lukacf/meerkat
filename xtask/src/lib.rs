@@ -1,4 +1,5 @@
 pub mod audit_generated_headers;
+pub mod machine_alphabet;
 #[cfg(feature = "machine-authority")]
 pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
@@ -15,6 +16,7 @@ pub mod typed_carrier;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
+use crate::machine_alphabet::MachineAlphabetArgs;
 #[cfg(feature = "machine-authority")]
 use crate::machines::HopcroftArgs;
 use crate::machines::{SelectionArgs, VerifyArgs};
@@ -53,6 +55,10 @@ enum Commands {
     /// and every codegen-emit path carries `@generated`. Errors on mismatch.
     #[command(name = "audit-generated-headers")]
     AuditGeneratedHeaders,
+    /// Emit the canonical machine alphabet (phase/input/signal variant names
+    /// per canonical machine) as JSON for the machine-poster content gate.
+    #[command(name = "machine-alphabet")]
+    MachineAlphabet(MachineAlphabetArgs),
 }
 
 pub fn run() -> Result<()> {
@@ -76,6 +82,9 @@ pub fn run() -> Result<()> {
         Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
         Commands::AuditGeneratedHeaders => {
             run_machine_authority_task(run_audit_generated_headers_command)
+        }
+        Commands::MachineAlphabet(args) => {
+            run_machine_authority_task(move || machine_alphabet::run_machine_alphabet(args))
         }
     }
 }

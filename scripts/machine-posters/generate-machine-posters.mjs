@@ -98,13 +98,6 @@ const MACHINE_SPECS = [
           subtitle: "active work / interrupts / staged visibility",
           emphasis: true,
         },
-        Recovering: {
-          x: 1290,
-          y: 180,
-          w: 320,
-          h: 94,
-          subtitle: "fault repair / boundary salvage",
-        },
         Retired: {
           x: 1390,
           y: 430,
@@ -191,7 +184,7 @@ const MACHINE_SPECS = [
           y: 64,
           w: 430,
           columns: 1,
-          anchors: ["Initializing", "Idle", "Attached", "Recovering", "Retired", "Stopped", "Destroyed"],
+          anchors: ["Initializing", "Idle", "Attached", "Retired", "Stopped", "Destroyed"],
           triggers: [
             "Initialize",
             "RegisterSession",
@@ -221,7 +214,6 @@ const MACHINE_SPECS = [
             "RunCompleted",
             "RunFailed",
             "RunCancelled",
-            "SubmitMobWork",
           ],
         },
         {
@@ -263,16 +255,14 @@ const MACHINE_SPECS = [
           triggers: [
             "SetPeerIngressContext",
             "NotifyDrainExited",
-            "ReconcileResolvedDirectory",
-            "RecordSendSucceeded",
-            "RecordSendFailed",
+            "PeerRequestSent",
+            "PeerRequestSendFailed",
             "Abort",
             "AbortAll",
             "Wait",
             "EnsureDrainRunning",
-            "PeerReady",
-            "RegisterWatcher",
-            "ProgressReported",
+            "PeerReadyOp",
+            "ProgressReportedOp",
           ],
         },
         {
@@ -314,12 +304,10 @@ const MACHINE_SPECS = [
             "Prepare",
             "Commit",
             "Fail",
-            "AdmitQueued",
-            "AdmitConsumedOnAccept",
-            "StageDrainSnapshot",
-            "SupersedeQueuedInput",
-            "CoalesceQueuedInputs",
-            "SetSilentIntentOverrides",
+            "QueueAccepted",
+            "ConsumeOnAccept",
+            "SupersedeInput",
+            "CoalesceInput",
             "StartConversationRun",
             "StartImmediateAppend",
             "StartImmediateContext",
@@ -357,17 +345,16 @@ const MACHINE_SPECS = [
             "ExtractionValidationFailed",
             "ExtractionStart",
             "ForceCancelNoRun",
-            "RegisterOperation",
-            "ProvisioningSucceeded",
-            "ProvisioningFailed",
-            "AbortProvisioning",
-            "CompleteOperation",
-            "FailOperation",
-            "CancelOperation",
-            "RetireRequested",
-            "RetireCompleted",
-            "CollectTerminal",
-            "BeginWaitAll",
+            "RegisterOp",
+            "StartOp",
+            "AbortOp",
+            "CompleteOp",
+            "FailOp",
+            "CancelOp",
+            "RetireRequestedOp",
+            "RetireCompletedOp",
+            "CollectCompletedOp",
+            "RequestWaitAll",
             "CancelWaitAll",
             "ClassifyExternalEnvelope",
             "ClassifyPlainEvent",
@@ -407,13 +394,6 @@ const MACHINE_SPECS = [
     layout: {
       plate: { width: 1880, height: 1220 },
       phases: {
-        Creating: {
-          x: 330,
-          y: 104,
-          w: 300,
-          h: 90,
-          subtitle: "boot / empty registry",
-        },
         Running: {
           x: 760,
           y: 350,
@@ -497,9 +477,8 @@ const MACHINE_SPECS = [
           y: 60,
           w: 430,
           columns: 1,
-          anchors: ["Creating", "Running", "Stopped", "Completed", "Destroyed"],
+          anchors: ["Running", "Stopped", "Completed", "Destroyed"],
           triggers: [
-            "Start",
             "Spawn",
             "Retire",
             "Respawn",
@@ -527,9 +506,6 @@ const MACHINE_SPECS = [
             "SubmitWork",
             "CancelWork",
             "CancelAllWork",
-            "ObserveWorkCompleted",
-            "ObserveWorkFailed",
-            "ObserveWorkCancelled",
             "RetireMember",
             "ObserveRuntimeRetired",
             "ResetMember",
@@ -564,17 +540,13 @@ const MACHINE_SPECS = [
             "MemberTerminalized",
             "OperationPeerTrusted",
             "PeerInputAdmitted",
-            "RuntimeWorkAdmitted",
-            "KickoffStarted",
-            "KickoffCallbackPending",
-            "KickoffFailed",
-            "KickoffCancelled",
-            "KickoffForceCancelled",
-            "RuntimeRunSubmitted",
-            "RuntimeRunCompleted",
-            "RuntimeRunFailed",
-            "RuntimeRunCancelled",
-            "RuntimeStopRequested",
+            "KickoffMarkPending",
+            "KickoffMarkStarting",
+            "KickoffResolveStarted",
+            "KickoffResolveCallbackPending",
+            "KickoffResolveFailed",
+            "KickoffCancelRequested",
+            "KickoffClear",
           ],
         },
         {
@@ -585,12 +557,13 @@ const MACHINE_SPECS = [
           y: 470,
           w: 430,
           columns: 1,
-          anchors: ["Running", "Creating"],
+          anchors: ["Running"],
           triggers: [
-            "Wire",
-            "Unwire",
-            "ExternalTurn",
-            "InternalTurn",
+            "WireMembers",
+            "WireMembersWithTrust",
+            "UnwireMembers",
+            "WireExternalPeer",
+            "UnwireExternalPeer",
             "SetSpawnPolicy",
           ],
         },
@@ -604,7 +577,6 @@ const MACHINE_SPECS = [
           columns: 2,
           anchors: ["Running"],
           triggers: [
-            "McpServerStates",
             "RosterSnapshot",
             "ListMembers",
             "ListMembersIncludingRetiring",
@@ -617,7 +589,6 @@ const MACHINE_SPECS = [
             "ReplayAllEvents",
             "RecordOperatorActionProvenance",
             "GetMember",
-            "KickoffBarrierSnapshot",
           ],
         },
         {
@@ -638,20 +609,13 @@ const MACHINE_SPECS = [
             "CreateRun",
             "StartRun",
             "FinishRun",
-            "DispatchStep",
-            "CompleteStep",
-            "RecordStepOutput",
-            "ConditionPassed",
-            "ConditionRejected",
-            "FailStep",
-            "SkipStep",
-            "ProjectFrameStepStatus",
-            "CancelStep",
-            "RegisterTargets",
-            "RecordTargetSuccess",
-            "RecordTargetTerminalFailure",
-            "RecordTargetCanceled",
-            "RecordTargetFailure",
+            "CreateRunSeed",
+            "ClassifyFlowRunTerminality",
+            "ClassifyFlowRunPublicResult",
+            "ClassifyFlowStepTerminality",
+            "ClassifyStepOutputFault",
+            "AuthorizeFlowRunReducerCommand",
+            "ResolveFlowDelegationEdgeAdmission",
           ],
         },
         {
@@ -664,28 +628,14 @@ const MACHINE_SPECS = [
           columns: 2,
           anchors: ["Running", "Completed"],
           triggers: [
-            "RegisterReadyFrame",
-            "RegisterPendingBodyFrame",
-            "NodeExecutionReleased",
-            "FrameTerminated",
-            "TerminalizeCompleted",
-            "TerminalizeFailed",
-            "TerminalizeCanceled",
-            "StartRootFrame",
-            "StartBodyFrame",
-            "CompleteNode",
-            "RecordNodeOutput",
-            "FailNode",
-            "SkipNode",
-            "CancelNode",
-            "StartLoop",
-            "BodyFrameStarted",
-            "BodyFrameCompleted",
-            "BodyFrameFailed",
-            "BodyFrameCanceled",
-            "UntilConditionMet",
-            "UntilConditionFailed",
-            "CancelLoop",
+            "CreateFrameSeed",
+            "ClassifyFlowFrameTerminalStatus",
+            "AuthorizeFlowFrameReducerCommand",
+            "CreateLoopSeed",
+            "RecordLoopBodyFrameCompleted",
+            "RecordLoopUntilConditionMet",
+            "RecordLoopUntilConditionFailed",
+            "AuthorizeLoopIterationReducerCommand",
           ],
         },
       ],
@@ -728,6 +678,11 @@ function canonicalMachineFns() {
 // here. A NEW canonical machine that appears in neither fails `--check` — which
 // forces a deliberate decision (author a poster, or extend this allow-list)
 // instead of the coverage silently drifting.
+//
+// This allow-list is SHRINK-ONLY: it exempts a machine from poster COVERAGE,
+// never from poster CONTENT validation (a gap machine has no poster, so there
+// is no content to exempt). `--check` fails when an entry stops being
+// canonical or gains a poster — in both cases the entry must be deleted.
 const POSTER_COVERAGE_KNOWN_GAPS = new Set([
   "dsl_schedule_lifecycle_machine",
   "dsl_occurrence_lifecycle_machine",
@@ -739,11 +694,13 @@ const POSTER_COVERAGE_KNOWN_GAPS = new Set([
   "dsl_work_attention_lifecycle_machine",
 ]);
 
-// `--check` drift gate: every canonical machine must be either covered by a
-// poster spec or listed in POSTER_COVERAGE_KNOWN_GAPS. Fails (non-zero exit)
-// when a canonical machine is added without either, when a poster names a
-// `canonicalFn` that no longer exists, or when a known-gap entry is no longer
-// canonical (stale allow-list).
+// `--check` drift gate, part 1 (COVERAGE): every canonical machine must be
+// either covered by a poster spec or listed in POSTER_COVERAGE_KNOWN_GAPS.
+// Fails (non-zero exit) when a canonical machine is added without either,
+// when a poster names a `canonicalFn` that no longer exists, when a known-gap
+// entry is no longer canonical (stale allow-list), or when a known-gap entry
+// is also postered (the gap entry is no longer needed — delete it; the
+// allow-list is shrink-only).
 function checkCoverage() {
   const canonical = canonicalMachineFns();
   const covered = MACHINE_SPECS.map((spec) => spec.canonicalFn);
@@ -767,8 +724,16 @@ function checkCoverage() {
   const staleGaps = [...POSTER_COVERAGE_KNOWN_GAPS].filter(
     (fn) => !canonicalSet.has(fn),
   );
+  const obsoleteGaps = [...POSTER_COVERAGE_KNOWN_GAPS].filter((fn) =>
+    coveredSet.has(fn),
+  );
 
-  if (uncovered.length === 0 && staleSpecs.length === 0 && staleGaps.length === 0) {
+  if (
+    uncovered.length === 0 &&
+    staleSpecs.length === 0 &&
+    staleGaps.length === 0 &&
+    obsoleteGaps.length === 0
+  ) {
     console.log(
       `machine-poster --check: all ${canonical.length} canonical machines accounted for ` +
         `(${coveredSet.size} postered, ${POSTER_COVERAGE_KNOWN_GAPS.size} known-gap).`,
@@ -801,12 +766,197 @@ function checkCoverage() {
       console.error(`  - ${fn}`);
     }
   }
+  if (obsoleteGaps.length > 0) {
+    console.error(
+      "machine-poster --check: POSTER_COVERAGE_KNOWN_GAPS entries that now have a poster " +
+        "(shrink-only allow-list — delete these entries):",
+    );
+    for (const fn of obsoleteGaps) {
+      console.error(`  - ${fn}`);
+    }
+  }
   return 1;
+}
+
+// `--check` drift gate, part 2 (CONTENT): every poster spec may only
+// advertise alphabet the canonical machine actually owns. The canonical
+// alphabet is emitted at check time by
+// `cargo run -p xtask -- machine-alphabet --emit <path>` from the compiled
+// `meerkat_machine_schema::canonical_machine_schemas()` catalog (no committed
+// artifact, so it cannot go stale). Asserts, per poster spec:
+//   - every `layout.phases` box names a canonical state (phase enum variant);
+//   - every canonical state has a `layout.phases` box (rendering walks the
+//     canonical phase list and would crash on a missing box);
+//   - every group anchor names a canonical state;
+//   - every group trigger names a canonical input or signal variant.
+function validateContent(canonicalFns, alphabetPath) {
+  const failures = [];
+  const alphabetByFn = loadAlphabetByCanonicalFn(canonicalFns, alphabetPath);
+
+  for (const spec of MACHINE_SPECS) {
+    const alphabet = alphabetByFn.get(spec.canonicalFn);
+    if (!alphabet) {
+      // Stale canonicalFn binding — already reported by checkCoverage().
+      continue;
+    }
+    const declared = declaredMachineId(spec.catalogPath);
+    if (declared !== alphabet.machine) {
+      failures.push(
+        `poster "${spec.id}": catalog ${path.relative(repoRoot, spec.catalogPath)} declares ` +
+          `machine "${declared}" but the canonical alphabet entry paired with ${spec.canonicalFn} ` +
+          `is "${alphabet.machine}" — canonicalFn/catalogPath/alphabet binding is inconsistent`,
+      );
+      continue;
+    }
+
+    const states = new Set(alphabet.states);
+    const triggers = new Set([...alphabet.triggers, ...alphabet.signals]);
+    const machineFailures = [];
+
+    const phaseBoxes = Object.keys(spec.layout.phases);
+    for (const box of phaseBoxes) {
+      if (!states.has(box)) {
+        machineFailures.push(
+          `layout phase box "${box}" is not a canonical state`,
+        );
+      }
+    }
+    for (const state of alphabet.states) {
+      if (!phaseBoxes.includes(state)) {
+        machineFailures.push(
+          `canonical state "${state}" has no layout phase box (poster cannot render)`,
+        );
+      }
+    }
+
+    for (const group of spec.layout.groups) {
+      for (const anchor of group.anchors) {
+        if (!states.has(anchor)) {
+          machineFailures.push(
+            `group "${group.id}" anchor "${anchor}" is not a canonical state`,
+          );
+        }
+      }
+      for (const trigger of group.triggers) {
+        if (!triggers.has(trigger)) {
+          machineFailures.push(
+            `group "${group.id}" trigger "${trigger}" is not a canonical input or signal variant`,
+          );
+        }
+      }
+    }
+
+    if (machineFailures.length > 0) {
+      failures.push(
+        `poster "${spec.id}" (${alphabet.machine}) advertises alphabet the canonical machine does not own:`,
+      );
+      for (const failure of machineFailures) {
+        failures.push(`  - ${failure}`);
+      }
+      failures.push(
+        `  allowed states: ${alphabet.states.join(", ")}`,
+      );
+      failures.push(
+        `  allowed triggers (${alphabet.triggers.length} inputs): ${alphabet.triggers.join(", ")}`,
+      );
+      failures.push(
+        `  allowed triggers (${alphabet.signals.length} signals): ${alphabet.signals.join(", ")}`,
+      );
+    }
+  }
+
+  return failures;
+}
+
+// Load the alphabet JSON and bind each entry to its `dsl_<fn>` name. The
+// emitted `machines` array and `canonicalMachineFns()` both come from the
+// same `canonical_machine_schemas()` vec (compiled body and parsed source
+// respectively), so they share length and order; the pairing is additionally
+// verified per spec against the `machine <Name>` declaration in the spec's
+// own catalog file (see validateContent), so a silent mis-pair is impossible.
+function loadAlphabetByCanonicalFn(canonicalFns, alphabetPath) {
+  let document;
+  try {
+    document = JSON.parse(fs.readFileSync(alphabetPath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `machine-poster --check: could not read alphabet JSON at ${alphabetPath}: ${error.message}`,
+    );
+  }
+  const machines = document?.machines;
+  if (!Array.isArray(machines)) {
+    throw new Error(
+      `machine-poster --check: alphabet JSON at ${alphabetPath} has no "machines" array`,
+    );
+  }
+  if (machines.length !== canonicalFns.length) {
+    throw new Error(
+      `machine-poster --check: alphabet JSON lists ${machines.length} machines but ` +
+        `canonical_machine_schemas() lists ${canonicalFns.length} — stale alphabet emit?`,
+    );
+  }
+  for (const entry of machines) {
+    if (
+      typeof entry?.machine !== "string" ||
+      !Array.isArray(entry?.states) ||
+      !Array.isArray(entry?.triggers) ||
+      !Array.isArray(entry?.signals)
+    ) {
+      throw new Error(
+        `machine-poster --check: malformed alphabet entry in ${alphabetPath}: ${JSON.stringify(entry)}`,
+      );
+    }
+  }
+  return new Map(canonicalFns.map((fn, index) => [fn, machines[index]]));
+}
+
+// Parse the `machine <Name> {` declaration out of a poster spec's bound DSL
+// catalog file. Independent route to the machine identity, used to verify
+// the canonicalFn→alphabet pairing.
+function declaredMachineId(catalogPath) {
+  const text = fs.readFileSync(catalogPath, "utf8");
+  const match = text.match(/\bmachine\s+([A-Z][A-Za-z0-9_]*)\s*\{/);
+  return match ? match[1] : null;
+}
+
+function runCheck(argv) {
+  const coverageStatus = checkCoverage();
+
+  const alphabetIndex = argv.indexOf("--alphabet");
+  const alphabetPath = alphabetIndex >= 0 ? argv[alphabetIndex + 1] : undefined;
+  if (!alphabetPath) {
+    console.error(
+      "machine-poster --check: missing --alphabet <path>. Run the gate via " +
+        "`make verify-machine-poster-coverage`, which emits the canonical machine " +
+        "alphabet (cargo run -p xtask -- machine-alphabet) at check time.",
+    );
+    return 1;
+  }
+
+  let contentFailures;
+  try {
+    contentFailures = validateContent(canonicalMachineFns(), alphabetPath);
+  } catch (error) {
+    console.error(error.message);
+    return 1;
+  }
+  if (contentFailures.length > 0) {
+    console.error("machine-poster --check: CONTENT drift detected:");
+    for (const failure of contentFailures) {
+      console.error(failure);
+    }
+    return 1;
+  }
+  console.log(
+    `machine-poster --check: poster content (phase boxes, group anchors, triggers) ` +
+      `matches the canonical machine alphabet for all ${MACHINE_SPECS.length} postered machines.`,
+  );
+  return coverageStatus;
 }
 
 function main() {
   if (process.argv.includes("--check")) {
-    process.exit(checkCoverage());
+    process.exit(runCheck(process.argv.slice(2)));
   }
 
   fs.mkdirSync(outputDir, { recursive: true });

@@ -35,10 +35,17 @@ impl fmt::Display for BlobId {
 /// of the same image share one identity. Because an inline image hydrates from
 /// its blob's own bytes, `content_blob_id(media_type, hydrated_data)` equals the
 /// id the blob store minted for that image.
+///
+/// The media type is canonicalized through
+/// [`MediaType::canonical_str`](crate::image_generation::MediaType::canonical_str)
+/// before hashing, so cosmetic string differences (e.g. `image/PNG` vs
+/// `image/png`, or a trailing `; charset=...`) never mint divergent blob ids for
+/// identical bytes.
 pub fn content_blob_id(media_type: &str, data: &str) -> BlobId {
     use sha2::{Digest, Sha256};
+    let canonical_media_type = crate::image_generation::MediaType::canonical_str(media_type);
     let mut hasher = Sha256::new();
-    hasher.update(media_type.as_bytes());
+    hasher.update(canonical_media_type.as_bytes());
     hasher.update([0]);
     hasher.update(data.as_bytes());
     BlobId::new(format!("sha256:{:x}", hasher.finalize()))
@@ -88,6 +95,43 @@ pub enum BlobStoreError {
     Unsupported(String),
     #[error("blob store internal error: {0}")]
     Internal(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_blob_id_canonicalizes_media_type_for_identity() {
+        let data = "AAAA";
+        // Cosmetic media-type differences must not mint divergent blob ids for
+        // identical bytes.
+        assert_eq!(
+            content_blob_id("image/PNG", data),
+            content_blob_id("image/png", data),
+            "case differences in the media type must not change blob identity"
+        );
+        assert_eq!(
+            content_blob_id("image/png; charset=binary", data),
+            content_blob_id("image/png", data),
+            "media-type parameters must not change blob identity"
+        );
+        assert_eq!(
+            content_blob_id("  image/png  ", data),
+            content_blob_id("image/png", data),
+            "surrounding whitespace must not change blob identity"
+        );
+    }
+
+    #[test]
+    fn content_blob_id_distinguishes_distinct_media_types() {
+        let data = "AAAA";
+        assert_ne!(
+            content_blob_id("image/png", data),
+            content_blob_id("image/jpeg", data),
+            "genuinely different media types must mint different blob ids"
+        );
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

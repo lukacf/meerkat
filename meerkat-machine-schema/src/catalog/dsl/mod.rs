@@ -46,8 +46,8 @@ pub mod workgraph_lifecycle;
 
 use crate::identity::InputVariantId;
 use crate::{
-    MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumStructuralVariant,
-    TypePathStructField,
+    MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumPayloadField,
+    TypePathEnumStructuralVariant, TypePathStructField,
 };
 
 pub struct MachineSchemaMetadata {
@@ -285,6 +285,8 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // newtype (`SessionId(pub String)`) so the `Map` key satisfies
             // `Ord + Hash + Clone`; the model domain is the string identity.
             NamedTypeBinding::string("SessionId"),
+            // WAVE G1 fold (#86): machine-owned transcript edit directive.
+            NamedTypeBinding::string_enum("TranscriptEditKind", &["Fork", "Rewrite"]),
             NamedTypeBinding::string_enum(
                 "SessionFirstTurnPhase",
                 &["Inactive", "Pending", "Consumed"],
@@ -338,7 +340,6 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "System",
                     "SystemNotice",
                     "User",
-                    "Assistant",
                     "BlockAssistant",
                     "ToolResults",
                 ],
@@ -376,6 +377,14 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "StoredTranscriptRevisionDiverged",
                 ],
             ),
+            // Lifecycle-terminal region typed vocabulary (LUC-524 R004 fold:
+            // SessionDocumentMachine owns archive lifecycle truth for all
+            // profiles).
+            NamedTypeBinding::string_enum("SessionDocumentLifecycle", &["Active", "Archived"]),
+            NamedTypeBinding::string_enum(
+                "SessionArchiveDisposition",
+                &["Archive", "AlreadyArchived"],
+            ),
         ],
         Vec::new(),
     )
@@ -405,6 +414,18 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "TurnAdmissionPhase",
                 &["Idle", "Admitted", "Running", "Completing", "ShuttingDown"],
+            ),
+            // WAVE G1 fold (#345 keep-alive tri-state).
+            NamedTypeBinding::string_enum(
+                "RuntimeKeepAliveRequest",
+                &["Enable", "Disable", "Preserve"],
+            ),
+            // Dogma K13: machine-resolved persistence decision replaces the
+            // former `persist_keep_alive: bool` effect payload that collapsed
+            // Disable and Preserve.
+            NamedTypeBinding::string_enum(
+                "RuntimeKeepAlivePersistenceDecision",
+                &["PersistEnabled", "PersistDisabled", "PreserveExisting"],
             ),
             NamedTypeBinding::string_enum(
                 "StartTurnExecutionKind",
@@ -480,6 +501,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("AgentRuntimeId"),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("CommsRuntimeId"),
+            // WAVE G1 fold (#51): machine-owned staged realtime transcript item
+            // role/lane classifiers carried on the RealtimeTranscriptAppended effect.
+            NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
             NamedTypeBinding::string("AuthBindingRef"),
             NamedTypeBinding::string_enum(
                 meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME,
@@ -606,7 +631,9 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "AdmissionRejectReasonKind",
                 &[
-                    "DurabilityViolation",
+                    "DurabilityMissing",
+                    "ExternalDerivedDurabilityForbidden",
+                    "DerivedDurabilityForbiddenForInputKind",
                     "PeerHandlingModeInvalid",
                     "PeerResponseTerminalInvalid",
                 ],
@@ -631,6 +658,39 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Completed",
                     "Failed",
                     "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::type_path("OperationResult", "meerkat_core::ops::OperationResult"),
+            // K8b fold: the ops terminal payload is the domain type itself —
+            // `meerkat_core::ops_lifecycle::OperationTerminalOutcome` — carried
+            // typed through the machine (no JSON-string codec). The structural
+            // variant declarations give the model/oracle a faithful finite
+            // domain for variant-matches-kind guards.
+            NamedTypeBinding::type_path_enum_with_structural_variants(
+                "OpTerminalPayload",
+                "meerkat_core::ops_lifecycle::OperationTerminalOutcome",
+                &["Retired"],
+                vec![
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Completed",
+                        vec![TypePathEnumPayloadField::named("result", "OperationResult")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Failed",
+                        vec![TypePathEnumPayloadField::string("error")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Aborted",
+                        vec![TypePathEnumPayloadField::optional_string("reason")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Cancelled",
+                        vec![TypePathEnumPayloadField::optional_string("reason")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Terminated",
+                        vec![TypePathEnumPayloadField::string("reason")],
+                    ),
                 ],
             ),
             NamedTypeBinding::string_enum("OperationCompletionFeedClass", &["Emit", "Suppress"]),
@@ -763,6 +823,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "CallTimeout",
                     "RetryableProviderError",
                 ],
+            ),
+            NamedTypeBinding::string_enum("CallTimeoutSource", &["CallBudget", "TurnBudget"]),
+            NamedTypeBinding::string_enum(
+                "CallTimeoutVerdict",
+                &["RetryableCallTimeout", "TerminalTurnBudget"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveOpenAdmissionRejection",
@@ -987,6 +1052,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "PeerIngressResponseStatus",
                 &["Accepted", "Completed", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressRequestClass",
+                &[
+                    "Other",
+                    "MobPeerAdded",
+                    "MobPeerRetired",
+                    "MobPeerUnwired",
+                    "SupervisorBridge",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressResponseTerminality",
@@ -1247,6 +1322,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Drain", "Reset", "Stop", "Exit", "Recover"],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeEventKind",
+                &[
+                    "InputLifecycle",
+                    "RunLifecycle",
+                    "RuntimeStateChange",
+                    "Topology",
+                    "Projection",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RuntimeEffectKind",
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),
@@ -1290,7 +1375,13 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "UserInterruptPublicResultKind",
-                &["Interrupted", "NotFound", "SessionBusy", "Conflict"],
+                &[
+                    "Interrupted",
+                    "StagedNoop",
+                    "NotFound",
+                    "SessionBusy",
+                    "Conflict",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionResultClass",
@@ -1427,10 +1518,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "crate::catalog::dsl::meerkat_machine::ToolFilter",
                 &["All"],
                 vec![
-                    TypePathEnumStructuralVariant::string_set("Allow", "names"),
-                    TypePathEnumStructuralVariant::string_set("Deny", "names"),
+                    TypePathEnumStructuralVariant::named_set("Allow", "names", "ToolName"),
+                    TypePathEnumStructuralVariant::named_set("Deny", "names", "ToolName"),
                 ],
             ),
+            // K8a fold: the tool-visibility name domain is the canonical
+            // `meerkat_core::types::ToolName` newtype, threaded through the
+            // machine as a named value domain (overlay sets, deferred name
+            // sets, witness/catalog map keys, and ToolFilter payloads).
+            NamedTypeBinding::type_path("ToolName", "meerkat_core::types::ToolName"),
             NamedTypeBinding::type_path_struct(
                 "ToolProvenance",
                 "crate::catalog::dsl::meerkat_machine::ToolProvenance",
@@ -1458,7 +1554,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness",
-                &["stable_owner_key", "last_seen_provenance"],
+                &["last_seen_provenance"],
             ),
             NamedTypeBinding::string_enum(
                 "TurnPhase",
@@ -1596,6 +1692,7 @@ runtime_internal_inputs!(
         ChangeLane,
         ClearLocalEndpoint,
         CoalesceInput,
+        Commit,
         CommitDeferredNames,
         CommitVisibilityFilter,
         CompleteOp,
@@ -1608,6 +1705,7 @@ runtime_internal_inputs!(
         ExtractionStart,
         ExtractionValidationFailed,
         ExtractionValidationPassed,
+        Fail,
         FailOp,
         FatalFailure,
         ForceCancelNoRun,
@@ -1631,11 +1729,13 @@ runtime_internal_inputs!(
         OpsBarrierSatisfied,
         PeerReadyOp,
         PeerRequestReceived,
+        PeerRequestSendFailed,
         PeerRequestSent,
         PeerRequestTimedOut,
         PeerResponseProgressArrived,
         PeerResponseReplied,
         PeerResponseTerminalArrived,
+        Prepare,
         PrimitiveApplied,
         ProgressReportedOp,
         QueueAccepted,
@@ -1704,7 +1804,7 @@ runtime_internal_inputs!(
         SurfaceStageAdd,
         SurfaceStageReload,
         SurfaceStageRemove,
-        SyncVisibilityRevisions,
+        ReplaceVisibilityState,
         SupervisorTrustEdgePublishFailed,
         SupervisorTrustEdgePublished,
         SupervisorTrustEdgeRevokeFailed,
@@ -1724,6 +1824,8 @@ runtime_internal_inputs!(
         BeginDeferredSessionArchive,
         BeginDeferredSessionPromotion,
         CancelSurfaceRequest,
+        ClassifyAssistantOutput,
+        ClassifyCallTimeout,
         ClassifyInputTerminality,
         ClassifyOperationTerminality,
         ClassifyOperationPublicResult,
@@ -1827,6 +1929,27 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            // WAVE G2 machine folds (#14/#260/#261/#293/#314/#320): typed
+            // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
+            NamedTypeBinding::string_enum(
+                "MemberAdmissionVerdictKind",
+                &["Admitted", "DuplicateRejected"],
+            ),
+            NamedTypeBinding::string_enum("StepOutputFaultKind", &["MalformedJson"]),
+            NamedTypeBinding::string_enum("StepFaultDispositionKind", &["Retry", "Terminal"]),
+            NamedTypeBinding::string_enum(
+                "SupervisorEscalationFailureCause",
+                &["NoEligibleSupervisor", "TimeoutExceeded"],
+            ),
+            NamedTypeBinding::string_enum("PolicyDecision", &["Allow", "Deny"]),
+            NamedTypeBinding::string_enum(
+                "ExternalMemberRebindCapability",
+                &["Unavailable", "Available"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TurnTimeoutDisposition",
+                &["Detached", "Canceled", "Retryable"],
+            ),
             NamedTypeBinding::string_enum(
                 "CancelAllWorkRejectReasonKind",
                 &["MobNotRunning", "MemberNotFound", "StaleFenceToken"],
@@ -2077,6 +2200,14 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Fatal", "NotConfirmedReattempt", "StalePendingAuthority"],
             ),
             NamedTypeBinding::string_enum("MobFrameSeedDisposition", &["Seeded", "AlreadySeeded"]),
+            NamedTypeBinding::string_enum(
+                "MemberLiveMaterializationObservationKind",
+                &["DurableSnapshotPresent", "DurableSnapshotMissing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberRevivalVerdictKind",
+                &["ReviveAuthorized", "BrokenRecorded"],
+            ),
             NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
@@ -2333,6 +2464,16 @@ runtime_internal_inputs!(
         UpdateCoordinationWorkIntentStatus,
         UpdateCoordinationResourceClaimStatus,
         ObserveCoordinationResourceClaimOverlap,
+        // WAVE G2 machine folds: shell-driven classifier + seed inputs.
+        ProbeMemberAdmission,
+        ComputeRespawnGeneration,
+        ClassifyStepOutputFault,
+        EscalateToSupervisor,
+        EscalateToSupervisorNoEligibleTarget,
+        EvaluateTopologyEdge,
+        SetExternalMemberRebindCapability,
+        ClassifyTurnTimeoutDisposition,
+        SeedOrphanBudget,
     ]
 );
 
@@ -2355,6 +2496,12 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         // receives `ConfirmOccurrencesSuperseded { occurrence_id }` from
         // the occurrence authority; both sides must agree on the atom.
         vec![
+            // WAVE G1 fold (#250): opaque typed target-binding identity newtype.
+            NamedTypeBinding::string("TargetBindingId"),
+            // Typed trigger identity (#18): distinct from TargetBindingId —
+            // trigger identity and target-binding identity are different
+            // semantic facts.
+            NamedTypeBinding::string("TriggerKey"),
             NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
@@ -2379,6 +2526,17 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![
             NamedTypeBinding::string("ClaimToken"),
             NamedTypeBinding::string("SessionId"),
+            // Typed semantic handles (#18): trigger identity, target-binding
+            // identity, claim ownership, and delivery correlation are
+            // string-backed newtypes, never raw `String`s the machine could
+            // confuse with policy keys or free-form detail text.
+            NamedTypeBinding::string("TriggerKey"),
+            NamedTypeBinding::string("TargetBindingId"),
+            NamedTypeBinding::string("ClaimOwner"),
+            NamedTypeBinding::string("CorrelationId"),
+            // Dogma K8: runtime-outcome receipt key is a typed identity, not
+            // a raw String in canonical machine state.
+            NamedTypeBinding::string("RuntimeOutcomeKey"),
             NamedTypeBinding::string_enum(
                 "DeliveryReceiptStage",
                 &[

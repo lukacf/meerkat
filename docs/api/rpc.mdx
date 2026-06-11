@@ -76,134 +76,134 @@ This table mirrors the generated catalog in `artifacts/schemas/rpc-methods.json`
 enabled in the running binary, so reduced or feature-limited builds expose a
 subset.
 
-| Method | Category | Description |
-|--------|----------|-------------|
-| `initialize` | Handshake | Returns server capabilities |
-| `help/ask` | Help | Ask Meerkat usage help with the embedded platform skill |
-| `runtime/host_info` | Runtime | Read host identity, endpoints, capabilities, health, and realm projection |
-| `runtime/capabilities` | Runtime | Read runtime host capability flags |
-| `runtime/health` | Runtime | Read runtime host health |
-| `session/create` | Session | Create session and run first turn |
-| `session/list` | Session | List active sessions |
-| `session/read` | Session | Get session state |
-| `session/history` | Session | Get committed session transcript messages |
-| `session/rewrite_transcript` | Session | Commit a same-session transcript rewrite |
-| `session/transcript_revision` | Session | Read a transcript revision by id |
-| `session/restore_transcript_revision` | Session | Restore an earlier transcript revision in place |
-| `session/fork_at` | Session | Fork an idle session at a transcript message index |
-| `session/fork_replace` | Session | Fork an idle session and apply a typed transcript replacement |
-| `blob/get` | Session | Fetch a blob payload by id |
-| `artifact/list` | Artifact | List stable artifact records |
-| `artifact/get` | Artifact | Get one stable artifact record |
-| `artifact/download` | Artifact | Download blob-backed artifact payload bytes |
-| `approval/request` | Approval | Create a durable approval request |
-| `approval/list` | Approval | List approval records |
-| `approval/get` | Approval | Get one approval record |
-| `approval/decide` | Approval | Record an approval decision |
-| `events/latest_cursor` | Events | Read the latest replay cursor for a typed event scope |
-| `events/list_since` | Events | List replayable events after a typed cursor |
-| `events/snapshot` | Events | Read a point-in-time snapshot with its replay cursor |
-| `session/archive` | Session | Remove session from runtime |
-| `session/external_event` | Session | Queue a runtime-backed external event |
-| `session/peer_response_terminal` | Session | Admit a correlated terminal peer response through the typed runtime ingress |
-| `session/inject_context` | Session | Append runtime-backed system context to the next turn |
-| `turn/start` | Turn | Start a new turn on existing session |
-| `turn/interrupt` | Turn | Cancel in-flight turn |
-| `live/open` | Live | Open a live audio/text channel for a session |
-| `live/webrtc/answer` | Live | Answer a browser WebRTC offer for an already-open live channel |
-| `live/status` | Live | Get the status of a live channel |
-| `live/close` | Live | Close a live channel |
-| `live/send_input` | Live | Send an input chunk (audio/text) to a live channel |
-| `live/commit_input` | Live | Commit pending input on a live channel (turn boundary) |
-| `live/interrupt` | Live | Interrupt the assistant turn on a live channel (barge-in) |
-| `live/truncate` | Live | Truncate assistant output at a client-tracked playback cursor |
-| `live/refresh` | Live | Apply mutable session config (instructions/tools/audio) to an open live channel |
-| `session/stream_open` | Session | Open a standalone session event stream |
-| `session/stream_close` | Session | Close a standalone session event stream |
-| `mob/create` | Mob | Create a mob from a definition (mob feature) |
-| `mob/list` | Mob | List mobs (mob feature) |
-| `mob/status` | Mob | Get mob status (mob feature) |
-| `mob/members` | Mob | List mob members (mob feature) |
-| `mob/spawn` | Mob | Spawn a member into a mob (mob feature) |
-| `mob/spawn_many` | Mob | Spawn multiple members into a mob (mob feature) |
-| `mob/retire` | Mob | Retire a mob member (mob feature) |
-| `mob/respawn` | Mob | Respawn a mob member (mob feature) |
-| `mob/wire` | Mob | Wire two mob members for comms (mob feature) |
-| `mob/wire_members_batch` | Mob | Wire multiple local mob member edges in one batch (mob feature) |
-| `mob/unwire` | Mob | Remove mob comms wiring (mob feature) |
-| `mob/lifecycle` | Mob | Stop, resume, complete, destroy, or reset a mob (mob feature) |
-| `mob/events` | Mob | Read mob events by cursor (mob feature) |
-| `mob/ingress_interaction` | Mob | Ensure an ingress member and deliver user input with replay anchors (mob feature) |
-| `mob/stream_open` | Mob | Open mob or member event stream (mob feature) |
-| `mob/stream_close` | Mob | Close mob or member event stream (mob feature) |
-| `mob/member_send` | Mob | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
-| `mob/append_system_context` | Mob | Stage system context for a member session (mob feature) |
-| `mob/flows` | Mob | List mob flows (mob feature) |
-| `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
-| `mob/flow_status` | Mob | Get flow run status (mob feature) |
-| `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
-| `mob/ensure_member` | Mob | Idempotent spawn — returns existing entry if member already exists (mob feature) |
-| `mob/reconcile` | Mob | Declarative roster reconcile against a desired spec list (mob feature) |
-| `mob/list_members_matching` | Mob | Label-filtered member listing with server-side filter (mob feature) |
-| `mob/spawn_helper` | Mob | Spawn a helper member and wait for its result (mob feature) |
-| `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
-| `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
-| `mob/turn_start` | Mob | Start a turn on a mob member by identity (mob feature) |
-| `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
-| `mob/snapshot` | Mob | Point-in-time aggregate of mob status plus member list (mob feature) |
-| `mob/destroy` | Mob | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
-| `mob/rotate_supervisor` | Mob | Rotate the supervisor bridge for all members of a mob (mob feature) |
-| `mob/submit_work` | Mob | Submit a unit of work to a mob member through the work lane (mob feature) |
-| `mob/cancel_work` | Mob | Cancel a previously submitted unit of work (mob feature) |
-| `mob/cancel_all_work` | Mob | Cancel all in-flight work for a mob member (mob feature) |
-| `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
-| `mob/wait_ready` | Mob | Wait for mob startup readiness (members bound but kickoff not required, mob feature) |
-| `mob/profile/create` | Mob | Create a realm-scoped mob profile (mob feature) |
-| `mob/profile/get` | Mob | Read a realm-scoped mob profile (mob feature) |
-| `mob/profile/list` | Mob | List realm-scoped mob profiles (mob feature) |
-| `mob/profile/update` | Mob | Update a realm-scoped mob profile (mob feature) |
-| `mob/profile/delete` | Mob | Delete a realm-scoped mob profile (mob feature) |
-| `schedule/create` | Schedule | Create a new schedule (schedule feature) |
-| `schedule/get` | Schedule | Get a schedule by ID (schedule feature) |
-| `schedule/list` | Schedule | List schedules (schedule feature) |
-| `schedule/update` | Schedule | Update a schedule (schedule feature) |
-| `schedule/pause` | Schedule | Pause a schedule (schedule feature) |
-| `schedule/resume` | Schedule | Resume a paused schedule (schedule feature) |
-| `schedule/delete` | Schedule | Delete a schedule (schedule feature) |
-| `schedule/occurrences` | Schedule | List occurrences for a schedule (schedule feature) |
-| `schedule/tools` | Schedule | List schedule tools (schedule feature) |
-| `schedule/call` | Schedule | Call a schedule tool directly (schedule feature) |
-| `workgraph/get` | WorkGraph | Read a WorkGraph item (workgraph feature) |
-| `workgraph/list` | WorkGraph | List WorkGraph items (workgraph feature) |
-| `workgraph/ready` | WorkGraph | List ready WorkGraph items (workgraph feature) |
-| `workgraph/snapshot` | WorkGraph | Read a WorkGraph observability snapshot (workgraph feature) |
-| `workgraph/events` | WorkGraph | Read WorkGraph event history (workgraph feature) |
-| `workgraph/goal/status` | WorkGraph | Read goal and attention status (workgraph feature) |
-| `workgraph/attention/list` | WorkGraph | List attention bindings, optionally filtered by status (workgraph feature) |
-| `comms/send` | Comms | Dispatch a comms command to a session |
-| `comms/peers` | Comms | List discoverable peers (comms feature) |
-| `skills/list` | Skills | List skills with provenance |
-| `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
-| `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
-| `mcp/reload` | MCP | Reload one or all MCP servers (mcp feature) |
-| `models/catalog` | Models | List available models with capabilities and provider profiles |
-| `capabilities/get` | Capabilities | Runtime capability report |
-| `config/get` | Config | Read current config |
-| `config/set` | Config | Replace config |
-| `config/patch` | Config | Merge-patch config (RFC 7396) |
-| `auth/profile/list` | Auth | List auth profiles in a realm |
-| `auth/profile/get` | Auth | Get one auth profile |
-| `auth/profile/create` | Auth | Create an auth profile (CLI-driven for now) |
-| `auth/profile/delete` | Auth | Delete an auth profile (CLI-driven for now) |
-| `auth/login/start` | Auth | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
-| `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
-| `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
-| `auth/login/device_complete` | Auth | Single-poll completion for a device-code OAuth login |
-| `auth/login/provision_api_key` | Auth | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
-| `auth/status/get` | Auth | Get auth status for a profile |
-| `auth/logout` | Auth | Revoke + remove persisted credentials |
-| `realm/list` | Realm | List realm summaries |
-| `realm/get` | Realm | Get full realm connection set |
+| Method | Category | Params | Result | Description |
+| --- | --- | --- | --- | --- |
+| `initialize` | Handshake | — | `ServerCapabilities` | Returns server capabilities |
+| `help/ask` | Help | `HelpRequest` | `HelpResponse` | Ask Meerkat usage help with the embedded platform skill |
+| `runtime/host_info` | Runtime | — | `RuntimeHostInfo` | Read host identity, endpoints, capabilities, health, and realm projection |
+| `runtime/capabilities` | Runtime | — | `RuntimeHostCapabilities` | Read runtime host capability flags |
+| `runtime/health` | Runtime | — | `RuntimeHostHealth` | Read runtime host health |
+| `session/create` | Session | `CreateSessionParams` | `WireRunResult \| DeferredCreateResult` | Create session and run first turn |
+| `session/list` | Session | `ListSessionsParams` | `ListSessionsResult` | List active sessions |
+| `session/read` | Session | `ReadSessionParams` | `WireSessionInfo` | Get session state |
+| `session/history` | Session | `ReadSessionHistoryParams` | `WireSessionHistory` | Get committed session transcript messages |
+| `session/rewrite_transcript` | Session | `RewriteSessionTranscriptParams` | `SessionTranscriptRewriteResult` | Commit a same-session transcript rewrite |
+| `session/transcript_revision` | Session | `ReadSessionTranscriptRevisionParams` | `WireSessionTranscriptRevision` | Read a transcript revision by id |
+| `session/restore_transcript_revision` | Session | `RestoreSessionTranscriptRevisionParams` | `SessionTranscriptRewriteResult` | Restore an earlier transcript revision in place |
+| `session/fork_at` | Session | `ForkSessionAtParams` | `SessionForkResult` | Fork an idle session at a transcript message index |
+| `session/fork_replace` | Session | `ForkSessionReplaceParams` | `SessionForkResult` | Fork an idle session and apply a typed transcript replacement |
+| `blob/get` | Session | `BlobGetParams` | `BlobPayload` | Fetch a blob payload by id |
+| `artifact/list` | Artifact | `ArtifactListParams` | `ArtifactListResult` | List stable artifact records |
+| `artifact/get` | Artifact | `ArtifactIdParams` | `ArtifactRecord` | Get one stable artifact record |
+| `artifact/download` | Artifact | `ArtifactDownloadParams` | `ArtifactDownloadResult` | Download blob-backed artifact payload bytes |
+| `approval/request` | Approval | `ApprovalRequestParams` | `ApprovalRecord` | Create a durable approval request |
+| `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval records |
+| `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval record |
+| `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval decision |
+| `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
+| `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
+| `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
+| `session/archive` | Session | `ArchiveSessionParams` | `Value` | Remove session from runtime |
+| `session/external_event` | Session | `SessionExternalEventEnvelope` | `RuntimeAcceptResult` | Queue a runtime-backed external event |
+| `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
+| `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append runtime-backed system context to the next turn |
+| `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
+| `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
+| `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel for a session |
+| `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
+| `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
+| `live/close` | Live | `LiveChannelParams` | `LiveCloseResult` | Close a live channel |
+| `live/send_input` | Live | `LiveSendInputParams` | `LiveSendInputResult` | Send an input chunk (audio/text) to a live channel |
+| `live/commit_input` | Live | `LiveCommitInputParams` | `LiveCommitInputResult` | Commit pending input on a live channel (turn boundary) |
+| `live/interrupt` | Live | `LiveChannelParams` | `LiveInterruptResult` | Interrupt the assistant turn on a live channel (barge-in) |
+| `live/truncate` | Live | `LiveTruncateParams` | `LiveTruncateResult` | Truncate assistant output at a client-tracked playback cursor |
+| `live/refresh` | Live | `LiveChannelParams` | `LiveRefreshResult` | Apply mutable session config (instructions/tools/audio) to an open live channel |
+| `session/stream_open` | Session | `SessionStreamOpenParams` | `SessionStreamOpenResult` | Open a standalone session event stream |
+| `session/stream_close` | Session | `SessionStreamCloseParams` | `SessionStreamCloseResult` | Close a standalone session event stream |
+| `mob/create` | Mob | `MobCreateParams` | `MobCreateResult` | Create a mob from a definition (mob feature) |
+| `mob/list` | Mob | — | `MobListResult` | List mobs (mob feature) |
+| `mob/status` | Mob | `MobIdParams` | `MobStatusResult` | Get mob status (mob feature) |
+| `mob/members` | Mob | `MobIdParams` | `MobMembersResult` | List mob members (mob feature) |
+| `mob/spawn` | Mob | `MobSpawnParams` | `MobSpawnResult` | Spawn a member into a mob (mob feature) |
+| `mob/spawn_many` | Mob | `MobSpawnManyParams` | `MobSpawnManyResult` | Spawn multiple members into a mob (mob feature) |
+| `mob/retire` | Mob | `MobMemberParams` | `MobRetireResult` | Retire a mob member (mob feature) |
+| `mob/respawn` | Mob | `MobRespawnParams` | `MobRespawnResult` | Respawn a mob member (mob feature) |
+| `mob/wire` | Mob | `MobWireParams` | `MobWireResult` | Wire two mob members for comms (mob feature) |
+| `mob/wire_members_batch` | Mob | `MobWireMembersBatchParams` | `MobWireMembersBatchResult` | Wire multiple local mob member edges in one batch (mob feature) |
+| `mob/unwire` | Mob | `MobUnwireParams` | `MobUnwireResult` | Remove mob comms wiring (mob feature) |
+| `mob/lifecycle` | Mob | `MobLifecycleParams` | `MobLifecycleResult` | Stop, resume, complete, destroy, or reset a mob (mob feature) |
+| `mob/events` | Mob | `MobEventsParams` | `MobEventsResult` | Read mob events by cursor (mob feature) |
+| `mob/ingress_interaction` | Mob | `MobIngressInteractionParams` | `MobIngressInteractionResult` | Ensure an ingress member and deliver user input with replay anchors (mob feature) |
+| `mob/stream_open` | Mob | `MobStreamOpenParams` | `MobStreamOpenResult` | Open mob or member event stream (mob feature) |
+| `mob/stream_close` | Mob | `MobStreamCloseParams` | `MobStreamCloseResult` | Close mob or member event stream (mob feature) |
+| `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
+| `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Stage system context for a member session (mob feature) |
+| `mob/flows` | Mob | `MobIdParams` | `MobFlowsResult` | List mob flows (mob feature) |
+| `mob/flow_run` | Mob | `MobFlowRunParams` | `MobFlowRunResult` | Start a mob flow run (mob feature) |
+| `mob/flow_status` | Mob | `MobFlowStatusParams` | `MobFlowStatusResult` | Get flow run status (mob feature) |
+| `mob/flow_cancel` | Mob | `MobFlowCancelParams` | `MobFlowCancelResult` | Cancel a flow run (mob feature) |
+| `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn — returns existing entry if member already exists (mob feature) |
+| `mob/reconcile` | Mob | `MobReconcileParams` | `MobReconcileResult` | Declarative roster reconcile against a desired spec list (mob feature) |
+| `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |
+| `mob/spawn_helper` | Mob | `MobSpawnHelperParams` | `MobHelperResult` | Spawn a helper member and wait for its result (mob feature) |
+| `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
+| `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
+| `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
+| `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
+| `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
+| `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
+| `mob/rotate_supervisor` | Mob | `MobIdParams` | `MobRotateSupervisorResult` | Rotate the supervisor bridge for all members of a mob (mob feature) |
+| `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
+| `mob/cancel_work` | Mob | `MobCancelWorkParams` | `MobCancelWorkResult` | Cancel a previously submitted unit of work (mob feature) |
+| `mob/cancel_all_work` | Mob | `MobCancelAllWorkParams` | `MobCancelAllWorkResult` | Cancel all in-flight work for a mob member (mob feature) |
+| `mob/wait_kickoff` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for kickoff completion for a member (mob feature) |
+| `mob/wait_ready` | Mob | `MobWaitParams` | `MobWaitMembersResult` | Wait for mob startup readiness (members bound but kickoff not required, mob feature) |
+| `mob/profile/create` | Mob | `MobProfileCreateParams` | `MobProfileLookupResult` | Create a realm-scoped mob profile (mob feature) |
+| `mob/profile/get` | Mob | `MobProfileNameParams` | `MobProfileLookupResult` | Read a realm-scoped mob profile (mob feature) |
+| `mob/profile/list` | Mob | — | `MobProfileListResult` | List realm-scoped mob profiles (mob feature) |
+| `mob/profile/update` | Mob | `MobProfileUpdateParams` | `MobProfileLookupResult` | Update a realm-scoped mob profile (mob feature) |
+| `mob/profile/delete` | Mob | `MobProfileDeleteParams` | `MobProfileDeleteResult` | Delete a realm-scoped mob profile (mob feature) |
+| `schedule/create` | Schedule | `CreateScheduleRequest` | `Schedule` | Create a new schedule (schedule feature) |
+| `schedule/get` | Schedule | `ScheduleIdParams` | `Schedule` | Get a schedule by ID (schedule feature) |
+| `schedule/list` | Schedule | `ListSchedulesParams` | `ScheduleListResult` | List schedules (schedule feature) |
+| `schedule/update` | Schedule | `UpdateScheduleParams` | `Schedule` | Update a schedule (schedule feature) |
+| `schedule/pause` | Schedule | `ScheduleIdParams` | `Schedule` | Pause a schedule (schedule feature) |
+| `schedule/resume` | Schedule | `ScheduleIdParams` | `Schedule` | Resume a paused schedule (schedule feature) |
+| `schedule/delete` | Schedule | `ScheduleIdParams` | `Schedule` | Delete a schedule (schedule feature) |
+| `schedule/occurrences` | Schedule | `ScheduleOccurrencesParams` | `ScheduleOccurrencesResult` | List occurrences for a schedule (schedule feature) |
+| `schedule/tools` | Schedule | — | `ScheduleToolsResult` | List schedule tools (schedule feature) |
+| `schedule/call` | Schedule | `ScheduleToolCallParams` | `Value` | Call a schedule tool directly (schedule feature) |
+| `workgraph/get` | WorkGraph | `WorkGraphIdParams` | `WorkItem` | Read a WorkGraph item (workgraph feature) |
+| `workgraph/list` | WorkGraph | `WorkItemFilter` | `WorkItemsResult` | List WorkGraph items (workgraph feature) |
+| `workgraph/ready` | WorkGraph | `ReadyWorkFilter` | `WorkItemsResult` | List ready WorkGraph items (workgraph feature) |
+| `workgraph/snapshot` | WorkGraph | `WorkGraphSnapshotFilter` | `WorkGraphSnapshot` | Read a WorkGraph observability snapshot (workgraph feature) |
+| `workgraph/events` | WorkGraph | `WorkGraphEventFilter` | `WorkEventsResult` | Read WorkGraph event history (workgraph feature) |
+| `workgraph/goal/status` | WorkGraph | `GoalStatusRequest` | `GoalStatusResult` | Read goal and attention status (workgraph feature) |
+| `workgraph/attention/list` | WorkGraph | `AttentionListRequest` | `AttentionListResult` | List attention bindings, optionally filtered by status (workgraph feature) |
+| `comms/send` | Comms | `CommsSendParams` | `CommsSendResult` | Dispatch a comms command to a session |
+| `comms/peers` | Comms | `CommsPeersParams` | `CommsPeersResult` | List discoverable peers (comms feature) |
+| `skills/list` | Skills | — | `SkillListResponse` | List skills with provenance |
+| `mcp/add` | MCP | `McpAddParams` | `McpLiveOpResponse` | Stage live MCP server addition (mcp feature) |
+| `mcp/remove` | MCP | `McpRemoveParams` | `McpLiveOpResponse` | Stage live MCP server removal (mcp feature) |
+| `mcp/reload` | MCP | `McpReloadParams` | `McpLiveOpResponse` | Reload one or all MCP servers (mcp feature) |
+| `models/catalog` | Models | — | `ModelsCatalogResponse` | List available models with capabilities and provider profiles |
+| `capabilities/get` | Capabilities | — | `CapabilitiesResponse` | Runtime capability report |
+| `config/get` | Config | — | `ConfigEnvelope` | Read current config |
+| `config/set` | Config | `ConfigSetParams` | `ConfigWriteResult` | Replace config |
+| `config/patch` | Config | `ConfigPatchParams` | `ConfigWriteResult` | Merge-patch config (RFC 7396) |
+| `auth/profile/list` | Auth | `RealmIdParams` | `WireAuthProfilesList` | List auth profiles in a realm |
+| `auth/profile/get` | Auth | `BindingIdParams` | `WireAuthProfileDetail` | Get one auth profile |
+| `auth/profile/create` | Auth | `CreateProfileParams` | `WireAuthProfileCreated` | Create an auth profile (CLI-driven for now) |
+| `auth/profile/delete` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Delete an auth profile (CLI-driven for now) |
+| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
+| `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore |
+| `auth/login/device_start` | Auth | `DeviceStartParams` | `WireDeviceStart` | Begin device-code OAuth; returns user_code + verification URL |
+| `auth/login/device_complete` | Auth | `DeviceCompleteParams` | `WireDeviceCompleteResult` | Single-poll completion for a device-code OAuth login |
+| `auth/login/provision_api_key` | Auth | `ProvisionApiKeyParams` | `WireProvisionApiKeyResult` | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
+| `auth/status/get` | Auth | `BindingIdParams` | `WireAuthStatusDetail` | Get auth status for a profile |
+| `auth/logout` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Revoke + remove persisted credentials |
+| `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
+| `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
 WorkGraph goal and attention mutation methods require trusted in-process
 host/session authority and are not part of the public JSON-RPC catalog.
@@ -283,9 +283,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.6.23"
+      "version": "0.7.0-alpha.0"
     },
-    "contract_version": "0.6.23",
+    "contract_version": "0.7.0-alpha.0",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -532,8 +532,9 @@ the parent revision for audit and restore.
     },
     "replacement": [
       {
-        "role": "assistant",
-        "content": "Compacted assistant trace"
+        "role": "block_assistant",
+        "blocks": [{ "block_type": "text", "data": { "text": "Compacted assistant trace" } }],
+        "stop_reason": "end_turn"
       }
     ],
     "reason": {
@@ -1253,7 +1254,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.6.23",
+    "contract_version": "0.7.0-alpha.0",
     "providers": [
       {
         "provider": "anthropic",
@@ -1311,7 +1312,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 6, "patch": 6},
+    "contract_version": {"major": 0, "minor": 7, "patch": 0},
     "capabilities": [
       {
         "id": "sessions",

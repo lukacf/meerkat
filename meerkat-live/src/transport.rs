@@ -40,12 +40,13 @@ use crate::host::{
     LiveChannelCloseObservation, LiveChannelId, LiveChannelStatusCommitAuthority,
     LiveChannelStatusObservation, ObservationOutcome, ObservationRouting,
 };
+use crate::wire_input::live_input_chunk_from_wire;
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use meerkat_contracts::WireLiveAdapterObservation;
+use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
 use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
 use meerkat_core::types::SessionId;
 use uuid::Uuid;
@@ -690,23 +691,48 @@ async fn handle_live_socket(
             client_msg = socket.recv() => {
                 match client_msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        match serde_json::from_str::<LiveInputChunk>(text.as_str()) {
-                            Ok(chunk) => {
-                                if let Err(err) = state.host.send_input(&channel_id, chunk).await {
-                                    tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
-                                    let err_json = serde_json::to_string(&WsErrorFrame {
-                                        error: err.to_string(),
-                                        reason: None,
-                                    }).unwrap_or_default();
-                                    let _ = socket.send(WsMessage::Text(err_json.into())).await;
+                        // D243: deserialize the wire-contract `LiveInputChunkWire`
+                        // and run the shared `live_input_chunk_from_wire`
+                        // conversion owner (`crate::wire_input`) that the RPC
+                        // `live/send_input` path also uses, so the direct WS path
+                        // runs identical wire validation. A malformed envelope OR
+                        // malformed base64 fails closed uniformly.
+                        let chunk = match serde_json::from_str::<LiveInputChunkWire>(text.as_str()) {
+                            Ok(wire) => match live_input_chunk_from_wire(wire) {
+                                Ok(chunk) => Some(chunk),
+                                Err(convert_err) => {
+                                    tracing::warn!(
+                                        channel = %channel_id,
+                                        error = %convert_err,
+                                        "WS input chunk failed wire validation; closing"
+                                    );
+                                    None
                                 }
-                            }
+                            },
                             Err(parse_err) => {
                                 tracing::warn!(
                                     channel = %channel_id,
                                     error = %parse_err,
                                     "invalid WS text frame; closing"
                                 );
+                                None
+                            }
+                        };
+                        match chunk {
+                            Some(chunk) => {
+                                if let Err(err) = state.host.send_input(&channel_id, chunk).await {
+                                    tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
+                                    // D153: populate the typed `reason` with the
+                                    // host error's stable class so clients route
+                                    // on the code, not the prose `error`.
+                                    let err_json = serde_json::to_string(&WsErrorFrame {
+                                        error: err.to_string(),
+                                        reason: Some(err.reason_code().to_string()),
+                                    }).unwrap_or_default();
+                                    let _ = socket.send(WsMessage::Text(err_json.into())).await;
+                                }
+                            }
+                            None => {
                                 if !state.close_channel_with_generated_feedback(&channel_id).await {
                                     break;
                                 }
@@ -734,9 +760,11 @@ async fn handle_live_socket(
                         };
                         if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                             tracing::warn!(channel = %channel_id, error = %err, "binary send_input failed");
+                            // D153: populate the typed `reason` with the host
+                            // error's stable class (see text-frame path above).
                             let err_json = serde_json::to_string(&WsErrorFrame {
                                 error: err.to_string(),
-                                reason: None,
+                                reason: Some(err.reason_code().to_string()),
                             }).unwrap_or_default();
                             let _ = socket.send(WsMessage::Text(err_json.into())).await;
                         }
@@ -1069,6 +1097,14 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_output_audio_degraded(
+            &self,
+            _session_id: &SessionId,
+            _dropped: u64,
         ) -> Result<(), LiveProjectionError> {
             Ok(())
         }
@@ -1994,6 +2030,77 @@ mod tests {
         server_handle.abort();
     }
 
+    /// D243: a frame whose JSON envelope is well-formed but whose base64
+    /// `data` field fails wire validation (the same validation RPC
+    /// `live/send_input` runs via `live_input_chunk_from_wire`) is rejected on
+    /// the direct WS path exactly like a malformed-envelope frame — the channel
+    /// fails closed instead of fail-open accepting the bad chunk.
+    #[tokio::test]
+    async fn websocket_closes_on_wire_validation_failure() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let session_id = meerkat_core::types::SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
+            .await
+            .unwrap();
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let (mut write, mut read) = ws_stream.split();
+
+        // Well-formed `LiveInputChunkWire::Audio` envelope, but `data` is not
+        // valid base64 — `live_input_chunk_from_wire` rejects it.
+        let frame = serde_json::json!({
+            "kind": "audio",
+            "data": "not valid base64!!!",
+            "sample_rate_hz": 24000,
+            "channels": 1
+        })
+        .to_string();
+        write.send(Message::Text(frame.into())).await.unwrap();
+
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(msg) = read.next().await {
+                match msg {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(_) => continue,
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            disconnected,
+            "expected transport disconnect for wire-validation failure"
+        );
+        let status = state.host().channel_status(&channel_id).await.unwrap();
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "generated close authority must commit before disconnecting on wire-validation failure"
+        );
+
+        server_handle.abort();
+    }
+
     /// Adapter that delivers a single scripted observation after a short
     /// internal delay, then idles. Used to exercise the WS pump select!
     /// arms under inbound mic-audio saturation: a `biased;` arm ordering
@@ -2244,6 +2351,63 @@ mod tests {
         match typed_observation {
             Some(WireLiveAdapterObservation::Ready) => {}
             other => panic!("expected wire-mirror Ready, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // D153: send_input failure WsErrorFrame carries a typed reason code
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn send_input_failure_frame_populates_typed_reason() {
+        // A representative send_input failure: the channel is gone. The host
+        // error is typed; the WS frame must carry its stable reason class in
+        // the `reason` field (previously left `None`, forcing clients to
+        // reparse the prose `error`).
+        let host_err = LiveAdapterHostError::ChannelNotFound(LiveChannelId::new("ch-1"));
+        let frame = WsErrorFrame {
+            error: host_err.to_string(),
+            reason: Some(host_err.reason_code().to_string()),
+        };
+        assert_eq!(frame.reason.as_deref(), Some("channel_not_found"));
+
+        // The serialized frame must include the populated `reason` (the
+        // `skip_serializing_if = Option::is_none` would have dropped it under
+        // the old `reason: None` shape).
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"reason\":\"channel_not_found\""),
+            "serialized WsErrorFrame must carry the typed reason: {json}"
+        );
+
+        // Each host error variant maps to a distinct, stable reason class so
+        // clients can route without parsing the message. Two structurally
+        // different not-ready errors share the not-ready class, which is
+        // correct; the point is the codes are stable and exhaustive.
+        let cases = [
+            (
+                LiveAdapterHostError::NoAdapter(LiveChannelId::new("c")),
+                "no_adapter",
+            ),
+            (
+                LiveAdapterHostError::OpenNotAuthorized,
+                "open_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::CloseNotAuthorized,
+                "close_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::StatusNotAuthorized,
+                "status_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::UnsupportedCommand("x"),
+                "unsupported_command",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.reason_code(), expected, "reason_code for {err:?}");
         }
     }
 }

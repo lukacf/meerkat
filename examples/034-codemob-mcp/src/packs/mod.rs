@@ -125,7 +125,7 @@ pub fn turn_driven_profile(
     desc: &str,
     provider_params: Option<&Value>,
 ) -> ProfileBinding {
-    ProfileBinding::Inline(Profile {
+    ProfileBinding::Inline(Box::new(Profile {
         model,
         skills: vec![skill.to_string()],
         tools: ToolConfig {
@@ -141,7 +141,7 @@ pub fn turn_driven_profile(
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: provider_params.cloned(),
-    })
+    }))
 }
 
 /// Build a flow step with text output mode and common defaults.

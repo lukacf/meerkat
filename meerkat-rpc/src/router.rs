@@ -50,12 +50,7 @@ impl meerkat_live::LiveToolDispatcher for RuntimeLiveToolDispatcher {
         self.runtime
             .dispatch_external_tool_call(session_id, call)
             .await
-            .map_err(|err| match err {
-                SessionError::NotFound { id } => meerkat_live::LiveToolDispatchError::Rejected(
-                    format!("session {id} not found for live tool dispatch"),
-                ),
-                other => meerkat_live::LiveToolDispatchError::Internal(other.to_string()),
-            })
+            .map_err(|err| meerkat_live::LiveToolDispatchError::from_session_error(session_id, err))
     }
 }
 
@@ -77,17 +72,26 @@ fn mob_destroy_cleanup_error_response(
     }
 }
 
+/// Shared typed `SessionError` → JSON-RPC error mapper for mob-owned session
+/// reads/archives. Only `NotFound` maps to `SESSION_NOT_FOUND`; store-layer
+/// and other service failures surface as typed internal errors instead of
+/// being laundered into "session not found" (K17).
 #[cfg(feature = "mob")]
-fn mob_archive_session_error_response(
+fn mob_session_service_error_response(
     id: Option<crate::protocol::RpcId>,
     session_id: &SessionId,
-    archive_error: SessionError,
+    service_error: SessionError,
 ) -> RpcResponse {
-    match archive_error {
+    match service_error {
         SessionError::NotFound { .. } => RpcResponse::error(
             id,
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
+        ),
+        SessionError::Busy { .. } => RpcResponse::error(
+            id,
+            error::SESSION_BUSY,
+            format!("Session is busy: {session_id}"),
         ),
         SessionError::FailedWithData { message, data } => {
             RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, data)
@@ -126,13 +130,10 @@ fn rpc_mob_external_tools_provider_from_parts(
 }
 
 #[cfg(feature = "comms")]
-fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt)).unwrap_or_else(
-        |error| {
-            tracing::error!(?error, "failed to serialize CommsSendResult");
-            serde_json::Value::Object(serde_json::Map::new())
-        },
-    )
+fn send_receipt_json(
+    receipt: meerkat_core::comms::SendReceipt,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,13 +199,13 @@ impl NotificationSink {
     /// direct session events.
     async fn emit_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -218,9 +219,9 @@ impl NotificationSink {
     }
 
     /// Emit a scoped session stream event notification with scope metadata.
-    pub async fn emit_scoped_session_stream_event(
+    pub(crate) async fn emit_scoped_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
@@ -228,7 +229,7 @@ impl NotificationSink {
         scope_path: &[meerkat_core::event::StreamScopeFrame],
     ) {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -274,12 +275,12 @@ impl NotificationSink {
     /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
     async fn emit_mob_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "event": event,
         });
@@ -316,6 +317,45 @@ impl NotificationSink {
         }
         let notification = RpcNotification::new("mob/stream_end", params);
         let _ = self.tx.send(notification).await;
+    }
+}
+
+/// Typed owner of an RPC event-stream identity.
+///
+/// A stream identity is minted once on stream open (`StreamRef::mint`) and is
+/// the single key the router uses for its in-flight stream registries. The
+/// `MeerkatMachine` keys the same stream by its canonical string form, so the
+/// only conversions are mint (open), parse-at-ingress from the untrusted wire
+/// `stream_id` (`StreamRef::parse`, fail-closed on a malformed value), the
+/// canonical authority string (`Display`), and the wire-out string in the
+/// open/close results. There is no bare-`Uuid` stream key anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct StreamRef(Uuid);
+
+impl StreamRef {
+    /// Mint a fresh stream identity on stream open.
+    fn mint() -> Self {
+        StreamRef(Uuid::new_v4())
+    }
+
+    /// Parse an untrusted wire `stream_id` into the typed identity.
+    ///
+    /// Returns `None` for a malformed value so the caller can fail the request
+    /// closed at the ingress boundary instead of fabricating an identity.
+    fn parse(raw: &str) -> Option<Self> {
+        Uuid::parse_str(raw).ok().map(StreamRef)
+    }
+
+    /// Canonical string form, as keyed by the `MeerkatMachine` authority and
+    /// echoed back on the wire.
+    fn as_string(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl std::fmt::Display for StreamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -455,8 +495,8 @@ fn stop_stream_forwarder(stream: &mut StreamForwarder) {
 }
 
 async fn attach_stream_forwarder_task(
-    streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
-    stream_id: Uuid,
+    streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
+    stream_id: StreamRef,
     task: JoinHandle<()>,
 ) {
     let mut task = Some(task);
@@ -479,10 +519,10 @@ async fn attach_stream_forwarder_task(
 
 async fn resolve_session_stream_open_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     session_id: &SessionId,
 ) -> Result<SessionStreamOpenAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let session_id = session_id.to_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
@@ -520,11 +560,11 @@ async fn resolve_session_stream_open_authority(
 
 async fn record_session_stream_terminal_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) -> Result<SessionStreamTerminalAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -567,9 +607,9 @@ async fn record_session_stream_terminal_authority(
 
 async fn emit_authorized_session_stream_terminal(
     notification_sink: &NotificationSink,
-    active_session_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_session_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: &RpcStreamAuthority,
-    stream_id: Uuid,
+    stream_id: StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) {
@@ -592,9 +632,9 @@ async fn emit_authorized_session_stream_terminal(
 
 async fn resolve_session_stream_close_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<SessionStreamCloseAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -646,9 +686,9 @@ async fn resolve_session_stream_close_authority(
 
 async fn resolve_mob_stream_open_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<MobStreamOpenAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -678,11 +718,11 @@ async fn resolve_mob_stream_open_authority(
 
 async fn record_mob_stream_terminal_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) -> Result<MobStreamTerminalAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -721,12 +761,62 @@ async fn record_mob_stream_terminal_authority(
         })
 }
 
+/// Serialize an authoritative mob stream event, refusing to fabricate a
+/// `Value::Null` (or any other) event when serialization fails.
+///
+/// A serialization failure on the authoritative stream is a terminal fault: we
+/// cannot lawfully continue the stream after silently dropping or fabricating an
+/// event, because either choice would launder the fault into a fabricated
+/// success on the wire. The caller terminates the stream with the recorded fault
+/// detail instead.
+#[cfg(feature = "mob")]
+fn serialize_mob_stream_event<T: serde::Serialize>(
+    event: &T,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(event)
+}
+
+/// Terminate a mob stream after an authoritative event failed to serialize.
+///
+/// This records the typed serialization fault as the terminal detail and emits a
+/// machine-authorized terminal-error notification, so the client observes a
+/// truthful terminal instead of a fabricated `Value::Null` event.
+#[cfg(feature = "mob")]
+async fn emit_authorized_mob_stream_serialization_terminal(
+    notification_sink: &NotificationSink,
+    active_mob_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
+    stream_authority: &RpcStreamAuthority,
+    stream_id: StreamRef,
+    serialize_error: &serde_json::Error,
+) {
+    tracing::error!(
+        stream_id = %stream_id,
+        error = %serialize_error,
+        "failed to serialize authoritative mob stream event; terminating stream as terminal error"
+    );
+    emit_authorized_mob_stream_terminal(
+        notification_sink,
+        active_mob_streams,
+        stream_authority,
+        stream_id,
+        // No observation variant models a serialization fault yet; the
+        // queue-overflow observation is the closest terminal-*error* class
+        // (vs. TransportEnded, which would mislabel this as a clean remote
+        // end). The true cause is recorded verbatim in the detail.
+        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
+        Some(format!(
+            "authoritative mob stream event failed to serialize: {serialize_error}"
+        )),
+    )
+    .await;
+}
+
 #[cfg(feature = "mob")]
 async fn emit_authorized_mob_stream_terminal(
     notification_sink: &NotificationSink,
-    active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_mob_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: &RpcStreamAuthority,
-    stream_id: Uuid,
+    stream_id: StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) {
@@ -749,9 +839,9 @@ async fn emit_authorized_mob_stream_terminal(
 
 async fn resolve_mob_stream_close_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<MobStreamCloseAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -812,12 +902,12 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_session_streams: Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: RpcStreamAuthority,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "mob")]
-    active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_mob_streams: Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     live_adapter_host: Arc<meerkat_live::LiveAdapterHost>,
     live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
@@ -1327,7 +1417,16 @@ impl MethodRouter {
         }
 
         if self.runtime.pending_session_exists(session_id).await
-            || self.runtime.session_state(session_id).await.is_some()
+            // Best-effort owner probe: a store error here is treated as "not
+            // owned via this check" so the disjunction can fall through to the
+            // other existence checks. The authoritative read is performed again
+            // by the handler.
+            || self
+                .runtime
+                .session_state(session_id)
+                .await
+                .map(|opt| opt.is_some())
+                .unwrap_or(false)
             || self.runtime.read_session(session_id).await.is_ok()
             || self
                 .runtime
@@ -1365,11 +1464,9 @@ impl MethodRouter {
                 Some(RpcResponse::success(id, history))
             }
             Err(meerkat_core::service::SessionError::NotFound { .. }) => None,
-            Err(err) => Some(RpcResponse::error(
-                id,
-                error::SESSION_NOT_FOUND,
-                err.to_string(),
-            )),
+            // A store-layer failure must surface as a typed error, not be
+            // laundered into a "session not found" (K17).
+            Err(err) => Some(mob_session_service_error_response(id, session_id, err)),
         }
     }
 
@@ -1390,6 +1487,31 @@ impl MethodRouter {
         request: RpcRequest,
         request_context: Option<RequestContext>,
     ) -> Option<RpcResponse> {
+        // Validate the JSON-RPC envelope version at the boundary. The transport
+        // carries `jsonrpc` as a free String; an envelope that does not declare
+        // the supported "2.0" version is rejected here (typed via
+        // `has_supported_version`) rather than dispatched. A notification (no
+        // id) with a bad version gets no response per the JSON-RPC spec.
+        if !request.has_supported_version() {
+            if request.is_notification() {
+                tracing::debug!(
+                    jsonrpc = %request.jsonrpc,
+                    method = %request.method,
+                    "Dropping notification with unsupported JSON-RPC version"
+                );
+                return None;
+            }
+            return Some(RpcResponse::error(
+                request.id.clone(),
+                error::INVALID_REQUEST,
+                format!(
+                    "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                    crate::protocol::JSONRPC_VERSION,
+                    request.jsonrpc
+                ),
+            ));
+        }
+
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {
             // Handle known notification methods silently
@@ -1408,7 +1530,9 @@ impl MethodRouter {
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(
                 id,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
+                self.skill_runtime.is_some(),
             ),
             "help/ask" => {
                 Box::pin(handlers::help::handle_ask(
@@ -1710,12 +1834,16 @@ impl MethodRouter {
                 id,
                 &self.runtime,
                 &self.config_store,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
+                self.skill_runtime.is_some(),
             ),
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
                 id,
                 &self.runtime,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
+                self.skill_runtime.is_some(),
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
             "approval/request" => {
@@ -1970,18 +2098,24 @@ impl MethodRouter {
         // Use resolve_session_owner (from main) with enriched WireSessionInfo (from this PR).
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if let Some(mut info) = self.runtime.read_session_rich(&session_id).await {
-                    info.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, info)
-                } else {
-                    RpcResponse::error(
+                match self.runtime.read_session_rich(&session_id).await {
+                    Ok(Some(mut info)) => {
+                        info.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, info)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    // A store-layer failure must surface as a typed error, not
+                    // be laundered into a "session not found".
+                    Err(err) => match err.data {
+                        Some(data) => RpcResponse::error_with_data(id, err.code, err.message, data),
+                        None => RpcResponse::error(id, err.code, err.message),
+                    },
                 }
             }
             #[cfg(feature = "mob")]
@@ -1994,7 +2128,9 @@ impl MethodRouter {
                         });
                         RpcResponse::success(id, info)
                     }
-                    Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                    // A store-layer failure must surface as a typed error, not
+                    // be laundered into a "session not found" (K17).
+                    Err(err) => mob_session_service_error_response(id, &session_id, err),
                 }
             }
             None => RpcResponse::error(
@@ -2032,22 +2168,25 @@ impl MethodRouter {
 
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if let Some(mut history) = self
+                match self
                     .runtime
                     .read_session_history_rich(&session_id, query)
                     .await
                 {
-                    history.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, history)
-                } else {
-                    RpcResponse::error(
+                    Ok(Some(mut history)) => {
+                        history.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, history)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    // A store/control-plane fault is surfaced as itself —
+                    // never collapsed into a not-found.
+                    Err(err) => RpcResponse::error(id, err.code, err.message),
                 }
             }
             #[cfg(feature = "mob")]
@@ -2322,6 +2461,16 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
+        // Lower the typed wire replacement into the core `TranscriptReplacement`
+        // at the boundary; a malformed replacement fails closed with a typed
+        // parse error rather than being forwarded.
+        let replacement = match params.replacement.into_core() {
+            Ok(replacement) => replacement,
+            Err(err) => {
+                return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string());
+            }
+        };
+
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self
                 .runtime
@@ -2329,7 +2478,7 @@ impl MethodRouter {
                     &session_id,
                     SessionForkReplaceRequest {
                         message_index: params.message_index,
-                        replacement: params.replacement,
+                        replacement,
                         running_behavior: params.running_behavior,
                     },
                 )
@@ -2443,7 +2592,7 @@ impl MethodRouter {
                         format!("Session not found: {session_id}"),
                     )
                 }
-                Err(error) => mob_archive_session_error_response(id, &session_id, error),
+                Err(error) => mob_session_service_error_response(id, &session_id, error),
             },
             None => {
                 #[cfg(feature = "mob")]
@@ -2486,7 +2635,7 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
         let req = meerkat_core::AppendSystemContextRequest {
-            text: params.text,
+            content: params.content,
             source: params.source,
             idempotency_key: params.idempotency_key,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -2507,7 +2656,18 @@ impl MethodRouter {
                 .await
             {
                 Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
-                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                // Typed control-error mapping: session faults go through the
+                // shared store-error mapper; request-shape faults keep their
+                // typed control codes instead of laundering to SESSION_NOT_FOUND.
+                Err(meerkat_core::SessionControlError::Session(err)) => {
+                    mob_session_service_error_response(id, &session_id, err)
+                }
+                Err(control_err) => RpcResponse::error_with_data(
+                    id,
+                    error::INVALID_REQUEST,
+                    control_err.to_string(),
+                    json!({ "code": control_err.code() }),
+                ),
             },
             None => RpcResponse::error(
                 id,
@@ -2537,12 +2697,27 @@ impl MethodRouter {
         };
         let comms = match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if self.runtime.session_state(&session_id).await.is_none() {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Session is archived: {session_id}"),
-                    );
+                match self.runtime.session_state(&session_id).await {
+                    // Session exists and is live: proceed.
+                    Ok(Some(_)) => {}
+                    // Session genuinely absent: it has been archived.
+                    Ok(None) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Session is archived: {session_id}"),
+                        );
+                    }
+                    // A store-layer failure must surface as a typed error, not
+                    // be conflated with an archived session.
+                    Err(err) => {
+                        return match err.data {
+                            Some(data) => {
+                                RpcResponse::error_with_data(id, err.code, err.message, data)
+                            }
+                            None => RpcResponse::error(id, err.code, err.message),
+                        };
+                    }
                 }
                 self.runtime.comms_runtime(&session_id).await
             }
@@ -2578,7 +2753,14 @@ impl MethodRouter {
             }
         };
         match comms.send(cmd).await {
-            Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
+            Ok(receipt) => match send_receipt_json(receipt) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize comms send receipt: {serialize_error}"),
+                ),
+            },
             Err(e) => {
                 let normalized = match &e {
                     meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
@@ -2640,12 +2822,27 @@ impl MethodRouter {
         };
         let comms = match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if self.runtime.session_state(&session_id).await.is_none() {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Session is archived: {session_id}"),
-                    );
+                match self.runtime.session_state(&session_id).await {
+                    // Session exists and is live: proceed.
+                    Ok(Some(_)) => {}
+                    // Session genuinely absent: it has been archived.
+                    Ok(None) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Session is archived: {session_id}"),
+                        );
+                    }
+                    // A store-layer failure must surface as a typed error, not
+                    // be conflated with an archived session.
+                    Err(err) => {
+                        return match err.data {
+                            Some(data) => {
+                                RpcResponse::error_with_data(id, err.code, err.message, data)
+                            }
+                            None => RpcResponse::error(id, err.code, err.message),
+                        };
+                    }
                 }
                 self.runtime.comms_runtime(&session_id).await
             }
@@ -2738,7 +2935,7 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         let open_authority = match resolve_session_stream_open_authority(
             &self.stream_authority,
             &stream_id,
@@ -2826,7 +3023,7 @@ impl MethodRouter {
         attach_stream_forwarder_task(&self.active_session_streams, stream_id, task).await;
 
         let result = meerkat_contracts::SessionStreamOpenResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             session_id: open_authority.session_id,
             opened: open_authority.opened,
         };
@@ -2851,9 +3048,9 @@ impl MethodRouter {
                 Err(resp) => return resp.with_id(id),
             };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
+        let stream_id = match StreamRef::parse(&params.stream_id) {
+            Some(stream_id) => stream_id,
+            None => {
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
@@ -2894,7 +3091,7 @@ impl MethodRouter {
         }
 
         let result = meerkat_contracts::SessionStreamCloseResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             closed: close_authority.closed,
             already_closed: close_authority.already_closed,
         };
@@ -2932,7 +3129,7 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
         let stream_authority = self.stream_authority.clone();
@@ -2992,8 +3189,20 @@ impl MethodRouter {
                             match event {
                                 Some(envelope) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&envelope)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serialize_mob_stream_event(&envelope) {
+                                        Ok(value) => value,
+                                        Err(serialize_error) => {
+                                            emit_authorized_mob_stream_serialization_terminal(
+                                                &notification_sink,
+                                                &active_mob_streams,
+                                                &stream_authority,
+                                                stream_id_for_task,
+                                                &serialize_error,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -3087,8 +3296,20 @@ impl MethodRouter {
                             match event {
                                 Some(attributed) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&attributed)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serialize_mob_stream_event(&attributed) {
+                                        Ok(value) => value,
+                                        Err(serialize_error) => {
+                                            emit_authorized_mob_stream_serialization_terminal(
+                                                &notification_sink,
+                                                &active_mob_streams,
+                                                &stream_authority,
+                                                stream_id_for_task,
+                                                &serialize_error,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -3134,7 +3355,7 @@ impl MethodRouter {
         };
 
         let result = meerkat_contracts::MobStreamOpenResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             opened,
         };
         match serde_json::to_value(result) {
@@ -3159,9 +3380,9 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
+        let stream_id = match StreamRef::parse(&params.stream_id) {
+            Some(stream_id) => stream_id,
+            None => {
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
@@ -3196,7 +3417,7 @@ impl MethodRouter {
         }
 
         let result = meerkat_contracts::MobStreamCloseResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             closed: close_authority.closed,
             already_closed: close_authority.already_closed,
         };
@@ -3248,6 +3469,39 @@ mod tests {
 
     use crate::protocol::RpcId;
 
+    /// K17 regression: mob session-service failures must keep their typed
+    /// identity on the wire. Only `NotFound` may map to `SESSION_NOT_FOUND`;
+    /// a store-layer fault is a typed internal error, not a fabricated
+    /// "session not found".
+    #[cfg(feature = "mob")]
+    #[test]
+    fn mob_session_store_error_is_not_laundered_to_not_found() {
+        let session_id = meerkat_core::SessionId::new();
+
+        let store_error = SessionError::Store("sqlite I/O failure".into());
+        let response =
+            mob_session_service_error_response(Some(RpcId::Num(1)), &session_id, store_error);
+        let err = response.error.expect("store failure must be an error");
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert_ne!(err.code, error::SESSION_NOT_FOUND);
+        assert!(err.message.contains("sqlite I/O failure"));
+
+        let not_found = SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        let response =
+            mob_session_service_error_response(Some(RpcId::Num(2)), &session_id, not_found);
+        let err = response.error.expect("not-found must be an error");
+        assert_eq!(err.code, error::SESSION_NOT_FOUND);
+
+        let busy = SessionError::Busy {
+            id: session_id.clone(),
+        };
+        let response = mob_session_service_error_response(Some(RpcId::Num(3)), &session_id, busy);
+        let err = response.error.expect("busy must be an error");
+        assert_eq!(err.code, error::SESSION_BUSY);
+    }
+
     #[cfg(feature = "mob")]
     struct StaticDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -3282,6 +3536,39 @@ mod tests {
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
         }
+    }
+
+    #[test]
+    fn live_tool_dispatch_routes_session_error_through_typed_classifier() {
+        // Row 113: the RPC live-tool dispatch seam must route SessionError
+        // through the typed `LiveToolDispatchError::from_session_error` owner
+        // instead of collapsing every non-NotFound variant into a prose-only
+        // `Internal(to_string())`. A `Busy` error must land in the distinct
+        // typed `SessionBusy` variant (the class the inline match previously
+        // erased), and a `NotFound` must land in `SessionNotFound` — both
+        // preserving the terminal class for callers downstream of the live
+        // adapter.
+        let session_id = SessionId::new();
+        let busy = meerkat_live::LiveToolDispatchError::from_session_error(
+            &session_id,
+            SessionError::Busy {
+                id: session_id.clone(),
+            },
+        );
+        assert!(
+            matches!(busy, meerkat_live::LiveToolDispatchError::SessionBusy(_)),
+            "Busy must map to the typed SessionBusy variant, not Internal"
+        );
+        let not_found = meerkat_live::LiveToolDispatchError::from_session_error(
+            &session_id,
+            SessionError::NotFound {
+                id: session_id.clone(),
+            },
+        );
+        assert!(matches!(
+            not_found,
+            meerkat_live::LiveToolDispatchError::SessionNotFound(_)
+        ));
     }
 
     #[cfg(feature = "mob")]
@@ -3335,7 +3622,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("well-formed receipt serializes");
 
         assert_eq!(
             payload["request_id"],
@@ -3344,6 +3632,42 @@ mod tests {
         assert_eq!(
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
+        );
+    }
+
+    // Gate (#62): a serialization failure on the authoritative reply/stream must
+    // surface as a typed JSON-RPC error, never a fabricated success carrying an
+    // empty `{}` object or `null`. `send_receipt_json` now returns a `Result`
+    // (no `{}` fallback), and `RpcResponse::success` converts a serialize fault
+    // into an `INTERNAL_ERROR` response instead of a success-with-null.
+    #[test]
+    fn gate_serialize_failure_surfaces_typed_error_not_null_success() {
+        // A type whose Serialize impl always fails, standing in for a payload
+        // that cannot be serialized onto the authoritative reply.
+        struct AlwaysFailsToSerialize;
+        impl serde::Serialize for AlwaysFailsToSerialize {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("forced serialization failure"))
+            }
+        }
+
+        let response =
+            RpcResponse::success(Some(crate::protocol::RpcId::Num(7)), AlwaysFailsToSerialize);
+
+        // OLD behavior fabricated a success-with-{}/null; the fixed contract
+        // yields a typed error and no result payload at all.
+        assert!(
+            response.result.is_none(),
+            "serialization failure must not fabricate a success result"
+        );
+        let err = response
+            .error
+            .expect("serialization failure must surface as a typed JSON-RPC error");
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert!(
+            err.message.contains("serialize"),
+            "error message should name the serialization fault, got: {}",
+            err.message
         );
     }
 
@@ -3849,7 +4173,7 @@ mod tests {
             "approval/request",
             serde_json::json!({
                 "requester": "human:alice",
-                "owner": {"owner_type": "session", "session_id": "session-1"},
+                "owner": {"owner_type": "session", "session_id": "00000000-0000-0000-0000-000000000001"},
                 "resource": {"kind": "shell_command", "id": "shell:rm"},
                 "proposed_action": {
                     "kind": "shell_command",
@@ -4086,8 +4410,13 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -4100,7 +4429,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
@@ -4133,8 +4462,13 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -4147,7 +4481,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
@@ -4574,9 +4908,12 @@ mod tests {
                 if notif.params["event"]["payload"]["type"] != "run_started" {
                     continue;
                 }
-                break notif.params["event"]["payload"]["prompt"]
+                // K3: `run_started` carries the typed `RunInput`; a
+                // content-bearing run exposes its content under
+                // `input.content`.
+                break notif.params["event"]["payload"]["input"]["content"]
                     .as_str()
-                    .expect("run_started prompt")
+                    .expect("run_started content input")
                     .to_string();
             }
         })
@@ -4594,6 +4931,66 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
+
+    /// #326: a request envelope declaring an unsupported JSON-RPC version is
+    /// rejected with the standard INVALID_REQUEST error at the dispatch
+    /// boundary rather than dispatched to the named method handler.
+    #[tokio::test]
+    async fn unsupported_jsonrpc_version_request_rejected_before_dispatch() {
+        let (router, _notif_rx) = test_router().await;
+        let req = RpcRequest {
+            jsonrpc: "1.0".to_string(),
+            id: Some(RpcId::Num(7)),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let resp = router
+            .dispatch(req)
+            .await
+            .expect("request frame must yield a response");
+        assert_eq!(error_code(&resp), crate::error::INVALID_REQUEST);
+        assert_eq!(resp.id, Some(RpcId::Num(7)));
+        // The handler never ran: the success-shaped capability payload is absent.
+        assert!(resp.result.is_none());
+    }
+
+    /// #326: a missing JSON-RPC version (deserialized to empty string) is also
+    /// rejected, not silently treated as 2.0.
+    #[tokio::test]
+    async fn missing_jsonrpc_version_request_rejected_before_dispatch() {
+        let (router, _notif_rx) = test_router().await;
+        let req = RpcRequest {
+            jsonrpc: String::new(),
+            id: Some(RpcId::Num(8)),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let resp = router
+            .dispatch(req)
+            .await
+            .expect("request frame must yield a response");
+        assert_eq!(error_code(&resp), crate::error::INVALID_REQUEST);
+    }
+
+    /// #326: a notification (no id) with an unsupported version gets no
+    /// response and is not dispatched.
+    #[tokio::test]
+    async fn unsupported_jsonrpc_version_notification_dropped() {
+        let (router, _notif_rx) = test_router().await;
+        let notif = RpcRequest {
+            jsonrpc: "1.0".to_string(),
+            id: None,
+            method: "initialized".to_string(),
+            params: None,
+        };
+
+        assert!(
+            router.dispatch(notif).await.is_none(),
+            "bad-version notification must be dropped with no response"
+        );
+    }
 
     /// 1. `initialize` returns server capabilities with server info and methods.
     #[tokio::test]
@@ -4901,12 +5298,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        let stream_ref = StreamRef::parse(&stream_id).unwrap();
         assert_eq!(router.active_session_streams.lock().await.len(), 1);
 
         record_session_stream_terminal_authority(
             &router.stream_authority,
-            &stream_uuid,
+            &stream_ref,
             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
             None,
         )
@@ -5132,7 +5529,16 @@ mod tests {
     #[async_trait::async_trait]
     impl meerkat_client::realtime_session::RealtimeSessionFactory for RecordingLiveFactory {
         fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
-            meerkat_contracts::RealtimeCapabilities::default()
+            // #176: the live WS transport resolves its audio policy from the
+            // factory's typed `RealtimeCapabilities`. A realistic realtime
+            // factory advertises PCM 24 kHz mono in both directions (the only
+            // binary format the WS transport negotiates), so `live/open`
+            // resolves a typed audio policy instead of failing closed.
+            meerkat_contracts::RealtimeCapabilities {
+                audio_input_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                audio_output_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                ..meerkat_contracts::RealtimeCapabilities::default()
+            }
         }
 
         async fn open_session(
@@ -5297,9 +5703,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
-            body: "helper finished via comms".to_string(),
+            content: "helper finished via comms".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
 
@@ -5346,9 +5751,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
-            body: "urgent helper update via comms".to_string(),
+            content: "urgent helper update via comms".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
         });
 
@@ -6383,7 +6787,7 @@ mod tests {
         operator_comms
             .peer_interaction_handle()
             .expect("worker peer request authority")
-            .request_sent(corr_id, sender.public_key().to_peer_id().to_string())
+            .request_sent(corr_id)
             .expect("seed outbound request before terminal peer response");
         sender
             .peer_interaction_handle()
@@ -6729,7 +7133,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": "Coordinate with the lead before acting.",
+                    "content": { "type": "text", "text": "Coordinate with the lead before acting." },
                     "source": "mob",
                     "idempotency_key": "ctx-worker-1"
                 }),
@@ -6771,12 +7175,12 @@ mod tests {
         );
 
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 1, &session_id, &envelope)
+            sink.emit_session_stream_event(&StreamRef::mint(), 1, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Delivered
         );
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 2, &session_id, &envelope)
+            sink.emit_session_stream_event(&StreamRef::mint(), 2, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Overflow,
             "second send should surface overflow to the caller"
@@ -6793,7 +7197,7 @@ mod tests {
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let active_streams = Arc::new(Mutex::new(HashMap::new()));
         let session_id = SessionId::new();
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
             .await
             .expect("machine should accept session stream open");
@@ -6858,7 +7262,7 @@ mod tests {
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let session_id = SessionId::new();
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
             .await
             .expect("machine should accept session stream open");
@@ -6971,7 +7375,7 @@ mod tests {
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let active_streams = Arc::new(Mutex::new(HashMap::new()));
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_mob_stream_open_authority(&authority, &stream_id)
             .await
             .expect("machine should accept mob stream open");
@@ -7033,7 +7437,7 @@ mod tests {
         drop(rx);
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_mob_stream_open_authority(&authority, &stream_id)
             .await
             .expect("machine should accept mob stream open");
@@ -7109,7 +7513,8 @@ mod tests {
             .unwrap();
         assert!(
             read_resp.error.is_none(),
-            "archived session should remain readable"
+            "archived session should remain readable: {:?}",
+            read_resp.error
         );
         let read = result_value(&read_resp);
         assert_eq!(read["session_id"], session_id);
@@ -7131,7 +7536,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": "should be rejected"
+                    "content": { "type": "text", "text": "should be rejected" }
                 }),
             ))
             .await
@@ -7325,7 +7730,7 @@ mod tests {
         let members = members_value["members"].as_array().expect("members array");
         assert_eq!(members.len(), 1, "retiring member should remain observable");
         assert_eq!(members[0]["agent_identity"], "lead-1");
-        assert_eq!(members[0]["state"], "retiring");
+        assert_eq!(members[0]["status"], "retiring");
 
         let send_resp = router
             .dispatch(make_request(
@@ -7601,12 +8006,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        let stream_ref = StreamRef::parse(&stream_id).unwrap();
         assert_eq!(router.active_mob_streams.lock().await.len(), 1);
 
         record_mob_stream_terminal_authority(
             &router.stream_authority,
-            &stream_uuid,
+            &stream_ref,
             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
             None,
         )
@@ -8138,7 +8543,7 @@ mod tests {
             "session/inject_context",
             serde_json::json!({
                 "session_id": session_id,
-                "text": "Coordinate with the orchestrator.",
+                "content": { "type": "text", "text": "Coordinate with the orchestrator." },
                 "source": "mob",
                 "idempotency_key": "ctx-router-test"
             }),
@@ -8179,7 +8584,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-next-turn-once"
                 }),
@@ -8317,7 +8722,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-rpc-during-active-turn"
                 }),
@@ -8403,7 +8808,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-dedup"
                 }),
@@ -8417,7 +8822,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-dedup"
                 }),
@@ -8961,7 +9366,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-archive-drop"
                 }),
@@ -9288,11 +9693,9 @@ mod tests {
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(meerkat_core::service::SessionBuildOptions {
@@ -9581,5 +9984,120 @@ mod tests {
 
         let resp = router.dispatch(req).await;
         assert!(resp.is_none(), "Notifications should return None");
+    }
+
+    /// K20: catalog-driven dispatch parity. Every method the generated RPC
+    /// catalog advertises for this build's feature set must DISPATCH (never
+    /// fall through to METHOD_NOT_FOUND), and an unknown method must reject
+    /// with METHOD_NOT_FOUND. This replaces source-regex parity: adding a
+    /// router arm without a catalog entry (or vice versa) turns this red.
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx) = test_router().await;
+        // Wire a live transport so the `live/*` catalog methods are
+        // dispatchable exactly as the catalog advertises them
+        // (`runtime_available` => live surface present).
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let close_feedback: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let status_feedback: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let token_authority: Arc<dyn meerkat_live::LiveWsTokenAuthority> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let live_ws = Arc::new(meerkat_live::LiveWsState::new(
+            host,
+            close_feedback,
+            status_feedback,
+            token_authority,
+        ));
+        let router = router.with_live_ws(Arc::clone(&live_ws), "ws://127.0.0.1:0".to_string());
+        #[cfg(feature = "live-webrtc")]
+        let router = {
+            let webrtc_host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                meerkat_live::NoOpProjectionSink,
+            )));
+            let webrtc_close: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+                crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &router.runtime,
+                )),
+            );
+            let webrtc_status: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+                crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &router.runtime,
+                )),
+            );
+            router.with_live_webrtc(Arc::new(meerkat_live::LiveWebrtcState::new(
+                webrtc_host,
+                webrtc_close,
+                webrtc_status,
+            )))
+        };
+        let options = meerkat_contracts::RpcMethodCatalogOptions {
+            runtime_available: true,
+            mob_enabled: cfg!(feature = "mob"),
+            mcp_enabled: cfg!(feature = "mcp"),
+            comms_enabled: cfg!(feature = "comms"),
+            blob_enabled: true,
+            session_events_enabled: true,
+            session_streams_enabled: true,
+            schedule_enabled: cfg!(feature = "schedule"),
+            workgraph_enabled: cfg!(feature = "workgraph"),
+            // The test runtime has no skill runtime bound; `skills/list`
+            // still dispatches (to a typed capability error), so the parity
+            // sweep covers it whenever the catalog advertises it.
+            skills_enabled: true,
+            // `live/webrtc/answer` is feature-gated in the router; the
+            // catalog carries the same condition, so the default lane never
+            // advertises a method it cannot dispatch and the live-webrtc
+            // lane (with state wired above) covers it.
+            live_webrtc_enabled: cfg!(feature = "live-webrtc"),
+        };
+        let mut id = 0_i64;
+        for method in meerkat_contracts::rpc_method_names(options) {
+            id += 1;
+            let response = router
+                .dispatch(RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: method.clone(),
+                    params: Some(
+                        serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static JSON"),
+                    ),
+                    id: Some(RpcId::Num(id)),
+                })
+                .await
+                .unwrap_or_else(|| panic!("catalog method `{method}` produced no response"));
+            if let Some(err) = &response.error {
+                assert_ne!(
+                    err.code,
+                    error::METHOD_NOT_FOUND,
+                    "catalog method `{method}` fell through to METHOD_NOT_FOUND: {}",
+                    err.message
+                );
+            }
+        }
+
+        let response = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "definitely/not_a_method".to_string(),
+                params: None,
+                id: Some(RpcId::Num(id + 1)),
+            })
+            .await
+            .expect("unknown method must produce a response");
+        let err = response.error.expect("unknown method must be an error");
+        assert_eq!(err.code, error::METHOD_NOT_FOUND);
     }
 }

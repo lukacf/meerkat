@@ -11,7 +11,7 @@ use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
     ImageGenerationWarning, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
     OpenAiImageMetadata, OutputSchema, ProviderImageMetadata, ProviderMeta,
-    RevisedPromptDisposition, RevisedPromptSource, StopReason, SystemNoticeBlock,
+    RevisedPromptDisposition, RevisedPromptSource, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::BlockAssembler;
@@ -219,11 +219,6 @@ fn project_openai_assistant_blocks(
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -292,13 +287,6 @@ pub(crate) fn project_openai_replay_messages(
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_openai_assistant_blocks(mode, &assistant.blocks);
                 if blocks.is_empty() {
@@ -782,26 +770,8 @@ impl OpenAiClient {
                         }));
                     }
                 }
-                Message::Assistant(a) => {
-                    // Legacy AssistantMessage format - convert to items
-                    if !a.content.is_empty() {
-                        items.push(serde_json::json!({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": a.content
-                        }));
-                    }
-                    for tc in &a.tool_calls {
-                        items.push(serde_json::json!({
-                            "type": "function_call",
-                            "call_id": tc.id,
-                            "name": tc.name,
-                            "arguments": tc.args.to_string()
-                        }));
-                    }
-                }
                 Message::BlockAssistant(a) => {
-                    // New BlockAssistantMessage format - render blocks as items
+                    // BlockAssistantMessage format - render blocks as items
                     for block in &a.blocks {
                         match block {
                             AssistantBlock::Text { text, .. } => {
@@ -1646,7 +1616,7 @@ impl LlmClient for OpenAiClient {
                                                                                 id: item.get("id")
                                                                                     .and_then(|v| v.as_str())
                                                                                     .map(std::string::ToString::to_string),
-                                                                                name: "web_search_annotations".to_string(),
+                                                                                kind: ServerToolKind::WebSearch,
                                                                                 content: serde_json::json!({
                                                                                     "type": "message_annotations",
                                                                                     "annotations": annotations
@@ -1775,9 +1745,12 @@ impl LlmClient for OpenAiClient {
                                                         .or_else(|| item.get("call_id"))
                                                         .and_then(|v| v.as_str())
                                                         .map(std::string::ToString::to_string);
+                                                    // Sub-event discriminator (`web_search_call`
+                                                    // vs `web_search_result`) is preserved in
+                                                    // `content["type"]`; the semantic kind is web search.
                                                     yield LlmEvent::ServerToolContent {
                                                         id,
-                                                        name: item_type.to_string(),
+                                                        kind: ServerToolKind::WebSearch,
                                                         content: item.clone(),
                                                         meta: None,
                                                     };
@@ -2033,7 +2006,7 @@ impl LlmClient for OpenAiClient {
                             }
                             yield LlmEvent::ServerToolContent {
                                 id: event.item_id.clone(),
-                                name: "web_search".to_string(),
+                                kind: ServerToolKind::WebSearch,
                                 content: Value::Object(content),
                                 meta: None,
                             };
@@ -2331,7 +2304,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_status".to_string()),
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "response.web_search_call.searching",
                             "item_id": "ws_status"
@@ -2340,7 +2313,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_1".to_string()),
-                        name: "web_search_call".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "web_search_call",
                             "id": "ws_1",
@@ -2350,7 +2323,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search_annotations".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "message_annotations",
                             "annotations": []
@@ -2504,7 +2477,7 @@ mod tests {
                 },
                 AssistantBlock::ServerToolContent {
                     id: Some("ws_1".to_string()),
-                    name: "web_search_call".to_string(),
+                    kind: ServerToolKind::WebSearch,
                     content: serde_json::json!({
                         "type": "web_search_call",
                         "id": "ws_1",
@@ -3536,15 +3509,15 @@ mod tests {
             "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Weather?".to_string())),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![meerkat_core::ToolCall::new(
-                        "call_abc123".to_string(),
-                        "get_weather".to_string(),
-                        tool_args,
-                    )],
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::ToolUse {
+                        id: "call_abc123".to_string(),
+                        name: "get_weather".to_string(),
+                        args: serde_json::value::RawValue::from_string(tool_args.to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
@@ -3745,6 +3718,54 @@ mod tests {
         assert!((temperature - 0.3).abs() < 1e-6);
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    /// #46: the `supports_*_override` provider-tag fields are a typed,
+    /// fail-closed carve-out for off-catalog OpenAI-compatible endpoints.
+    /// When no override is present the capability MUST fall through to the
+    /// model catalog (the single typed owner), never default to a permissive
+    /// `true`. This is the fail-closed contract: an override only takes
+    /// effect when an off-catalog compatible client explicitly stamps it.
+    #[test]
+    fn request_capability_overrides_fall_back_to_catalog_when_absent() {
+        // A catalogued model with no override falls through to the catalog
+        // capability row — not to a hardcoded `true`.
+        let catalog_request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+        assert_eq!(
+            OpenAiClient::request_supports_temperature(&catalog_request),
+            OpenAiClient::model_supports_temperature("gpt-5.4"),
+            "absent temperature override must fall through to the catalog row"
+        );
+        assert_eq!(
+            OpenAiClient::request_supports_reasoning_payload(&catalog_request),
+            OpenAiClient::model_supports_reasoning_payload("gpt-5.4"),
+            "absent reasoning override must fall through to the catalog row"
+        );
+
+        // An off-catalog compatible-endpoint alias has no catalog row, so the
+        // catalog says `false` (unknown -> false). With no override the
+        // capability stays fail-closed `false`.
+        let off_catalog_request = LlmRequest::new(
+            "gemma4:e2b",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+        assert!(
+            !OpenAiClient::request_supports_temperature(&off_catalog_request),
+            "off-catalog alias with no override must fail closed to false"
+        );
+
+        // The off-catalog compatible endpoint opts in via the typed override
+        // (the only way the override is ever set — see
+        // `OpenAiCompatibleClient::request_with_remote_model`).
+        let with_override = off_catalog_request
+            .with_openai_tag_merge(|t| t.supports_temperature_override = Some(true));
+        assert!(
+            OpenAiClient::request_supports_temperature(&with_override),
+            "off-catalog endpoint sets the capability via the typed override"
+        );
     }
 
     // =========================================================================
@@ -3970,15 +3991,15 @@ mod tests {
             "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("What's the weather?".to_string())),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![meerkat_core::ToolCall::new(
-                        "call_123".to_string(),
-                        "get_weather".to_string(),
-                        tool_args,
-                    )],
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "get_weather".to_string(),
+                        args: serde_json::value::RawValue::from_string(tool_args.to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
@@ -4631,9 +4652,9 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream event") {
                 LlmEvent::ServerToolContent {
-                    id, name, content, ..
+                    id, kind, content, ..
                 } => {
-                    server_blocks.push((id, name, content));
+                    server_blocks.push((id, kind, content));
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}
@@ -4642,19 +4663,23 @@ mod tests {
         server.abort();
 
         assert_eq!(server_blocks.len(), 3);
+        // All OpenAI web-search sub-events project to the typed WebSearch kind;
+        // the provider-native sub-event discriminator lives in `content["type"]`.
         assert_eq!(server_blocks[0].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(server_blocks[0].1, ServerToolKind::WebSearch);
         assert_eq!(
             server_blocks[0].2["type"],
             "response.web_search_call.searching"
         );
         assert_eq!(server_blocks[1].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[1].1, "web_search_call");
+        assert_eq!(server_blocks[1].1, ServerToolKind::WebSearch);
+        assert_eq!(server_blocks[1].2["type"], "web_search_call");
         assert_eq!(
             server_blocks[1].2["action"]["queries"][0],
             "meerkat runtime"
         );
-        assert_eq!(server_blocks[2].1, "web_search_annotations");
+        assert_eq!(server_blocks[2].1, ServerToolKind::WebSearch);
+        assert_eq!(server_blocks[2].2["type"], "message_annotations");
         assert_eq!(
             server_blocks[2].2["annotations"][0]["url"],
             "https://example.com"

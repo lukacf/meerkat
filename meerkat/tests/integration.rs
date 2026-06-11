@@ -221,9 +221,6 @@ mod tool_dispatch {
 
     #[test]
     fn test_tool_discovery_validates_schema() {
-        let mut registry = ToolRegistry::new();
-
-        // Valid tool definition should be accepted
         let valid_tool = ToolDef {
             name: "test_tool".into(),
             description: "A test tool".to_string(),
@@ -231,14 +228,13 @@ mod tool_dispatch {
             provenance: None,
         };
 
-        // Registry.register returns () - no error case
-        registry.register(valid_tool);
-
-        // Verify tool is registered using get()
-        assert!(
-            registry.get("test_tool").is_some(),
-            "Should find registered tool"
-        );
+        // Arguments matching the schema validate against the live tool def.
+        meerkat_tools::validate_tool_def(
+            &valid_tool,
+            "test_tool",
+            &serde_json::json!({"input": "hello"}),
+        )
+        .expect("valid args should validate against the tool schema");
     }
 
     #[cfg(feature = "mcp")]
@@ -290,11 +286,12 @@ mod session_persistence {
         // Create session with multiple messages
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi there!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi there!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("How are you?".to_string())));
@@ -313,7 +310,7 @@ mod session_persistence {
 
         // Messages should match
         assert!(matches!(loaded.messages()[0], Message::User(_)));
-        assert!(matches!(loaded.messages()[1], Message::Assistant(_)));
+        assert!(matches!(loaded.messages()[1], Message::BlockAssistant(_)));
         assert!(matches!(loaded.messages()[2], Message::User(_)));
     }
 
@@ -327,11 +324,12 @@ mod session_persistence {
         let session_id = {
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text("Before crash".to_string())));
-            session.push(Message::Assistant(AssistantMessage {
-                content: "Response before crash".to_string(),
-                tool_calls: vec![],
+            session.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "Response before crash".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let id = session.id().clone();
@@ -362,11 +360,12 @@ mod session_persistence {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("You are helpful")));
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("Call a tool".to_string())));
@@ -1001,15 +1000,17 @@ mod combined {
             cache_creation_tokens: None,
             cache_read_tokens: None,
         };
-        session.push(Message::Assistant(AssistantMessage {
-            content: "".to_string(),
-            tool_calls: vec![ToolCall::new(
-                "tc_1".to_string(),
-                "test_tool".to_string(),
-                serde_json::json!({"input": "test"}),
-            )],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ToolUse {
+                id: "tc_1".to_string(),
+                name: "test_tool".to_string(),
+                args: serde_json::value::RawValue::from_string(
+                    serde_json::json!({"input": "test"}).to_string(),
+                )
+                .expect("valid args"),
+                meta: None,
+            }],
             stop_reason: StopReason::ToolUse,
-            usage: first_usage.clone(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(first_usage);
@@ -1026,11 +1027,12 @@ mod combined {
             cache_creation_tokens: None,
             cache_read_tokens: None,
         };
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Based on the tool result...".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Based on the tool result...".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: second_usage.clone(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(second_usage);

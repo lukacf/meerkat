@@ -1,7 +1,87 @@
 // Generated wire types for Meerkat SDK
 // Contract version: 0.7.0-alpha.0
 
+import { MeerkatError } from "./errors.js";
+
 export const CONTRACT_VERSION = "0.7.0-alpha.0";
+
+
+// K21 — shared fail-closed wire parsing helpers (generated; not exported).
+function wireParseError(context: string, message: string): MeerkatError {
+  return new MeerkatError("INVALID_RESPONSE", `invalid ${context}: ${message}`);
+}
+
+function expectWireObject(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw wireParseError(context, "expected object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireWireField(
+  data: Record<string, unknown>,
+  key: string,
+  context: string,
+): unknown {
+  const value = data[key];
+  if (value === undefined || value === null) {
+    throw wireParseError(context, `missing required field \`${key}\``);
+  }
+  return value;
+}
+
+function expectWireString(value: unknown, context: string): string {
+  if (typeof value !== "string") {
+    throw wireParseError(context, "expected string");
+  }
+  return value;
+}
+
+function expectWireBoolean(value: unknown, context: string): boolean {
+  if (typeof value !== "boolean") {
+    throw wireParseError(context, "expected boolean");
+  }
+  return value;
+}
+
+function expectWireInteger(value: unknown, context: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw wireParseError(context, "expected integer");
+  }
+  return value;
+}
+
+function expectWireNumber(value: unknown, context: string): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    throw wireParseError(context, "expected number");
+  }
+  return value;
+}
+
+function expectWireArray(value: unknown, context: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw wireParseError(context, "expected array");
+  }
+  return value;
+}
+
+function expectWireEnum(
+  value: unknown,
+  values: readonly string[],
+  context: string,
+): string {
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw wireParseError(context, `expected one of ${values.join(", ")}`);
+  }
+  return value;
+}
+
+function expectWireConst(value: unknown, expected: unknown, context: string): unknown {
+  if (value !== expected) {
+    throw wireParseError(context, `expected constant \`${String(expected)}\``);
+  }
+  return value;
+}
 
 export interface WireUsage {
   input_tokens: number;
@@ -29,12 +109,6 @@ export interface WireProviderMeta {
   [key: string]: unknown;
 }
 
-export interface WireToolCall {
-  id: string;
-  name: string;
-  args: unknown;
-}
-
 export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
@@ -47,7 +121,6 @@ export interface WireSessionMessage {
   kind?: string;
   body?: string;
   content?: WireContentInput;
-  tool_calls?: WireToolCall[];
   stop_reason?: WireStopReason;
   blocks?: WireAssistantBlock[];
   results?: WireToolResult[];
@@ -134,6 +207,91 @@ export interface McpLiveOpResponse {
   session_id: string;
   status: "staged" | "applied" | "rejected";
 }
+
+export type SkillName = string;
+
+export type SkillScope = "builtin" | "project" | "user";
+
+export type SourceIdentityStatus = "active" | "disabled" | "retired";
+
+export type SourceTransportKind = "embedded" | "filesystem" | "git" | "http" | "stdio";
+
+export type SourceUuid = string;
+
+export type ToolName = string;
+
+export interface SkillEntry {
+  description: string;
+  is_active: boolean;
+  key: SkillKey;
+  name: string;
+  scope: SkillScope;
+  shadowed_by?: SkillSourceProvenance;
+  source: SkillSourceProvenance;
+}
+
+export interface SkillKey {
+  skill_name: SkillName;
+  source_uuid: SourceUuid;
+}
+
+export interface SkillSourceProvenance {
+  display_name: string;
+  fingerprint: string;
+  source_uuid: SourceUuid;
+  status?: SourceIdentityStatus;
+  transport_kind: SourceTransportKind;
+}
+
+export interface ConfigEnvelope {
+  backend?: string;
+  config: unknown;
+  generation: number;
+  instance_id?: string;
+  realm_id?: string;
+  resolved_paths?: Record<string, unknown>;
+}
+
+export interface ConfigPatchParams {
+  expected_generation?: number;
+  patch?: unknown;
+}
+
+export interface ConfigWriteResult {
+  backend?: string;
+  config: unknown;
+  generation: number;
+  instance_id?: string;
+  live_propagation?: Record<string, unknown>;
+  realm_id?: string;
+  resolved_paths?: Record<string, unknown>;
+}
+
+export interface InterruptResult {
+  interrupted: boolean;
+  result: "interrupted" | "staged_noop";
+  session_id: string;
+}
+
+export interface ServerCapabilities {
+  contract_version: string;
+  methods: string[];
+  server_info: Record<string, unknown>;
+}
+
+export interface SkillListResponse {
+  skills: SkillEntry[];
+}
+
+export interface WorkEventsResult {
+  events: unknown[];
+}
+
+export interface WorkItemsResult {
+  items: unknown[];
+}
+
+export type ConfigSetParams = Record<string, unknown> | unknown;
 
 export interface MobWireParams {
   member: string;
@@ -261,7 +419,6 @@ export interface MobMemberListEntryWire {
   member_ref: WireMemberRef;
   role: string;
   runtime_mode: WireMobRuntimeMode;
-  state: WireMemberState;
   status: WireMobMemberStatus;
   wired_to?: string[];
 }
@@ -279,16 +436,50 @@ export interface WireMobToolConfig {
 }
 
 export interface WireMobProfile {
+  auto_compact_threshold?: number;
   backend?: WireMobBackendKind;
   external_addressable?: boolean;
+  image_generation_provider?: Provider;
   max_inline_peer_notifications?: number;
   model: string;
   output_schema?: unknown;
   peer_description?: string;
+  provider?: Provider;
   provider_params?: unknown;
+  resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
+  self_hosted_server_id?: string;
   skills?: string[];
   tools?: WireMobToolConfig;
+}
+
+export interface WireMobRun {
+  flow_id: string;
+  mob_id: string;
+  run_id: string;
+  status: "pending" | "running" | "completed" | "failed" | "canceled";
+}
+
+export interface WireMobRunStatus {
+}
+
+export interface WirePeerConnectivity {
+}
+
+export interface WirePeerConnectivitySnapshot {
+  reachable_peer_count: number;
+  unknown_peer_count: number;
+  unreachable_peers?: Record<string, unknown>[];
+}
+
+export interface WireUnreachablePeer {
+  peer: string;
+  reason?: string;
+}
+
+export interface WireMobError {
+  code: MobSpawnManyFailureCause;
+  message: string;
 }
 
 export interface MobEnsureMemberParams {
@@ -443,7 +634,7 @@ export interface MobFlowStatusParams {
 }
 
 export interface MobFlowStatusResult {
-  run: unknown;
+  run?: Record<string, unknown>;
 }
 
 export interface MobFlowCancelParams {
@@ -499,7 +690,7 @@ export interface MobTurnStartParams {
   prompt: WireContentInput;
   provider?: string;
   provider_params?: Record<string, unknown>;
-  skill_refs?: Record<string, unknown>[];
+  skill_refs?: SkillKey[];
   structured_output_retries?: number;
   system_prompt?: string;
 }
@@ -510,8 +701,9 @@ export interface MobMemberStatusResult {
   external_member?: unknown;
   is_final: boolean;
   kickoff?: unknown;
+  member_ref: WireMemberRef;
   output_preview?: string;
-  peer_connectivity?: unknown;
+  peer_connectivity?: Record<string, unknown>;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
@@ -596,7 +788,7 @@ export interface MobProfileLookupResult {
   created_at?: string;
   name: string;
   not_found?: boolean;
-  profile?: unknown;
+  profile?: WireMobProfile;
   revision?: number;
   updated_at?: string;
 }
@@ -642,8 +834,8 @@ export interface MobStreamCloseResult {
 }
 
 export interface PublicTurnToolOverlay {
-  allowed_tools?: string[];
-  blocked_tools?: string[];
+  allowed_tools?: ToolName[];
+  blocked_tools?: ToolName[];
 }
 
 export interface MobDefinitionInput {
@@ -651,7 +843,9 @@ export interface MobDefinitionInput {
   event_router?: MobEventRouterConfigInput;
   flows?: Record<string, MobFlowSpecInput>;
   id: string;
+  image_generation_provider?: Provider;
   limits?: MobLimitsSpecInput;
+  models?: Record<string, CustomModelConfig>;
   orchestrator?: MobOrchestratorInput;
   profiles: Record<string, MobProfileBindingInput>;
   skills?: Record<string, MobSkillSourceInput>;
@@ -718,14 +912,19 @@ export interface MobOrchestratorInput {
 }
 
 export interface MobProfileInput {
+  auto_compact_threshold?: number;
   backend?: WireMobBackendKind;
   external_addressable?: boolean;
+  image_generation_provider?: Provider;
   max_inline_peer_notifications?: number;
   model: string;
   output_schema?: unknown;
   peer_description?: string;
+  provider?: Provider;
   provider_params?: unknown;
+  resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
+  self_hosted_server_id?: string;
   skills?: string[];
   tools?: MobToolConfigInput;
 }
@@ -737,6 +936,7 @@ export interface MobRoleWiringRuleInput {
 
 export interface MobSupervisorSpecInput {
   escalation_threshold: number;
+  escalation_turn_timeout_ms?: number;
   role: string;
 }
 
@@ -768,6 +968,16 @@ export interface MobWiringRulesInput {
   role_wiring?: MobRoleWiringRuleInput[];
 }
 
+export interface CustomModelConfig {
+  call_timeout_secs?: number;
+  context_window?: number;
+  display_name?: string;
+  max_output_tokens?: number;
+  provider: Provider;
+  vision?: boolean;
+  web_search?: boolean;
+}
+
 export interface MobMemberSpecWire {
   additional_instructions?: string[];
   agent_identity: string;
@@ -795,7 +1005,7 @@ export interface MobReconcileReportWire {
 
 export interface MobReconcileFailureWire {
   agent_identity: string;
-  error: string;
+  error: WireMobError;
   stage: WireMobReconcileStage;
 }
 
@@ -887,6 +1097,13 @@ export interface ProjectedAttentionAuthority {
   can_update: boolean;
 }
 
+export interface ReadyWorkFilter {
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+}
+
 export interface WorkAttentionBinding {
   binding_id: string;
   created_at: string;
@@ -900,20 +1117,64 @@ export interface WorkAttentionBinding {
   work_ref: WorkItemRef;
 }
 
+export interface WorkGraphEventFilter {
+  after_seq?: number;
+  all_namespaces?: boolean;
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface WorkGraphEventsResponse {
+  events: WorkGraphEvent[];
+}
+
+export interface WorkGraphIdParams {
+  id: string;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface WorkGraphItemsResponse {
+  items: WorkItem[];
+}
+
+export interface WorkGraphSnapshot {
+  all_namespaces: boolean;
+  attention?: WorkAttentionBinding[];
+  captured_at: string;
+  edges: WorkEdge[];
+  event_high_water_mark?: number;
+  items: WorkItem[];
+  namespace?: string;
+  ready_item_ids: string[];
+  realm_id: string;
+}
+
+export interface WorkGraphSnapshotFilter {
+  all_namespaces?: boolean;
+  include_terminal?: boolean;
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+  statuses?: WorkStatus[];
+}
+
 export interface WorkItem {
-  claim?: Record<string, unknown>;
-  completion_policy: Record<string, unknown>;
+  claim?: WorkItemClaim;
+  completion_policy: WorkCompletionPolicy;
   created_at: string;
   description?: string;
   due_at?: string;
-  evidence_refs?: Record<string, unknown>[];
-  external_refs?: Record<string, unknown>[];
+  evidence_refs?: WorkEvidenceRef[];
+  external_refs?: WorkItemExternalRef[];
   id: string;
   labels?: string[];
   machine_state: Record<string, unknown>;
   namespace: string;
   not_before?: string;
-  owner?: Record<string, unknown>;
+  owner?: WorkItemOwner;
   priority: "low" | "medium" | "high";
   realm_id: string;
   revision: number;
@@ -924,14 +1185,33 @@ export interface WorkItem {
   updated_at: string;
 }
 
+export interface WorkItemFilter {
+  all_namespaces?: boolean;
+  include_terminal?: boolean;
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+  statuses?: WorkStatus[];
+}
+
 export interface WorkItemRef {
   item_id: string;
   namespace: string;
   realm_id: string;
 }
 
+export interface WorkEdge {
+  created_at: string;
+  from_id: string;
+  kind: WorkEdgeKind;
+  namespace: string;
+  realm_id: string;
+  to_id: string;
+}
+
 export interface WorkEvidenceRef {
-  confirmation_kind?: unknown;
+  confirmation_kind?: WorkEvidenceKind;
   confirming_owner_key?: WorkOwnerKey;
   id: string;
   kind: string;
@@ -939,9 +1219,36 @@ export interface WorkEvidenceRef {
   summary?: string;
 }
 
+export interface WorkGraphEvent {
+  at: string;
+  item_id?: string;
+  kind: WorkGraphEventKind;
+  namespace: string;
+  payload?: unknown;
+  realm_id: string;
+  seq?: number;
+}
+
 export interface WorkOwnerKey {
   id: string;
   kind: WorkOwnerKind;
+}
+
+export interface WorkItemClaim {
+  claimed_at: string;
+  lease_expires_at?: string;
+  owner: WorkItemOwner;
+}
+
+export interface WorkItemExternalRef {
+  id: string;
+  kind: string;
+  url?: string;
+}
+
+export interface WorkItemOwner {
+  display_name?: string;
+  key: WorkOwnerKey;
 }
 
 export interface BridgeAck {
@@ -977,13 +1284,6 @@ export interface BridgeCapabilities {
   wire_member?: boolean;
 }
 
-export interface BridgeDeliveryCompletion {
-  session_id: string;
-  text: string;
-  tool_calls: number;
-  turns: number;
-}
-
 export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
@@ -995,7 +1295,6 @@ export interface BridgeDeliveryPayload {
 
 export interface BridgeDeliveryResponse {
   canonical_input_id?: string;
-  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
 }
@@ -1157,17 +1456,26 @@ export interface WireContentBlockVideo {
   type: "video";
 }
 
+export interface WireContentBlockStructured {
+  data: unknown;
+  type: "structured";
+}
+
 export interface WireContentBlockUnknown {
   type: "unknown";
 }
 
-export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
+export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown;
 
 export type WireContentInput = string | WireContentBlock[];
+
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 
 export type WireMemberRef = string;
 
 export type WireMobBackendKind = "session" | "external";
+
+export type WireMobResumeOverrideField = "model" | "provider" | "provider_params";
 
 export interface WireRuntimeBindingSession {
   kind: "session";
@@ -1247,7 +1555,7 @@ export type WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplit
 
 export type WireToolFilter = "All" | { Allow: string[] } | { Deny: string[] };
 
-export type WireMemberState = "active" | "retiring";
+export type WireMemberState = unknown;
 
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
@@ -1436,7 +1744,23 @@ export interface WorkCompletionPolicyReviewerQuorum {
 
 export type WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum;
 
+export type WorkEdgeKind = "blocks" | "parent" | "related" | "supersedes" | "derived_from";
+
+export type WorkEvidenceKind = "host_confirmation" | "principal_confirmation" | "supervisor_confirmation" | "reviewer_confirmation" | "self_attest";
+
+export type WorkGraphEventKind = "created" | "updated" | "claimed" | "released" | "blocked" | "closed" | "linked" | "evidence_added" | "attention_created" | "attention_updated";
+
 export type WorkOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
+
+export type WorkStatus = "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
+
+export const WORK_GRAPH_STATUSES = ["open", "in_progress", "blocked", "completed", "cancelled", "failed"] as const;
+export type WorkGraphStatus = typeof WORK_GRAPH_STATUSES[number];
+
+export const WORK_GRAPH_PRIORITIES = ["low", "medium", "high"] as const;
+export type WorkGraphPriority = typeof WORK_GRAPH_PRIORITIES[number];
+
+export const WORK_GRAPH_EVENT_KINDS = ["created", "updated", "claimed", "released", "blocked", "closed", "linked", "evidence_added", "attention_created", "attention_updated"] as const;
 
 export type McpLiveOperation = "add" | "remove" | "reload";
 
@@ -1511,7 +1835,7 @@ export interface CommsCommandPeerMessage {
 
 export interface CommsCommandPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
   params: CommsPeerLifecycleParams;
   to: PeerId;
 }
@@ -1703,7 +2027,6 @@ export interface BridgeReplyObservation {
 
 export interface BridgeReplyDelivery {
   canonical_input_id?: string;
-  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
   result: "delivery";
@@ -1744,7 +2067,18 @@ export interface ContentBlockVideo {
   type: "video";
 }
 
-export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo;
+export interface ContentBlockStructured {
+  data: unknown;
+  type: "structured";
+}
+
+export interface ContentBlockSkillContext {
+  skill_key: SkillKey;
+  text: string;
+  type: "skill_context";
+}
+
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext;
 
 export type ContentInput = string | ContentBlock[];
 
@@ -1770,7 +2104,7 @@ export interface CommsSendParamsPeerMessage {
 
 export interface CommsSendParamsPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
   params: CommsPeerLifecycleParams;
   session_id: string;
   to: PeerId;
@@ -2032,14 +2366,12 @@ export interface LiveCommitInputParams {
 export type LiveRefreshStatus = "queued";
 
 export interface LiveRefreshResult {
-  refresh_enqueued: boolean;
   status: "queued";
 }
 
 export type LiveCloseStatus = "closed";
 
 export interface LiveCloseResult {
-  closed: boolean;
   status: "closed";
 }
 
@@ -2689,7 +3021,7 @@ export interface WireAuthStatus {
   last_refresh_at?: string;
   profile_id: string;
   provider: string;
-  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
 }
 
 export interface WireAuthStatusDetail {
@@ -2703,7 +3035,7 @@ export interface WireAuthStatusDetail {
   profile_id: string;
   provider: string;
   realm_id: string;
-  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
 }
 
 export interface WireAuthErrorMissingSecret {
@@ -2750,6 +3082,11 @@ export interface WireAuthErrorRefreshFailed {
   kind: "refresh_failed";
 }
 
+export interface WireAuthErrorResolveRequired {
+  detail: string;
+  kind: "resolve_required";
+}
+
 export interface WireAuthErrorInteractiveLoginRequired {
   kind: "interactive_login_required";
 }
@@ -2768,7 +3105,7 @@ export interface WireAuthErrorOther {
   kind: "other";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 
@@ -2805,7 +3142,7 @@ export interface WireAssistantBlockToolUse {
 
 export interface WireAssistantBlockServerToolContent {
   block_type: "server_tool_content";
-  data: { content: unknown; id?: string; meta?: Record<string, unknown>; name: string };
+  data: { content: unknown; id?: string; kind: Record<string, unknown>; meta?: Record<string, unknown> };
 }
 
 export interface WireAssistantBlockImage {
@@ -2870,3 +3207,319 @@ export interface WireImageOperationPhaseTerminal {
 }
 
 export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;
+
+/** Fail-closed wire parser for WorkItem (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItem(value: unknown): WorkItem {
+  const data = expectWireObject(value, "WorkItem");
+  return {
+    ...(data["claim"] === undefined || data["claim"] === null ? {} : { claim: parseWorkItemClaim(data["claim"]) }),
+    completion_policy: parseWorkCompletionPolicy(requireWireField(data, "completion_policy", "WorkItem")),
+    created_at: expectWireString(requireWireField(data, "created_at", "WorkItem"), "WorkItem.created_at"),
+    ...(data["description"] === undefined || data["description"] === null ? {} : { description: expectWireString(data["description"], "WorkItem.description") }),
+    ...(data["due_at"] === undefined || data["due_at"] === null ? {} : { due_at: expectWireString(data["due_at"], "WorkItem.due_at") }),
+    ...(data["evidence_refs"] === undefined || data["evidence_refs"] === null ? {} : { evidence_refs: expectWireArray(data["evidence_refs"], "WorkItem.evidence_refs").map((entry) => parseWorkEvidenceRef(entry)) }),
+    ...(data["external_refs"] === undefined || data["external_refs"] === null ? {} : { external_refs: expectWireArray(data["external_refs"], "WorkItem.external_refs").map((entry) => parseWorkItemExternalRef(entry)) }),
+    id: expectWireString(requireWireField(data, "id", "WorkItem"), "WorkItem.id"),
+    ...(data["labels"] === undefined || data["labels"] === null ? {} : { labels: expectWireArray(data["labels"], "WorkItem.labels").map((entry) => expectWireString(entry, "WorkItem.labels[]")) }),
+    machine_state: expectWireObject(requireWireField(data, "machine_state", "WorkItem"), "WorkItem.machine_state"),
+    namespace: expectWireString(requireWireField(data, "namespace", "WorkItem"), "WorkItem.namespace"),
+    ...(data["not_before"] === undefined || data["not_before"] === null ? {} : { not_before: expectWireString(data["not_before"], "WorkItem.not_before") }),
+    ...(data["owner"] === undefined || data["owner"] === null ? {} : { owner: parseWorkItemOwner(data["owner"]) }),
+    priority: expectWireEnum(requireWireField(data, "priority", "WorkItem"), ["low", "medium", "high"], "WorkItem.priority") as "low" | "medium" | "high",
+    realm_id: expectWireString(requireWireField(data, "realm_id", "WorkItem"), "WorkItem.realm_id"),
+    revision: expectWireInteger(requireWireField(data, "revision", "WorkItem"), "WorkItem.revision"),
+    ...(data["snoozed_until"] === undefined || data["snoozed_until"] === null ? {} : { snoozed_until: expectWireString(data["snoozed_until"], "WorkItem.snoozed_until") }),
+    status: expectWireEnum(requireWireField(data, "status", "WorkItem"), ["open", "in_progress", "blocked", "completed", "cancelled", "failed"], "WorkItem.status") as "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed",
+    ...(data["terminal_at"] === undefined || data["terminal_at"] === null ? {} : { terminal_at: expectWireString(data["terminal_at"], "WorkItem.terminal_at") }),
+    title: expectWireString(requireWireField(data, "title", "WorkItem"), "WorkItem.title"),
+    updated_at: expectWireString(requireWireField(data, "updated_at", "WorkItem"), "WorkItem.updated_at"),
+  };
+}
+
+/** Fail-closed wire parser for WorkEdge (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkEdge(value: unknown): WorkEdge {
+  const data = expectWireObject(value, "WorkEdge");
+  return {
+    created_at: expectWireString(requireWireField(data, "created_at", "WorkEdge"), "WorkEdge.created_at"),
+    from_id: expectWireString(requireWireField(data, "from_id", "WorkEdge"), "WorkEdge.from_id"),
+    kind: parseWorkEdgeKind(requireWireField(data, "kind", "WorkEdge")),
+    namespace: expectWireString(requireWireField(data, "namespace", "WorkEdge"), "WorkEdge.namespace"),
+    realm_id: expectWireString(requireWireField(data, "realm_id", "WorkEdge"), "WorkEdge.realm_id"),
+    to_id: expectWireString(requireWireField(data, "to_id", "WorkEdge"), "WorkEdge.to_id"),
+  };
+}
+
+/** Fail-closed wire parser for WorkGraphEvent (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
+  const data = expectWireObject(value, "WorkGraphEvent");
+  return {
+    at: expectWireString(requireWireField(data, "at", "WorkGraphEvent"), "WorkGraphEvent.at"),
+    ...(data["item_id"] === undefined || data["item_id"] === null ? {} : { item_id: expectWireString(data["item_id"], "WorkGraphEvent.item_id") }),
+    kind: parseWorkGraphEventKind(requireWireField(data, "kind", "WorkGraphEvent")),
+    namespace: expectWireString(requireWireField(data, "namespace", "WorkGraphEvent"), "WorkGraphEvent.namespace"),
+    ...(data["payload"] === undefined || data["payload"] === null ? {} : { payload: data["payload"] }),
+    realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphEvent"), "WorkGraphEvent.realm_id"),
+    ...(data["seq"] === undefined || data["seq"] === null ? {} : { seq: expectWireInteger(data["seq"], "WorkGraphEvent.seq") }),
+  };
+}
+
+/** Fail-closed wire parser for WorkGraphItemsResponse (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsResponse {
+  const data = expectWireObject(value, "WorkGraphItemsResponse");
+  return {
+    items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+  };
+}
+
+/** Fail-closed wire parser for WorkGraphEventsResponse (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkGraphEventsResponse(value: unknown): WorkGraphEventsResponse {
+  const data = expectWireObject(value, "WorkGraphEventsResponse");
+  return {
+    events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events").map((entry) => parseWorkGraphEvent(entry)),
+  };
+}
+
+/** Fail-closed wire parser for WorkGraphSnapshot (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
+  const data = expectWireObject(value, "WorkGraphSnapshot");
+  return {
+    all_namespaces: expectWireBoolean(requireWireField(data, "all_namespaces", "WorkGraphSnapshot"), "WorkGraphSnapshot.all_namespaces"),
+    ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention").map((entry) => parseWorkAttentionBinding(entry)) }),
+    captured_at: expectWireString(requireWireField(data, "captured_at", "WorkGraphSnapshot"), "WorkGraphSnapshot.captured_at"),
+    edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges").map((entry) => parseWorkEdge(entry)),
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark") }),
+    items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items").map((entry) => parseWorkItem(entry)),
+    ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
+    ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
+    realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
+  };
+}
+
+/** Fail-closed wire parser for WorkItemsResult (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItemsResult(value: unknown): WorkItemsResult {
+  const data = expectWireObject(value, "WorkItemsResult");
+  return {
+    items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+  };
+}
+
+/** Fail-closed wire parser for WorkEventsResult (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkEventsResult(value: unknown): WorkEventsResult {
+  const data = expectWireObject(value, "WorkEventsResult");
+  return {
+    events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events"),
+  };
+}
+
+/** Fail-closed wire parser for GoalStatusResult (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseGoalStatusResult(value: unknown): GoalStatusResult {
+  const data = expectWireObject(value, "GoalStatusResult");
+  return {
+    attention: parseWorkAttentionBinding(requireWireField(data, "attention", "GoalStatusResult")),
+    item: parseWorkItem(requireWireField(data, "item", "GoalStatusResult")),
+  };
+}
+
+/** Fail-closed wire parser for AttentionListResult (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseAttentionListResult(value: unknown): AttentionListResult {
+  const data = expectWireObject(value, "AttentionListResult");
+  return {
+    attention: expectWireArray(requireWireField(data, "attention", "AttentionListResult"), "AttentionListResult.attention").map((entry) => parseWorkAttentionBinding(entry)),
+  };
+}
+
+/** Fail-closed wire parser for WorkItemClaim (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItemClaim(value: unknown): WorkItemClaim {
+  const data = expectWireObject(value, "WorkItemClaim");
+  return {
+    claimed_at: expectWireString(requireWireField(data, "claimed_at", "WorkItemClaim"), "WorkItemClaim.claimed_at"),
+    ...(data["lease_expires_at"] === undefined || data["lease_expires_at"] === null ? {} : { lease_expires_at: expectWireString(data["lease_expires_at"], "WorkItemClaim.lease_expires_at") }),
+    owner: parseWorkItemOwner(requireWireField(data, "owner", "WorkItemClaim")),
+  };
+}
+
+/** Fail-closed wire parser for WorkCompletionPolicy (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkCompletionPolicy(value: unknown): WorkCompletionPolicy {
+  const data = expectWireObject(value, "WorkCompletionPolicy");
+  const tag = expectWireString(requireWireField(data, "kind", "WorkCompletionPolicy"), "WorkCompletionPolicy.kind");
+  switch (tag) {
+    case "self_attest":
+      return {
+        kind: "self_attest",
+      };
+    case "host_confirmed":
+      return {
+        kind: "host_confirmed",
+      };
+    case "principal_confirmed":
+      return {
+        kind: "principal_confirmed",
+      };
+    case "supervisor":
+      return {
+        kind: "supervisor",
+        owner_key: parseWorkOwnerKey(requireWireField(data, "owner_key", "WorkCompletionPolicy")),
+      };
+    case "reviewer_quorum":
+      return {
+        kind: "reviewer_quorum",
+        threshold: expectWireInteger(requireWireField(data, "threshold", "WorkCompletionPolicy"), "WorkCompletionPolicy.reviewer_quorum.threshold"),
+      };
+    default:
+      throw wireParseError("WorkCompletionPolicy", `unknown \`kind\` value \`${tag}\``);
+  }
+}
+
+/** Fail-closed wire parser for WorkEvidenceRef (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkEvidenceRef(value: unknown): WorkEvidenceRef {
+  const data = expectWireObject(value, "WorkEvidenceRef");
+  return {
+    ...(data["confirmation_kind"] === undefined || data["confirmation_kind"] === null ? {} : { confirmation_kind: parseWorkEvidenceKind(data["confirmation_kind"]) }),
+    ...(data["confirming_owner_key"] === undefined || data["confirming_owner_key"] === null ? {} : { confirming_owner_key: parseWorkOwnerKey(data["confirming_owner_key"]) }),
+    id: expectWireString(requireWireField(data, "id", "WorkEvidenceRef"), "WorkEvidenceRef.id"),
+    kind: expectWireString(requireWireField(data, "kind", "WorkEvidenceRef"), "WorkEvidenceRef.kind"),
+    ...(data["label"] === undefined || data["label"] === null ? {} : { label: expectWireString(data["label"], "WorkEvidenceRef.label") }),
+    ...(data["summary"] === undefined || data["summary"] === null ? {} : { summary: expectWireString(data["summary"], "WorkEvidenceRef.summary") }),
+  };
+}
+
+/** Fail-closed wire parser for WorkItemExternalRef (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItemExternalRef(value: unknown): WorkItemExternalRef {
+  const data = expectWireObject(value, "WorkItemExternalRef");
+  return {
+    id: expectWireString(requireWireField(data, "id", "WorkItemExternalRef"), "WorkItemExternalRef.id"),
+    kind: expectWireString(requireWireField(data, "kind", "WorkItemExternalRef"), "WorkItemExternalRef.kind"),
+    ...(data["url"] === undefined || data["url"] === null ? {} : { url: expectWireString(data["url"], "WorkItemExternalRef.url") }),
+  };
+}
+
+/** Fail-closed wire parser for WorkItemOwner (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItemOwner(value: unknown): WorkItemOwner {
+  const data = expectWireObject(value, "WorkItemOwner");
+  return {
+    ...(data["display_name"] === undefined || data["display_name"] === null ? {} : { display_name: expectWireString(data["display_name"], "WorkItemOwner.display_name") }),
+    key: parseWorkOwnerKey(requireWireField(data, "key", "WorkItemOwner")),
+  };
+}
+
+/** Fail-closed wire parser for WorkEdgeKind (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkEdgeKind(value: unknown): WorkEdgeKind {
+  return expectWireEnum(value, ["blocks", "parent", "related", "supersedes", "derived_from"], "WorkEdgeKind") as WorkEdgeKind;
+}
+
+/** Fail-closed wire parser for WorkGraphEventKind (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkGraphEventKind(value: unknown): WorkGraphEventKind {
+  return expectWireEnum(value, ["created", "updated", "claimed", "released", "blocked", "closed", "linked", "evidence_added", "attention_created", "attention_updated"], "WorkGraphEventKind") as WorkGraphEventKind;
+}
+
+/** Fail-closed wire parser for WorkAttentionBinding (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkAttentionBinding(value: unknown): WorkAttentionBinding {
+  const data = expectWireObject(value, "WorkAttentionBinding");
+  return {
+    binding_id: expectWireString(requireWireField(data, "binding_id", "WorkAttentionBinding"), "WorkAttentionBinding.binding_id"),
+    created_at: expectWireString(requireWireField(data, "created_at", "WorkAttentionBinding"), "WorkAttentionBinding.created_at"),
+    delegated_authority: parseAttentionDelegatedAuthority(requireWireField(data, "delegated_authority", "WorkAttentionBinding")),
+    ...(data["machine_state"] === undefined || data["machine_state"] === null ? {} : { machine_state: expectWireObject(data["machine_state"], "WorkAttentionBinding.machine_state") }),
+    mode: parseWorkAttentionMode(requireWireField(data, "mode", "WorkAttentionBinding")),
+    ...(data["projection_policy"] === undefined || data["projection_policy"] === null ? {} : { projection_policy: parseAttentionProjectionPolicy(data["projection_policy"]) }),
+    status: parseWorkAttentionStatus(requireWireField(data, "status", "WorkAttentionBinding")),
+    target: parseWorkAttentionTarget(requireWireField(data, "target", "WorkAttentionBinding")),
+    updated_at: expectWireString(requireWireField(data, "updated_at", "WorkAttentionBinding"), "WorkAttentionBinding.updated_at"),
+    work_ref: parseWorkItemRef(requireWireField(data, "work_ref", "WorkAttentionBinding")),
+  };
+}
+
+/** Fail-closed wire parser for WorkOwnerKey (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkOwnerKey(value: unknown): WorkOwnerKey {
+  const data = expectWireObject(value, "WorkOwnerKey");
+  return {
+    id: expectWireString(requireWireField(data, "id", "WorkOwnerKey"), "WorkOwnerKey.id"),
+    kind: parseWorkOwnerKind(requireWireField(data, "kind", "WorkOwnerKey")),
+  };
+}
+
+/** Fail-closed wire parser for WorkEvidenceKind (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkEvidenceKind(value: unknown): WorkEvidenceKind {
+  return expectWireEnum(value, ["host_confirmation", "principal_confirmation", "supervisor_confirmation", "reviewer_confirmation", "self_attest"], "WorkEvidenceKind") as WorkEvidenceKind;
+}
+
+/** Fail-closed wire parser for AttentionDelegatedAuthority (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseAttentionDelegatedAuthority(value: unknown): AttentionDelegatedAuthority {
+  return expectWireEnum(value, ["add_evidence", "close_own_review_item", "request_closure", "close_if_policy_allows"], "AttentionDelegatedAuthority") as AttentionDelegatedAuthority;
+}
+
+/** Fail-closed wire parser for WorkAttentionMode (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkAttentionMode(value: unknown): WorkAttentionMode {
+  return expectWireEnum(value, ["pursue", "coordinate", "review", "falsify", "judge", "observe"], "WorkAttentionMode") as WorkAttentionMode;
+}
+
+/** Fail-closed wire parser for AttentionProjectionPolicy (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseAttentionProjectionPolicy(value: unknown): AttentionProjectionPolicy {
+  const data = expectWireObject(value, "AttentionProjectionPolicy");
+  return {
+    ...(data["include_parent_context"] === undefined || data["include_parent_context"] === null ? {} : { include_parent_context: expectWireBoolean(data["include_parent_context"], "AttentionProjectionPolicy.include_parent_context") }),
+    ...(data["max_text_chars"] === undefined || data["max_text_chars"] === null ? {} : { max_text_chars: expectWireInteger(data["max_text_chars"], "AttentionProjectionPolicy.max_text_chars") }),
+  };
+}
+
+/** Fail-closed wire parser for WorkAttentionStatus (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkAttentionStatus(value: unknown): WorkAttentionStatus {
+  const data = expectWireObject(value, "WorkAttentionStatus");
+  const tag = expectWireString(requireWireField(data, "state", "WorkAttentionStatus"), "WorkAttentionStatus.state");
+  switch (tag) {
+    case "active":
+      return {
+        state: "active",
+      };
+    case "paused":
+      return {
+        state: "paused",
+        ...(data["until"] === undefined || data["until"] === null ? {} : { until: expectWireString(data["until"], "WorkAttentionStatus.paused.until") }),
+      };
+    case "superseded":
+      return {
+        state: "superseded",
+      };
+    case "stopped":
+      return {
+        state: "stopped",
+      };
+    default:
+      throw wireParseError("WorkAttentionStatus", `unknown \`state\` value \`${tag}\``);
+  }
+}
+
+/** Fail-closed wire parser for WorkAttentionTarget (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkAttentionTarget(value: unknown): WorkAttentionTarget {
+  const data = expectWireObject(value, "WorkAttentionTarget");
+  const tag = expectWireString(requireWireField(data, "kind", "WorkAttentionTarget"), "WorkAttentionTarget.kind");
+  switch (tag) {
+    case "session":
+      return {
+        kind: "session",
+        session_id: expectWireString(requireWireField(data, "session_id", "WorkAttentionTarget"), "WorkAttentionTarget.session.session_id"),
+      };
+    case "lowered_owner":
+      return {
+        kind: "lowered_owner",
+        owner_key: parseWorkOwnerKey(requireWireField(data, "owner_key", "WorkAttentionTarget")),
+      };
+    default:
+      throw wireParseError("WorkAttentionTarget", `unknown \`kind\` value \`${tag}\``);
+  }
+}
+
+/** Fail-closed wire parser for WorkItemRef (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkItemRef(value: unknown): WorkItemRef {
+  const data = expectWireObject(value, "WorkItemRef");
+  return {
+    item_id: expectWireString(requireWireField(data, "item_id", "WorkItemRef"), "WorkItemRef.item_id"),
+    namespace: expectWireString(requireWireField(data, "namespace", "WorkItemRef"), "WorkItemRef.namespace"),
+    realm_id: expectWireString(requireWireField(data, "realm_id", "WorkItemRef"), "WorkItemRef.realm_id"),
+  };
+}
+
+/** Fail-closed wire parser for WorkOwnerKind (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWorkOwnerKind(value: unknown): WorkOwnerKind {
+  return expectWireEnum(value, ["principal", "agent", "session", "mob", "label"], "WorkOwnerKind") as WorkOwnerKind;
+}

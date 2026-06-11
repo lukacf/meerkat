@@ -137,7 +137,7 @@ Live is the single subsystem for audio and other realtime modalities. Pick a rea
 | JSON-RPC | `live/open` (returns `LiveOpenResult` with transport bootstrap + capabilities) | `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close` |
 | Python SDK | `client.live_open(session_id)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
 | TypeScript SDK | `client.liveOpen({ sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
-| Rust | `meerkat_live::LiveHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
+| Rust | `meerkat_live::LiveAdapterHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
 
 The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for transports that need WebSocket bootstrap; `live/open` will fail if the listener isn't configured. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
 
@@ -161,8 +161,8 @@ rkat run --tools full --resume <session_id> "retire worker-2 and add worker-4"
 Where needed, the current helper-oriented CLI mob surface is:
 
 ```bash
-rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>] [--json]
-rkat mob fork-helper <mob_id> <source_member> <prompt> [--agent-identity <id>] [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
+rkat mob spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]
+rkat mob fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
 rkat mob member-status <mob_id> <agent_identity> [--json]
 rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--initial-message <msg>]
@@ -413,7 +413,7 @@ let service = build_persistent_service(factory, config, 64, persistence);
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "What is Rust?".into(),
-    system_prompt: None,
+    system_prompt: SystemPromptOverride::Inherit,
     max_tokens: None,
     event_tx: None,
     skill_references: None,

@@ -1,9 +1,7 @@
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken};
 use crate::machines::mob_machine as mob_dsl;
-use crate::roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
-use crate::runtime::handle::{
-    HelperResult, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-};
+use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+use crate::runtime::handle::{HelperResult, MobMemberSnapshot, MobMemberStatus};
 use meerkat_core::time_compat::UNIX_EPOCH;
 use meerkat_core::types::SessionId;
 
@@ -28,21 +26,11 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) agent_runtime_id: Option<AgentRuntimeId>,
     pub(super) fence_token: Option<FenceToken>,
     pub(super) current_bridge_session_id: Option<SessionId>,
-    pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+    pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
 
 impl CanonicalMemberSnapshotMaterial {
-    pub(super) fn roster_state(&self) -> MemberState {
-        match self.status {
-            CanonicalMemberStatus::Retiring => MemberState::Retiring,
-            CanonicalMemberStatus::Unknown
-            | CanonicalMemberStatus::Active
-            | CanonicalMemberStatus::Broken
-            | CanonicalMemberStatus::Completed => MemberState::Active,
-        }
-    }
-
     pub(super) fn to_snapshot(&self) -> MobMemberSnapshot {
         let status = match self.status {
             CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
@@ -93,7 +81,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) agent_runtime_id: Option<AgentRuntimeId>,
     pub(super) fence_token: Option<FenceToken>,
     pub(super) current_bridge_session_id: Option<SessionId>,
-    pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+    pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
 
@@ -136,18 +124,6 @@ impl MobMemberLifecycleProjection {
             mob_dsl::MobMemberLifecycleStatus::Retiring => CanonicalMemberStatus::Retiring,
             mob_dsl::MobMemberLifecycleStatus::Broken => CanonicalMemberStatus::Broken,
             mob_dsl::MobMemberLifecycleStatus::Completed => CanonicalMemberStatus::Completed,
-        }
-    }
-
-    pub(super) fn roster_state_for_machine_lifecycle(
-        lifecycle: &mob_dsl::MobMemberLifecycleMaterial,
-    ) -> MemberState {
-        match lifecycle.status {
-            mob_dsl::MobMemberLifecycleStatus::Retiring => MemberState::Retiring,
-            mob_dsl::MobMemberLifecycleStatus::Unknown
-            | mob_dsl::MobMemberLifecycleStatus::Active
-            | mob_dsl::MobMemberLifecycleStatus::Broken
-            | mob_dsl::MobMemberLifecycleStatus::Completed => MemberState::Active,
         }
     }
 
@@ -224,7 +200,7 @@ mod tests {
 
         authority
             .apply_signal(mob_dsl::MobMachineSignal::RecoverMemberKickoff {
-                member_id: "worker".to_string(),
+                member_id: mob_dsl::AgentIdentity::from("worker"),
                 phase: mob_dsl::KickoffPhase::Pending,
                 error: None,
             })

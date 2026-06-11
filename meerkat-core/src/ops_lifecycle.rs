@@ -74,11 +74,10 @@ impl OperationSource {
 pub struct OperationSpec {
     pub id: OperationId,
     pub kind: OperationKind,
-    /// Compatibility owner binding field.
+    /// Canonical owner bridge session binding for this operation.
     ///
-    /// Under the identity-first Mob regime this carries the canonical bridge
-    /// session binding, even though the stored field name still says
-    /// `owner_session_id`.
+    /// The serde field name `owner_session_id` is durable in
+    /// `PersistedOpsSnapshot`; renaming it is a persisted-shape change.
     pub owner_session_id: SessionId,
     pub display_name: String,
     pub source_label: String,
@@ -86,19 +85,6 @@ pub struct OperationSpec {
     pub operation_source: Option<OperationSource>,
     pub child_session_id: Option<SessionId>,
     pub expect_peer_channel: bool,
-}
-
-impl OperationSpec {
-    /// Canonical owner bridge binding for this operation.
-    pub fn owner_bridge_session_id(&self) -> &SessionId {
-        &self.owner_session_id
-    }
-
-    /// Compatibility alias retained while older surfaces still speak in
-    /// session-centric terms.
-    pub fn owner_session_id(&self) -> &SessionId {
-        &self.owner_session_id
-    }
 }
 
 /// Peer-facing connection handoff surfaced once an operation is ready.
@@ -116,15 +102,30 @@ pub struct OperationProgressUpdate {
 }
 
 /// Terminal lifecycle outcome recorded for an operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` exists solely for generated machine-authority plumbing
+/// (`OptionValueExt::get` on `Option<OpTerminalPayload>` guard projections);
+/// the defaulted `Retired` value can never be admitted as truth because the
+/// generated guards reject any transition whose payload presence witness is
+/// `None` before the variant-match guard is consulted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome_type", rename_all = "snake_case")]
 pub enum OperationTerminalOutcome {
     Completed(OperationResult),
-    Failed { error: String },
-    Aborted { reason: Option<String> },
-    Cancelled { reason: Option<String> },
+    Failed {
+        error: String,
+    },
+    Aborted {
+        reason: Option<String>,
+    },
+    Cancelled {
+        reason: Option<String>,
+    },
+    #[default]
     Retired,
-    Terminated { reason: String },
+    Terminated {
+        reason: String,
+    },
 }
 
 /// Current lifecycle status for an operation.

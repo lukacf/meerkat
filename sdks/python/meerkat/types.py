@@ -174,6 +174,8 @@ from .generated.types import (
     WorkAttentionStatus as WorkAttentionStatus,
     WorkAttentionTarget as WorkAttentionTarget,
     WorkCompletionPolicy as WorkCompletionPolicy,
+    WorkGraphStatus as WorkGraphStatus,
+    WorkGraphPriority as WorkGraphPriority,
     WorkItemRef as WorkItemRef,
     WorkOwnerKey as WorkOwnerKey,
     WorkOwnerKind as WorkOwnerKind,
@@ -187,7 +189,6 @@ from .generated.types import (
     WireInputState as WireInputState,
     WireMemberLaunchMode as WireMemberLaunchMode,
     WireMemberRef as WireMemberRef,
-    WireMemberState as WireMemberState,
     WireMobBackendKind as WireMobBackendKind,
     WireMobMemberStatus as WireMobMemberStatus,
     WireMobProfile as WireMobProfile,
@@ -388,17 +389,6 @@ class SessionDetails(SessionInfo):
     resolved_capabilities: ResolvedModelCapabilities | None = None
 
 
-class ConfigEnvelope(TypedDict, total=False):
-    """Config envelope returned by config APIs."""
-
-    config: dict[str, Any]
-    generation: int
-    realm_id: str | None
-    instance_id: str | None
-    backend: str | None
-    resolved_paths: dict[str, str] | None
-
-
 class ExternalEventOutcome(TypedDict, total=False):
     """Outcome payload returned by `session/external_event`."""
 
@@ -449,156 +439,44 @@ class ScheduleToolCall(TypedDict, total=False):
     arguments: Any
 
 
-WorkGraphStatus = Literal[
-    "open",
-    "in_progress",
-    "blocked",
-    "completed",
-    "cancelled",
-    "failed",
-]
-WorkGraphPriority = Literal["low", "medium", "high"]
-WorkGraphEdgeKind = Literal[
-    "blocks",
-    "parent",
-    "related",
-    "supersedes",
-    "derived_from",
-]
-WorkGraphEventKind = Literal[
-    "created",
-    "updated",
-    "claimed",
-    "released",
-    "blocked",
-    "closed",
-    "linked",
-    "evidence_added",
-    "attention_created",
-    "attention_updated",
-]
-WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
+# `WorkGraphStatus` and `WorkGraphPriority` are generated from the WorkItem
+# schema's closed enums and imported/re-exported from `.generated.types` above
+# (dogma row #256). They are no longer hand-declared here.
+# Generated closed unions for edge and event kinds (re-exported wire types).
+from .generated.types import WorkEdgeKind as WorkEdgeKind  # noqa: E402
+from .generated.types import WorkGraphEventKind as WorkGraphEventKind  # noqa: E402
 
+# K21: the workgraph read shapes are fully generated (including the promoted
+# inline-object types `WorkItemOwner` / `WorkItemClaim` /
+# `WorkItemExternalRef`) and carry fail-closed `from_wire` parsers. The hand
+# TypedDict twins (`WorkGraphOwner*`, `WorkGraphClaim`, `ExternalWorkRef`,
+# hand `WorkEvidenceRef`/`WorkItem`) are deleted.
+from .generated.types import WorkItem as WorkItem  # noqa: E402
+from .generated.types import WorkItemOwner as WorkItemOwner  # noqa: E402
+from .generated.types import WorkItemClaim as WorkItemClaim  # noqa: E402
+from .generated.types import WorkItemExternalRef as WorkItemExternalRef  # noqa: E402
+from .generated.types import WorkEvidenceRef as WorkEvidenceRef  # noqa: E402
+from .generated.types import WorkEvidenceKind as WorkEvidenceKind  # noqa: E402
 
-class WorkGraphOwnerKey(TypedDict):
-    kind: WorkGraphOwnerKind
-    id: str
+# Re-exports of the generated wire types — the signature-parity gate enforces
+# that workgraph wrappers consume the generated shapes, not hand mirrors.
+from .generated.types import WorkEdge as WorkEdge  # noqa: E402
+from .generated.types import WorkGraphEvent as WorkGraphEvent  # noqa: E402
+from .generated.types import ConfigEnvelope as ConfigEnvelope  # noqa: E402
+from .generated.types import WorkGraphItemsResponse as WorkGraphItemsResponse  # noqa: E402
+from .generated.types import WorkGraphEventsResponse as WorkGraphEventsResponse  # noqa: E402
 
+# Re-export of the generated wire type — the contract inventory gate enforces
+# that the snapshot wrapper consumes the generated shape, not a hand mirror.
+from .generated.types import WorkGraphSnapshot as WorkGraphSnapshot  # noqa: E402
 
-class WorkGraphOwner(TypedDict):
-    key: WorkGraphOwnerKey
-    display_name: NotRequired[str]
-
-
-class WorkGraphClaim(TypedDict):
-    owner: WorkGraphOwner
-    claimed_at: str
-    lease_expires_at: NotRequired[str]
-
-
-class ExternalWorkRef(TypedDict, total=False):
-    kind: str
-    id: str
-    url: str
-
-
-class WorkEvidenceRef(TypedDict, total=False):
-    kind: str
-    id: str
-    label: str
-    summary: str
-
-
-class WorkItem(TypedDict, total=False):
-    id: str
-    realm_id: str
-    namespace: str
-    title: str
-    description: str
-    status: WorkGraphStatus
-    priority: WorkGraphPriority
-    completion_policy: WorkCompletionPolicy
-    labels: list[str]
-    owner: WorkGraphOwner
-    claim: WorkGraphClaim
-    machine_state: dict[str, Any]
-    revision: int
-    due_at: str
-    not_before: str
-    snoozed_until: str
-    created_at: str
-    updated_at: str
-    terminal_at: str
-    external_refs: list[ExternalWorkRef]
-    evidence_refs: list[WorkEvidenceRef]
-
-
-class WorkGraphEdge(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    kind: WorkGraphEdgeKind
-    from_id: str
-    to_id: str
-    created_at: str
-
-
-class WorkGraphEvent(TypedDict, total=False):
-    seq: int
-    realm_id: str
-    namespace: str
-    item_id: str
-    kind: WorkGraphEventKind
-    at: str
-    payload: Any
-
-
-class WorkItemListResult(TypedDict):
-    items: list[WorkItem]
-
-
-class WorkGraphEventsResult(TypedDict):
-    events: list[WorkGraphEvent]
-
-
-class WorkGraphSnapshot(TypedDict):
-    realm_id: str
-    namespace: NotRequired[str]
-    all_namespaces: bool
-    captured_at: str
-    event_high_water_mark: NotRequired[int]
-    items: list[WorkItem]
-    edges: list[WorkGraphEdge]
-    attention: list[WorkAttentionBinding]
-    ready_item_ids: list[str]
-
-
-class WorkGraphItemFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    all_namespaces: bool
-    statuses: list[WorkGraphStatus]
-    labels: list[str]
-    include_terminal: bool
-    limit: int
-
-
-class WorkGraphReadyFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    labels: list[str]
-    limit: int
-
-
-class WorkGraphSnapshotFilter(WorkGraphItemFilter, total=False):
-    pass
-
-
-class WorkGraphEventFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    all_namespaces: bool
-    after_seq: int
-    limit: int
+# Generated request/filter wire types for the workgraph read APIs
+# (see WorkGraphSnapshot note above).
+from .generated.types import WorkGraphIdParams as WorkGraphIdParams  # noqa: E402
+from .generated.types import WorkItemFilter as WorkItemFilter  # noqa: E402
+from .generated.types import ReadyWorkFilter as ReadyWorkFilter  # noqa: E402
+from .generated.types import WorkGraphSnapshotFilter as WorkGraphSnapshotFilter  # noqa: E402
+from .generated.types import WorkGraphEventFilter as WorkGraphEventFilter  # noqa: E402
 
 
 class MobEventCursorEntry(TypedDict, total=False):
@@ -622,6 +500,11 @@ class MobProfileTools(TypedDict, total=False):
 
 class MobProfile(TypedDict, total=False):
     model: str
+    provider: str | None
+    self_hosted_server_id: str | None
+    image_generation_provider: str | None
+    auto_compact_threshold: int | None
+    resume_overrides: list[str]
     skills: list[str]
     tools: MobProfileTools
     peer_description: str
@@ -699,15 +582,6 @@ class ModelsCatalogResponse(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
-class SessionToolCall:
-    """Legacy assistant tool call captured in transcript history."""
-
-    id: str = ""
-    name: str = ""
-    args: Any = None
-
-
-@dataclass(frozen=True, slots=True)
 class SessionToolResult:
     """Tool result captured in transcript history."""
 
@@ -754,7 +628,6 @@ class SessionMessage:
     kind: str | None = None
     body: str | None = None
     content: ContentInput | None = None
-    tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
@@ -862,14 +735,6 @@ class TranscriptRewriteUserMessage(TypedDict):
     created_at: NotRequired[str]
 
 
-class TranscriptRewriteAssistantMessage(TypedDict):
-    role: Literal["assistant"]
-    content: str
-    tool_calls: NotRequired[list[dict[str, Any]]]
-    stop_reason: NotRequired[str]
-    created_at: NotRequired[str]
-
-
 class TranscriptRewriteBlockAssistantMessage(TypedDict):
     role: Literal["block_assistant"]
     blocks: list[dict[str, Any]]
@@ -887,7 +752,6 @@ TranscriptRewriteMessage = (
     TranscriptRewriteSystemMessage
     | TranscriptRewriteSystemNoticeMessage
     | TranscriptRewriteUserMessage
-    | TranscriptRewriteAssistantMessage
     | TranscriptRewriteBlockAssistantMessage
     | TranscriptRewriteToolResultsMessage
 )
@@ -935,7 +799,6 @@ class EventEnvelope:
 
     event_id: str = ""
     source: EventSourceIdentity | None = None
-    source_id: str = ""
     seq: int = 0
     timestamp_ms: int = 0
     payload: Event | None = None
@@ -948,6 +811,7 @@ class AttributedEvent:
     source: str = ""
     role: str = ""
     envelope: EventEnvelope = field(default_factory=EventEnvelope)
+    source_fence_token: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

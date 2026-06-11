@@ -777,8 +777,12 @@ impl std::fmt::Display for AdmissionQueueActionKind {
 )]
 pub enum AdmissionRejectReasonKind {
     #[default]
-    #[serde(rename = "DurabilityViolation")]
-    DurabilityViolation,
+    #[serde(rename = "DurabilityMissing")]
+    DurabilityMissing,
+    #[serde(rename = "ExternalDerivedDurabilityForbidden")]
+    ExternalDerivedDurabilityForbidden,
+    #[serde(rename = "DerivedDurabilityForbiddenForInputKind")]
+    DerivedDurabilityForbiddenForInputKind,
     #[serde(rename = "PeerHandlingModeInvalid")]
     PeerHandlingModeInvalid,
     #[serde(rename = "PeerResponseTerminalInvalid")]
@@ -787,7 +791,11 @@ pub enum AdmissionRejectReasonKind {
 impl AdmissionRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::DurabilityViolation => "DurabilityViolation",
+            Self::DurabilityMissing => "DurabilityMissing",
+            Self::ExternalDerivedDurabilityForbidden => "ExternalDerivedDurabilityForbidden",
+            Self::DerivedDurabilityForbiddenForInputKind => {
+                "DerivedDurabilityForbiddenForInputKind"
+            }
             Self::PeerHandlingModeInvalid => "PeerHandlingModeInvalid",
             Self::PeerResponseTerminalInvalid => "PeerResponseTerminalInvalid",
         }
@@ -797,7 +805,11 @@ impl std::convert::TryFrom<&str> for AdmissionRejectReasonKind {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "DurabilityViolation" => Ok(Self::DurabilityViolation),
+            "DurabilityMissing" => Ok(Self::DurabilityMissing),
+            "ExternalDerivedDurabilityForbidden" => Ok(Self::ExternalDerivedDurabilityForbidden),
+            "DerivedDurabilityForbiddenForInputKind" => {
+                Ok(Self::DerivedDurabilityForbiddenForInputKind)
+            }
             "PeerHandlingModeInvalid" => Ok(Self::PeerHandlingModeInvalid),
             "PeerResponseTerminalInvalid" => Ok(Self::PeerResponseTerminalInvalid),
             other => Err(format!("invalid AdmissionRejectReasonKind value `{other}`")),
@@ -1059,6 +1071,106 @@ impl From<&str> for AgentRuntimeId {
 impl std::fmt::Display for AgentRuntimeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CallTimeoutSource {
+    #[default]
+    #[serde(rename = "CallBudget")]
+    CallBudget,
+    #[serde(rename = "TurnBudget")]
+    TurnBudget,
+}
+impl CallTimeoutSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CallBudget => "CallBudget",
+            Self::TurnBudget => "TurnBudget",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CallTimeoutSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CallBudget" => Ok(Self::CallBudget),
+            "TurnBudget" => Ok(Self::TurnBudget),
+            other => Err(format!("invalid CallTimeoutSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CallTimeoutSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CallTimeoutSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CallTimeoutVerdict {
+    #[default]
+    #[serde(rename = "RetryableCallTimeout")]
+    RetryableCallTimeout,
+    #[serde(rename = "TerminalTurnBudget")]
+    TerminalTurnBudget,
+}
+impl CallTimeoutVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetryableCallTimeout => "RetryableCallTimeout",
+            Self::TerminalTurnBudget => "TerminalTurnBudget",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CallTimeoutVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RetryableCallTimeout" => Ok(Self::RetryableCallTimeout),
+            "TerminalTurnBudget" => Ok(Self::TerminalTurnBudget),
+            other => Err(format!("invalid CallTimeoutVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CallTimeoutVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CallTimeoutVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -3653,6 +3765,7 @@ impl std::fmt::Display for OpRegistrationRejectReasonKind {
         f.write_str(self.as_str())
     }
 }
+pub type OpTerminalPayload = meerkat_core::ops_lifecycle::OperationTerminalOutcome;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -4746,6 +4859,68 @@ impl std::fmt::Display for PeerIngressReceiveOutcomeClass {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressRequestClass {
+    #[default]
+    #[serde(rename = "Other")]
+    Other,
+    #[serde(rename = "MobPeerAdded")]
+    MobPeerAdded,
+    #[serde(rename = "MobPeerRetired")]
+    MobPeerRetired,
+    #[serde(rename = "MobPeerUnwired")]
+    MobPeerUnwired,
+    #[serde(rename = "SupervisorBridge")]
+    SupervisorBridge,
+}
+impl PeerIngressRequestClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Other => "Other",
+            Self::MobPeerAdded => "MobPeerAdded",
+            Self::MobPeerRetired => "MobPeerRetired",
+            Self::MobPeerUnwired => "MobPeerUnwired",
+            Self::SupervisorBridge => "SupervisorBridge",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressRequestClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Other" => Ok(Self::Other),
+            "MobPeerAdded" => Ok(Self::MobPeerAdded),
+            "MobPeerRetired" => Ok(Self::MobPeerRetired),
+            "MobPeerUnwired" => Ok(Self::MobPeerUnwired),
+            "SupervisorBridge" => Ok(Self::SupervisorBridge),
+            other => Err(format!("invalid PeerIngressRequestClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressRequestClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressRequestClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressResponseStatus {
     #[default]
     #[serde(rename = "Accepted")]
@@ -5056,6 +5231,110 @@ impl std::convert::TryFrom<String> for PreRunPhase {
     }
 }
 impl std::fmt::Display for PreRunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    #[serde(rename = "Display")]
+    Display,
+    #[serde(rename = "Spoken")]
+    Spoken,
+}
+impl RealtimeTranscriptLaneKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::Spoken => "Spoken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Display" => Ok(Self::Display),
+            "Spoken" => Ok(Self::Spoken),
+            other => Err(format!(
+                "invalid RealtimeTranscriptLaneKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptLaneKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    #[serde(rename = "User")]
+    User,
+    #[serde(rename = "Assistant")]
+    Assistant,
+}
+impl RealtimeTranscriptRoleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "User" => Ok(Self::User),
+            "Assistant" => Ok(Self::Assistant),
+            other => Err(format!(
+                "invalid RealtimeTranscriptRoleKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptRoleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7482,6 +7761,68 @@ impl std::fmt::Display for RuntimeEpochId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeEventKind {
+    #[default]
+    #[serde(rename = "InputLifecycle")]
+    InputLifecycle,
+    #[serde(rename = "RunLifecycle")]
+    RunLifecycle,
+    #[serde(rename = "RuntimeStateChange")]
+    RuntimeStateChange,
+    #[serde(rename = "Topology")]
+    Topology,
+    #[serde(rename = "Projection")]
+    Projection,
+}
+impl RuntimeEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InputLifecycle => "InputLifecycle",
+            Self::RunLifecycle => "RunLifecycle",
+            Self::RuntimeStateChange => "RuntimeStateChange",
+            Self::Topology => "Topology",
+            Self::Projection => "Projection",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeEventKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InputLifecycle" => Ok(Self::InputLifecycle),
+            "RunLifecycle" => Ok(Self::RunLifecycle),
+            "RuntimeStateChange" => Ok(Self::RuntimeStateChange),
+            "Topology" => Ok(Self::Topology),
+            "Projection" => Ok(Self::Projection),
+            other => Err(format!("invalid RuntimeEventKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeEventKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeIngressAdmission {
     #[default]
     #[serde(rename = "Open")]
@@ -9061,6 +9402,7 @@ impl std::fmt::Display for TerminalCauseClass {
     }
 }
 pub type ToolFilter = meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolFilter;
+pub type ToolName = meerkat_core::types::ToolName;
 pub type ToolVisibilityWitness =
     meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolVisibilityWitness;
 #[allow(non_camel_case_types)]
@@ -9551,6 +9893,8 @@ pub enum UserInterruptPublicResultKind {
     #[default]
     #[serde(rename = "Interrupted")]
     Interrupted,
+    #[serde(rename = "StagedNoop")]
+    StagedNoop,
     #[serde(rename = "NotFound")]
     NotFound,
     #[serde(rename = "SessionBusy")]
@@ -9562,6 +9906,7 @@ impl UserInterruptPublicResultKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Interrupted => "Interrupted",
+            Self::StagedNoop => "StagedNoop",
             Self::NotFound => "NotFound",
             Self::SessionBusy => "SessionBusy",
             Self::Conflict => "Conflict",
@@ -9573,6 +9918,7 @@ impl std::convert::TryFrom<&str> for UserInterruptPublicResultKind {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Interrupted" => Ok(Self::Interrupted),
+            "StagedNoop" => Ok(Self::StagedNoop),
             "NotFound" => Ok(Self::NotFound),
             "SessionBusy" => Ok(Self::SessionBusy),
             "Conflict" => Ok(Self::Conflict),
@@ -9844,7 +10190,7 @@ pub struct State {
     pub image_tool_results_enabled: bool,
     pub tool_calls_pending: u64,
     pub pending_op_refs: std::collections::BTreeSet<String>,
-    pub barrier_operation_ids: std::collections::BTreeSet<String>,
+    pub barrier_operation_ids: std::collections::BTreeSet<OperationId>,
     pub has_barrier_ops: bool,
     pub barrier_satisfied: bool,
     pub boundary_count: u64,
@@ -9856,6 +10202,7 @@ pub struct State {
     pub runtime_completion_result_run_id: Option<RunId>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
+    pub extraction_active: bool,
     pub llm_retry_attempt: u64,
     pub llm_retry_max_retries: u64,
     pub llm_retry_selected_delay_ms: u64,
@@ -9937,19 +10284,19 @@ pub struct State {
     pub staged_filter: ToolFilter,
     pub active_visibility_revision: u64,
     pub staged_visibility_revision: u64,
-    pub active_deferred_names: std::collections::BTreeSet<String>,
-    pub staged_deferred_names: std::collections::BTreeSet<String>,
-    pub requested_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub filter_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub active_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub staged_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub requested_visibility_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub filter_visibility_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub active_deferred_authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub staged_deferred_authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub deferred_visibility_authority_catalog:
-        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub filter_visibility_authority_catalog:
-        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub turn_tool_overlay_allow_active: bool,
-    pub turn_tool_overlay_allow_names: std::collections::BTreeSet<String>,
-    pub turn_tool_overlay_deny_names: std::collections::BTreeSet<String>,
+    pub turn_tool_overlay_allow_names: std::collections::BTreeSet<ToolName>,
+    pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
     pub input_phases: std::collections::BTreeMap<String, InputPhase>,
     pub input_terminal_kind: std::collections::BTreeMap<String, InputTerminalKind>,
     pub input_superseded_by: std::collections::BTreeMap<String, String>,
@@ -9981,9 +10328,9 @@ pub struct State {
     pub completion_feed_kinds: std::collections::BTreeMap<String, OperationKind>,
     pub completion_feed_terminal_outcomes:
         std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
-    pub completion_feed_terminal_payload: std::collections::BTreeMap<String, String>,
+    pub completion_feed_terminal_payload: std::collections::BTreeMap<String, OpTerminalPayload>,
     pub op_terminal_outcomes: std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
-    pub op_terminal_payload: std::collections::BTreeMap<String, String>,
+    pub op_terminal_payload: std::collections::BTreeMap<String, OpTerminalPayload>,
     pub op_kinds: std::collections::BTreeMap<String, OperationKind>,
     pub op_sources: std::collections::BTreeMap<String, OperationSource>,
     pub op_peer_ready: std::collections::BTreeMap<String, bool>,
@@ -10215,16 +10562,18 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StagePersistentFilter {
         pub filter: ToolFilter,
-        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishCommittedVisibleSet {
         pub active_filter: ToolFilter,
         pub staged_filter: ToolFilter,
-        pub active_requested_deferred_names: std::collections::BTreeSet<String>,
-        pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
-        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub staged_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub active_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub staged_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
         pub active_visibility_revision: u64,
         pub staged_visibility_revision: u64,
     }
@@ -10427,7 +10776,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishEvent {
-        pub kind: String,
+        pub kind: RuntimeEventKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeState {
@@ -10603,6 +10952,15 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyTurnTerminality {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyAssistantOutput {
+        pub has_visible_or_actionable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyCallTimeout {
+        pub source: CallTimeoutSource,
+        pub timeout_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyLlmFailureRecovery {
         pub failure_kind: Option<LlmRetryFailureKind>,
         pub retry_attempt: u64,
@@ -10707,7 +11065,7 @@ pub mod inputs {
     pub struct RegisterPendingOps {
         pub run_id: RunId,
         pub op_refs: std::collections::BTreeSet<String>,
-        pub barrier_operation_ids: std::collections::BTreeSet<String>,
+        pub barrier_operation_ids: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ToolCallsResolved {
@@ -10716,7 +11074,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OpsBarrierSatisfied {
         pub run_id: RunId,
-        pub operation_ids: std::collections::BTreeSet<String>,
+        pub operation_ids: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BoundaryContinue {
@@ -10923,7 +11281,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordBoundarySeq {
         pub input_id: String,
-        pub seq: u64,
+        pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterOp {
@@ -10940,25 +11298,25 @@ pub mod inputs {
     pub struct CompleteOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FailOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbortOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerReadyOp {
@@ -10976,13 +11334,13 @@ pub mod inputs {
     pub struct RetireCompletedOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TerminateOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveOpLifecycleTransitionRejection {
@@ -10998,7 +11356,7 @@ pub mod inputs {
         pub peer_ready: bool,
         pub progress_count: u64,
         pub terminal_outcome: Option<OperationTerminalOutcomeKind>,
-        pub terminal_payload: Option<String>,
+        pub terminal_payload: Option<OpTerminalPayload>,
         pub completion_sequence: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11046,7 +11404,7 @@ pub mod inputs {
         pub operation_id: String,
         pub kind: OperationKind,
         pub terminal_outcome: OperationTerminalOutcomeKind,
-        pub terminal_payload: String,
+        pub terminal_payload: OpTerminalPayload,
         pub completion_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11256,11 +11614,11 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageVisibilityFilter {
         pub filter: ToolFilter,
-        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceFilterToolAuthorityCatalog {
-        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitVisibilityFilter {
@@ -11269,42 +11627,44 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageDeferredNames {
-        pub names: std::collections::BTreeSet<String>,
+        pub names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestDeferredTools {
-        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceDeferredToolAuthorityCatalog {
-        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitDeferredNames {
-        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetTurnToolOverlay {
         pub allow_active: bool,
-        pub allow_names: std::collections::BTreeSet<String>,
-        pub deny_names: std::collections::BTreeSet<String>,
+        pub allow_names: std::collections::BTreeSet<ToolName>,
+        pub deny_names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearTurnToolOverlay {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SyncVisibilityRevisions {
+    pub struct ReplaceVisibilityState {
         pub capability_base_filter: ToolFilter,
         pub inherited_base_filter: ToolFilter,
         pub active_filter: ToolFilter,
         pub staged_filter: ToolFilter,
         pub active_revision: u64,
         pub staged_revision: u64,
-        pub active_deferred_names: std::collections::BTreeSet<String>,
-        pub staged_deferred_names: std::collections::BTreeSet<String>,
-        pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub active_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub staged_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub requested_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub filter_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub active_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub staged_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceRegister {
@@ -11395,7 +11755,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestSent {
         pub corr_id: PeerCorrelationId,
-        pub to: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerResponseProgressArrived {
@@ -11412,6 +11771,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestTimedOut {
+        pub corr_id: PeerCorrelationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerRequestSendFailed {
         pub corr_id: PeerCorrelationId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11663,6 +12026,8 @@ pub enum Input {
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyTurnTerminalCauseClass(inputs::ClassifyTurnTerminalCauseClass),
     ClassifyTurnTerminality(inputs::ClassifyTurnTerminality),
+    ClassifyAssistantOutput(inputs::ClassifyAssistantOutput),
+    ClassifyCallTimeout(inputs::ClassifyCallTimeout),
     ClassifyLlmFailureRecovery(inputs::ClassifyLlmFailureRecovery),
     ResolveTurnSurfaceResult(inputs::ResolveTurnSurfaceResult),
     AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
@@ -11794,7 +12159,7 @@ pub enum Input {
     CommitDeferredNames(inputs::CommitDeferredNames),
     SetTurnToolOverlay(inputs::SetTurnToolOverlay),
     ClearTurnToolOverlay(inputs::ClearTurnToolOverlay),
-    SyncVisibilityRevisions(inputs::SyncVisibilityRevisions),
+    ReplaceVisibilityState(inputs::ReplaceVisibilityState),
     SurfaceRegister(inputs::SurfaceRegister),
     SurfaceSetRemovalTimeout(inputs::SurfaceSetRemovalTimeout),
     SurfaceStageAdd(inputs::SurfaceStageAdd),
@@ -11819,6 +12184,7 @@ pub enum Input {
     PeerResponseTerminalArrived(inputs::PeerResponseTerminalArrived),
     PeerResponseRejected(inputs::PeerResponseRejected),
     PeerRequestTimedOut(inputs::PeerRequestTimedOut),
+    PeerRequestSendFailed(inputs::PeerRequestSendFailed),
     PeerRequestReceived(inputs::PeerRequestReceived),
     PeerResponseReplied(inputs::PeerResponseReplied),
     AdvanceSessionContext(inputs::AdvanceSessionContext),
@@ -11964,6 +12330,8 @@ impl Input {
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyTurnTerminalCauseClass(_) => InputKind::ClassifyTurnTerminalCauseClass,
             Self::ClassifyTurnTerminality(_) => InputKind::ClassifyTurnTerminality,
+            Self::ClassifyAssistantOutput(_) => InputKind::ClassifyAssistantOutput,
+            Self::ClassifyCallTimeout(_) => InputKind::ClassifyCallTimeout,
             Self::ClassifyLlmFailureRecovery(_) => InputKind::ClassifyLlmFailureRecovery,
             Self::ResolveTurnSurfaceResult(_) => InputKind::ResolveTurnSurfaceResult,
             Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
@@ -12123,7 +12491,7 @@ impl Input {
             Self::CommitDeferredNames(_) => InputKind::CommitDeferredNames,
             Self::SetTurnToolOverlay(_) => InputKind::SetTurnToolOverlay,
             Self::ClearTurnToolOverlay(_) => InputKind::ClearTurnToolOverlay,
-            Self::SyncVisibilityRevisions(_) => InputKind::SyncVisibilityRevisions,
+            Self::ReplaceVisibilityState(_) => InputKind::ReplaceVisibilityState,
             Self::SurfaceRegister(_) => InputKind::SurfaceRegister,
             Self::SurfaceSetRemovalTimeout(_) => InputKind::SurfaceSetRemovalTimeout,
             Self::SurfaceStageAdd(_) => InputKind::SurfaceStageAdd,
@@ -12148,6 +12516,7 @@ impl Input {
             Self::PeerResponseTerminalArrived(_) => InputKind::PeerResponseTerminalArrived,
             Self::PeerResponseRejected(_) => InputKind::PeerResponseRejected,
             Self::PeerRequestTimedOut(_) => InputKind::PeerRequestTimedOut,
+            Self::PeerRequestSendFailed(_) => InputKind::PeerRequestSendFailed,
             Self::PeerRequestReceived(_) => InputKind::PeerRequestReceived,
             Self::PeerResponseReplied(_) => InputKind::PeerResponseReplied,
             Self::AdvanceSessionContext(_) => InputKind::AdvanceSessionContext,
@@ -12278,6 +12647,8 @@ pub enum InputKind {
     ClassifyInputTerminality,
     ClassifyTurnTerminalCauseClass,
     ClassifyTurnTerminality,
+    ClassifyAssistantOutput,
+    ClassifyCallTimeout,
     ClassifyLlmFailureRecovery,
     ResolveTurnSurfaceResult,
     AuthorizeStoredInputStateSeed,
@@ -12409,7 +12780,7 @@ pub enum InputKind {
     CommitDeferredNames,
     SetTurnToolOverlay,
     ClearTurnToolOverlay,
-    SyncVisibilityRevisions,
+    ReplaceVisibilityState,
     SurfaceRegister,
     SurfaceSetRemovalTimeout,
     SurfaceStageAdd,
@@ -12434,6 +12805,7 @@ pub enum InputKind {
     PeerResponseTerminalArrived,
     PeerResponseRejected,
     PeerRequestTimedOut,
+    PeerRequestSendFailed,
     PeerRequestReceived,
     PeerResponseReplied,
     AdvanceSessionContext,
@@ -12485,6 +12857,7 @@ pub mod signals {
         pub from_peer: String,
         pub envelope_kind: PeerIngressEnvelopeClass,
         pub request_intent: String,
+        pub request_intent_class: PeerIngressRequestClass,
         pub lifecycle_kind: PeerIngressLifecycleClass,
         pub lifecycle_peer_param: Option<String>,
         pub response_status: PeerIngressResponseStatus,
@@ -12728,6 +13101,8 @@ pub mod effects {
         pub request_immediate_processing: bool,
         pub interrupt_yielding: bool,
         pub wake_if_idle: bool,
+        pub execution_handling_mode: Option<InputLane>,
+        pub live_interrupt_required: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmissionValidationResolved {
@@ -12779,6 +13154,15 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnTerminalityClassified {
         pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AssistantOutputClassified {
+        pub empty_response_terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CallTimeoutClassified {
+        pub verdict: CallTimeoutVerdict,
+        pub timeout_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LlmFailureRecoveryClassified {
@@ -12913,7 +13297,7 @@ pub mod effects {
         pub seq: u64,
         pub kind: OperationKind,
         pub terminal_outcome: OperationTerminalOutcomeKind,
-        pub terminal_payload: String,
+        pub terminal_payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompletionProduced {
@@ -13024,7 +13408,6 @@ pub mod effects {
     pub struct LiveRefreshResultResolved {
         pub channel_id: String,
         pub status: LiveRefreshPublicStatus,
-        pub refresh_enqueued: bool,
         pub sequence: u64,
         pub queue_acceptance_sequence: u64,
     }
@@ -13032,7 +13415,6 @@ pub mod effects {
     pub struct LiveCloseResultResolved {
         pub channel_id: String,
         pub status: LiveClosePublicStatus,
-        pub closed: bool,
         pub sequence: u64,
         pub close_observation_sequence: u64,
     }
@@ -13040,7 +13422,6 @@ pub mod effects {
     pub struct LiveCommandResultResolved {
         pub channel_id: String,
         pub command: LiveCommandPublicKind,
-        pub accepted: bool,
         pub sequence: u64,
         pub command_acceptance_sequence: u64,
     }
@@ -13173,7 +13554,14 @@ pub mod effects {
         pub degradation_detail: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct EnqueueClassifiedEntry {}
+    pub struct RealtimeTranscriptAppended {
+        pub channel_id: String,
+        pub item_id: String,
+        pub text: String,
+        pub role: RealtimeTranscriptRoleKind,
+        pub lane: RealtimeTranscriptLaneKind,
+        pub sequence: u64,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
         pub class: PeerIngressInputClass,
@@ -13384,6 +13772,8 @@ pub enum Effect {
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     TurnTerminalCauseClassResolved(effects::TurnTerminalCauseClassResolved),
     TurnTerminalityClassified(effects::TurnTerminalityClassified),
+    AssistantOutputClassified(effects::AssistantOutputClassified),
+    CallTimeoutClassified(effects::CallTimeoutClassified),
     LlmFailureRecoveryClassified(effects::LlmFailureRecoveryClassified),
     TurnSurfaceResultResolved(effects::TurnSurfaceResultResolved),
     StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
@@ -13460,7 +13850,7 @@ pub enum Effect {
     MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
     MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
-    EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
+    RealtimeTranscriptAppended(effects::RealtimeTranscriptAppended),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
     PeerIngressReceiveResolved(effects::PeerIngressReceiveResolved),
@@ -13539,6 +13929,8 @@ pub enum EffectKind {
     InputBehavioralTerminalityResolved,
     TurnTerminalCauseClassResolved,
     TurnTerminalityClassified,
+    AssistantOutputClassified,
+    CallTimeoutClassified,
     LlmFailureRecoveryClassified,
     TurnSurfaceResultResolved,
     StoredInputStateSeedAuthorized,
@@ -13613,7 +14005,7 @@ pub enum EffectKind {
     MobEventStreamTerminalResolved,
     MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
-    EnqueueClassifiedEntry,
+    RealtimeTranscriptAppended,
     PeerIngressClassified,
     PeerResponseReplyClassified,
     PeerIngressReceiveResolved,
@@ -13654,6 +14046,11 @@ pub enum TransitionId {
     RegisterSessionRunning,
     RegisterSessionRetired,
     RegisterSessionStopped,
+    RegisterSessionIdempotentIdle,
+    RegisterSessionIdempotentAttached,
+    RegisterSessionIdempotentRunning,
+    RegisterSessionIdempotentRetired,
+    RegisterSessionIdempotentStopped,
     StageDeferredSession,
     UpdateDeferredSessionKeepAlive,
     BeginDeferredSessionPromotion,
@@ -13890,6 +14287,12 @@ pub enum TransitionId {
     ResolveUserInterruptPublicResultNoopRunning,
     ResolveUserInterruptPublicResultNoopRetired,
     ResolveUserInterruptPublicResultNoopStopped,
+    ResolveUserInterruptPublicResultStagedNoopInitializing,
+    ResolveUserInterruptPublicResultStagedNoopIdle,
+    ResolveUserInterruptPublicResultStagedNoopAttached,
+    ResolveUserInterruptPublicResultStagedNoopRunning,
+    ResolveUserInterruptPublicResultStagedNoopRetired,
+    ResolveUserInterruptPublicResultStagedNoopStopped,
     ResolveUserInterruptPublicResultDestroyedPresentInitializing,
     ResolveUserInterruptPublicResultDestroyedPresentIdle,
     ResolveUserInterruptPublicResultDestroyedPresentAttached,
@@ -14106,9 +14509,15 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
-    ResolveAdmissionValidationDurabilityRejectedIdle,
-    ResolveAdmissionValidationDurabilityRejectedAttached,
-    ResolveAdmissionValidationDurabilityRejectedRunning,
+    ResolveAdmissionValidationDurabilityMissingRejectedIdle,
+    ResolveAdmissionValidationDurabilityMissingRejectedAttached,
+    ResolveAdmissionValidationDurabilityMissingRejectedRunning,
+    ResolveAdmissionValidationExternalDerivedRejectedIdle,
+    ResolveAdmissionValidationExternalDerivedRejectedAttached,
+    ResolveAdmissionValidationExternalDerivedRejectedRunning,
+    ResolveAdmissionValidationDerivedKindRejectedIdle,
+    ResolveAdmissionValidationDerivedKindRejectedAttached,
+    ResolveAdmissionValidationDerivedKindRejectedRunning,
     ResolveAdmissionValidationPeerHandlingRejectedIdle,
     ResolveAdmissionValidationPeerHandlingRejectedAttached,
     ResolveAdmissionValidationPeerHandlingRejectedRunning,
@@ -14967,11 +15376,11 @@ pub enum TransitionId {
     ClearTurnToolOverlayRunning,
     ClearTurnToolOverlayRetired,
     ClearTurnToolOverlayStopped,
-    SyncVisibilityRevisionsIdle,
-    SyncVisibilityRevisionsAttached,
-    SyncVisibilityRevisionsRunning,
-    SyncVisibilityRevisionsRetired,
-    SyncVisibilityRevisionsStopped,
+    ReplaceVisibilityStateIdle,
+    ReplaceVisibilityStateAttached,
+    ReplaceVisibilityStateRunning,
+    ReplaceVisibilityStateRetired,
+    ReplaceVisibilityStateStopped,
     McpServerConnectPendingIdle,
     McpServerConnectPendingAttached,
     McpServerConnectPendingRunning,
@@ -15027,6 +15436,11 @@ pub enum TransitionId {
     PeerRequestTimedOutRunning,
     PeerRequestTimedOutRetired,
     PeerRequestTimedOutStopped,
+    PeerRequestSendFailedIdle,
+    PeerRequestSendFailedAttached,
+    PeerRequestSendFailedRunning,
+    PeerRequestSendFailedRetired,
+    PeerRequestSendFailedStopped,
     PeerRequestReceivedIdle,
     PeerRequestReceivedAttached,
     PeerRequestReceivedRunning,
@@ -15234,6 +15648,18 @@ pub enum TransitionId {
     ClassifyLlmFailureRecoveryFatalIdle,
     ClassifyLlmFailureRecoveryFatalAttached,
     ClassifyLlmFailureRecoveryFatalRunning,
+    ClassifyAssistantOutputEmptyTerminalIdle,
+    ClassifyAssistantOutputEmptyTerminalAttached,
+    ClassifyAssistantOutputEmptyTerminalRunning,
+    ClassifyAssistantOutputProceedIdle,
+    ClassifyAssistantOutputProceedAttached,
+    ClassifyAssistantOutputProceedRunning,
+    ClassifyCallTimeoutRetryableIdle,
+    ClassifyCallTimeoutRetryableAttached,
+    ClassifyCallTimeoutRetryableRunning,
+    ClassifyCallTimeoutTerminalIdle,
+    ClassifyCallTimeoutTerminalAttached,
+    ClassifyCallTimeoutTerminalRunning,
     ResolveTurnSurfaceResultNoneMissingTerminalIdle,
     ResolveTurnSurfaceResultCompletedSuccessIdle,
     ResolveTurnSurfaceResultCompletedFailureIdle,
@@ -15344,6 +15770,7 @@ pub fn initial_state() -> State {
         runtime_completion_result_run_id: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,
+        extraction_active: false,
         llm_retry_attempt: 0,
         llm_retry_max_retries: 0,
         llm_retry_selected_delay_ms: 0,

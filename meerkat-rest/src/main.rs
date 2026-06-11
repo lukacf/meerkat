@@ -96,16 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.expose_paths,
     )
     .await?;
-    tracing::info!(
-        realm_id = %state.realm,
-        backend = %state.backend,
-        store_path = %state.store_path.display(),
-        default_model = %state.default_model,
-        max_tokens = state.max_tokens,
-        "Starting Meerkat REST server"
-    );
-
-    // Check for API key early
+    // Read the current config early: API-key warning + startup log below.
     let mut config = state
         .config_store
         .get()
@@ -114,6 +105,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
+    // `default_model` is a startup-time snapshot of the canonical
+    // create-session default-model ladder, logged for operators; the live
+    // value is re-resolved per request from the current config (config is
+    // runtime-mutable via PUT/PATCH /config).
+    tracing::info!(
+        realm_id = %state.realm,
+        backend = %state.backend,
+        store_path = %state.store_path.display(),
+        default_model = %meerkat::resolve_create_session_default_model(&config),
+        max_tokens = state.max_tokens,
+        "Starting Meerkat REST server"
+    );
     // Plan §6.9/§6.10 deleted the legacy `config.provider` enum block
     // and the `providers.{api_keys,base_urls}` shared maps. Post-0.6.0
     // the REST server relies on env vars (ANTHROPIC_API_KEY /

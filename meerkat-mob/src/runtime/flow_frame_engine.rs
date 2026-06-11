@@ -1894,7 +1894,13 @@ impl FlowFrameEngine {
                 run_id.clone(),
                 context.activation_params.clone(),
             );
-            let until_met = evaluate_condition(&loop_spec.until, &eval_context);
+            let until_met =
+                evaluate_condition(&loop_spec.until, &eval_context).map_err(|error| {
+                    MobError::ConditionEval {
+                        location: format!("loop '{}' until condition", obligation.loop_id),
+                        reason: error.to_string(),
+                    }
+                })?;
             let (decision, until_feedback) = self
                 .resolve_until_feedback_decision(
                     run_id,

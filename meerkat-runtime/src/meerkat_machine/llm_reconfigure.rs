@@ -48,7 +48,7 @@ impl MeerkatMachine {
     }
 
     pub(super) fn committed_visibility_allows(
-        base_tool_names: &std::collections::BTreeSet<String>,
+        base_tool_names: &std::collections::BTreeSet<meerkat_core::ToolName>,
         visibility_state: &SessionToolVisibilityState,
         tool_name: &str,
     ) -> bool {
@@ -72,7 +72,7 @@ impl MeerkatMachine {
     pub(super) fn propose_reconfigured_visibility_plan(
         current: &SessionToolVisibilityState,
         target_capability_surface: &SessionLlmCapabilitySurface,
-        base_tool_names: &std::collections::BTreeSet<String>,
+        base_tool_names: &std::collections::BTreeSet<meerkat_core::ToolName>,
     ) -> SessionLlmVisibilityPlanProposal {
         let previous_capability_base_filter = current.capability_base_filter.clone();
         let view_image_tool_available =

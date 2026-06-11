@@ -45,12 +45,9 @@ pub enum RuntimeBinding {
         bootstrap_token: Option<BridgeBootstrapToken>,
         /// Ed25519 signing pubkey (32 bytes) of the external process.
         ///
-        /// Required for peer-only trust registration. Legacy callers may
-        /// deserialize with this field absent, but live wiring and bridge
-        /// control paths fail closed instead of installing a zero-pubkey
-        /// trust descriptor.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pubkey: Option<[u8; 32]>,
+        /// Required for peer-only trust registration; `peer_id` must derive
+        /// from it. Zero-key descriptors are rejected by trust validation.
+        pubkey: [u8; 32],
     },
 }
 

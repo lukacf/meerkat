@@ -1,4 +1,6 @@
 import { EventSubscription } from './events.js';
+import { serializePromptContentInput } from './session.js';
+import { isKnownEvent } from './types.js';
 import type {
   AuthBindingRef,
   ContentInput,
@@ -20,22 +22,26 @@ import type {
   MemberDeliveryReceipt,
   MobRespawnResult,
   MobMemberSnapshot,
+  MobPeerConnectivity,
+  MobPeerConnectivitySnapshot,
+  MobUnreachablePeer,
   ResolvedModelCapabilities,
   MobHelperResult,
   EventEnvelope,
   EventSourceIdentity,
   AgentRuntimeId,
-  SubscriptionLaggedEvent,
 } from './types.js';
 import type {
   MobAppendSystemContextResult as WireMobAppendSystemContextResult,
   MobFlowStatusResult as WireMobFlowStatusResult,
   MobHelperResult as WireMobHelperResult,
+  MobLifecycleResult,
   MobMemberSendResult as WireMobMemberSendResult,
   MobMemberStatusResult as WireMobMemberStatusResult,
   MobRespawnResult as WireMobRespawnResult,
   MobStatusResult as WireMobStatusResult,
   WireMobMemberStatus,
+  WireResolvedModelCapabilities,
 } from './generated/mob.js';
 
 // WASM function signatures (bound at construction)
@@ -44,10 +50,8 @@ interface MobWasmBindings {
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
-  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_wire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_unwire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -61,29 +65,15 @@ interface MobWasmBindings {
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
-}
-
-function encodeBase64UrlJson(payload: Record<string, unknown>): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  const b64 = btoa(binary);
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function encodeMemberRef(mobId: string, agentIdentity: string): string {
-  return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (streamId: string) => string;
+  close_subscription: (streamId: string) => void;
 }
 
 function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
@@ -244,15 +234,47 @@ function parseResolvedModelCapabilities(
   const record = requireRecord(
     raw,
     'Invalid mob member_status response: resolved_capabilities must be object',
-  );
+  ) as Partial<WireResolvedModelCapabilities> & Record<string, unknown>;
+  // Strict consumption of the generated WireResolvedModelCapabilities: every
+  // capability flag must arrive as a real boolean. We fail closed on
+  // absent/malformed booleans rather than coercing with Boolean(...), which
+  // would silently project `undefined`/`null`/non-booleans into `false`.
   return {
-    vision: Boolean(record.vision),
-    image_input: Boolean(record.image_input),
-    image_tool_results: Boolean(record.image_tool_results),
-    inline_video: Boolean(record.inline_video),
-    realtime: Boolean(record.realtime),
-    web_search: Boolean(record.web_search),
-    image_generation: Boolean(record.image_generation),
+    vision: requireBooleanField(
+      record,
+      'vision',
+      'Invalid mob member_status response: resolved_capabilities.vision must be boolean',
+    ),
+    image_input: requireBooleanField(
+      record,
+      'image_input',
+      'Invalid mob member_status response: resolved_capabilities.image_input must be boolean',
+    ),
+    image_tool_results: requireBooleanField(
+      record,
+      'image_tool_results',
+      'Invalid mob member_status response: resolved_capabilities.image_tool_results must be boolean',
+    ),
+    inline_video: requireBooleanField(
+      record,
+      'inline_video',
+      'Invalid mob member_status response: resolved_capabilities.inline_video must be boolean',
+    ),
+    realtime: requireBooleanField(
+      record,
+      'realtime',
+      'Invalid mob member_status response: resolved_capabilities.realtime must be boolean',
+    ),
+    web_search: requireBooleanField(
+      record,
+      'web_search',
+      'Invalid mob member_status response: resolved_capabilities.web_search must be boolean',
+    ),
+    image_generation: requireBooleanField(
+      record,
+      'image_generation',
+      'Invalid mob member_status response: resolved_capabilities.image_generation must be boolean',
+    ),
   };
 }
 
@@ -298,6 +320,89 @@ function parseWireHandlingMode(raw: unknown, message: string): HandlingMode {
   throw new Error(message);
 }
 
+function parseMobUnreachablePeer(raw: unknown): MobUnreachablePeer {
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry must be object',
+  );
+  const peer = requireStringField(
+    record,
+    'peer',
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry missing peer',
+  );
+  const reason = optionalStringField(
+    record,
+    'reason',
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry reason must be string',
+  );
+  return reason === undefined ? { peer } : { peer, reason };
+}
+
+function parseMobPeerConnectivitySnapshot(raw: unknown): MobPeerConnectivitySnapshot {
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity.snapshot must be object',
+  );
+  const unreachableRaw = record.unreachable_peers;
+  const unreachable_peers =
+    unreachableRaw === undefined
+      ? []
+      : Array.isArray(unreachableRaw)
+        ? unreachableRaw.map(parseMobUnreachablePeer)
+        : (() => {
+            throw new Error(
+              'Invalid mob member_status response: peer_connectivity.snapshot.unreachable_peers must be array',
+            );
+          })();
+  return {
+    reachable_peer_count: requireNonNegativeIntegerField(
+      record,
+      'reachable_peer_count',
+      'Invalid mob member_status response: peer_connectivity.snapshot.reachable_peer_count must be number',
+    ),
+    unknown_peer_count: requireNonNegativeIntegerField(
+      record,
+      'unknown_peer_count',
+      'Invalid mob member_status response: peer_connectivity.snapshot.unknown_peer_count must be number',
+    ),
+    unreachable_peers,
+  };
+}
+
+/**
+ * Fail-closed parser for the tri-state `peer_connectivity` projection. Mirrors
+ * `parseWireHandlingMode`: switch on the variant `status` tag and THROW on any
+ * unknown tag rather than coalescing it into a permissive default. Absent
+ * connectivity (the field was omitted) returns `undefined`.
+ */
+function parseMobPeerConnectivity(raw: unknown): MobPeerConnectivity | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity must be object',
+  );
+  const status = record.status;
+  switch (status) {
+    case 'not_applicable':
+      return { status: 'not_applicable' };
+    case 'probe_timed_out':
+      return { status: 'probe_timed_out' };
+    case 'known':
+      return {
+        status: 'known',
+        snapshot: parseMobPeerConnectivitySnapshot(record.snapshot),
+      };
+    default:
+      throw new Error(
+        `Invalid mob member_status response: unknown peer_connectivity status ${JSON.stringify(
+          status,
+        )}`,
+      );
+  }
+}
+
 export function parseMobStatusResult(
   raw: unknown,
   context = 'Invalid mob/status response',
@@ -319,7 +424,6 @@ export function parseMobStatusResult(
   return {
     mob_id: mobId,
     status,
-    state: status,
   };
 }
 
@@ -401,16 +505,6 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
   };
 }
 
-function parseSubscriptionLaggedEvent(
-  record: Record<string, unknown>,
-  context: string,
-): SubscriptionLaggedEvent {
-  return {
-    type: 'lagged',
-    skipped: requireNumberField(record, 'skipped', `${context}: lagged skipped must be number`),
-  };
-}
-
 function normalizeEventSourceIdentity(raw: unknown, context: string): EventSourceIdentity {
   const source = requireRecord(raw, `${context}: missing source`);
   const sourceType = requireStringField(source, 'type', `${context}: source missing type`);
@@ -464,7 +558,15 @@ function normalizeEventSourceIdentity(raw: unknown, context: string): EventSourc
 
 function parseEventPayload(raw: unknown, context: string): EventEnvelope['payload'] {
   const payload = requireRecord(raw, `${context}: missing payload`);
-  requireStringField(payload, 'type', `${context}: payload missing type`);
+  const type = requireStringField(payload, 'type', `${context}: payload missing type`);
+  // Fail closed on an unrecognized event type: validate the full record
+  // against the generated `AgentEvent` inventory via `isKnownEvent` instead
+  // of blindly casting an arbitrary record. An unknown discriminant is a
+  // malformed/forward-incompatible wire shape — mirroring session.ts and the
+  // TS SDK's parseCoreEvent policy.
+  if (!isKnownEvent(payload as { type: string })) {
+    throw new Error(`${context}: unknown event type "${type}"`);
+  }
   return payload as EventEnvelope['payload'];
 }
 
@@ -478,11 +580,6 @@ function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
       `${context}: missing event_id`,
     ),
     source: normalizeEventSourceIdentity(record.source, context),
-    source_id: requireStringField(
-      record,
-      'source_id',
-      `${context}: missing source_id`,
-    ),
     seq: requireNumberField(record, 'seq', `${context}: missing seq`),
     timestamp_ms: requireNumberField(
       record,
@@ -516,11 +613,9 @@ function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
 }
 
 function parseMemberEventItem(raw: unknown, context: string): MemberEventItem {
-  const record = requireRecord(raw, `${context}: malformed event item`);
-  if (record.type === 'lagged') {
-    return parseSubscriptionLaggedEvent(record, context);
-  }
-  return parseEventEnvelope(record, context);
+  // K19: a lagged receiver arrives as the generated `stream_truncated`
+  // envelope; every item is a full EventEnvelope, parsed fail-closed.
+  return parseEventEnvelope(raw, context);
 }
 
 function parseAttributedSource(raw: unknown, context: string): AgentRuntimeId {
@@ -536,9 +631,6 @@ function parseAttributedSource(raw: unknown, context: string): AgentRuntimeId {
 
 function parseAttributedEventItem(raw: unknown, context: string): AttributedEventItem {
   const record = requireRecord(raw, `${context}: malformed attributed event`);
-  if (record.type === 'lagged') {
-    return parseSubscriptionLaggedEvent(record, context);
-  }
   const source = parseAttributedSource(record.source, context);
   const role = requireStringField(record, 'role', `${context}: missing role`);
   const attributed = {
@@ -581,7 +673,7 @@ function parseMobEvents(raw: unknown): MobEvent[] {
   return parseEventItems(raw, 'Invalid mob/events response', parseMobEvent);
 }
 
-function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: string): MobMemberSnapshot {
+function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const snapshot = requireRecord(
     raw,
     'Invalid mob member_status response: malformed envelope',
@@ -596,7 +688,13 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
       snapshot.status,
       'Invalid mob member_status response: missing status',
     ),
-    member_ref: encodeMemberRef(mobId, agentIdentity),
+    // The opaque member handle is runtime-owned: read it from the payload
+    // rather than synthesizing it client-side from {mobId, agentIdentity}.
+    member_ref: requireStringField(
+      snapshot,
+      'member_ref',
+      'Invalid mob member_status response: missing member_ref',
+    ),
     output_preview: optionalStringField(
       snapshot,
       'output_preview',
@@ -622,14 +720,13 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
       'kickoff',
       'Invalid mob member_status response: kickoff must be object',
     ),
-    peer_connectivity: optionalRecordField(
-      snapshot,
-      'peer_connectivity',
-      'Invalid mob member_status response: peer_connectivity must be object',
-    ) as MobMemberSnapshot['peer_connectivity'],
   };
   if (currentSessionId !== undefined) {
     result.current_session_id = currentSessionId;
+  }
+  const peerConnectivity = parseMobPeerConnectivity(snapshot.peer_connectivity);
+  if (peerConnectivity !== undefined) {
+    result.peer_connectivity = peerConnectivity;
   }
   const resolvedCapabilities = parseResolvedModelCapabilities(
     snapshot.resolved_capabilities,
@@ -801,12 +898,12 @@ export class Member {
   }
 
   async subscribe(): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
+    const streamId = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 }
@@ -848,11 +945,7 @@ export class Mob {
       await this.bindings.mob_wire(this.mobId, member, peer);
       return;
     }
-    const wirePeer = this.bindings.mob_wire_peer ?? this.bindings.mob_wire_target;
-    if (!wirePeer) {
-      throw new Error('This runtime does not support external peer wiring');
-    }
-    await wirePeer(this.mobId, member, JSON.stringify(peer));
+    await this.bindings.mob_wire_peer(this.mobId, member, JSON.stringify(peer));
   }
 
   /** Remove comms trust between two agents. */
@@ -861,11 +954,7 @@ export class Mob {
       await this.bindings.mob_unwire(this.mobId, member, peer);
       return;
     }
-    const unwirePeer = this.bindings.mob_unwire_peer ?? this.bindings.mob_unwire_target;
-    if (!unwirePeer) {
-      throw new Error('This runtime does not support external peer unwiring');
-    }
-    await unwirePeer(this.mobId, member, JSON.stringify(peer));
+    await this.bindings.mob_unwire_peer(this.mobId, member, JSON.stringify(peer));
   }
 
   /** List all members in the mob. */
@@ -916,7 +1005,6 @@ export class Mob {
               )
             : undefined,
         runtime_mode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
-        state: member.state != null ? String(member.state) : undefined,
         wired_to: Array.isArray(member.wired_to)
           ? member.wired_to.map((peer) => String(peer))
           : undefined,
@@ -966,11 +1054,12 @@ export class Mob {
     agentIdentity: string,
     initialMessage?: string | ContentBlock[],
   ): Promise<MobRespawnResult> {
+    // K19: the initial message crosses the WASM boundary as the tagged
+    // content-input wire shape — the tag is the discriminator, never JSON
+    // shape-sniffing of a raw string.
     const payload =
       initialMessage != null
-        ? typeof initialMessage === 'string'
-          ? initialMessage
-          : JSON.stringify(initialMessage)
+        ? serializePromptContentInput(initialMessage)
         : undefined;
     const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
     return parseMobRespawnResult(parseJsonPayload(json, 'Invalid mob respawn response'));
@@ -986,16 +1075,19 @@ export class Mob {
     const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
     return parseMobMemberSnapshot(
       parseJsonPayload(json, 'Invalid mob member_status response'),
-      this.mobId,
-      agentIdentity,
     );
   }
 
-  /** Spawn a short-lived helper and return its terminal result. */
+  /**
+   * Spawn a short-lived helper and return its terminal result.
+   *
+   * `agentIdentity` is required: the surface does not allocate member
+   * identity (#115) — the runtime fails closed without it.
+   */
   async spawnHelper(
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       runtimeMode?: string;
@@ -1006,11 +1098,11 @@ export class Mob {
       this.mobId,
         JSON.stringify({
           prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
+          agent_identity: options.agentIdentity,
+          profile_name: options.profileName,
+          auth_binding: options.authBinding,
+          runtime_mode: options.runtimeMode,
+          backend: options.backend,
         }),
     );
     return parseMobHelperResult(
@@ -1019,12 +1111,17 @@ export class Mob {
     );
   }
 
-  /** Fork a helper from an existing member and return its terminal result. */
+  /**
+   * Fork a helper from an existing member and return its terminal result.
+   *
+   * `agentIdentity` is required: the surface does not allocate member
+   * identity (#115) — the runtime fails closed without it.
+   */
   async forkHelper(
     sourceMemberId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       forkContext?: Record<string, unknown>;
@@ -1037,12 +1134,12 @@ export class Mob {
         JSON.stringify({
           source_member_id: sourceMemberId,
           prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          fork_context: options?.forkContext,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
+          agent_identity: options.agentIdentity,
+          profile_name: options.profileName,
+          auth_binding: options.authBinding,
+          fork_context: options.forkContext,
+          runtime_mode: options.runtimeMode,
+          backend: options.backend,
         }),
     );
     return parseMobHelperResult(
@@ -1057,15 +1154,31 @@ export class Mob {
     return parseMobStatusResult(parseJsonPayload(json, 'Invalid mob/status response'));
   }
 
-  /** Perform a lifecycle action (stop, resume, complete, destroy). */
-  async lifecycle(action: MobLifecycleAction): Promise<void> {
-    await this.bindings.mob_lifecycle(this.mobId, action);
+  /** Perform a lifecycle action (stop, resume, complete, destroy).
+   *
+   *  Returns the typed {@link MobLifecycleResult} from the WASM boundary
+   *  (carrying the typed destroy_report for a destroy action), parsed
+   *  fail-closed — a malformed payload throws instead of being dropped. */
+  async lifecycle(action: MobLifecycleAction): Promise<MobLifecycleResult> {
+    const json = await this.bindings.mob_lifecycle(this.mobId, action);
+    const raw = parseJsonPayload(json, 'Invalid mob/lifecycle response');
+    if (
+      typeof raw !== 'object' ||
+      raw === null ||
+      typeof (raw as { ok?: unknown }).ok !== 'boolean' ||
+      typeof (raw as { mob_id?: unknown }).mob_id !== 'string' ||
+      typeof (raw as { action?: unknown }).action !== 'string'
+    ) {
+      throw new Error('Invalid mob/lifecycle response: missing typed fields');
+    }
+    return raw as MobLifecycleResult;
   }
 
-  /** Get mob events after a cursor. */
+  /** Get mob events after a cursor. The cursor is an opaque u64-backed string
+   *  forwarded verbatim — it MUST NOT be narrowed through Number() (which both
+   *  caps it at u32 range and silently resets a non-finite value to 0). */
   async events(afterCursor = '', limit = 100): Promise<MobEvent[]> {
-    const numericCursor = afterCursor === '' ? 0 : Number(afterCursor);
-    const json = await this.bindings.mob_events(this.mobId, Number.isFinite(numericCursor) ? numericCursor : 0, limit);
+    const json = await this.bindings.mob_events(this.mobId, afterCursor, limit);
     return parseMobEvents(parseJsonPayload(json, 'Invalid mob/events response'));
   }
 
@@ -1091,23 +1204,23 @@ export class Mob {
 
   /** Subscribe to events for a specific member. */
   async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
+    const streamId = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 
   /** Subscribe to all mob-wide attributed events. */
   async subscribeEvents(): Promise<EventSubscription<AttributedEventItem>> {
-    const handle = await this.bindings.mob_subscribe_events(this.mobId);
+    const streamId = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(streamId),
       (raw) =>
         parseEventItems(raw, 'Invalid mob attributed subscription event', parseAttributedEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(streamId),
     );
   }
 

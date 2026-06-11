@@ -8,16 +8,14 @@
 //! `{ "session_id": "...", "kind": "<variant>", ... }`.
 
 pub use meerkat_core::comms::{
-    CommsCommandError, InputSource, InputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId, PeerLifecycleKind,
-    PeerName, PeerSendability, PeerTransport,
+    CommsCommandError, CommsPeerRequestIntent, InputSource, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    PeerLifecycleKind, PeerName, PeerSendability, PeerTransport,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;
 
-use super::supervisor_bridge::{
-    BridgeCommand, BridgePeerSpec, BridgeReply, SUPERVISOR_BRIDGE_INTENT,
-};
+use super::supervisor_bridge::{BridgeCommand, BridgePeerSpec, BridgeReply};
 use serde::{Deserialize, Serialize};
 
 /// Typed params for one-way peer lifecycle notifications.
@@ -42,28 +40,6 @@ pub struct CommsPeerLifecycleParams {
 impl CommsPeerLifecycleParams {
     fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
-    }
-}
-
-/// Closed public request-intent contract for `peer_request`.
-///
-/// Unknown strings fail during deserialization and cannot fall through to a
-/// local match/default path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum CommsPeerRequestIntent {
-    #[serde(rename = "supervisor.bridge")]
-    SupervisorBridge,
-    #[serde(rename = "checksum_token")]
-    ChecksumToken,
-}
-
-impl CommsPeerRequestIntent {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
-            Self::ChecksumToken => "checksum_token",
-        }
     }
 }
 
@@ -174,6 +150,33 @@ impl CommsCommandProjectionError {
     }
 }
 
+/// Project the canonical `body` text from the single content authority.
+///
+/// When a comms command carries structured `blocks`, those blocks are the sole
+/// content authority and `body` is a deterministic projection of their text
+/// blocks (text-block contents joined with newlines; non-text blocks such as
+/// images contribute no body text). This guarantees `body` cannot diverge from
+/// the block content it mirrors. With no blocks, the caller-supplied `body`
+/// stands alone as the sole content owner.
+///
+/// This mirrors the single-content-authority contract already enforced by the
+/// comms tool surface (`project_body_from_blocks`); pulling the projection into
+/// the wire boundary means every surface that deserializes the public comms
+/// contract gets the same non-divergent guarantee for free.
+fn single_authority_body(body: String, blocks: &Option<Vec<meerkat_core::ContentBlock>>) -> String {
+    match blocks {
+        Some(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => body,
+    }
+}
+
 /// Request command carried inside public `comms/send` surfaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -252,7 +255,7 @@ impl CommsCommandRequest {
                 handling_mode,
                 allow_self_session,
             } => meerkat_core::comms::CommsCommandRequest::Input {
-                body,
+                body: single_authority_body(body, &blocks),
                 blocks,
                 source,
                 stream,
@@ -266,7 +269,7 @@ impl CommsCommandRequest {
                 handling_mode,
             } => meerkat_core::comms::CommsCommandRequest::PeerMessage {
                 to,
-                body,
+                body: single_authority_body(body, &blocks),
                 blocks,
                 handling_mode,
             },
@@ -296,7 +299,14 @@ impl CommsCommandRequest {
                 }
                 meerkat_core::comms::CommsCommandRequest::PeerRequest {
                     to,
-                    intent: intent.as_str().to_string(),
+                    // The closed intent is now the same core-owned type on both
+                    // sides of this seam, so it passes through typed — no
+                    // string downgrade at the public-wire -> core projection.
+                    // `params` cannot follow yet: its `supervisor.bridge`
+                    // variant wraps the contracts-owned `BridgeCommand`, which
+                    // core cannot reference, so the structurally-validated
+                    // params still serialize to compatibility JSON here.
+                    intent,
                     params: params.into_json_value().map_err(|source| {
                         CommsCommandProjectionError::compatibility_json(
                             "peer_request.params",
@@ -581,6 +591,55 @@ impl From<meerkat_core::comms::SendReceipt> for CommsSendResult {
     }
 }
 
+/// Why a peer was unreachable for a `comms/send` dispatch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CommsPeerUnreachableReason {
+    OfflineOrNoAck,
+    TransportError,
+}
+
+/// Typed error data for `comms/send` failures.
+///
+/// The error taxonomy is owned here (K17): surfaces serialize this contract
+/// as JSON-RPC `error.data` instead of hand-shaping per-surface payloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CommsSendErrorData {
+    PeerNotFoundOrNotTrusted {
+        peer: String,
+        message: String,
+    },
+    PeerUnreachable {
+        peer: String,
+        reason: CommsPeerUnreachableReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+    },
+    SendFailed {
+        message: String,
+    },
+    InvalidCommand {
+        message: String,
+    },
+}
+
+impl CommsSendErrorData {
+    /// Human-readable message carried by every variant.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::PeerNotFoundOrNotTrusted { message, .. }
+            | Self::PeerUnreachable { message, .. }
+            | Self::SendFailed { message }
+            | Self::InvalidCommand { message } => message,
+        }
+    }
+}
+
 pub type CommsPeerEntry = PeerDirectoryEntry;
 
 /// Response payload for `comms/peers`.
@@ -609,6 +668,7 @@ impl From<PeerDirectoryListing> for CommsPeersResult {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::super::supervisor_bridge::SUPERVISOR_BRIDGE_INTENT;
     use super::*;
     use serde_json::json;
 
@@ -871,6 +931,58 @@ mod tests {
         assert_eq!(result["request_intent"], "checksum_token");
         assert_eq!(result["request_subject"], "alpha beta gamma");
         assert_eq!(result["token"], "birch seventeen");
+    }
+
+    #[test]
+    fn input_body_is_projected_from_blocks_single_authority() {
+        // A divergent caller-supplied body must NOT survive projection: when
+        // blocks are present they are the single content authority and body is
+        // derived from their text blocks.
+        let request = CommsCommandRequest::Input {
+            body: "diverged caller body".to_string(),
+            blocks: Some(vec![
+                meerkat_core::ContentBlock::Text {
+                    text: "authoritative line one".to_string(),
+                },
+                meerkat_core::ContentBlock::Text {
+                    text: "authoritative line two".to_string(),
+                },
+            ]),
+            source: None,
+            stream: None,
+            handling_mode: None,
+            allow_self_session: None,
+        };
+
+        let core = request
+            .into_core_request()
+            .expect("input request should project to core");
+
+        let meerkat_core::comms::CommsCommandRequest::Input { body, .. } = core else {
+            panic!("expected core input request");
+        };
+        assert_eq!(body, "authoritative line one\nauthoritative line two");
+    }
+
+    #[test]
+    fn peer_message_body_stands_alone_when_no_blocks() {
+        // With no blocks, the caller-supplied body is the sole content owner and
+        // is preserved verbatim.
+        let request = CommsCommandRequest::PeerMessage {
+            to: peer_id(),
+            body: "lone body".to_string(),
+            blocks: None,
+            handling_mode: None,
+        };
+
+        let core = request
+            .into_core_request()
+            .expect("peer message should project to core");
+
+        let meerkat_core::comms::CommsCommandRequest::PeerMessage { body, .. } = core else {
+            panic!("expected core peer message");
+        };
+        assert_eq!(body, "lone body");
     }
 
     #[test]

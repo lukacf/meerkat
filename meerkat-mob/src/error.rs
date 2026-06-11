@@ -1,6 +1,6 @@
 //! Error types for mob operations.
 
-use crate::ids::{AgentRuntimeId, FenceToken, FlowId, LoopId, MeerkatId, ProfileName, WorkRef};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, FlowId, LoopId, ProfileName, WorkRef};
 use crate::runtime::MobState;
 use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
@@ -12,6 +12,35 @@ use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRej
 pub enum MobMemberCapability {
     /// Interaction-scoped injection used for autonomous console/RPC/flow turns.
     InteractionEventInjector,
+}
+
+/// Mob-owned classification of why a mob operation failed.
+///
+/// This is the typed owner of "what class of failure does this `MobError`
+/// represent" — the knowledge of which variants are missing-target vs busy vs
+/// transport vs internal lives next to the variants themselves, not in
+/// downstream classifiers that re-`match` the enum.
+///
+/// Consumers (e.g. the schedule delivery host) map this onto their own
+/// domain-failure vocabulary (`DeliveryFailureReason`); the mapping lives at
+/// the consumer because the schedule-failure type is owned by a crate
+/// `meerkat-mob` does not (and must not) depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobFailureClass {
+    /// The addressed mob/profile/member/flow/run/work does not exist.
+    TargetMissing,
+    /// The target exists but cannot accept the operation right now
+    /// (e.g. a member id collision).
+    TargetBusy,
+    /// A transport/persistence/session/timeout fault prevented delivery.
+    Transport,
+    /// A runtime accepted the work but parked at an external boundary
+    /// (callback pending) rather than completing.
+    RuntimeRejected,
+    /// An internal/unexpected-state fault.
+    Internal,
+    /// The mob authority rejected the operation on its own terms.
+    MobRejected,
 }
 
 impl std::fmt::Display for MobMemberCapability {
@@ -34,24 +63,16 @@ pub enum MobError {
     ProfileNotFound(ProfileName),
 
     /// The requested mob member does not exist in the roster.
-    ///
-    /// Renamed from `MeerkatNotFound` by DELETE_ME finding A2 + B8 as
-    /// part of the 0.6 identity-first cascade. The inner type remains
-    /// [`MeerkatId`] until the full A5 DSL-schema migration flips it to
-    /// [`AgentIdentity`](crate::ids::AgentIdentity); the rename lands
-    /// first so public error matching doesn't leak the legacy term.
     #[error("mob member not found: {0}")]
-    MemberNotFound(MeerkatId),
+    MemberNotFound(AgentIdentity),
 
     /// A mob member with the given ID already exists.
-    ///
-    /// Renamed from `MeerkatAlreadyExists` by DELETE_ME finding A2 + B8.
     #[error("mob member already exists: {0}")]
-    MemberAlreadyExists(MeerkatId),
+    MemberAlreadyExists(AgentIdentity),
 
     /// The mob member's profile does not allow external turns.
     #[error("mob member is not externally addressable: {0}")]
-    NotExternallyAddressable(MeerkatId),
+    NotExternallyAddressable(AgentIdentity),
 
     /// The requested lifecycle state transition is invalid.
     #[error("invalid state transition: {from} -> {to}")]
@@ -65,7 +86,7 @@ pub enum MobError {
     /// complete, so local supervisor authority stayed at the pre-rotation
     /// epoch.
     #[error(
-        "supervisor rotation incomplete: failed after {rotated_peer_count} remote peer(s) accepted attempted epoch {attempted_epoch}; local authority remains at epoch {previous_epoch}; rollback_succeeded={rollback_succeeded}; pending_authority_recorded={pending_authority_recorded}; pending_authority_process_local={pending_authority_process_local}; failure: {reason}"
+        "supervisor rotation incomplete: failed after {rotated_peer_count} remote peer(s) accepted attempted epoch {attempted_epoch}; local authority remains at epoch {previous_epoch}; rollback_succeeded={rollback_succeeded}; pending_authority_recorded={pending_authority_recorded}; failure: {reason}"
     )]
     SupervisorRotationIncomplete {
         previous_epoch: u64,
@@ -74,10 +95,6 @@ pub enum MobError {
         rotated_peer_count: usize,
         rollback_succeeded: bool,
         pending_authority_recorded: bool,
-        /// Compatibility diagnostic retained for existing wire consumers.
-        /// Generated supervisor authority no longer uses local-only retry
-        /// records, so production constructors keep this false.
-        pending_authority_process_local: bool,
         rollback_error: Option<String>,
         reason: String,
     },
@@ -95,18 +112,22 @@ pub enum MobError {
         format_member_restore_target(.session_id.as_ref())
     )]
     MemberRestoreFailed {
-        member_id: MeerkatId,
+        member_id: AgentIdentity,
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
     },
 
     /// Waiting for kickoff completion timed out.
     #[error("kickoff wait timed out")]
-    KickoffWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+    KickoffWaitTimedOut {
+        pending_member_ids: Vec<AgentIdentity>,
+    },
 
     /// Waiting for startup readiness timed out.
     #[error("member ready wait timed out")]
-    ReadyWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+    ReadyWaitTimedOut {
+        pending_member_ids: Vec<AgentIdentity>,
+    },
 
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
@@ -194,7 +215,7 @@ pub enum MobError {
     /// A member is missing a required runtime capability for the requested operation.
     #[error("mob member {member_id} missing required capability {capability}: {context}")]
     MissingMemberCapability {
-        member_id: MeerkatId,
+        member_id: AgentIdentity,
         capability: MobMemberCapability,
         context: &'static str,
     },
@@ -242,6 +263,16 @@ pub enum MobError {
     #[error("work not found: {0}")]
     WorkNotFound(WorkRef),
 
+    /// Per-unit work cancellation is not realized: no work-tracking ledger
+    /// backs `cancel_work`, so there is no authority that can locate and
+    /// cancel an individual submitted unit. Returned instead of a phantom
+    /// `WorkNotFound` so the advertised `mob/cancel_work` surface fails
+    /// closed with an honest "unsupported" signal rather than claiming a
+    /// search-and-miss that never happened. Callers that need to cancel
+    /// in-flight work should use member-scoped `cancel_all_work`.
+    #[error("per-unit work cancellation is unsupported for {0}: no work-tracking ledger is wired")]
+    WorkCancellationUnsupported(WorkRef),
+
     /// The mob actor command channel closed before accepting a command.
     #[error("mob actor command channel closed")]
     ActorCommandChannelClosed,
@@ -259,6 +290,25 @@ pub enum MobError {
     /// scoped mobs) may proceed to scoped cleanup instead of failing.
     #[error("bridge session not found in any live mob authority: {bridge_session_id}")]
     BridgeSessionNotInLiveAuthority { bridge_session_id: String },
+
+    /// A mob-member comms (peer) routing name could not be rendered because a
+    /// component failed the [`meerkat_core::MemberCommsName`] slug rule.
+    ///
+    /// The routing-name shape has exactly one fail-closed owner; rendering
+    /// surfaces the typed component fault here instead of reconstructing a raw
+    /// `mob_id/role/member` join that the owner already rejected.
+    #[error("invalid mob member comms name: {0}")]
+    MemberCommsName(#[from] meerkat_core::MemberCommsNameError),
+
+    /// A flow/loop condition could not be evaluated to a definite boolean
+    /// because it referenced an absent/invalid context path or compared
+    /// non-comparable operands.
+    ///
+    /// Surfaced as a typed fault (`location` names the owning step or loop)
+    /// rather than silently evaluating the condition to `false` and skipping
+    /// the step / mis-deciding the loop-until.
+    #[error("condition evaluation failed for {location}: {reason}")]
+    ConditionEval { location: String, reason: String },
 
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
@@ -324,6 +374,42 @@ impl MobError {
             _ => None,
         }
     }
+
+    /// Whether this error means the addressed target (mob, profile, member,
+    /// flow, run, or work unit) does not exist.
+    ///
+    /// Owned here so target-existence probing does not re-`match` the
+    /// `MobError` variant list in downstream classifiers.
+    pub fn is_missing_target(&self) -> bool {
+        matches!(self.failure_class(), MobFailureClass::TargetMissing)
+    }
+
+    /// Classify this error into the mob-owned [`MobFailureClass`].
+    ///
+    /// This is the single source of truth for which `MobError` variants fall
+    /// into which failure class; consumers map [`MobFailureClass`] onto their
+    /// own domain vocabularies rather than re-matching the variant list.
+    pub fn failure_class(&self) -> MobFailureClass {
+        match self {
+            Self::MobNotFound(_)
+            | Self::ProfileNotFound(_)
+            | Self::MemberNotFound(_)
+            | Self::FlowNotFound(_)
+            | Self::RunNotFound(_)
+            | Self::WorkNotFound(_) => MobFailureClass::TargetMissing,
+            Self::MemberAlreadyExists(_) => MobFailureClass::TargetBusy,
+            Self::StorageError(_)
+            | Self::SessionError(_)
+            | Self::CommsError(_)
+            | Self::MemberRestoreFailed { .. }
+            | Self::KickoffWaitTimedOut { .. }
+            | Self::ReadyWaitTimedOut { .. }
+            | Self::FlowTurnTimedOut => MobFailureClass::Transport,
+            Self::Internal(_) => MobFailureClass::Internal,
+            Self::CallbackPending { .. } => MobFailureClass::RuntimeRejected,
+            _ => MobFailureClass::MobRejected,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,9 +430,9 @@ mod tests {
     /// 0.6 identity-first cascade cannot regress into legacy wording.
     #[test]
     fn member_not_found_and_already_exists_use_identity_first_display() {
-        let not_found = MobError::MemberNotFound(MeerkatId::from("singer"));
-        let already = MobError::MemberAlreadyExists(MeerkatId::from("singer"));
-        let not_addressable = MobError::NotExternallyAddressable(MeerkatId::from("singer"));
+        let not_found = MobError::MemberNotFound(AgentIdentity::from("singer"));
+        let already = MobError::MemberAlreadyExists(AgentIdentity::from("singer"));
+        let not_addressable = MobError::NotExternallyAddressable(AgentIdentity::from("singer"));
 
         let msg_nf = format!("{not_found}");
         let msg_ae = format!("{already}");
@@ -428,9 +514,9 @@ mod tests {
         // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
             MobError::ProfileNotFound(ProfileName::from("p")),
-            MobError::MemberNotFound(MeerkatId::from("m")),
-            MobError::MemberAlreadyExists(MeerkatId::from("m")),
-            MobError::NotExternallyAddressable(MeerkatId::from("m")),
+            MobError::MemberNotFound(AgentIdentity::from("m")),
+            MobError::MemberAlreadyExists(AgentIdentity::from("m")),
+            MobError::NotExternallyAddressable(AgentIdentity::from("m")),
             MobError::InvalidTransition {
                 from: MobState::Creating,
                 to: MobState::Running,
@@ -443,7 +529,6 @@ mod tests {
                 rotated_peer_count: 1,
                 rollback_succeeded: false,
                 pending_authority_recorded: true,
-                pending_authority_process_local: false,
                 rollback_error: Some("rollback failed".to_string()),
                 reason: "remote failed".to_string(),
             },
@@ -452,12 +537,12 @@ mod tests {
                 reason: "bind required".to_string(),
             },
             MobError::MemberRestoreFailed {
-                member_id: MeerkatId::from("m"),
+                member_id: AgentIdentity::from("m"),
                 session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
             },
             MobError::KickoffWaitTimedOut {
-                pending_member_ids: vec![MeerkatId::from("m")],
+                pending_member_ids: vec![AgentIdentity::from("m")],
             },
             MobError::DefinitionError(vec![]),
             MobError::FlowNotFound(FlowId::from("f")),
@@ -514,10 +599,76 @@ mod tests {
                 actual: FenceToken::new(0),
             },
             MobError::WorkNotFound(WorkRef::new()),
+            MobError::WorkCancellationUnsupported(WorkRef::new()),
             MobError::BridgeSessionNotInLiveAuthority {
                 bridge_session_id: "sess-1".to_string(),
             },
             MobError::Internal("i".to_string()),
         ];
+    }
+
+    #[test]
+    fn failure_class_partitions_missing_target_variants() {
+        // The missing-target class is the authority `is_missing_target`
+        // delegates to; both must agree on the same variant partition.
+        let missing = [
+            MobError::MobNotFound(MobId::from("mob")),
+            MobError::ProfileNotFound(ProfileName::from("p")),
+            MobError::MemberNotFound(AgentIdentity::from("m")),
+            MobError::FlowNotFound(FlowId::from("f")),
+            MobError::RunNotFound(RunId::new()),
+            MobError::WorkNotFound(WorkRef::new()),
+        ];
+        for err in &missing {
+            assert_eq!(
+                err.failure_class(),
+                MobFailureClass::TargetMissing,
+                "{err} should classify as TargetMissing",
+            );
+            assert!(
+                err.is_missing_target(),
+                "{err} should report is_missing_target()",
+            );
+        }
+    }
+
+    #[test]
+    fn failure_class_maps_non_missing_variants() {
+        let cases = [
+            (
+                MobError::MemberAlreadyExists(AgentIdentity::from("m")),
+                MobFailureClass::TargetBusy,
+            ),
+            (
+                MobError::StorageError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "e",
+                ))),
+                MobFailureClass::Transport,
+            ),
+            (MobError::FlowTurnTimedOut, MobFailureClass::Transport),
+            (
+                MobError::CallbackPending {
+                    session_id: meerkat_core::types::SessionId::new(),
+                    tool_name: "t".to_string(),
+                    args: serde_json::Value::Null,
+                },
+                MobFailureClass::RuntimeRejected,
+            ),
+            (
+                MobError::Internal("i".to_string()),
+                MobFailureClass::Internal,
+            ),
+            // A variant outside every explicit arm falls through to the
+            // mob-rejected default.
+            (MobError::ResetBarrier, MobFailureClass::MobRejected),
+        ];
+        for (err, expected) in &cases {
+            assert_eq!(err.failure_class(), *expected, "{err} misclassified");
+            assert!(
+                !err.is_missing_target(),
+                "{err} must not report is_missing_target()",
+            );
+        }
     }
 }

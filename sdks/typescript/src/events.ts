@@ -27,6 +27,8 @@
  */
 
 import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
+import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
+import { MeerkatError } from "./generated/errors.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -251,7 +253,6 @@ export interface ToolExecutionCompletedEvent {
   readonly type: "tool_execution_completed";
   readonly id: string;
   readonly name: string;
-  readonly result: string;
   readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
   readonly durationMs?: number;
@@ -284,7 +285,9 @@ export interface CompactionCompletedEvent {
 
 export interface CompactionFailedEvent {
   readonly type: "compaction_failed";
-  readonly error: string;
+  // Typed failure-reason object ({ kind, ... }); mirrors the Rust
+  // CompactionFailureReason tagged enum (was a bare `error` string).
+  readonly reason: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,10 +390,6 @@ export interface SkillResolutionFailedEvent {
   readonly type: "skill_resolution_failed";
   readonly skillKey?: SkillKey;
   readonly reason?: SkillResolutionFailureReason;
-  /** Legacy display mirror. Prefer `skillKey` when present. */
-  readonly reference: string;
-  /** Legacy display mirror. Prefer `reason` for structured handling. */
-  readonly error: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +455,6 @@ export type ToolConfigChangeStatus =
 export interface ToolConfigChangedPayload {
   readonly operation?: ToolConfigChangeOperation;
   readonly target?: string;
-  readonly status?: string;
   readonly status_info?: ToolConfigChangeStatus;
   readonly persisted?: boolean;
   readonly applied_at_turn?: number;
@@ -471,7 +469,6 @@ export interface BackgroundJobCompletedEvent {
   readonly type: "background_job_completed";
   readonly jobId: string;
   readonly displayName: string;
-  readonly legacyStatus?: string;
   readonly terminalStatus: BackgroundJobTerminalStatus;
   readonly detail: string;
 }
@@ -913,7 +910,6 @@ const TURN_TERMINAL_CAUSE_KINDS = new Set<TurnTerminalCauseKind>([
 
 function parseSkillResolutionFailureReason(
   raw: unknown,
-  fallbackMessage: string,
 ): SkillResolutionFailureReason | undefined {
   if (raw == null || typeof raw !== "object") {
     return undefined;
@@ -981,11 +977,11 @@ function parseSkillResolutionFailureReason(
         skillName: String(value.skill_name ?? value.skillName ?? ""),
       };
     case "unknown":
-      return { reasonType, message: String(value.message ?? fallbackMessage) };
+      return { reasonType, message: String(value.message ?? "") };
     default:
       return {
         reasonType: "unknown",
-        message: String(value.message ?? fallbackMessage),
+        message: String(value.message ?? ""),
         rawReasonType: reasonType,
       };
   }
@@ -994,8 +990,12 @@ function parseSkillResolutionFailureReason(
 /**
  * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
- * Unknown event types are returned as {@link UnknownEvent} for
- * forward-compatibility.
+ * Fails CLOSED: a `type` that is not in the generated
+ * {@link KNOWN_AGENT_EVENT_TYPES} inventory (including an empty/absent `type`)
+ * throws a typed {@link MeerkatError}. A `type` that is in the inventory but
+ * has no parser case in this SDK version is surfaced as an {@link UnknownEvent}
+ * for forward-compatibility; a known type with a malformed payload is preserved
+ * as a `malformed_event` {@link MalformedEvent}.
  */
 export function parseEvent(raw: Record<string, unknown>): StreamEvent {
   const normalizeScopePath = (value: unknown): StreamScopeFrame[] => {
@@ -1039,9 +1039,28 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
   return parseCoreEvent(raw);
 }
 
+const KNOWN_AGENT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(KNOWN_AGENT_EVENT_TYPES);
+
 /** Parse a raw wire event as a core (non-wrapper) agent event. */
 export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   const type = String(raw.type ?? "");
+
+  // Row #283: a frame with no `type` discriminant is malformed, not a typed
+  // event — preserve it as a `malformed_event` frame (never fabricate a typed
+  // event from a missing discriminant, and never crash a streaming consumer on
+  // a control/keepalive frame).
+  if (type === "") {
+    return malformedEvent(raw, type, "event is missing a `type` discriminant");
+  }
+  // Fail CLOSED on a present-but-unknown discriminant: a `type` absent from the
+  // schema-derived KNOWN_AGENT_EVENT_TYPES inventory is a contract violation for
+  // a version-matched client. (Version skew is handled separately by the
+  // contract-version check.) A type that IS in the inventory but has no parser
+  // case below falls through to `default` and is surfaced as a forward-compatible
+  // UnknownEvent. This guard is OUTSIDE the try/catch so it is not laundered.
+  if (!KNOWN_AGENT_EVENT_TYPE_SET.has(type)) {
+    throw new MeerkatError("UNKNOWN_EVENT_TYPE", `unknown agent event type "${type}"`, raw);
+  }
 
   try {
   switch (type) {
@@ -1134,8 +1153,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         id: requireStringField(raw, "id"),
         name: requireStringField(raw, "name"),
-        result: requireStringField(raw, "result"),
-        content: parseContentBlocks(raw.content, raw.result),
+        content: parseContentBlocks(raw.content, undefined),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
           ? { durationMs: raw.duration_ms }
@@ -1150,7 +1168,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "compaction_completed":
       return { type, summaryTokens: requireNumberField(raw, "summary_tokens"), messagesBefore: requireNumberField(raw, "messages_before"), messagesAfter: requireNumberField(raw, "messages_after") };
     case "compaction_failed":
-      return { type, error: requireStringField(raw, "error") };
+      return { type, reason: requireRecordField(raw, "reason") };
 
     // Budget
     case "budget_warning":
@@ -1178,16 +1196,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         injectionBytes: requireNumberField(raw, "injection_bytes"),
       };
     case "skill_resolution_failed": {
-      const reference = requireStringField(raw, "reference");
-      const error = requireStringField(raw, "error");
       const skillKey = parseSkillKey(raw.skill_key);
-      const reason = parseSkillResolutionFailureReason(raw.reason, error);
+      const reason = parseSkillResolutionFailureReason(raw.reason);
       return {
         type,
         ...(skillKey ? { skillKey } : {}),
         ...(reason ? { reason } : {}),
-        reference,
-        error,
       };
     }
 
@@ -1219,19 +1233,16 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ...(statusInfo != null ? { status_info: statusInfo } : {}),
           operation: requireOneOf(requireStringField(payloadRaw, "operation"), "operation", ["add", "remove", "reload"] as const),
           target: requireStringField(payloadRaw, "target"),
-          status: requireStringField(payloadRaw, "status"),
           persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
       };
     }
     case "background_job_completed": {
-      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
       return {
         type,
         jobId: requireStringField(raw, "job_id"),
         displayName: requireStringField(raw, "display_name"),
-        ...(legacyStatus != null ? { legacyStatus } : {}),
         terminalStatus: requireOneOf(
           requireStringField(raw, "terminal_status"),
           "terminal_status",
@@ -1249,7 +1260,10 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       };
     }
 
-    // Unknown — forward-compat
+    // Forward-compat: `type` is in the schema-known inventory (guaranteed by
+    // the fail-closed guard above) but this SDK version has no parser case for
+    // it yet. Surface it as an UnknownEvent rather than rejecting — it is a
+    // genuine, contract-valid future event, not a violation.
     default:
       return { type, ...raw } as UnknownEvent;
   }

@@ -4,7 +4,7 @@ import pytest
 
 from meerkat import MeerkatClient, SkillKey
 from meerkat.session import DeferredSession, Session, _normalize_skill_ref
-from meerkat.types import RunResult, SessionHistory, SessionMessage, Usage
+from meerkat.types import RunResult, SessionAssistantBlock, SessionHistory, SessionMessage, Usage
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,11 @@ class _MockClient:
             has_more=False,
             messages=[
                 SessionMessage(role="user", content="hello"),
-                SessionMessage(role="assistant", content="ok", stop_reason="end_turn"),
+                SessionMessage(
+                    role="block_assistant",
+                    blocks=[SessionAssistantBlock(block_type="text", text="ok")],
+                    stop_reason="end_turn",
+                ),
             ],
         )
 
@@ -206,7 +210,7 @@ async def test_session_history_routes_to_client_history_reader():
     history = await session.history(offset=1, limit=5)
 
     assert history.session_id == "s-1"
-    assert history.messages[1].role == "assistant"
+    assert history.messages[1].role == "block_assistant"
     assert client._history_calls == [
         {"session_id": "s-1", "offset": 1, "limit": 5},
     ]

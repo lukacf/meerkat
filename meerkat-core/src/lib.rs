@@ -48,6 +48,7 @@ pub mod memory;
 pub mod model_defaults;
 pub mod model_profile;
 pub mod model_registry;
+pub mod oauth_identity;
 pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_correlation;
@@ -69,7 +70,6 @@ pub mod schema;
 pub mod service;
 pub mod session;
 pub mod session_durable_config_authority;
-pub mod session_migrations;
 pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
@@ -88,15 +88,17 @@ pub mod web_search;
 pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient,
     AgentLlmClientDecorator, AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome,
-    CommsCapabilityError, CommsRuntime, CurrentTurnContent, DispatcherCapabilities,
-    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, ToolDispatchContext,
-    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    CancelAfterBoundaryCommand, CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime,
+    CurrentTurnContent, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError, SystemContextStateError,
+    ToolDispatchContext, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
-    ApprovalListFilter, ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction,
-    ApprovalRecord, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk,
-    ApprovalService, ApprovalStatus, ApprovalStore, ApprovalStoreError, InMemoryApprovalStore,
+    ApprovalListFilter, ApprovalMemberRef, ApprovalMobRef, ApprovalOwnerRef, ApprovalPrincipalId,
+    ApprovalProposedAction, ApprovalRecord, ApprovalRequest, ApprovalResourceId,
+    ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalService, ApprovalStatus,
+    ApprovalStore, ApprovalStoreError, InMemoryApprovalStore,
 };
 pub use artifact::{
     ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,
@@ -122,8 +124,9 @@ pub use compact::{
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
-    MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata,
-    MemoryOwner, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    EmbeddingModel, HnswParams, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
+    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryResult,
+    MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError, MessageRange,
 };
 pub use model_registry::{
     ModelCapability, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
@@ -145,12 +148,13 @@ pub use completion_feed::{
     CompletionFeed, CompletionSeq,
 };
 pub use config::{
-    AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
-    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
-    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, LimitsConfig, ModelDefaults,
+    AgentConfig, BudgetConfig, CallTimeoutOverride, CommandRuntimeConfig, CommsAuthMode,
+    CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope,
+    HookAdapterConfig, HookEntryConfig, HookInProcessHandlerId, HookInProcessRuntimeConfig,
+    HookRunOverrides, HookRuntimeKind, HooksConfig, HttpRuntimeConfig, LimitsConfig, ModelDefaults,
     PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
-    StorageConfig, StoreConfig, ToolsConfig,
+    StorageConfig, StoreConfig, SystemPromptOverride, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{
@@ -159,16 +163,17 @@ pub use config_runtime::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
-    TaggedConfigStore,
+    TaggedConfigStore, apply_config_patch_preview, merge_patch,
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType, EventEnvelope,
-    EventSourceIdentity, ExternalToolDelta, ExternalToolDeltaPhase, ScopedAgentEvent,
-    SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, TurnErrorMetadata,
-    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config,
+    AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
+    CompactionFailureReason, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
+    ExternalToolDeltaPhase, InteractionFailureReason, ScopedAgentEvent,
+    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, ToolCallArguments,
+    ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,
+    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -187,9 +192,8 @@ pub use handles::{
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
-    HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
-    HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
-    HookRevision, HookToolCall, HookToolResult, default_failure_policy,
+    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookLlmRequest,
+    HookLlmResponse, HookOutcome, HookPoint, HookReasonCode, HookToolCall, HookToolResult,
 };
 pub use image_content::{
     MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
@@ -208,17 +212,22 @@ pub use interaction::{
     PeerIngressReceiveFacts, PeerIngressReceiveOutcome, PeerIngressRuntimeSnapshot, PeerInputClass,
     ResponseStatus, SendResponseCallProjection, TerminalDisposition, TerminalityClass,
     format_external_event_projection, format_peer_ack_projection, format_peer_message_projection,
-    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
+    format_peer_request_projection, format_peer_response_projection,
     render_peer_ingress_admitted_text,
+};
+pub use lifecycle::run_primitive::{
+    ProviderParamsCarrier, ProviderParamsMergeError, ProviderParamsOverride, ProviderTag,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
     CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
     CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle, CoreRenderable,
-    InputId, RunApplyBoundary, RunBoundaryReceipt, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    InputId, RunApplyBoundary, RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId,
+    RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;
+pub use oauth_identity::OAuthProviderIdentity;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SessionEffect,
@@ -269,8 +278,8 @@ pub use service::{
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
     DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
-    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_ARCHIVED_LEGACY_KEY,
-    SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
+    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_BUILD_STATE_KEY,
+    SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
     SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
     SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION,
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
@@ -284,9 +293,9 @@ pub use session::{
     transcript_messages_digest,
 };
 pub use session_recovery::{
-    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
-    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
-    has_build_only_turn_overrides, has_materialization_overrides,
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, RecoveryBackendKind,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, has_build_only_turn_overrides, has_materialization_overrides,
     session_allows_first_turn_build_overrides,
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
@@ -312,9 +321,10 @@ pub use turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
-    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema,
-    ProviderMeta, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason,
+    ArtifactRef, AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock,
+    ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
+    MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput, RunResult,
+    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
@@ -349,9 +359,9 @@ pub use auth::{
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,
     BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError, CredentialSourceSpec,
-    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
-    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
-    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
+    ExternalResolverId, IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding,
+    PeerRole, ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError,
+    RealmConfigSection, RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
     resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
     resolve_realm_binding_target_for_provider,
 };

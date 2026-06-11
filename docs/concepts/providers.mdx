@@ -20,6 +20,7 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 
     | Model | Context | Max output | Best for |
     |-------|---------|------------|----------|
+    | `claude-fable-5` | 1M | 128K | Most capable Anthropic model (premium pricing) |
     | `claude-opus-4-8` | 1M | 128K | Default Anthropic recommendation |
     | `claude-sonnet-4-6` | 1M | 64K | Balanced performance and cost |
     | `claude-sonnet-4-5` | 200K | 64K | Legacy supported Sonnet |
@@ -118,7 +119,7 @@ The `generate_image` builtin uses provider-specific image profiles behind a sing
 | OpenAI | `gpt-image-2` | Uses the hosted Responses image tool by default. Other OpenAI-owned `gpt-image*` or `dall-e*` targets use the Images API path. |
 | Gemini | `gemini-3.1-flash-image-preview` | Also accepts provider alias `google`. Gemini image targets run through an internal scoped image-model turn. |
 
-Request `provider_params` are provider-specific and do not replace Meerkat's universal image fields. Use top-level `size`, `quality`, `format`, and `intent`; the OpenAI adapter lowers `format` to provider-side `output_format`. For the current `gpt-image-2` default, public callers should only need `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; use `background: "auto"` or `"opaque"` (not `"transparent"`), use `output_compression` only with `format: "jpeg"` or `"webp"`, usually omit `action`, and omit `input_fidelity` because Meerkat 0.6.23 rejects unknown OpenAI image provider params. Gemini accepts `aspect_ratio` and `image_size`. See [Image generation](/guides/image-generation) for the exact request shape and troubleshooting.
+Request `provider_params` are provider-specific and do not replace Meerkat's universal image fields. Use top-level `size`, `quality`, `format`, and `intent`; the OpenAI adapter lowers `format` to provider-side `output_format`. For the current `gpt-image-2` default, public callers should only need `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; use `background: "auto"` or `"opaque"` (not `"transparent"`), use `output_compression` only with `format: "jpeg"` or `"webp"`, usually omit `action`, and omit `input_fidelity` because Meerkat rejects unknown OpenAI image provider params. Gemini accepts `aspect_ratio` and `image_size`. See [Image generation](/guides/image-generation) for the exact request shape and troubleshooting.
 
 ## SDK feature flags
 
@@ -134,11 +135,11 @@ When using Meerkat as a Rust library, enable only the providers you need:
 <CodeGroup>
 
 ```toml Anthropic only (smallest binary)
-meerkat = { version = "0.6.23", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "0.7.0-alpha.0", features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "0.6.23", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "0.7.0-alpha.0", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -186,7 +187,7 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
 
 ## Model catalog
 
-Meerkat ships a curated built-in model catalog in `meerkat_core::model_profile` and merges it with any configured self-hosted aliases into one effective runtime registry used for capability detection, provider resolution, and catalog responses. The compatibility `meerkat-models` crate re-exports that catalog surface for consumers that still depend on the older crate boundary.
+Meerkat ships a curated built-in model catalog in `meerkat_core::model_profile` and merges it with any configured self-hosted aliases into one effective runtime registry used for capability detection, provider resolution, and catalog responses.
 
 Query the catalog programmatically from any surface:
 
@@ -199,15 +200,17 @@ Configured self-hosted aliases appear under the `self_hosted` provider group and
 
 For Gemma 4 specifically, prefer `chat_completions` as the default OpenAI-compatible interface. It is the clearest common path for tool calling across Ollama, LM Studio, and vLLM, while reasoning-trace semantics still vary by server.
 
-## Auto-detection
+## Provider resolution
 
-The provider is resolved from the built-in model catalog and any configured self-hosted aliases:
+The provider for a model is resolved by exact match against the config-backed
+model registry (the compiled-in catalog merged with any configured self-hosted
+aliases). There is no name-prefix inference: a model id resolves to the
+provider recorded for its catalog entry (or its self-hosted alias config), and
+an uncatalogued id — even a prefix-shaped one like `gpt-unknown-preview` or
+`claude-unknown-preview` — is rejected rather than guessed at.
 
-- `claude-*` models use Anthropic
-- `gpt-*`, `chatgpt-*` models use OpenAI
-- `gemini-*` models use Gemini
-
-Configured self-hosted aliases are resolved by exact model ID match before prefix inference. That means an alias such as `gemma-4-31b` works without `--provider`.
+A configured self-hosted alias such as `gemma-4-31b` resolves by exact model ID
+match, so it works without `--provider`.
 
 You can still override this with `--provider` on the CLI or `provider` in API requests.
 

@@ -55,25 +55,22 @@ where
     };
 
     // Verify signature (when peer auth is enabled).
+    //
+    // A rejected envelope is a *failed* admission, not successful handling.
+    // Return a typed auth/address fault (mirroring the `IngressDropped` arm
+    // below) so the listener's `Err -> warn` arm records the rejection fact
+    // rather than treating the silent `Ok(())` as a clean connection.
     if require_peer_auth && !envelope.verify() {
-        tracing::warn!(
-            "Dropped message {} from {:?}: invalid signature",
-            envelope.id,
-            envelope.from
-        );
-        return Ok(());
+        return Err(IoTaskError::InvalidSignature {
+            envelope_id: envelope.id,
+        });
     }
 
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
-        tracing::warn!(
-            "Dropped message {} from {:?}: misaddressed (to {:?}, we are {:?})",
-            envelope.id,
-            envelope.from,
-            envelope.to,
-            keypair.public_key()
-        );
-        return Ok(());
+        return Err(IoTaskError::Misaddressed {
+            envelope_id: envelope.id,
+        });
     }
 
     // Admit through the inbox seam first. Typed admission outcome: explicit
@@ -145,6 +142,22 @@ pub enum IoTaskError {
     InboxFull,
     #[error("Ingress dropped: {0:?}")]
     IngressDropped(DropReason),
+    #[error("Rejected envelope {envelope_id}: invalid signature")]
+    InvalidSignature { envelope_id: uuid::Uuid },
+    #[error("Rejected envelope {envelope_id}: misaddressed (not addressed to us)")]
+    Misaddressed { envelope_id: uuid::Uuid },
+}
+
+impl IoTaskError {
+    /// Whether this error represents a *rejected admission* (auth/address/policy
+    /// fault) rather than a transport/IO failure. Lets the listener distinguish
+    /// "we refused this peer" from "the connection broke" for metrics.
+    pub fn is_admission_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidSignature { .. } | Self::Misaddressed { .. } | Self::IngressDropped(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -154,7 +167,7 @@ mod tests {
     use crate::classify::test_support;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
-    use crate::trust::{TrustedPeer, TrustedPeers};
+    use crate::trust::{TrustEntry, TrustStore};
     use crate::types::InboxItem;
     use futures::StreamExt;
     use parking_lot::RwLock;
@@ -166,17 +179,30 @@ mod tests {
         Keypair::generate()
     }
 
-    fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustedPeers>> {
-        Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "test-peer".to_string(),
+    fn test_trust_entry(name: &str, pubkey: &PubKey, addr: &str) -> TrustEntry {
+        TrustEntry {
+            peer_id: pubkey.to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(name).expect("valid peer name"),
             pubkey: *pubkey,
-            addr: "tcp://127.0.0.1:4200".to_string(),
+            address: meerkat_core::comms::PeerAddress::parse(addr).expect("valid peer address"),
             meta: crate::PeerMeta::default(),
-        }])))
+        }
+    }
+
+    fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustStore>> {
+        let mut store = TrustStore::new();
+        store
+            .insert(test_trust_entry(
+                "test-peer",
+                pubkey,
+                "tcp://127.0.0.1:4200",
+            ))
+            .expect("trusted test peer should insert");
+        Arc::new(RwLock::new(store))
     }
 
     fn classified_inbox_for_trust(
-        trusted: &Arc<RwLock<TrustedPeers>>,
+        trusted: &Arc<RwLock<TrustStore>>,
         require_peer_auth: bool,
     ) -> (Inbox, InboxSender) {
         Inbox::new_classified(test_support::classification_context_shared(
@@ -231,7 +257,7 @@ mod tests {
         fn _check_signature<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             _stream: S,
             _keypair: &Keypair,
-            _trusted: &Arc<RwLock<TrustedPeers>>,
+            _trusted: &Arc<RwLock<TrustStore>>,
             _inbox_sender: &InboxSender,
         ) {
             // The handle_connection function exists with correct signature
@@ -303,9 +329,60 @@ mod tests {
         });
 
         let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
-        assert!(result.is_ok()); // Silent drop, not an error
+        // ROW #300: an invalid signature is a rejected admission, surfaced as a
+        // typed auth fault — not a silent `Ok(())` that the listener would treat
+        // as successful handling.
+        assert!(matches!(result, Err(IoTaskError::InvalidSignature { .. })));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(IoTaskError::is_admission_rejection),
+            "invalid signature must classify as an admission rejection"
+        );
 
         // No item in inbox
+        let items = inbox.try_drain_classified();
+        assert!(items.is_empty());
+    }
+
+    /// ROW #300 gate: an envelope addressed to a different recipient is rejected
+    /// with a typed `Misaddressed` fault, not silently swallowed as `Ok(())`.
+    #[tokio::test]
+    async fn test_io_task_misaddressed_returns_typed_fault() {
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let other_keypair = make_keypair();
+        let trusted = make_trusted_peers(&sender_keypair.public_key());
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
+
+        // Signed correctly, but addressed to `other_keypair`, not the receiver.
+        let envelope = make_signed_envelope(
+            &sender_keypair,
+            other_keypair.public_key(),
+            MessageKind::Message {
+                blocks: None,
+                body: "hello".to_string(),
+                handling_mode: None,
+            },
+        );
+        let bytes = envelope_to_bytes(&envelope).await;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (_client_read, mut client_write) = tokio::io::split(client);
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
+        assert!(matches!(result, Err(IoTaskError::Misaddressed { .. })));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(IoTaskError::is_admission_rejection)
+        );
+
         let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
@@ -751,11 +828,17 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &inbox_sender)
-            .await
-            .unwrap();
+        // ROW #300: an invalid signature is a rejected admission surfaced as a
+        // typed auth fault, not a silent `Ok(())` the listener would treat as a
+        // clean connection.
+        let outcome = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
+        assert!(
+            matches!(outcome, Err(IoTaskError::InvalidSignature { .. })),
+            "invalid signature must classify as a typed admission rejection, got {outcome:?}"
+        );
 
-        // No ack sent - connection closes without data
+        // No ack sent - the connection is dropped on the rejection rather than
+        // acknowledged.
         let result = read_one_envelope(&mut client_read).await;
         assert!(result.is_err(), "Should not send ack for invalid signature");
 
@@ -844,7 +927,7 @@ mod tests {
     }
 
     /// Regression: the IO task must read trust through the shared
-    /// `Arc<RwLock<TrustedPeers>>` handle — not a snapshot — so that a
+    /// `Arc<RwLock<TrustStore>>` handle — not a snapshot — so that a
     /// peer added to the router *after* the connection is accepted is
     /// still admitted. This locks in the Wave 3 D Row 20 invariant: one
     /// trust authority, one read path, no snapshot divergence.
@@ -856,7 +939,7 @@ mod tests {
         // Start with an EMPTY trust set. If the IO task snapshotted at
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
-        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
+        let trusted = Arc::new(RwLock::new(TrustStore::new()));
         let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
@@ -877,12 +960,14 @@ mod tests {
         // Mutate the trust set AFTER the IO task would normally have
         // snapshotted, but BEFORE the envelope is delivered. The live
         // read must observe this mutation.
-        trusted.write().push_unchecked_for_test(crate::TrustedPeer {
-            name: "sender".to_string(),
-            pubkey: sender_keypair.public_key(),
-            addr: "tcp://127.0.0.1:0".to_string(),
-            meta: crate::PeerMeta::default(),
-        });
+        trusted
+            .write()
+            .insert(test_trust_entry(
+                "sender",
+                &sender_keypair.public_key(),
+                "tcp://127.0.0.1:0",
+            ))
+            .expect("live trust insert should succeed");
 
         tokio::spawn(async move {
             client_write.write_all(&bytes).await.unwrap();

@@ -47,12 +47,49 @@ use std::collections::HashSet;
 /// regardless of caller intent.
 const REALTIME_MAX_OUTPUT_TOKENS: u32 = 4096;
 
-/// Translate an agent-level `max_tokens` budget into the optional
+/// Translate an agent-level `max_tokens` budget into the
 /// `response.max_output_tokens` the Realtime API accepts, clamping to the
-/// protocol ceiling. Returns `None` when the caller did not request a
-/// finite budget so the provider default (`inf`) applies.
-fn realtime_max_output_tokens(max_tokens: u32) -> Option<MaxTokens> {
-    (max_tokens > 0).then(|| MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
+/// protocol ceiling.
+///
+/// #230: an explicit `max_tokens == 0` is a typed [`LlmError::InvalidRequest`]
+/// reject rather than a silent downgrade to the provider default. A zero cap
+/// is already invalid caller policy upstream — `agent.max_tokens_per_turn == 0`
+/// fails config validation — so the realtime boundary fails closed on an
+/// explicit zero instead of fail-open reverting to the provider default. A
+/// finite positive budget clamps to the protocol ceiling.
+///
+/// (The remaining caller-Unset distinction — a request that genuinely did not
+/// set a finite budget — would need `LlmRequest.max_tokens: Option<u32>` in
+/// `meerkat-llm-core`; until that lands every request carries a positive
+/// budget from the validated config path.)
+fn realtime_max_output_tokens(max_tokens: u32) -> Result<MaxTokens, LlmError> {
+    if max_tokens == 0 {
+        return Err(LlmError::InvalidRequest {
+            message: "realtime max_output_tokens must be greater than 0".to_string(),
+        });
+    }
+    Ok(MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
+}
+
+/// Resolve the optional caller temperature into a realtime `Temperature`,
+/// distinguishing caller-Unset from an explicit-but-invalid value.
+///
+/// `None` is the caller-Unset distinction: the provider default applies. An
+/// explicit `Some(t)` outside the realtime protocol's accepted `[0.0, 2.0]`
+/// range is a typed [`LlmError::InvalidRequest`] reject rather than a silent
+/// downgrade to the provider default, so an out-of-range caller policy never
+/// fails open.
+fn resolve_realtime_temperature(temperature: Option<f32>) -> Result<Option<Temperature>, LlmError> {
+    match temperature {
+        None => Ok(None),
+        Some(value) => {
+            Temperature::new(value)
+                .map(Some)
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("invalid realtime temperature: {error}"),
+                })
+        }
+    }
 }
 
 /// LlmClient implementation that serves text turns via OpenAI Realtime WS.
@@ -115,11 +152,6 @@ fn project_realtime_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistant
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -187,13 +219,6 @@ fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_realtime_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -298,20 +323,20 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             //
             // Propagate the session-level LlmRequest tunables so
             // realtime turns honor the same max_output_tokens / temperature
-            // as the Responses-API path. Temperatures outside the realtime
-            // protocol's accepted [0.0, 2.0] range are dropped rather than
-            // rejected — the upstream constructor returns a typed error we
-            // do not want to elevate mid-stream.
-            let max_output_tokens = realtime_max_output_tokens(request.max_tokens);
-            let temperature = request
-                .temperature
-                .and_then(|t| Temperature::new(t).ok());
+            // as the Responses-API path. `temperature == None` is the
+            // caller-Unset distinction (provider default applies); an
+            // explicit-but-invalid temperature is a typed reject rather than
+            // a silent downgrade to the provider default. #230: likewise an
+            // explicit zero output-token cap is a typed reject, not a silent
+            // fall-through to the provider default.
+            let max_output_tokens = realtime_max_output_tokens(request.max_tokens)?;
+            let temperature = resolve_realtime_temperature(request.temperature)?;
             let response_config = ResponseConfig {
                 conversation: Some(ConversationMode::None),
                 output_modalities: Some(OutputModalities::Text),
                 instructions: instructions.clone(),
                 tools: Some(tools.clone()),
-                max_output_tokens,
+                max_output_tokens: Some(max_output_tokens),
                 temperature,
                 ..ResponseConfig::default()
             };
@@ -362,22 +387,10 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
                         arguments,
                         ..
                     } => {
-                        let args = if arguments.trim().is_empty() {
-                            serde_json::json!({})
-                        } else {
-                            match serde_json::from_str::<serde_json::Value>(&arguments) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    tracing::warn!(
-                                        call_id = %call_id,
-                                        tool = %name,
-                                        error = %err,
-                                        "openai realtime: tool_call arguments failed JSON parse; falling back to raw string"
-                                    );
-                                    serde_json::Value::String(arguments.clone())
-                                }
-                            }
-                        };
+                        // Fail the tool-call boundary on malformed provider
+                        // JSON instead of laundering it into a Value::String
+                        // blob and yielding a synthetic successful ToolUse turn.
+                        let args = crate::live::parse_tool_call_args(&arguments, &call_id)?;
                         stop_reason = StopReason::ToolUse;
                         yield LlmEvent::ToolCallComplete {
                             id: call_id,
@@ -506,29 +519,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                         phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText { text }],
-                    });
-                }
-            }
-            Message::Assistant(a) => {
-                if !a.content.trim().is_empty() {
-                    items.push(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::Assistant,
-                        content: vec![ContentPart::OutputText {
-                            text: a.content.clone(),
-                        }],
-                    });
-                }
-                for tc in &a.tool_calls {
-                    items.push(Item::FunctionCall {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        name: tc.name.clone(),
-                        call_id: tc.id.clone(),
-                        arguments: tc.args.to_string(),
                     });
                 }
             }
@@ -692,9 +682,9 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
 mod tests {
     use super::*;
     use meerkat_core::{
-        AssistantImageId, AssistantMessage, BlobId, BlobRef, BlockAssistantMessage, ImageData,
-        MediaType, ProviderImageMetadata, RevisedPromptDisposition, SystemMessage, ToolCall,
-        ToolResult, UserMessage,
+        AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,
+        ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage, ToolResult,
+        UserMessage,
     };
 
     fn sys(text: &str) -> Message {
@@ -706,11 +696,12 @@ mod tests {
     }
 
     fn asst(text: &str) -> Message {
-        Message::Assistant(AssistantMessage {
-            content: text.to_string(),
-            tool_calls: Vec::new(),
+        Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         })
     }
@@ -754,7 +745,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({"type": "web_search_call"}),
                         meta: None,
                     },
@@ -863,15 +854,17 @@ mod tests {
 
     #[test]
     fn convert_tool_call_and_result_round_trips_to_function_items() {
-        let asst_with_tool = Message::Assistant(AssistantMessage {
-            content: String::new(),
-            tool_calls: vec![ToolCall::new(
-                "call_42".to_string(),
-                "read_file".to_string(),
-                serde_json::json!({"path": "/tmp/x"}),
-            )],
+        let asst_with_tool = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ToolUse {
+                id: "call_42".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::value::RawValue::from_string(
+                    serde_json::json!({"path": "/tmp/x"}).to_string(),
+                )
+                .expect("valid args"),
+                meta: None,
+            }],
             stop_reason: StopReason::ToolUse,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
         let tool_results = Message::ToolResults {
@@ -938,18 +931,28 @@ mod tests {
     }
 
     #[test]
-    fn realtime_max_output_tokens_drops_zero_budget() {
-        assert!(realtime_max_output_tokens(0).is_none());
+    fn realtime_max_output_tokens_rejects_explicit_zero_budget() {
+        // #230: an explicit zero cap is a typed InvalidRequest reject, never a
+        // silent downgrade to the provider default.
+        match realtime_max_output_tokens(0) {
+            Err(LlmError::InvalidRequest { message }) => {
+                assert!(
+                    message.contains("greater than 0"),
+                    "unexpected reject message: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest for zero cap, got {other:?}"),
+        }
     }
 
     #[test]
     fn realtime_max_output_tokens_passes_values_at_or_below_ceiling() {
         match realtime_max_output_tokens(1) {
-            Some(MaxTokens::Count(n)) => assert_eq!(n, 1),
+            Ok(MaxTokens::Count(n)) => assert_eq!(n, 1),
             other => panic!("expected Count(1), got {other:?}"),
         }
         match realtime_max_output_tokens(REALTIME_MAX_OUTPUT_TOKENS) {
-            Some(MaxTokens::Count(n)) => assert_eq!(n, REALTIME_MAX_OUTPUT_TOKENS),
+            Ok(MaxTokens::Count(n)) => assert_eq!(n, REALTIME_MAX_OUTPUT_TOKENS),
             other => panic!("expected Count(4096), got {other:?}"),
         }
     }
@@ -961,7 +964,7 @@ mod tests {
         // the s71/s72 smoke failures.
         for requested in [4097_u32, 8_192, 16_384, u32::MAX] {
             match realtime_max_output_tokens(requested) {
-                Some(MaxTokens::Count(n)) => assert_eq!(
+                Ok(MaxTokens::Count(n)) => assert_eq!(
                     n, REALTIME_MAX_OUTPUT_TOKENS,
                     "requested={requested} should clamp to {REALTIME_MAX_OUTPUT_TOKENS}"
                 ),
@@ -1052,5 +1055,40 @@ mod tests {
     fn provider_is_openai() {
         let adapter = OpenAiRealtimeTextAdapter::new("sk-test");
         assert_eq!(adapter.provider(), meerkat_core::Provider::OpenAI);
+    }
+
+    // Row #230: an unset caller temperature is the Unset distinction and
+    // defers to the provider default; an explicit-but-invalid temperature
+    // surfaces a typed reject rather than a silent downgrade.
+    #[test]
+    fn resolve_realtime_temperature_none_is_caller_unset() {
+        assert!(
+            resolve_realtime_temperature(None)
+                .expect("unset temperature is valid")
+                .is_none(),
+            "None must defer to the provider default, not be a reject"
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_temperature_accepts_in_range() {
+        let resolved = resolve_realtime_temperature(Some(0.5)).expect("in-range temperature");
+        assert!(resolved.is_some());
+    }
+
+    #[test]
+    fn resolve_realtime_temperature_rejects_out_of_range() {
+        // Without the fix this silently became `None` (provider default),
+        // dropping explicit caller policy. It must now be a typed reject.
+        let err = resolve_realtime_temperature(Some(5.0))
+            .expect_err("an out-of-range temperature must be a typed reject, not a silent drop");
+        assert!(
+            matches!(err, LlmError::InvalidRequest { .. }),
+            "expected InvalidRequest, got {err:?}"
+        );
+
+        let negative = resolve_realtime_temperature(Some(-1.0))
+            .expect_err("a negative temperature must be a typed reject");
+        assert!(matches!(negative, LlmError::InvalidRequest { .. }));
     }
 }

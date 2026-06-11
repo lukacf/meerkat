@@ -18,8 +18,14 @@
 //!     .expect("no .rkat directory found");
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
-//! let dispatcher =
-//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None, true)?;
+//! let dispatcher = CompositeDispatcher::new(
+//!     store,
+//!     &BuiltinToolConfig::default(),
+//!     Some(project_root),
+//!     None,
+//!     None,
+//!     None,
+//! )?;
 //! ```
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
@@ -36,6 +42,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod registry;
 pub mod schema;
+pub mod timeout;
 
 #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
 pub use builder::CommsDispatcherConfig;
@@ -58,11 +65,10 @@ pub use dispatcher::ToolDispatcher;
 pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 #[cfg(feature = "comms")]
-pub use meerkat_comms::agent::{
-    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
-};
-pub use registry::ToolRegistry;
+pub use meerkat_comms::agent::{CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher};
+pub use registry::validate_tool_def;
 pub use schema::{empty_object_schema, schema_for};
+pub use timeout::ToolTimeoutPolicy;
 
 // Capability registrations
 inventory::submit! {

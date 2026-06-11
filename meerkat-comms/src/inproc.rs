@@ -11,15 +11,9 @@
 //! let (inbox, sender) = Inbox::new();
 //! InprocRegistry::global().register("my-agent", pubkey, sender);
 //!
-//! // Send to an inproc peer (via Router with inproc:// address)
-//! router.send(
-//!     "my-agent",
-//!     MessageKind::Message {
-//!         blocks: None,
-//!         body: "hello".into(),
-//!         handling_mode: None,
-//!     },
-//! ).await?;
+//! // Delivery is pubkey-keyed: the Router resolves a trusted peer's
+//! // signing key and delivers through the namespace-scoped
+//! // send_to_pubkey_*_wait owners.
 //!
 //! // Unregister when done
 //! InprocRegistry::global().unregister(&pubkey);
@@ -44,6 +38,58 @@ pub struct InprocPeerInfo {
     pub name: String,
     pub pubkey: PubKey,
     pub meta: PeerMeta,
+}
+
+/// Why a registration was rejected without mutating the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationRejection {
+    /// The supplied pubkey was the all-zero key, which can never identify a
+    /// distinct peer and is refused fail-closed.
+    ZeroPubkey,
+}
+
+/// Typed result of registering an inproc peer.
+///
+/// Registration is not always a clean insert: re-registering an existing
+/// pubkey under a new name evicts the old name mapping, and re-registering an
+/// existing name with a new pubkey evicts the old pubkey entry. Both evictions
+/// can also happen at once. Callers (runtime constructors, metadata refresh)
+/// must observe these facts rather than assume a clean success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationOutcome {
+    /// The peer was inserted without displacing any existing route.
+    Registered,
+    /// This pubkey was already registered under a different name; the old name
+    /// mapping was removed and replaced with the new name.
+    ReplacedPubkey { evicted_name: String },
+    /// This name was already bound to a different pubkey; the old pubkey entry
+    /// was evicted so the stale key is no longer reachable.
+    EvictedName { evicted_pubkey: PubKey },
+    /// Both evictions happened: this pubkey's old name was removed AND this
+    /// name's old pubkey was evicted in the same registration.
+    ReplacedPubkeyAndEvictedName {
+        evicted_name: String,
+        evicted_pubkey: PubKey,
+    },
+    /// The registration was refused without mutating the registry.
+    Rejected { reason: RegistrationRejection },
+}
+
+impl RegistrationOutcome {
+    /// Whether the registration displaced an existing route (either eviction).
+    pub fn displaced_existing(&self) -> bool {
+        matches!(
+            self,
+            Self::ReplacedPubkey { .. }
+                | Self::EvictedName { .. }
+                | Self::ReplacedPubkeyAndEvictedName { .. }
+        )
+    }
+
+    /// Whether the registration was rejected (no mutation occurred).
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
 }
 
 /// Global inproc registry instance.
@@ -122,31 +168,34 @@ impl InprocRegistry {
 
     /// Register an agent's inbox for inproc communication.
     ///
-    /// If an agent with the same pubkey already exists, it will be replaced.
-    /// If an agent with the same name but different pubkey exists, the old
-    /// agent will be evicted (both from peers and names maps).
-    pub fn register(&self, name: impl Into<String>, pubkey: PubKey, sender: InboxSender) {
+    /// Returns a typed [`RegistrationOutcome`] describing whether the insert was
+    /// clean or displaced an existing route (see
+    /// [`register_with_meta_in_namespace`](Self::register_with_meta_in_namespace)).
+    pub fn register(
+        &self,
+        name: impl Into<String>,
+        pubkey: PubKey,
+        sender: InboxSender,
+    ) -> RegistrationOutcome {
         self.register_with_meta_in_namespace(
             DEFAULT_NAMESPACE,
             name,
             pubkey,
             sender,
             PeerMeta::default(),
-        );
-    }
-
-    /// Register an agent's inbox with associated [`PeerMeta`].
-    pub fn register_with_meta(
-        &self,
-        name: impl Into<String>,
-        pubkey: PubKey,
-        sender: InboxSender,
-        meta: PeerMeta,
-    ) {
-        self.register_with_meta_in_namespace(DEFAULT_NAMESPACE, name, pubkey, sender, meta);
+        )
     }
 
     /// Register an agent's inbox within an explicit namespace.
+    ///
+    /// Returns a typed [`RegistrationOutcome`] that surfaces route displacement
+    /// explicitly: re-registering an existing pubkey under a new name evicts
+    /// the old name mapping ([`RegistrationOutcome::ReplacedPubkey`]); a name
+    /// rebound to a new pubkey evicts the old pubkey entry
+    /// ([`RegistrationOutcome::EvictedName`]); both can happen at once
+    /// ([`RegistrationOutcome::ReplacedPubkeyAndEvictedName`]). A zero pubkey is
+    /// refused without mutation ([`RegistrationOutcome::Rejected`]). Callers
+    /// must observe displacement/rejection rather than assume a clean success.
     pub fn register_with_meta_in_namespace(
         &self,
         namespace: &str,
@@ -154,7 +203,7 @@ impl InprocRegistry {
         pubkey: PubKey,
         sender: InboxSender,
         meta: PeerMeta,
-    ) {
+    ) -> RegistrationOutcome {
         let name = name.into();
         if pubkey.is_zero() {
             tracing::warn!(
@@ -162,7 +211,9 @@ impl InprocRegistry {
                 peer_name = %name,
                 "rejecting zero-pubkey inproc registration"
             );
-            return;
+            return RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::ZeroPubkey,
+            };
         }
         let peer = InprocPeer {
             name: name.clone(),
@@ -175,28 +226,40 @@ impl InprocRegistry {
         let namespace_state = state.namespace_mut(namespace);
 
         // If this pubkey was registered under a different name, remove old name mapping
-        let old_name_to_remove = namespace_state
+        let evicted_name = namespace_state
             .peers
             .get(&pubkey)
             .filter(|old_peer| old_peer.name != name)
             .map(|old_peer| old_peer.name.clone());
-        if let Some(old_name) = old_name_to_remove {
-            namespace_state.names.remove(&old_name);
+        if let Some(old_name) = &evicted_name {
+            namespace_state.names.remove(old_name);
         }
 
         // If this name was registered to a different pubkey, remove the old pubkey entry
         // This prevents stale pubkeys from remaining reachable
-        let old_pubkey_to_remove = namespace_state
+        let evicted_pubkey = namespace_state
             .names
             .get(&name)
             .filter(|&&old_pk| old_pk != pubkey)
             .copied();
-        if let Some(old_pubkey) = old_pubkey_to_remove {
+        if let Some(old_pubkey) = evicted_pubkey {
             namespace_state.peers.remove(&old_pubkey);
         }
 
         namespace_state.peers.insert(pubkey, peer);
         namespace_state.names.insert(name, pubkey);
+
+        match (evicted_name, evicted_pubkey) {
+            (None, None) => RegistrationOutcome::Registered,
+            (Some(evicted_name), None) => RegistrationOutcome::ReplacedPubkey { evicted_name },
+            (None, Some(evicted_pubkey)) => RegistrationOutcome::EvictedName { evicted_pubkey },
+            (Some(evicted_name), Some(evicted_pubkey)) => {
+                RegistrationOutcome::ReplacedPubkeyAndEvictedName {
+                    evicted_name,
+                    evicted_pubkey,
+                }
+            }
+        }
     }
 
     /// Unregister an agent by pubkey.
@@ -216,60 +279,6 @@ impl InprocRegistry {
             return true;
         }
         false
-    }
-
-    /// Look up an inproc peer by name.
-    pub fn get_by_name(&self, name: &str) -> Option<(PubKey, InboxSender)> {
-        self.get_by_name_in_namespace(DEFAULT_NAMESPACE, name)
-    }
-
-    /// Look up an inproc peer by name in an explicit namespace.
-    pub fn get_by_name_in_namespace(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Option<(PubKey, InboxSender)> {
-        let state = self.state.read();
-        let namespace_state = state.namespace(namespace)?;
-        let pubkey = namespace_state.names.get(name).copied()?;
-        let peer = namespace_state.peers.get(&pubkey)?;
-        Some((peer.pubkey, peer.sender.clone()))
-    }
-
-    /// Look up an inproc peer by name AND pubkey across ALL namespaces.
-    ///
-    /// Constrains the match by pubkey to avoid ambiguity when multiple
-    /// namespaces contain peers with the same name but different keys.
-    pub fn get_by_name_and_pubkey_any_namespace(
-        &self,
-        name: &str,
-        expected_pubkey: &PubKey,
-    ) -> Option<(PubKey, InboxSender)> {
-        if expected_pubkey.is_zero() {
-            return None;
-        }
-        let state = self.state.read();
-        let mut found = None;
-        let mut pubkey_registrations = 0;
-        for namespace_state in state.namespaces.values() {
-            if namespace_state.peers.contains_key(expected_pubkey) {
-                pubkey_registrations += 1;
-            }
-            if let Some(&pubkey) = namespace_state.names.get(name)
-                && pubkey == *expected_pubkey
-                && let Some(peer) = namespace_state.peers.get(&pubkey)
-            {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some((peer.pubkey, peer.sender.clone()));
-            }
-        }
-        if pubkey_registrations == 1 {
-            found
-        } else {
-            None
-        }
     }
 
     /// Look up an inproc peer by pubkey.
@@ -369,119 +378,7 @@ impl InprocRegistry {
         self.state.write().namespaces.clear();
     }
 
-    /// Send a message directly to an inproc peer.
-    ///
-    /// This bypasses network transport entirely, delivering the envelope
-    /// directly to the peer's inbox.
-    ///
-    /// Returns the generated envelope ID when the message was delivered, or
-    /// an error if:
-    /// - The peer is not found in the registry
-    /// - The peer's inbox has been closed
-    pub fn send(
-        &self,
-        from_keypair: &Keypair,
-        to_name: &str,
-        kind: MessageKind,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        self.send_with_signature_in_namespace(DEFAULT_NAMESPACE, from_keypair, to_name, kind, true)
-    }
-
-    /// Send a message directly to an inproc peer.
-    ///
-    /// If `sign_envelope` is false, the envelope is sent unsigned.
-    pub fn send_with_signature(
-        &self,
-        from_keypair: &Keypair,
-        to_name: &str,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        self.send_with_signature_in_namespace(
-            DEFAULT_NAMESPACE,
-            from_keypair,
-            to_name,
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Send a message to an inproc peer, searching ALL namespaces.
-    ///
-    /// Used as a fallback for cross-mob communication when the recipient is
-    /// in a different namespace (realm) than the sender. The lookup is
-    /// constrained by `expected_pubkey` to prevent misdelivery when multiple
-    /// namespaces contain peers with the same name but different identities.
-    pub fn send_cross_namespace(
-        &self,
-        from_keypair: &Keypair,
-        to_name: &str,
-        expected_pubkey: &PubKey,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        self.send_cross_namespace_with_id(
-            from_keypair,
-            to_name,
-            expected_pubkey,
-            Uuid::new_v4(),
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Send a message to an inproc peer across namespaces using a caller-chosen envelope id.
-    pub fn send_cross_namespace_with_id(
-        &self,
-        from_keypair: &Keypair,
-        to_name: &str,
-        expected_pubkey: &PubKey,
-        envelope_id: Uuid,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        let (to_pubkey, sender) = self
-            .get_by_name_and_pubkey_any_namespace(to_name, expected_pubkey)
-            .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
-
-        Self::deliver_to_sender(
-            from_keypair,
-            to_pubkey,
-            sender,
-            envelope_id,
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Send a message to an inproc peer by pubkey, searching ALL namespaces.
-    ///
-    /// Router call sites already resolved the destination from canonical trust
-    /// state, so delivery must use that identity rather than a display name.
-    #[cfg(test)]
-    pub(crate) fn send_to_pubkey_any_namespace_with_id(
-        &self,
-        from_keypair: &Keypair,
-        to_pubkey: &PubKey,
-        envelope_id: Uuid,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        let sender = self
-            .get_by_pubkey_any_namespace(to_pubkey)
-            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
-
-        Self::deliver_to_sender(
-            from_keypair,
-            *to_pubkey,
-            sender,
-            envelope_id,
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Backpressured variant of [`Self::send_to_pubkey_any_namespace_with_id`].
+    /// Backpressured pubkey-keyed delivery across all namespaces.
     ///
     /// Runtime-originated peer sends should await receiver capacity instead of
     /// turning a transient full inbox into semantic message loss.
@@ -508,56 +405,18 @@ impl InprocRegistry {
         .await
     }
 
-    /// Send a message directly to an inproc peer within a namespace.
-    pub fn send_with_signature_in_namespace(
-        &self,
-        namespace: &str,
-        from_keypair: &Keypair,
-        to_name: &str,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        self.send_with_signature_in_namespace_with_id(
-            namespace,
-            from_keypair,
-            to_name,
-            Uuid::new_v4(),
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Send a message directly to an inproc peer within a namespace using a caller-chosen envelope id.
-    pub fn send_with_signature_in_namespace_with_id(
-        &self,
-        namespace: &str,
-        from_keypair: &Keypair,
-        to_name: &str,
-        envelope_id: Uuid,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        // Look up the peer
-        let (to_pubkey, sender) = self
-            .get_by_name_in_namespace(namespace, to_name)
-            .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
-        if to_pubkey.is_zero() {
-            return Err(InprocSendError::PeerNotFound(to_name.to_string()));
-        }
-
-        Self::deliver_to_sender(
-            from_keypair,
-            to_pubkey,
-            sender,
-            envelope_id,
-            kind,
-            sign_envelope,
-        )
-    }
-
-    /// Send a message directly to an inproc peer within a namespace by pubkey.
-    #[cfg(test)]
-    fn send_to_pubkey_in_namespace_with_id(
+    /// Namespace-scoped variant of
+    /// [`Self::send_to_pubkey_any_namespace_with_id_wait`]: the destination is
+    /// resolved exactly once, *inside* `namespace`, and that resolved sender is
+    /// the delivery target.
+    ///
+    /// This is the single-resolution send for namespace-isolated routers. The
+    /// namespace is the delivery authority, so the destination must not be
+    /// re-derived from the global registry between an isolation check and the
+    /// inbox handoff — a second any-namespace lookup would open a window where
+    /// the peer re-registers elsewhere and delivery crosses the namespace
+    /// boundary.
+    pub(crate) async fn send_to_pubkey_in_namespace_with_id_wait(
         &self,
         namespace: &str,
         from_keypair: &Keypair,
@@ -570,7 +429,7 @@ impl InprocRegistry {
             .get_by_pubkey_in_namespace(namespace, to_pubkey)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
 
-        Self::deliver_to_sender(
+        Self::deliver_to_sender_wait(
             from_keypair,
             *to_pubkey,
             sender,
@@ -578,43 +437,7 @@ impl InprocRegistry {
             kind,
             sign_envelope,
         )
-    }
-
-    fn deliver_to_sender(
-        from_keypair: &Keypair,
-        to_pubkey: PubKey,
-        sender: InboxSender,
-        envelope_id: Uuid,
-        kind: MessageKind,
-        sign_envelope: bool,
-    ) -> Result<uuid::Uuid, InprocSendError> {
-        let mut envelope = Envelope {
-            id: envelope_id,
-            from: from_keypair.public_key(),
-            to: to_pubkey,
-            kind,
-            sig: Signature::new([0u8; 64]),
-        };
-        if sign_envelope {
-            envelope.sign(from_keypair);
-        }
-
-        // Deliver directly to inbox
-        let envelope_id = envelope.id;
-        match sender.send_classified(InboxItem::External { envelope }) {
-            AdmissionOutcome::Admitted => {}
-            AdmissionOutcome::Dropped {
-                reason: DropReason::SessionClosed,
-            } => return Err(InprocSendError::InboxClosed),
-            AdmissionOutcome::Dropped {
-                reason: DropReason::InboxFull,
-            } => return Err(InprocSendError::InboxFull),
-            AdmissionOutcome::Dropped { reason } => {
-                return Err(InprocSendError::IngressDropped(reason));
-            }
-        }
-
-        Ok(envelope_id)
+        .await
     }
 
     async fn deliver_to_sender_wait(
@@ -651,11 +474,6 @@ impl InprocRegistry {
         }
 
         Ok(envelope_id)
-    }
-
-    /// List all registered peer names.
-    pub fn peer_names(&self) -> Vec<String> {
-        self.peer_names_in_namespace(DEFAULT_NAMESPACE)
     }
 
     /// List all registered peer names in an explicit namespace.
@@ -714,11 +532,11 @@ mod tests {
     use super::*;
     use crate::classify::test_support;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeers;
+    use crate::trust::TrustStore;
 
     fn classified_inbox() -> (Inbox, crate::InboxSender) {
         Inbox::new_classified(test_support::classification_context(
-            TrustedPeers::new(),
+            TrustStore::new(),
             false,
         ))
     }
@@ -748,11 +566,11 @@ mod tests {
         assert!(registry.contains(&pubkey));
         assert!(registry.contains_name("test-agent"));
 
-        // Lookup by name
-        let (found_pubkey, _) = registry.get_by_name("test-agent").unwrap();
-        assert_eq!(found_pubkey, pubkey);
-
-        // Lookup by pubkey
+        // Name is display metadata; routing lookups are pubkey-keyed.
+        assert_eq!(
+            registry.get_name_by_pubkey(&pubkey).as_deref(),
+            Some("test-agent")
+        );
         assert!(registry.get_by_pubkey(&pubkey).is_some());
     }
 
@@ -766,7 +584,6 @@ mod tests {
 
         assert!(registry.is_empty());
         assert!(!registry.contains_name("zero-agent"));
-        assert!(registry.get_by_name("zero-agent").is_none());
         assert!(registry.get_by_pubkey(&zero_pubkey).is_none());
     }
 
@@ -788,10 +605,11 @@ mod tests {
         assert!(registry.get_by_pubkey(&valid_pubkey).is_some());
         assert!(registry.get_by_pubkey(&zero_pubkey).is_none());
 
-        let (found_pubkey, _) = registry
-            .get_by_name("stable-agent")
-            .expect("valid name mapping should remain");
-        assert_eq!(found_pubkey, valid_pubkey);
+        assert_eq!(
+            registry.get_name_by_pubkey(&valid_pubkey).as_deref(),
+            Some("stable-agent"),
+            "valid name mapping should remain"
+        );
     }
 
     #[test]
@@ -861,9 +679,62 @@ mod tests {
         assert!(registry.contains_name("my-agent"));
         assert_eq!(registry.len(), 1);
 
-        // Lookup should return the new pubkey
-        let (found_pubkey, _) = registry.get_by_name("my-agent").unwrap();
-        assert_eq!(found_pubkey, pubkey2);
+        // The name maps to the new identity.
+        assert_eq!(
+            registry.get_name_by_pubkey(&pubkey2).as_deref(),
+            Some("my-agent")
+        );
+    }
+
+    /// ROW #292 gate: registration returns a typed [`RegistrationOutcome`] that
+    /// surfaces route displacement and zero-pubkey rejection, instead of
+    /// silently evicting and returning `()`.
+    #[test]
+    fn registration_outcome_is_typed_for_displacement_and_rejection() {
+        let registry = InprocRegistry::new();
+        let keypair = make_keypair();
+        let pubkey = keypair.public_key();
+        let (_, sender1) = classified_inbox();
+        let (_, sender2) = classified_inbox();
+        let (_, sender3) = classified_inbox();
+
+        // Clean first insert.
+        assert_eq!(
+            registry.register("agent-v1", pubkey, sender1),
+            RegistrationOutcome::Registered
+        );
+
+        // Re-registering the SAME pubkey under a NEW name evicts the old name
+        // and reports it typed.
+        assert_eq!(
+            registry.register("agent-v2", pubkey, sender2),
+            RegistrationOutcome::ReplacedPubkey {
+                evicted_name: "agent-v1".to_string()
+            }
+        );
+
+        // Re-registering an existing NAME with a NEW pubkey evicts the old
+        // pubkey and reports it typed.
+        let other = make_keypair();
+        let other_pubkey = other.public_key();
+        match registry.register("agent-v2", other_pubkey, sender3) {
+            RegistrationOutcome::EvictedName { evicted_pubkey } => {
+                assert_eq!(evicted_pubkey, pubkey);
+            }
+            other => panic!("expected EvictedName, got {other:?}"),
+        }
+
+        // A zero pubkey is refused fail-closed with a typed rejection, no
+        // mutation.
+        let (_, zero_sender) = classified_inbox();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+        assert_eq!(
+            registry.register("zero", zero_pubkey, zero_sender),
+            RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::ZeroPubkey
+            }
+        );
+        assert!(!registry.contains_name("zero"));
     }
 
     /// Test that the ABA scenario is handled correctly:
@@ -906,26 +777,36 @@ mod tests {
             "name should still map to new agent"
         );
 
-        // Verify the correct pubkey is returned for lookup
-        let (found_pubkey, _) = registry.get_by_name("agent").unwrap();
-        assert_eq!(found_pubkey, pubkey_new, "lookup should return new pubkey");
+        // The name maps to the new identity.
+        assert_eq!(
+            registry.get_name_by_pubkey(&pubkey_new).as_deref(),
+            Some("agent"),
+            "name should map to the new pubkey"
+        );
     }
 
     #[test]
-    fn test_registry_peer_names() {
+    fn test_registry_peer_names_in_namespace() {
         let registry = InprocRegistry::new();
 
         for i in 0..3 {
             let keypair = make_keypair();
             let (_, sender) = classified_inbox();
-            registry.register(format!("agent-{i}"), keypair.public_key(), sender);
+            registry.register_with_meta_in_namespace(
+                "realm-names",
+                format!("agent-{i}"),
+                keypair.public_key(),
+                sender,
+                PeerMeta::default(),
+            );
         }
 
-        let names = registry.peer_names();
+        let names = registry.peer_names_in_namespace("realm-names");
         assert_eq!(names.len(), 3);
         assert!(names.contains(&"agent-0".to_string()));
         assert!(names.contains(&"agent-1".to_string()));
         assert!(names.contains(&"agent-2".to_string()));
+        assert!(registry.peer_names_in_namespace("realm-other").is_empty());
     }
 
     #[test]
@@ -969,16 +850,21 @@ mod tests {
         // Set up sender
         let sender_keypair = make_keypair();
 
-        // Send a message
-        let result = registry.send(
-            &sender_keypair,
-            "receiver",
-            MessageKind::Message {
-                blocks: None,
-                body: "hello inproc".to_string(),
-                handling_mode: None,
-            },
-        );
+        // Send a message (pubkey-keyed delivery)
+        let result = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "",
+                &sender_keypair,
+                &receiver_keypair.public_key(),
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "hello inproc".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
         assert!(result.is_ok());
 
         // Verify message was received
@@ -1004,26 +890,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_registry_send_peer_not_found() {
+    #[tokio::test]
+    async fn test_registry_send_peer_not_found() {
         let registry = InprocRegistry::new();
         let sender_keypair = make_keypair();
+        let unknown = make_keypair().public_key();
 
-        let result = registry.send(
-            &sender_keypair,
-            "nonexistent",
-            MessageKind::Message {
-                blocks: None,
-                body: "hello".to_string(),
-                handling_mode: None,
-            },
-        );
+        let result = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "",
+                &sender_keypair,
+                &unknown,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "hello".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
 
         assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
     }
 
-    #[test]
-    fn test_registry_send_inbox_closed() {
+    #[tokio::test]
+    async fn test_registry_send_inbox_closed() {
         let registry = InprocRegistry::new();
 
         // Set up receiver but drop the inbox
@@ -1034,15 +926,20 @@ mod tests {
 
         let sender_keypair = make_keypair();
 
-        let result = registry.send(
-            &sender_keypair,
-            "receiver",
-            MessageKind::Message {
-                blocks: None,
-                body: "hello".to_string(),
-                handling_mode: None,
-            },
-        );
+        let result = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "",
+                &sender_keypair,
+                &receiver_keypair.public_key(),
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "hello".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
 
         assert!(matches!(result, Err(InprocSendError::InboxClosed)));
     }
@@ -1061,49 +958,59 @@ mod tests {
         );
 
         // Default namespace cannot see realm-a registrations.
-        assert!(registry.get_by_name("receiver").is_none());
         assert!(
             registry
-                .get_by_name_in_namespace("realm-a", "receiver")
+                .get_by_pubkey(&receiver_keypair.public_key())
+                .is_none()
+        );
+        assert!(
+            registry
+                .get_by_pubkey_in_namespace("realm-a", &receiver_keypair.public_key())
                 .is_some()
         );
 
         let sender_keypair = make_keypair();
 
         // Matching namespace succeeds.
-        let ok = registry.send_with_signature_in_namespace(
-            "realm-a",
-            &sender_keypair,
-            "receiver",
-            MessageKind::Message {
-                blocks: None,
-                body: "hello scoped".to_string(),
-                handling_mode: None,
-            },
-            true,
-        );
+        let ok = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "realm-a",
+                &sender_keypair,
+                &receiver_keypair.public_key(),
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "hello scoped".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
         assert!(ok.is_ok());
 
         // Different namespace cannot route to receiver.
-        let wrong_ns = registry.send_with_signature_in_namespace(
-            "realm-b",
-            &sender_keypair,
-            "receiver",
-            MessageKind::Message {
-                blocks: None,
-                body: "should not deliver".to_string(),
-                handling_mode: None,
-            },
-            true,
-        );
+        let wrong_ns = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "realm-b",
+                &sender_keypair,
+                &receiver_keypair.public_key(),
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "should not deliver".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
         assert!(matches!(wrong_ns, Err(InprocSendError::PeerNotFound(_))));
 
         let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
     }
 
-    #[test]
-    fn test_send_to_pubkey_in_namespace_ignores_display_name_collision() {
+    #[tokio::test]
+    async fn test_send_to_pubkey_in_namespace_ignores_display_name_collision() {
         let registry = InprocRegistry::new();
         let target_keypair = make_keypair();
         let target_pubkey = target_keypair.public_key();
@@ -1128,18 +1035,20 @@ mod tests {
         );
 
         let sender_keypair = make_keypair();
-        let result = registry.send_to_pubkey_in_namespace_with_id(
-            "",
-            &sender_keypair,
-            &target_pubkey,
-            Uuid::new_v4(),
-            MessageKind::Message {
-                blocks: None,
-                body: "hello canonical".to_string(),
-                handling_mode: None,
-            },
-            true,
-        );
+        let result = registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "",
+                &sender_keypair,
+                &target_pubkey,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "hello canonical".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
         assert!(result.is_ok());
 
         assert_eq!(shadow_inbox.try_drain_classified().len(), 0);
@@ -1151,8 +1060,8 @@ mod tests {
         assert_eq!(envelope.to, target_pubkey);
     }
 
-    #[test]
-    fn test_send_to_pubkey_any_namespace_rejects_ambiguous_identity() {
+    #[tokio::test]
+    async fn test_send_to_pubkey_any_namespace_rejects_ambiguous_identity() {
         let registry = InprocRegistry::new();
         let sender_keypair = make_keypair();
         let target_keypair = make_keypair();
@@ -1175,17 +1084,19 @@ mod tests {
             PeerMeta::default(),
         );
 
-        let result = registry.send_to_pubkey_any_namespace_with_id(
-            &sender_keypair,
-            &target_pubkey,
-            Uuid::new_v4(),
-            MessageKind::Message {
-                blocks: None,
-                body: "ambiguous identity".to_string(),
-                handling_mode: None,
-            },
-            true,
-        );
+        let result = registry
+            .send_to_pubkey_any_namespace_with_id_wait(
+                &sender_keypair,
+                &target_pubkey,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    blocks: None,
+                    body: "ambiguous identity".to_string(),
+                    handling_mode: None,
+                },
+                true,
+            )
+            .await;
 
         assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
         assert!(alpha_inbox.try_drain_classified().is_empty());
@@ -1215,14 +1126,23 @@ mod tests {
             PeerMeta::default(),
         );
 
-        let (found_a, _) = registry
-            .get_by_name_in_namespace("realm-a", "shared-name")
-            .expect("realm-a peer should exist");
-        let (found_b, _) = registry
-            .get_by_name_in_namespace("realm-b", "shared-name")
-            .expect("realm-b peer should exist");
-        assert_ne!(found_a, found_b);
-        assert!(registry.get_by_name("shared-name").is_none());
+        assert_eq!(
+            registry
+                .get_name_by_pubkey_in_namespace("realm-a", &kp_a.public_key())
+                .as_deref(),
+            Some("shared-name")
+        );
+        assert_eq!(
+            registry
+                .get_name_by_pubkey_in_namespace("realm-b", &kp_b.public_key())
+                .as_deref(),
+            Some("shared-name")
+        );
+        assert_ne!(kp_a.public_key(), kp_b.public_key());
+        assert!(
+            !registry.contains_name("shared-name"),
+            "default namespace must not see namespaced registrations"
+        );
     }
 
     #[test]
@@ -1256,7 +1176,13 @@ mod tests {
             .with_description("Reviews code for style issues")
             .with_label("lang", "rust");
 
-        registry.register_with_meta("reviewer", pubkey, sender, meta.clone());
+        registry.register_with_meta_in_namespace(
+            DEFAULT_NAMESPACE,
+            "reviewer",
+            pubkey,
+            sender,
+            meta.clone(),
+        );
 
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
@@ -1277,226 +1203,5 @@ mod tests {
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].meta, PeerMeta::default());
-    }
-
-    /// Regression: send_cross_namespace must reject delivery when the resolved
-    /// peer's pubkey doesn't match the expected pubkey. Without the pubkey
-    /// guard, a name collision across namespaces can misdeliver messages.
-    #[test]
-    fn test_send_cross_namespace_rejects_pubkey_mismatch() {
-        let registry = InprocRegistry::new();
-        let sender_kp = make_keypair();
-
-        // Register "ambassador" in namespace "mob:alpha" with key A
-        let key_a = make_keypair();
-        let (_inbox_a, sender_a) = classified_inbox();
-        registry.register_with_meta_in_namespace(
-            "mob:alpha",
-            "ambassador",
-            key_a.public_key(),
-            sender_a,
-            PeerMeta::default(),
-        );
-
-        // Register "ambassador" (same name!) in namespace "mob:beta" with key B
-        let key_b = make_keypair();
-        let (_inbox_b, sender_b) = classified_inbox();
-        registry.register_with_meta_in_namespace(
-            "mob:beta",
-            "ambassador",
-            key_b.public_key(),
-            sender_b,
-            PeerMeta::default(),
-        );
-
-        // Send cross-namespace expecting key A → should succeed (matches alpha)
-        let result_a = registry.send_cross_namespace(
-            &sender_kp,
-            "ambassador",
-            &key_a.public_key(),
-            MessageKind::Request {
-                intent: "test".into(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-            false,
-        );
-        assert!(result_a.is_ok(), "should deliver when pubkey matches");
-
-        // Send cross-namespace with an unrelated key that doesn't match
-        // either registered "ambassador". The pubkey guard must reject it.
-        let unrelated_key = make_keypair();
-        let result_mismatch = registry.send_cross_namespace(
-            &sender_kp,
-            "ambassador",
-            &unrelated_key.public_key(),
-            MessageKind::Request {
-                intent: "test".into(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-            false,
-        );
-        assert!(
-            matches!(result_mismatch, Err(InprocSendError::PeerNotFound(_))),
-            "must reject when resolved pubkey doesn't match expected: {result_mismatch:?}"
-        );
-    }
-
-    #[test]
-    fn test_send_cross_namespace_rejects_duplicate_name_pubkey_across_namespaces() {
-        let registry = InprocRegistry::new();
-        let sender_kp = make_keypair();
-        let target_key = make_keypair();
-        let target_pubkey = target_key.public_key();
-        let (mut inbox_a, sender_a) = classified_inbox();
-        let (mut inbox_b, sender_b) = classified_inbox();
-
-        registry.register_with_meta_in_namespace(
-            "mob:alpha",
-            "ambassador",
-            target_pubkey,
-            sender_a,
-            PeerMeta::default(),
-        );
-        registry.register_with_meta_in_namespace(
-            "mob:beta",
-            "ambassador",
-            target_pubkey,
-            sender_b,
-            PeerMeta::default(),
-        );
-
-        let result = registry.send_cross_namespace(
-            &sender_kp,
-            "ambassador",
-            &target_pubkey,
-            MessageKind::Request {
-                intent: "test".into(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-            false,
-        );
-
-        assert!(
-            matches!(result, Err(InprocSendError::PeerNotFound(_))),
-            "same name/pubkey across namespaces must fail closed instead of picking a namespace: {result:?}"
-        );
-        assert!(
-            inbox_a.try_drain_classified().is_empty(),
-            "must not deliver to the first duplicate namespace"
-        );
-        assert!(
-            inbox_b.try_drain_classified().is_empty(),
-            "must not deliver to the second duplicate namespace"
-        );
-    }
-
-    #[test]
-    fn test_send_cross_namespace_rejects_duplicate_pubkey_with_different_names_across_namespaces() {
-        let registry = InprocRegistry::new();
-        let sender_kp = make_keypair();
-        let target_key = make_keypair();
-        let target_pubkey = target_key.public_key();
-        let (mut alpha_inbox, alpha_sender) = classified_inbox();
-        let (mut beta_inbox, beta_sender) = classified_inbox();
-
-        registry.register_with_meta_in_namespace(
-            "mob:alpha",
-            "ambassador",
-            target_pubkey,
-            alpha_sender,
-            PeerMeta::default(),
-        );
-        registry.register_with_meta_in_namespace(
-            "mob:beta",
-            "observer",
-            target_pubkey,
-            beta_sender,
-            PeerMeta::default(),
-        );
-
-        let result = registry.send_cross_namespace(
-            &sender_kp,
-            "ambassador",
-            &target_pubkey,
-            MessageKind::Request {
-                intent: "test".into(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-            false,
-        );
-
-        assert!(
-            matches!(result, Err(InprocSendError::PeerNotFound(_))),
-            "duplicate pubkey across namespaces must fail closed even when display names differ: {result:?}"
-        );
-        assert!(
-            alpha_inbox.try_drain_classified().is_empty(),
-            "must not deliver to the named namespace when canonical pubkey is ambiguous"
-        );
-        assert!(
-            beta_inbox.try_drain_classified().is_empty(),
-            "must not deliver to the differently named duplicate namespace"
-        );
-    }
-
-    #[test]
-    fn test_send_cross_namespace_with_id_rejects_duplicate_pubkey_different_names() {
-        let registry = InprocRegistry::new();
-        let sender_kp = make_keypair();
-        let target_key = make_keypair();
-        let target_pubkey = target_key.public_key();
-        let (mut alpha_inbox, alpha_sender) = classified_inbox();
-        let (mut beta_inbox, beta_sender) = classified_inbox();
-        let envelope_id = Uuid::new_v4();
-
-        registry.register_with_meta_in_namespace(
-            "mob:alpha",
-            "ambassador",
-            target_pubkey,
-            alpha_sender,
-            PeerMeta::default(),
-        );
-        registry.register_with_meta_in_namespace(
-            "mob:beta",
-            "observer",
-            target_pubkey,
-            beta_sender,
-            PeerMeta::default(),
-        );
-
-        let result = registry.send_cross_namespace_with_id(
-            &sender_kp,
-            "ambassador",
-            &target_pubkey,
-            envelope_id,
-            MessageKind::Request {
-                intent: "test".into(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-            false,
-        );
-
-        assert!(
-            matches!(result, Err(InprocSendError::PeerNotFound(_))),
-            "duplicate pubkey across namespaces must fail closed on send_cross_namespace_with_id: {result:?}"
-        );
-        assert!(
-            alpha_inbox.try_drain_classified().is_empty(),
-            "must not deliver the caller-chosen envelope id to the named namespace"
-        );
-        assert!(
-            beta_inbox.try_drain_classified().is_empty(),
-            "must not deliver the caller-chosen envelope id to the differently named duplicate namespace"
-        );
     }
 }

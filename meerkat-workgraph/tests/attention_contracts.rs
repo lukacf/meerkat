@@ -1615,8 +1615,10 @@ async fn attention_continuation_supersession_is_binding_scoped_not_projection_sc
     stale_successor.binding_revision += 1;
 
     assert_ne!(
-        workgraph_attention_continuation_key(&projection),
-        workgraph_attention_continuation_key(&stale_successor),
+        workgraph_attention_continuation_key(&projection)
+            .expect("projection continuation key must serialize"),
+        workgraph_attention_continuation_key(&stale_successor)
+            .expect("successor continuation key must serialize"),
         "idempotency stays projection-specific"
     );
     assert_eq!(

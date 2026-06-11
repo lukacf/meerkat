@@ -26,13 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-#[cfg(feature = "comms")]
-type DynCommsAgent = meerkat_comms::agent::CommsAgent<
-    dyn AgentLlmClient,
-    dyn AgentToolDispatcher,
-    dyn AgentSessionStore,
->;
-
 // ============================================================================
 // ADAPTERS - Bridge LlmClient/SessionStore to Agent traits
 // ============================================================================
@@ -162,8 +155,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        self.client.provider().as_str()
+    fn provider(&self) -> meerkat_core::Provider {
+        self.client.provider()
     }
 
     fn model(&self) -> &str {
@@ -438,7 +431,7 @@ mod scenario_02_tool_driven_shell {
 
         let config = Config::default();
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant with shell access. Execute commands as asked.".to_string(),
         );
 
@@ -529,7 +522,7 @@ mod scenario_03_structured_output {
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
         build_config.output_schema = Some(output_schema);
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant with shell access. \
              List files as instructed."
                 .to_string(),
@@ -614,8 +607,9 @@ mod scenario_05_multi_turn {
         let config = Config::default();
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt =
-            Some("You are a helpful assistant. Keep your responses brief and precise.".to_string());
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
+            "You are a helpful assistant. Keep your responses brief and precise.".to_string(),
+        );
 
         let mut agent = factory
             .build_agent(build_config, &config)
@@ -717,9 +711,8 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Observe,
                     priority: 100,
-                    failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "observer"})),
                     )
@@ -732,9 +725,8 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Guardrail,
                     priority: 90,
-                    failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "guardrail"})),
                     )
@@ -747,9 +739,8 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Observe,
                     priority: 80,
-                    failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "post_llm_observer"})),
                     )
@@ -767,15 +758,11 @@ mod scenario_06_hooks {
                 "observer",
                 Arc::new(move |_invocation| {
                     observer_called_clone.store(true, Ordering::SeqCst);
-                    Box::pin(async {
-                        Ok(RuntimeHookResponse {
-                            decision: None,
-                            patches: Vec::new(),
-                        })
-                    })
+                    Box::pin(async { Ok(RuntimeHookResponse { decision: None }) })
                 }),
             )
-            .await;
+            .await
+            .expect("register observer hook handler");
 
         // Register guardrail handler (always allows)
         engine
@@ -786,12 +773,12 @@ mod scenario_06_hooks {
                     Box::pin(async {
                         Ok(RuntimeHookResponse {
                             decision: Some(HookDecision::Allow),
-                            patches: Vec::new(),
                         })
                     })
                 }),
             )
-            .await;
+            .await
+            .expect("register guardrail hook handler");
 
         // Register post-LLM observer handler
         engine
@@ -803,15 +790,11 @@ mod scenario_06_hooks {
                         invocation.llm_response.is_some(),
                         "post-LLM observer should receive an LLM response projection"
                     );
-                    Box::pin(async move {
-                        Ok(RuntimeHookResponse {
-                            decision: None,
-                            patches: Vec::new(),
-                        })
-                    })
+                    Box::pin(async move { Ok(RuntimeHookResponse { decision: None }) })
                 }),
             )
-            .await;
+            .await
+            .expect("register post-LLM observer hook handler");
 
         let hook_engine: Arc<dyn HookEngine> = Arc::new(engine);
 
@@ -876,7 +859,7 @@ mod scenario_07_session_resume {
             let factory = AgentFactory::new(store_path.clone());
             let config = Config::default();
             let mut build_config = AgentBuildConfig::new(smoke_model());
-            build_config.system_prompt = Some(
+            build_config.system_prompt = meerkat::SystemPromptOverride::Set(
                 "You are a helpful assistant. Remember everything the user tells you.".to_string(),
             );
 
@@ -940,193 +923,6 @@ mod scenario_07_session_resume {
 }
 
 // ============================================================================
-// SCENARIO 8: Comms exchange (two-agent TCP)
-// ============================================================================
-
-#[cfg(feature = "comms")]
-mod scenario_08_comms {
-    use super::*;
-    use meerkat_comms::agent::{
-        CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
-    };
-    use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
-    use parking_lot::RwLock;
-
-    /// Create a pair of agents that can communicate with each other.
-    async fn create_agent_pair(
-        api_key: &str,
-    ) -> (
-        DynCommsAgent,
-        DynCommsAgent,
-        meerkat_comms::agent::ListenerHandle,
-        meerkat_comms::agent::ListenerHandle,
-        TempDir,
-        TempDir,
-    ) {
-        let keypair_a = Keypair::generate();
-        let keypair_b = Keypair::generate();
-        let pubkey_a = keypair_a.public_key();
-        let pubkey_b = keypair_b.public_key();
-
-        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr_a = listener_a.local_addr().unwrap();
-        drop(listener_a);
-
-        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr_b = listener_b.local_addr().unwrap();
-        drop(listener_b);
-
-        let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "agent-b".to_string(),
-            pubkey: pubkey_b,
-            addr: format!("tcp://{addr_b}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
-
-        let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "agent-a".to_string(),
-            pubkey: pubkey_a,
-            addr: format!("tcp://{addr_a}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
-
-        let config_a = CommsManagerConfig::with_keypair(keypair_a)
-            .trusted_peers(trusted_for_a.clone())
-            .comms_config(CommsConfig::default());
-        let comms_manager_a = CommsManager::new(config_a).unwrap();
-
-        let config_b = CommsManagerConfig::with_keypair(keypair_b)
-            .trusted_peers(trusted_for_b.clone())
-            .comms_config(CommsConfig::default());
-        let comms_manager_b = CommsManager::new(config_b).unwrap();
-
-        let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
-        let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
-
-        let handle_a = spawn_tcp_listener(
-            &addr_a.to_string(),
-            comms_manager_a.keypair_arc(),
-            trusted_a_shared.clone(),
-            comms_manager_a.inbox_sender().clone(),
-        )
-        .await
-        .expect("Failed to start listener A");
-
-        let handle_b = spawn_tcp_listener(
-            &addr_b.to_string(),
-            comms_manager_b.keypair_arc(),
-            trusted_b_shared.clone(),
-            comms_manager_b.inbox_sender().clone(),
-        )
-        .await
-        .expect("Failed to start listener B");
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let llm_client_a = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
-        let llm_adapter_a = Arc::new(LlmClientAdapter::new(llm_client_a, smoke_model()));
-
-        let llm_client_b = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
-        let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, smoke_model()));
-
-        let tools_a = Arc::new(CommsToolDispatcher::new(
-            comms_manager_a.router().clone(),
-            comms_manager_a.router().trusted_peers_view(),
-        ));
-
-        let tools_b = Arc::new(CommsToolDispatcher::new(
-            comms_manager_b.router().clone(),
-            comms_manager_b.router().trusted_peers_view(),
-        ));
-
-        let (_store_a, store_adapter_a, temp_dir_a) = create_temp_store().await;
-        let (_store_b, store_adapter_b, temp_dir_b) = create_temp_store().await;
-
-        let agent_a_inner = AgentBuilder::new()
-            .model(smoke_model())
-            .max_tokens_per_turn(1024)
-            .system_prompt(
-                "You are Agent A. Use the comms tools `send` and `peers`. \
-                 To message agent-b, call `send` with kind `peer_message`.",
-            )
-            .build(llm_adapter_a, tools_a, store_adapter_a)
-            .await
-            .expect("public builder build");
-
-        let agent_b_inner = AgentBuilder::new()
-            .model(smoke_model())
-            .max_tokens_per_turn(1024)
-            .system_prompt(
-                "You are Agent B. You can receive messages from agent-a. \
-                 Acknowledge any messages you receive.",
-            )
-            .build(llm_adapter_b, tools_b, store_adapter_b)
-            .await
-            .expect("public builder build");
-
-        let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
-        let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
-
-        (agent_a, agent_b, handle_a, handle_b, temp_dir_a, temp_dir_b)
-    }
-
-    #[tokio::test]
-    #[ignore = "lane:e2e-smoke"]
-    async fn e2e_smoke_comms_exchange() {
-        let Some(api_key) = anthropic_api_key() else {
-            eprintln!("Skipping scenario 8: missing ANTHROPIC_API_KEY");
-            return;
-        };
-
-        let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
-            create_agent_pair(&api_key).await;
-
-        // Agent A sends a message to Agent B via comms tools.
-        let result_a = agent_a
-            .run(
-                "Use the send_message tool (handling_mode='steer') to send a message to agent-b with body \
-                 exactly: Smoke test ping from Agent A"
-                    .into(),
-            )
-            .await
-            .expect("Agent A run should succeed");
-        eprintln!(
-            "[scenario 8] Agent A: tool_calls={}, text={}",
-            result_a.tool_calls,
-            result_a.text.trim()
-        );
-        assert!(
-            result_a.tool_calls > 0,
-            "Agent A should make at least one comms tool call"
-        );
-
-        // Give time for message delivery
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        // Agent B processes the incoming message
-        let result_b = agent_b
-            .run("Process your inbox and acknowledge what Agent A sent.".into())
-            .await
-            .expect("Agent B inbox processing should succeed");
-
-        eprintln!("[scenario 8] Agent B: text={}", result_b.text.trim());
-        let text_b_lower = result_b.text.to_lowercase();
-        assert!(
-            text_b_lower.contains("agent a")
-                || text_b_lower.contains("ping")
-                || text_b_lower.contains("smoke")
-                || text_b_lower.contains("message")
-                || text_b_lower.contains("received"),
-            "Agent B should acknowledge the message: {}",
-            result_b.text
-        );
-
-        handle_a.abort();
-        handle_b.abort();
-    }
-}
-
-// ============================================================================
 // SCENARIO 9: Session service lifecycle (EphemeralSessionService)
 // ============================================================================
 
@@ -1154,12 +950,12 @@ mod scenario_09_session_service {
             prompt: "Hello, I am testing the session service."
                 .to_string()
                 .into(),
-            render_metadata: None,
-            system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
+            system_prompt: meerkat::SystemPromptOverride::Set(
+                "You are a helpful assistant. Be brief.".to_string(),
+            ),
             max_tokens: Some(256),
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,
@@ -1440,7 +1236,7 @@ mod scenario_19_multi_turn_context {
         let config = Config::default();
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant. Remember all facts the user tells you. Be brief."
                 .to_string(),
         );
@@ -1648,7 +1444,7 @@ mod scenario_22_runtime_host_comms {
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
@@ -1720,13 +1516,12 @@ mod scenario_22_runtime_host_comms {
             );
 
             Ok(CoreApplyOutput::with_run_result(
-                RunBoundaryReceipt {
+                RunBoundaryReceiptDraft {
                     run_id: _run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 result,
@@ -1783,13 +1578,11 @@ mod scenario_22_runtime_host_comms {
             prompt: "You are Agent A. Acknowledge peer messages briefly."
                 .to_string()
                 .into(),
-            render_metadata: None,
-            system_prompt: Some(
+            system_prompt: meerkat::SystemPromptOverride::Set(
                 "You are Agent A. When you receive a message, acknowledge it.".to_string(),
             ),
             max_tokens: Some(256),
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build_a),
@@ -1811,7 +1604,10 @@ mod scenario_22_runtime_host_comms {
             session_id: sid_a.clone(),
             turn_count: turn_count.clone(),
         });
-        runtime_adapter.register_session(sid_a.clone()).await;
+        runtime_adapter
+            .register_session(sid_a.clone())
+            .await
+            .expect("register session");
         runtime_adapter
             .register_session_with_executor(sid_a.clone(), executor)
             .await
@@ -1822,10 +1618,15 @@ mod scenario_22_runtime_host_comms {
             "You are Agent A. Wait for messages.".to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(60),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
-                    }),
+                    keep_alive: Some(
+                        meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(60),
+                                policy:
+                                    meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
+                            },
+                        ),
+                    ),
                     ..Default::default()
                 },
             ),
@@ -1845,7 +1646,8 @@ mod scenario_22_runtime_host_comms {
         // Spawn comms drain for A — THE path under test
         runtime_adapter
             .update_peer_ingress_context(&sid_a, true, Some(comms_a))
-            .await;
+            .await
+            .expect("comms drain spawn must succeed");
         eprintln!("[scenario 22] Comms drain spawned for A");
 
         // --- Inject message into A's inbox programmatically ---
@@ -2012,7 +1814,19 @@ mod scenario_23_web_search_default_on {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let mut build = AgentBuildConfig::new(smoke_model());
-        build.provider_params = Some(serde_json::json!({"web_search": null}));
+        build.provider_params = Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::Value::Null,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        });
         let mut agent = factory
             .build_agent(build, &config)
             .await

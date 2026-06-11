@@ -8,6 +8,8 @@ Contract version: 0.7.0-alpha.0
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
+from .errors import MeerkatError
+
 
 CONTRACT_VERSION = "0.7.0-alpha.0"
 
@@ -45,14 +47,6 @@ class WireProviderMeta:
 
 
 @dataclass
-class WireToolCall:
-    """Legacy assistant tool call."""
-    id: str = ''
-    name: str = ''
-    args: Optional[Any] = None
-
-
-@dataclass
 class WireToolResult:
     """Tool result transcript item."""
     tool_use_id: str = ''
@@ -68,7 +62,6 @@ class WireSessionMessage:
     kind: Optional[str] = None
     body: Optional[str] = None
     content: Optional[WireContentInput] = None
-    tool_calls: Optional[list[WireToolCall]] = None
     stop_reason: Optional[WireStopReason] = None
     blocks: Optional[list[WireAssistantBlock]] = None
     results: Optional[list[WireToolResult]] = None
@@ -124,6 +117,67 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_refs: list[dict[str, str]] = field(default_factory=list)
+
+
+
+def _wire_parse_error(context: str, message: str) -> MeerkatError:
+    """INVALID_RESPONSE error for the generated fail-closed wire parsers (K21)."""
+    return MeerkatError("INVALID_RESPONSE", f"invalid {context}: {message}")
+
+
+def _expect_wire_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _wire_parse_error(context, "expected object")
+    return value
+
+
+def _require_wire_field(data: dict[str, Any], key: str, context: str) -> Any:
+    if data.get(key) is None:
+        raise _wire_parse_error(context, f"missing required field `{key}`")
+    return data[key]
+
+
+def _expect_wire_str(value: Any, context: str) -> str:
+    if not isinstance(value, str):
+        raise _wire_parse_error(context, "expected string")
+    return value
+
+
+def _expect_wire_bool(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise _wire_parse_error(context, "expected boolean")
+    return value
+
+
+def _expect_wire_int(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _wire_parse_error(context, "expected integer")
+    return value
+
+
+def _expect_wire_number(value: Any, context: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _wire_parse_error(context, "expected number")
+    return float(value)
+
+
+def _expect_wire_list(value: Any, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise _wire_parse_error(context, "expected array")
+    return value
+
+
+def _expect_wire_enum(value: Any, values: tuple[str, ...], context: str) -> Any:
+    if not isinstance(value, str) or value not in values:
+        raise _wire_parse_error(context, f"expected one of {list(values)}")
+    return value
+
+
+def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
+    if value != expected:
+        raise _wire_parse_error(context, f"expected constant `{expected}`")
+    return value
+
 
 
 @dataclass
@@ -196,6 +250,154 @@ class McpLiveOpResponse:
     applied_at_turn: Optional[int] = None
     server_name: Optional[str] = None
 
+
+# Canonical skill slug (lowercase, dash-separated).
+SkillName = str
+
+# Where a skill was discovered.
+SkillScope = Literal['builtin', 'project', 'user']
+
+# Source lifecycle status in the identity registry.
+SourceIdentityStatus = Literal['active', 'disabled', 'retired']
+
+# Source transport class used for identity governance.
+SourceTransportKind = Literal['embedded', 'filesystem', 'git', 'http', 'stdio']
+
+# Canonical source identifier.
+SourceUuid = str
+
+# Canonical typed name for an LLM-callable tool.
+#
+# The model-facing wire shape is still the provider's string tool name, but
+# internal policy, routing, and registry surfaces carry this handle so raw
+# strings do not become the tool identity owner.
+ToolName = str
+
+@dataclass
+class SkillEntry:
+    """Wire representation of a skill entry (for list responses)."""
+    description: str
+    is_active: bool
+    key: SkillKey
+    name: str
+    scope: SkillScope
+    source: SkillSourceProvenance
+    shadowed_by: Optional[SkillSourceProvenance] = None
+
+
+@dataclass
+class SkillKey:
+    """Canonical runtime identity for a skill.
+
+This is the single identity carried across every surface — the wire parses
+directly into this struct, tools receive this struct, the registry stores
+this struct. There is no slash-delimited string path form."""
+    skill_name: SkillName
+    source_uuid: SourceUuid
+
+
+@dataclass
+class SkillSourceProvenance:
+    """Typed source provenance for a skill entry. `display_name` is presentation
+metadata only; `source_uuid` is the stable identity."""
+    display_name: str
+    fingerprint: str
+    source_uuid: SourceUuid
+    transport_kind: SourceTransportKind
+    status: Optional[SourceIdentityStatus] = None
+
+
+@dataclass
+class ConfigEnvelope:
+    """Wire envelope returned by config APIs across surfaces."""
+    config: Any
+    generation: int
+    backend: Optional[str] = None
+    instance_id: Optional[str] = None
+    realm_id: Optional[str] = None
+    resolved_paths: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class ConfigPatchParams:
+    """Parameters for the RPC `config/patch` method — RFC-7386 merge-patch
+(bare patch or wrapped with an optimistic-concurrency generation)."""
+    expected_generation: Optional[int] = None
+    patch: Optional[Any] = None
+
+
+@dataclass
+class ConfigWriteResult:
+    """Result of a `config/set` or `config/patch` write.
+
+`cfg`-gated off wasm32 alongside `meerkat_core::config_runtime`, which
+owns the embedded envelope (the browser runtime serves no config writes)."""
+    config: Any
+    generation: int
+    backend: Optional[str] = None
+    instance_id: Optional[str] = None
+    live_propagation: Optional[dict[str, Any]] = None
+    realm_id: Optional[str] = None
+    resolved_paths: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class InterruptResult:
+    """Shared interrupt result wire contract (REST and RPC)."""
+    interrupted: bool
+    result: Literal['interrupted', 'staged_noop']
+    session_id: str
+
+
+@dataclass
+class ServerCapabilities:
+    """Capabilities returned by the RPC server during `initialize`."""
+    contract_version: str
+    methods: list[str]
+    server_info: dict[str, Any]
+
+
+@dataclass
+class SkillListResponse:
+    """Wire response for listing skills with introspection data."""
+    skills: list[SkillEntry]
+
+
+@dataclass
+class WorkEventsResult:
+    """Result envelope for work-event list reads (`workgraph/events`)."""
+    events: list[Any]
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEventsResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEventsResult')
+        return cls(
+            events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events')),
+        )
+
+
+@dataclass
+class WorkItemsResult:
+    """Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`)."""
+    items: list[Any]
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemsResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemsResult')
+        return cls(
+            items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items')),
+        )
+
+
+# Parameters for the RPC `config/set` method — replace the config (bare
+# config or wrapped with an optimistic-concurrency generation).
+ConfigSetParams = dict[str, Any] | Any
 
 @dataclass
 class MobWireParams:
@@ -364,7 +566,6 @@ without leaking bridge-internal fields."""
     member_ref: WireMemberRef
     role: str
     runtime_mode: WireMobRuntimeMode
-    state: WireMemberState
     status: WireMobMemberStatus
     error: Optional[str] = None
     labels: Optional[dict[str, str]] = None
@@ -389,15 +590,80 @@ class WireMobToolConfig:
 class WireMobProfile:
     """Profile override for `mob/spawn`."""
     model: str
+    auto_compact_threshold: Optional[int] = None
     backend: Optional[WireMobBackendKind] = None
     external_addressable: Optional[bool] = None
+    image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
+    provider: Optional[Provider] = None
     provider_params: Optional[Any] = None
+    resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    self_hosted_server_id: Optional[str] = None
     skills: Optional[list[str]] = None
     tools: Optional[WireMobToolConfig] = None
+
+
+@dataclass
+class WireMobRun:
+    """Typed public projection of a single flow run for `mob/flow_status`.
+
+The canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,
+`status`) are typed; the remaining kernel-owned step/loop projection rides
+along as the `kernel` map. Producers project a domain `MobRun` into this
+shape so consumers never re-derive run identity or lifecycle from a free
+`serde_json::Value`."""
+    flow_id: str
+    mob_id: str
+    run_id: str
+    status: Literal['pending', 'running', 'completed', 'failed', 'canceled']
+
+
+@dataclass
+class WireMobRunStatus:
+    """Lifecycle status of a flow run on the wire. Mirrors
+`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
+re-deriving meaning from a free-form status string."""
+
+
+@dataclass
+class WirePeerConnectivity:
+    """Tri-state peer-connectivity projection for `mob/member_status`.
+
+Distinguishes "connectivity is not applicable to this member" (no bridge
+session backs the member) from "the live probe timed out" (the answer is
+transiently unknown) from a resolved connectivity snapshot. The legacy
+`Option<MobPeerConnectivitySnapshot>` projection collapsed both the
+not-applicable and timed-out cases into `None`, laundering a transient
+probe fault into the same shape as a structurally-absent binding."""
+
+
+@dataclass
+class WirePeerConnectivitySnapshot:
+    """Live connectivity summary for a member's currently wired peers. Mirrors
+`meerkat_mob::MobPeerConnectivitySnapshot`."""
+    reachable_peer_count: int
+    unknown_peer_count: int
+    unreachable_peers: Optional[list[dict[str, Any]]] = None
+
+
+@dataclass
+class WireUnreachablePeer:
+    """One currently wired peer that is known to be unreachable."""
+    peer: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class WireMobError:
+    """Typed mob error projection for wire surfaces. Carries the closed failure
+class alongside the human-readable message so consumers branch on the typed
+`code` rather than parsing the free-form `message`. Reuses
+[`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary."""
+    code: MobSpawnManyFailureCause
+    message: str
 
 
 @dataclass
@@ -612,8 +878,10 @@ class MobFlowStatusParams:
 
 @dataclass
 class MobFlowStatusResult:
-    """Response payload for `mob/flow_status`."""
-    run: Any
+    """Response payload for `mob/flow_status`.
+
+`run` is `None` when the requested run id has no persisted run."""
+    run: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -673,10 +941,10 @@ class MobTurnStartParams:
     """Request payload for `mob/turn_start`.
 
 `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
-(`provider_params` + `clear_provider_params: bool`) is still accepted at the
-serde boundary and folded into the tri-state, rejecting a `set + clear`
-payload there."""
+tri-state via [`WireTurnMetadataOverride`]; unknown fields (including the
+retired `clear_*` split wire form) fail closed at the serde boundary via
+`deny_unknown_fields`, which also keeps the emitted JSON Schema's
+`additionalProperties: false` aligned with the deserializer."""
     agent_identity: str
     mob_id: str
     prompt: WireContentInput
@@ -689,7 +957,7 @@ payload there."""
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
     provider_params: Optional[dict[str, Any]] = None
-    skill_refs: Optional[list[dict[str, Any]]] = None
+    skill_refs: Optional[list[SkillKey]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
 
@@ -698,6 +966,7 @@ payload there."""
 class MobMemberStatusResult:
     """Response payload for `mob/member_status`."""
     is_final: bool
+    member_ref: WireMemberRef
     status: WireMobMemberStatus
     tokens_used: int
     current_session_id: Optional[str] = None
@@ -705,7 +974,7 @@ class MobMemberStatusResult:
     external_member: Optional[Any] = None
     kickoff: Optional[Any] = None
     output_preview: Optional[str] = None
-    peer_connectivity: Optional[Any] = None
+    peer_connectivity: Optional[dict[str, Any]] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
@@ -822,7 +1091,7 @@ class MobProfileLookupResult:
     name: str
     created_at: Optional[str] = None
     not_found: Optional[bool] = None
-    profile: Optional[Any] = None
+    profile: Optional[WireMobProfile] = None
     revision: Optional[int] = None
     updated_at: Optional[str] = None
 
@@ -886,8 +1155,8 @@ class MobStreamCloseResult:
 @dataclass
 class PublicTurnToolOverlay:
     """Public caller-safe per-turn tool overlay."""
-    allowed_tools: Optional[list[str]] = None
-    blocked_tools: Optional[list[str]] = None
+    allowed_tools: Optional[list[ToolName]] = None
+    blocked_tools: Optional[list[ToolName]] = None
 
 
 @dataclass
@@ -905,7 +1174,9 @@ Not `Eq`: `profiles` transitively carries float provider params."""
     backend: Optional[MobBackendConfigInput] = None
     event_router: Optional[MobEventRouterConfigInput] = None
     flows: Optional[dict[str, MobFlowSpecInput]] = None
+    image_generation_provider: Optional[Provider] = None
     limits: Optional[MobLimitsSpecInput] = None
+    models: Optional[dict[str, CustomModelConfig]] = None
     orchestrator: Optional[MobOrchestratorInput] = None
     skills: Optional[dict[str, MobSkillSourceInput]] = None
     spawn_policy: Optional[MobSpawnPolicyInput] = None
@@ -990,13 +1261,18 @@ class MobOrchestratorInput:
 class MobProfileInput:
     """Request payload for MobProfileInput."""
     model: str
+    auto_compact_threshold: Optional[int] = None
     backend: Optional[WireMobBackendKind] = None
     external_addressable: Optional[bool] = None
+    image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
+    provider: Optional[Provider] = None
     provider_params: Optional[Any] = None
+    resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    self_hosted_server_id: Optional[str] = None
     skills: Optional[list[str]] = None
     tools: Optional[MobToolConfigInput] = None
 
@@ -1013,6 +1289,7 @@ class MobSupervisorSpecInput:
     """Request payload for MobSupervisorSpecInput."""
     escalation_threshold: int
     role: str
+    escalation_turn_timeout_ms: Optional[int] = None
 
 
 @dataclass
@@ -1049,6 +1326,26 @@ class MobWiringRulesInput:
     """Request payload for MobWiringRulesInput."""
     auto_wire_orchestrator: Optional[bool] = None
     role_wiring: Optional[list[MobRoleWiringRuleInput]] = None
+
+
+@dataclass
+class CustomModelConfig:
+    """User-defined model registry entry (`[models.<id>]` in `config.toml` or a
+mob definition).
+
+Declares an uncatalogued model that an API provider serves so a single
+definition feeds provider inference, compaction scaling, capability gates,
+and call timeouts through the effective [`crate::ModelRegistry`].
+
+Capability flags are conservative when omitted: an undeclared capability is
+treated as absent rather than guessed from the model name."""
+    provider: Provider
+    call_timeout_secs: Optional[int] = None
+    context_window: Optional[int] = None
+    display_name: Optional[str] = None
+    max_output_tokens: Optional[int] = None
+    vision: Optional[bool] = None
+    web_search: Optional[bool] = None
 
 
 @dataclass
@@ -1093,7 +1390,7 @@ class MobReconcileReportWire:
 class MobReconcileFailureWire:
     """Per-identity failure in a `mob/reconcile` pass."""
     agent_identity: str
-    error: str
+    error: WireMobError
     stage: WireMobReconcileStage
 
 
@@ -1140,12 +1437,33 @@ class AttentionListResult:
     """Wire payload for AttentionListResult."""
     attention: list[WorkAttentionBinding]
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "AttentionListResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'AttentionListResult')
+        return cls(
+            attention=[WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'attention', 'AttentionListResult'), 'AttentionListResult.attention')],
+        )
+
 
 @dataclass
 class AttentionProjectionPolicy:
     """Wire payload for AttentionProjectionPolicy."""
     include_parent_context: Optional[bool] = None
     max_text_chars: Optional[int] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "AttentionProjectionPolicy":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'AttentionProjectionPolicy')
+        return cls(
+            include_parent_context=(_expect_wire_bool(data['include_parent_context'], 'AttentionProjectionPolicy.include_parent_context') if data.get('include_parent_context') is not None else None),
+            max_text_chars=(_expect_wire_int(data['max_text_chars'], 'AttentionProjectionPolicy.max_text_chars') if data.get('max_text_chars') is not None else None),
+        )
 
 
 @dataclass
@@ -1193,6 +1511,17 @@ class GoalStatusResult:
     attention: WorkAttentionBinding
     item: WorkItem
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "GoalStatusResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'GoalStatusResult')
+        return cls(
+            attention=WorkAttentionBinding.from_wire(_require_wire_field(data, 'attention', 'GoalStatusResult')),
+            item=WorkItem.from_wire(_require_wire_field(data, 'item', 'GoalStatusResult')),
+        )
+
 
 @dataclass
 class ProjectedAttentionAuthority:
@@ -1212,6 +1541,15 @@ class ProjectedAttentionAuthority:
 
 
 @dataclass
+class ReadyWorkFilter:
+    """Request payload for ReadyWorkFilter."""
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
 class WorkAttentionBinding:
     """Wire payload for WorkAttentionBinding."""
     binding_id: str
@@ -1225,11 +1563,125 @@ class WorkAttentionBinding:
     machine_state: Optional[dict[str, Any]] = None
     projection_policy: Optional[AttentionProjectionPolicy] = None
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkAttentionBinding":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkAttentionBinding')
+        return cls(
+            binding_id=_expect_wire_str(_require_wire_field(data, 'binding_id', 'WorkAttentionBinding'), 'WorkAttentionBinding.binding_id'),
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkAttentionBinding'), 'WorkAttentionBinding.created_at'),
+            delegated_authority=parse_attention_delegated_authority(_require_wire_field(data, 'delegated_authority', 'WorkAttentionBinding')),
+            machine_state=(_expect_wire_object(data['machine_state'], 'WorkAttentionBinding.machine_state') if data.get('machine_state') is not None else None),
+            mode=parse_work_attention_mode(_require_wire_field(data, 'mode', 'WorkAttentionBinding')),
+            projection_policy=(AttentionProjectionPolicy.from_wire(data['projection_policy']) if data.get('projection_policy') is not None else None),
+            status=parse_work_attention_status(_require_wire_field(data, 'status', 'WorkAttentionBinding')),
+            target=parse_work_attention_target(_require_wire_field(data, 'target', 'WorkAttentionBinding')),
+            updated_at=_expect_wire_str(_require_wire_field(data, 'updated_at', 'WorkAttentionBinding'), 'WorkAttentionBinding.updated_at'),
+            work_ref=WorkItemRef.from_wire(_require_wire_field(data, 'work_ref', 'WorkAttentionBinding')),
+        )
+
+
+@dataclass
+class WorkGraphEventFilter:
+    """Request payload for WorkGraphEventFilter."""
+    after_seq: Optional[int] = None
+    all_namespaces: Optional[bool] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class WorkGraphEventsResponse:
+    """Wire payload for WorkGraphEventsResponse."""
+    events: list[WorkGraphEvent]
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphEventsResponse":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphEventsResponse')
+        return cls(
+            events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events')],
+        )
+
+
+@dataclass
+class WorkGraphIdParams:
+    """Parameters identifying a single WorkGraph item by id within an optional
+realm/namespace scope (`workgraph/get`)."""
+    id: str
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class WorkGraphItemsResponse:
+    """Wire payload for WorkGraphItemsResponse."""
+    items: list[WorkItem]
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphItemsResponse":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphItemsResponse')
+        return cls(
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items')],
+        )
+
+
+@dataclass
+class WorkGraphSnapshot:
+    """Wire payload for WorkGraphSnapshot."""
+    all_namespaces: bool
+    captured_at: str
+    edges: list[WorkEdge]
+    items: list[WorkItem]
+    ready_item_ids: list[str]
+    realm_id: str
+    attention: Optional[list[WorkAttentionBinding]] = None
+    event_high_water_mark: Optional[int] = None
+    namespace: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphSnapshot":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphSnapshot')
+        return cls(
+            all_namespaces=_expect_wire_bool(_require_wire_field(data, 'all_namespaces', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.all_namespaces'),
+            attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention')] if data.get('attention') is not None else None),
+            captured_at=_expect_wire_str(_require_wire_field(data, 'captured_at', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.captured_at'),
+            edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges')],
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items')],
+            namespace=(_expect_wire_str(data['namespace'], 'WorkGraphSnapshot.namespace') if data.get('namespace') is not None else None),
+            ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids')],
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.realm_id'),
+        )
+
+
+@dataclass
+class WorkGraphSnapshotFilter:
+    """Request payload for WorkGraphSnapshotFilter."""
+    all_namespaces: Optional[bool] = None
+    include_terminal: Optional[bool] = None
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    statuses: Optional[list[WorkStatus]] = None
+
 
 @dataclass
 class WorkItem:
     """Wire payload for WorkItem."""
-    completion_policy: dict[str, Any]
+    completion_policy: WorkCompletionPolicy
     created_at: str
     id: str
     machine_state: dict[str, Any]
@@ -1240,16 +1692,58 @@ class WorkItem:
     status: Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']
     title: str
     updated_at: str
-    claim: Optional[dict[str, Any]] = None
+    claim: Optional[WorkItemClaim] = None
     description: Optional[str] = None
     due_at: Optional[str] = None
-    evidence_refs: Optional[list[dict[str, Any]]] = None
-    external_refs: Optional[list[dict[str, Any]]] = None
+    evidence_refs: Optional[list[WorkEvidenceRef]] = None
+    external_refs: Optional[list[WorkItemExternalRef]] = None
     labels: Optional[list[str]] = None
     not_before: Optional[str] = None
-    owner: Optional[dict[str, Any]] = None
+    owner: Optional[WorkItemOwner] = None
     snoozed_until: Optional[str] = None
     terminal_at: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItem":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItem')
+        return cls(
+            claim=(WorkItemClaim.from_wire(data['claim']) if data.get('claim') is not None else None),
+            completion_policy=parse_work_completion_policy(_require_wire_field(data, 'completion_policy', 'WorkItem')),
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkItem'), 'WorkItem.created_at'),
+            description=(_expect_wire_str(data['description'], 'WorkItem.description') if data.get('description') is not None else None),
+            due_at=(_expect_wire_str(data['due_at'], 'WorkItem.due_at') if data.get('due_at') is not None else None),
+            evidence_refs=([WorkEvidenceRef.from_wire(_item) for _item in _expect_wire_list(data['evidence_refs'], 'WorkItem.evidence_refs')] if data.get('evidence_refs') is not None else None),
+            external_refs=([WorkItemExternalRef.from_wire(_item) for _item in _expect_wire_list(data['external_refs'], 'WorkItem.external_refs')] if data.get('external_refs') is not None else None),
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItem'), 'WorkItem.id'),
+            labels=([_expect_wire_str(_item, 'WorkItem.labels[]') for _item in _expect_wire_list(data['labels'], 'WorkItem.labels')] if data.get('labels') is not None else None),
+            machine_state=_expect_wire_object(_require_wire_field(data, 'machine_state', 'WorkItem'), 'WorkItem.machine_state'),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkItem'), 'WorkItem.namespace'),
+            not_before=(_expect_wire_str(data['not_before'], 'WorkItem.not_before') if data.get('not_before') is not None else None),
+            owner=(WorkItemOwner.from_wire(data['owner']) if data.get('owner') is not None else None),
+            priority=_expect_wire_enum(_require_wire_field(data, 'priority', 'WorkItem'), ('low', 'medium', 'high',), 'WorkItem.priority'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkItem'), 'WorkItem.realm_id'),
+            revision=_expect_wire_int(_require_wire_field(data, 'revision', 'WorkItem'), 'WorkItem.revision'),
+            snoozed_until=(_expect_wire_str(data['snoozed_until'], 'WorkItem.snoozed_until') if data.get('snoozed_until') is not None else None),
+            status=_expect_wire_enum(_require_wire_field(data, 'status', 'WorkItem'), ('open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed',), 'WorkItem.status'),
+            terminal_at=(_expect_wire_str(data['terminal_at'], 'WorkItem.terminal_at') if data.get('terminal_at') is not None else None),
+            title=_expect_wire_str(_require_wire_field(data, 'title', 'WorkItem'), 'WorkItem.title'),
+            updated_at=_expect_wire_str(_require_wire_field(data, 'updated_at', 'WorkItem'), 'WorkItem.updated_at'),
+        )
+
+
+@dataclass
+class WorkItemFilter:
+    """Request payload for WorkItemFilter."""
+    all_namespaces: Optional[bool] = None
+    include_terminal: Optional[bool] = None
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    statuses: Optional[list[WorkStatus]] = None
 
 
 @dataclass
@@ -1259,16 +1753,97 @@ class WorkItemRef:
     namespace: str
     realm_id: str
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemRef')
+        return cls(
+            item_id=_expect_wire_str(_require_wire_field(data, 'item_id', 'WorkItemRef'), 'WorkItemRef.item_id'),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkItemRef'), 'WorkItemRef.namespace'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkItemRef'), 'WorkItemRef.realm_id'),
+        )
+
+
+@dataclass
+class WorkEdge:
+    """Wire payload for WorkEdge."""
+    created_at: str
+    from_id: str
+    kind: WorkEdgeKind
+    namespace: str
+    realm_id: str
+    to_id: str
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEdge":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEdge')
+        return cls(
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkEdge'), 'WorkEdge.created_at'),
+            from_id=_expect_wire_str(_require_wire_field(data, 'from_id', 'WorkEdge'), 'WorkEdge.from_id'),
+            kind=parse_work_edge_kind(_require_wire_field(data, 'kind', 'WorkEdge')),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkEdge'), 'WorkEdge.namespace'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkEdge'), 'WorkEdge.realm_id'),
+            to_id=_expect_wire_str(_require_wire_field(data, 'to_id', 'WorkEdge'), 'WorkEdge.to_id'),
+        )
+
 
 @dataclass
 class WorkEvidenceRef:
     """Wire payload for WorkEvidenceRef."""
     id: str
     kind: str
-    confirmation_kind: Optional[Any] = None
+    confirmation_kind: Optional[WorkEvidenceKind] = None
     confirming_owner_key: Optional[WorkOwnerKey] = None
     label: Optional[str] = None
     summary: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEvidenceRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEvidenceRef')
+        return cls(
+            confirmation_kind=(parse_work_evidence_kind(data['confirmation_kind']) if data.get('confirmation_kind') is not None else None),
+            confirming_owner_key=(WorkOwnerKey.from_wire(data['confirming_owner_key']) if data.get('confirming_owner_key') is not None else None),
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkEvidenceRef'), 'WorkEvidenceRef.id'),
+            kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkEvidenceRef'), 'WorkEvidenceRef.kind'),
+            label=(_expect_wire_str(data['label'], 'WorkEvidenceRef.label') if data.get('label') is not None else None),
+            summary=(_expect_wire_str(data['summary'], 'WorkEvidenceRef.summary') if data.get('summary') is not None else None),
+        )
+
+
+@dataclass
+class WorkGraphEvent:
+    """Wire payload for WorkGraphEvent."""
+    at: str
+    kind: WorkGraphEventKind
+    namespace: str
+    realm_id: str
+    item_id: Optional[str] = None
+    payload: Optional[Any] = None
+    seq: Optional[int] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphEvent":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphEvent')
+        return cls(
+            at=_expect_wire_str(_require_wire_field(data, 'at', 'WorkGraphEvent'), 'WorkGraphEvent.at'),
+            item_id=(_expect_wire_str(data['item_id'], 'WorkGraphEvent.item_id') if data.get('item_id') is not None else None),
+            kind=parse_work_graph_event_kind(_require_wire_field(data, 'kind', 'WorkGraphEvent')),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkGraphEvent'), 'WorkGraphEvent.namespace'),
+            payload=data.get('payload'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphEvent'), 'WorkGraphEvent.realm_id'),
+            seq=(_expect_wire_int(data['seq'], 'WorkGraphEvent.seq') if data.get('seq') is not None else None),
+        )
 
 
 @dataclass
@@ -1276,6 +1851,75 @@ class WorkOwnerKey:
     """Wire payload for WorkOwnerKey."""
     id: str
     kind: WorkOwnerKind
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkOwnerKey":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkOwnerKey')
+        return cls(
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkOwnerKey'), 'WorkOwnerKey.id'),
+            kind=parse_work_owner_kind(_require_wire_field(data, 'kind', 'WorkOwnerKey')),
+        )
+
+
+@dataclass
+class WorkItemClaim:
+    """Promoted inline object type WorkItemClaim."""
+    claimed_at: str
+    owner: WorkItemOwner
+    lease_expires_at: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemClaim":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemClaim')
+        return cls(
+            claimed_at=_expect_wire_str(_require_wire_field(data, 'claimed_at', 'WorkItemClaim'), 'WorkItemClaim.claimed_at'),
+            lease_expires_at=(_expect_wire_str(data['lease_expires_at'], 'WorkItemClaim.lease_expires_at') if data.get('lease_expires_at') is not None else None),
+            owner=WorkItemOwner.from_wire(_require_wire_field(data, 'owner', 'WorkItemClaim')),
+        )
+
+
+@dataclass
+class WorkItemExternalRef:
+    """Promoted inline object type WorkItemExternalRef."""
+    id: str
+    kind: str
+    url: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemExternalRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemExternalRef')
+        return cls(
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItemExternalRef'), 'WorkItemExternalRef.id'),
+            kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkItemExternalRef'), 'WorkItemExternalRef.kind'),
+            url=(_expect_wire_str(data['url'], 'WorkItemExternalRef.url') if data.get('url') is not None else None),
+        )
+
+
+@dataclass
+class WorkItemOwner:
+    """Promoted inline object type WorkItemOwner."""
+    key: WorkOwnerKey
+    display_name: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemOwner":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemOwner')
+        return cls(
+            display_name=(_expect_wire_str(data['display_name'], 'WorkItemOwner.display_name') if data.get('display_name') is not None else None),
+            key=WorkOwnerKey.from_wire(_require_wire_field(data, 'key', 'WorkItemOwner')),
+        )
 
 
 @dataclass
@@ -1320,15 +1964,6 @@ class BridgeCapabilities:
 
 
 @dataclass
-class BridgeDeliveryCompletion:
-    """Request payload for BridgeDeliveryCompletion."""
-    session_id: str
-    text: str
-    tool_calls: int
-    turns: int
-
-
-@dataclass
 class BridgeDeliveryPayload:
     """Deliver one logical input to a member."""
     content: ContentInput
@@ -1341,11 +1976,20 @@ class BridgeDeliveryPayload:
 
 @dataclass
 class BridgeDeliveryResponse:
-    """Full response to a delivery command."""
+    """Full response to a delivery command.
+
+The bridge delivery wire contract advertises only the accept-boundary
+outcome (`outcome`) and the canonical input id. There is deliberately no
+turn-completion payload here: a `DeliverMemberInput` command acknowledges
+admission of one logical input, not the eventual turn result. Turn
+completion is observed through the runtime completion seam
+(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this
+delivery acknowledgement — advertising a completion field that every
+producer fills with `None` was pure schema theater and has been removed
+so the wire shape matches what is actually delivered."""
     input_id: str
     outcome: BridgeDeliveryOutcome
     canonical_input_id: Optional[str] = None
-    completion: Optional[BridgeDeliveryCompletion] = None
 
 
 @dataclass
@@ -1894,10 +2538,8 @@ realtime adapter today)."""
 # value and fail closed for values outside the generated contract they were
 # built with.
 #
-# Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
-# place this typed status alongside the back-compat `refresh_enqueued`
-# boolean as ordinary sibling fields, which keeps SDK codegen on the
-# simple-struct path.
+# Serializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps
+# SDK codegen on the simple-struct path.
 LiveRefreshStatus = Literal['queued']
 
 @dataclass
@@ -1905,14 +2547,11 @@ class LiveRefreshResult:
     """Response payload for `live/refresh`.
 
 R4-5 (P3): replaces the previous untyped `{"refresh_enqueued": true}`
-JSON blob. The boolean `refresh_enqueued` field is preserved for back-
-compat (legacy clients that pattern-match on it stay on the green path)
-alongside the typed `status` discriminator. New code should route on
+JSON blob with the typed `status` discriminator. Clients route on
 `status`.
 
 See [`LiveRefreshStatus`] for the variant set and the contract on
 asynchronous adapter-pump application."""
-    refresh_enqueued: bool
     status: Literal['queued']
 
 
@@ -1927,10 +2566,68 @@ LiveCloseStatus = Literal['closed']
 class LiveCloseResult:
     """Response payload for `live/close`.
 
-The boolean `closed` field is preserved for back-compat alongside the typed
-`status` discriminator. New code should route on `status`."""
-    closed: bool
+Clients route on the typed `status` discriminator."""
     status: Literal['closed']
+
+
+# Typed public result class for `live/send_input`.
+#
+# Today generated runtime authority emits only `Sent`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveSendInputStatus = Literal['sent']
+
+@dataclass
+class LiveSendInputResult:
+    """Response payload for `live/send_input`.
+
+Clients route on the typed `status` discriminator."""
+    status: Literal['sent']
+
+
+# Typed public result class for `live/commit_input`.
+#
+# Today generated runtime authority emits only `Committed`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveCommitInputStatus = Literal['committed']
+
+@dataclass
+class LiveCommitInputResult:
+    """Response payload for `live/commit_input`.
+
+Clients route on the typed `status` discriminator."""
+    status: Literal['committed']
+
+
+# Typed public result class for `live/interrupt`.
+#
+# Today generated runtime authority emits only `Interrupted`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveInterruptStatus = Literal['interrupted']
+
+@dataclass
+class LiveInterruptResult:
+    """Response payload for `live/interrupt`.
+
+Clients route on the typed `status` discriminator."""
+    status: Literal['interrupted']
+
+
+# Typed public result class for `live/truncate`.
+#
+# Today generated runtime authority emits only `Truncated`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveTruncateStatus = Literal['truncated']
+
+@dataclass
+class LiveTruncateResult:
+    """Response payload for `live/truncate`.
+
+Clients route on the typed `status` discriminator."""
+    status: Literal['truncated']
 
 
 # A typed, identity-bearing realtime transcript event consumed by the session.
@@ -2410,7 +3107,20 @@ class ProviderCatalog:
 
 @dataclass
 class ModelsCatalogResponse:
-    """Response for `models/catalog` — the compiled-in model catalog."""
+    """Response for `models/catalog` — the resolved model catalog.
+
+This is **not** a pure compiled-in snapshot. Surfaces build it from the
+config-backed `ModelRegistry`, which combines the compiled-in
+`meerkat_core::model_profile` catalog with any config-declared self-hosted aliases
+(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for
+the same binary can therefore differ when the active config declares
+different self-hosted models.
+
+Provider resolution for these entries is exact-catalog-match, not name
+prefix inference: an entry's provider is the one recorded for its catalog
+id (or its self-hosted alias config), never inferred from a `claude-*` /
+`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through
+the registry, not by prefix guessing."""
     contract_version: dict[str, Any]
     providers: list[dict[str, Any]]
 
@@ -2654,7 +3364,7 @@ class WireAuthStatus:
     auth_method: str
     profile_id: str
     provider: str
-    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
@@ -2674,7 +3384,7 @@ binding directly."""
     profile_id: str
     provider: str
     realm_id: str
-    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_refresh_at: Optional[str] = None
@@ -2716,6 +3426,10 @@ class WireAuthErrorRefreshFailed(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['refresh_failed']]
 
+class WireAuthErrorResolveRequired(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['resolve_required']]
+
 class WireAuthErrorInteractiveLoginRequired(TypedDict, total=False):
     kind: Required[Literal['interactive_login_required']]
 
@@ -2730,7 +3444,7 @@ class WireAuthErrorOther(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['other']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):
@@ -2746,13 +3460,25 @@ class WireContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
+class WireContentBlockStructured(TypedDict, total=False):
+    data: Required[Any]
+    type: Required[Literal['structured']]
+
 class WireContentBlockUnknown(TypedDict, total=False):
     type: Required[Literal['unknown']]
 
-WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown
+WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[WireContentBlock]
+
+# Supported LLM providers.
+#
+# `JsonSchema` is derived unconditionally (schemars is a non-optional
+# meerkat-core dependency): config-owned types such as
+# [`crate::config::CustomModelConfig`] embed the typed provider directly and
+# derive their schemas without the `schema` feature.
+Provider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
 
 # Server-resolved opaque handle for a mob member.
 #
@@ -2769,6 +3495,12 @@ WireMemberRef = str
 
 # Mob RPC helper wire type for WireMobBackendKind.
 WireMobBackendKind = Literal['session', 'external']
+
+# Profile fields that win over durable session metadata on resume.
+#
+# Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
+# vocabulary, parsed fail-closed at the wire boundary.
+WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params']
 
 # Runtime binding for spawn requests.
 #
@@ -2844,8 +3576,8 @@ WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyPropor
 # Pre-resolved tool filter inherited by a spawned mob member.
 WireToolFilter = Literal['All'] | dict[str, list[str]]
 
-# Roster member lifecycle state for `MobMemberFilterWire`.
-WireMemberState = Literal['active', 'retiring']
+# Mob RPC helper wire type for WireMemberState.
+WireMemberState = Any
 
 # Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.
 WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unknown']
@@ -3032,8 +3764,30 @@ class WorkCompletionPolicyReviewerQuorum(TypedDict, total=False):
 
 WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum
 
+# WorkGraph RPC helper wire type for WorkEdgeKind.
+WorkEdgeKind = Literal['blocks', 'parent', 'related', 'supersedes', 'derived_from']
+
+# Typed classification of confirmation evidence.
+#
+# This is the canonical signal the `WorkGraphLifecycleMachine` consumes to
+# decide completion-policy satisfaction. The producer
+# (`confirmation_evidence_for_policy`) sets this field; the raw
+# [`WorkEvidenceRef::kind`] string remains only as opaque provenance/display
+# and is never re-read to classify evidence for the satisfaction decision.
+WorkEvidenceKind = Literal['host_confirmation', 'principal_confirmation', 'supervisor_confirmation', 'reviewer_confirmation'] | Literal['self_attest']
+
+# WorkGraph RPC helper wire type for WorkGraphEventKind.
+WorkGraphEventKind = Literal['created', 'updated', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated']
+
 # WorkGraph RPC helper wire type for WorkOwnerKind.
 WorkOwnerKind = Literal['principal', 'agent', 'session', 'mob', 'label']
+
+# WorkGraph RPC helper wire type for WorkStatus.
+WorkStatus = Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']
+
+WorkGraphStatus = Literal["open", "in_progress", "blocked", "completed", "cancelled", "failed"]
+
+WorkGraphPriority = Literal["low", "medium", "high"]
 
 # Shared operation kind for live MCP operations.
 McpLiveOperation = Literal['add', 'remove', 'reload']
@@ -3136,14 +3890,14 @@ WireToolResultContent = str | list[WireContentBlock]
 
 # Wire-safe projection of [`meerkat_core::Provider`].
 #
-# The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
-# transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
-# `"openai"`. `WireProvider` pins the correct wire names with explicit
-# `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
-# `"anthropic"`, `"gemini"`, etc.
-#
-# Includes an `Unknown { debug: String }` variant for future-proofing per
-# the wire-mirror dogma used throughout this module.
+# `WireProvider` pins each provider's canonical wire name with an explicit
+# `#[serde(rename)]` (`"openai"`, `"anthropic"`, `"gemini"`, …). The core
+# `Provider` enum now agrees (its `OpenAI` variant carries an explicit
+# `#[serde(rename = "openai")]` so `rename_all = "snake_case"` can no longer
+# mangle it into `"open_a_i"`); `WireProvider` exists as the dedicated wire
+# mirror so SDK consumers get a stable, explicitly-named contract plus the
+# fail-loud `Unknown` sentinel below, per the wire-mirror dogma used
+# throughout this module.
 WireProvider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other'] | Literal['unknown']
 
 # Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
@@ -3210,8 +3964,8 @@ class WireAssistantBlockToolUse(TypedDict, total=False):
 class WireAssistantBlockServerToolContentData(TypedDict, total=False):
     content: Required[Any]
     id: NotRequired[str]
+    kind: Required[dict[str, Any]]
     meta: NotRequired[dict[str, Any]]
-    name: Required[str]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
@@ -3298,7 +4052,7 @@ class CommsCommandPeerMessage(TypedDict, total=False):
 
 class CommsCommandPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
     params: Required[CommsPeerLifecycleParams]
     to: Required[PeerId]
 
@@ -3500,7 +4254,6 @@ class BridgeReplyObservation(TypedDict, total=False):
 
 class BridgeReplyDelivery(TypedDict, total=False):
     canonical_input_id: NotRequired[str]
-    completion: NotRequired[BridgeDeliveryCompletion]
     input_id: Required[str]
     outcome: Required[BridgeDeliveryOutcome]
     result: Required[Literal['delivery']]
@@ -3535,7 +4288,16 @@ class ContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
-ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo
+class ContentBlockStructured(TypedDict, total=False):
+    data: Required[Any]
+    type: Required[Literal['structured']]
+
+class ContentBlockSkillContext(TypedDict, total=False):
+    skill_key: Required[SkillKey]
+    text: Required[str]
+    type: Required[Literal['skill_context']]
+
+ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #
@@ -3564,7 +4326,7 @@ class CommsSendParamsPeerMessage(TypedDict, total=False):
 
 class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
     params: Required[CommsPeerLifecycleParams]
     session_id: Required[str]
     to: Required[PeerId]
@@ -3623,10 +4385,18 @@ CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent 
 # Closed discriminator carried in [`CommsChecksumTokenResult`].
 CommsChecksumTokenResultIntent = Literal['checksum_token']
 
-# Closed public request-intent contract for `peer_request`.
+# Closed request-intent vocabulary for [`CommsCommandRequest::PeerRequest`].
 #
-# Unknown strings fail during deserialization and cannot fall through to a
-# local match/default path.
+# This is the canonical, core-owned set of intents a public `peer_request`
+# command may carry. Unknown strings fail at the serde deserialization
+# boundary and cannot fall through to a local match or string default — the
+# closed set is enforced structurally, not by a runtime string comparison.
+#
+# The domain envelope [`CommsCommand::PeerRequest`] intentionally keeps a wider
+# open intent space (it also carries mob topology intents such as
+# `mob.peer_added`); this enum is the narrow vocabulary admitted at the public
+# request surface. Surfaces that accept the public comms contract re-import
+# this type so they share the same fail-closed guarantee.
 CommsPeerRequestIntent = Literal['supervisor.bridge', 'checksum_token']
 
 # Typed params for public `peer_request`.
@@ -3680,3 +4450,93 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
+
+
+def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":
+    """Fail-closed wire parser for WorkCompletionPolicy (K21)."""
+    data = _expect_wire_object(value, 'WorkCompletionPolicy')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.kind')
+    if tag == 'self_attest':
+        parsed_self_attest: dict[str, Any] = {'kind': 'self_attest'}
+        return parsed_self_attest
+    if tag == 'host_confirmed':
+        parsed_host_confirmed: dict[str, Any] = {'kind': 'host_confirmed'}
+        return parsed_host_confirmed
+    if tag == 'principal_confirmed':
+        parsed_principal_confirmed: dict[str, Any] = {'kind': 'principal_confirmed'}
+        return parsed_principal_confirmed
+    if tag == 'supervisor':
+        parsed_supervisor: dict[str, Any] = {'kind': 'supervisor'}
+        parsed_supervisor['owner_key'] = WorkOwnerKey.from_wire(_require_wire_field(data, 'owner_key', 'WorkCompletionPolicy'))
+        return parsed_supervisor
+    if tag == 'reviewer_quorum':
+        parsed_reviewer_quorum: dict[str, Any] = {'kind': 'reviewer_quorum'}
+        parsed_reviewer_quorum['threshold'] = _expect_wire_int(_require_wire_field(data, 'threshold', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.reviewer_quorum.threshold')
+        return parsed_reviewer_quorum
+    raise _wire_parse_error('WorkCompletionPolicy', f"unknown `kind` value `{tag}`")
+
+
+def parse_work_edge_kind(value: Any) -> "WorkEdgeKind":
+    """Fail-closed wire parser for WorkEdgeKind (K21)."""
+    return _expect_wire_enum(value, ('blocks', 'parent', 'related', 'supersedes', 'derived_from',), 'WorkEdgeKind')
+
+
+def parse_work_graph_event_kind(value: Any) -> "WorkGraphEventKind":
+    """Fail-closed wire parser for WorkGraphEventKind (K21)."""
+    return _expect_wire_enum(value, ('created', 'updated', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated',), 'WorkGraphEventKind')
+
+
+def parse_work_evidence_kind(value: Any) -> "WorkEvidenceKind":
+    """Fail-closed wire parser for WorkEvidenceKind (K21)."""
+    return _expect_wire_enum(value, ('host_confirmation', 'principal_confirmation', 'supervisor_confirmation', 'reviewer_confirmation', 'self_attest',), 'WorkEvidenceKind')
+
+
+def parse_attention_delegated_authority(value: Any) -> "AttentionDelegatedAuthority":
+    """Fail-closed wire parser for AttentionDelegatedAuthority (K21)."""
+    return _expect_wire_enum(value, ('add_evidence', 'close_own_review_item', 'request_closure', 'close_if_policy_allows',), 'AttentionDelegatedAuthority')
+
+
+def parse_work_attention_mode(value: Any) -> "WorkAttentionMode":
+    """Fail-closed wire parser for WorkAttentionMode (K21)."""
+    return _expect_wire_enum(value, ('pursue', 'coordinate', 'review', 'falsify', 'judge', 'observe',), 'WorkAttentionMode')
+
+
+def parse_work_attention_status(value: Any) -> "WorkAttentionStatus":
+    """Fail-closed wire parser for WorkAttentionStatus (K21)."""
+    data = _expect_wire_object(value, 'WorkAttentionStatus')
+    tag = _expect_wire_str(_require_wire_field(data, 'state', 'WorkAttentionStatus'), 'WorkAttentionStatus.state')
+    if tag == 'active':
+        parsed_active: dict[str, Any] = {'state': 'active'}
+        return parsed_active
+    if tag == 'paused':
+        parsed_paused: dict[str, Any] = {'state': 'paused'}
+        if data.get('until') is not None:
+            parsed_paused['until'] = _expect_wire_str(data['until'], 'WorkAttentionStatus.paused.until')
+        return parsed_paused
+    if tag == 'superseded':
+        parsed_superseded: dict[str, Any] = {'state': 'superseded'}
+        return parsed_superseded
+    if tag == 'stopped':
+        parsed_stopped: dict[str, Any] = {'state': 'stopped'}
+        return parsed_stopped
+    raise _wire_parse_error('WorkAttentionStatus', f"unknown `state` value `{tag}`")
+
+
+def parse_work_attention_target(value: Any) -> "WorkAttentionTarget":
+    """Fail-closed wire parser for WorkAttentionTarget (K21)."""
+    data = _expect_wire_object(value, 'WorkAttentionTarget')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'WorkAttentionTarget'), 'WorkAttentionTarget.kind')
+    if tag == 'session':
+        parsed_session: dict[str, Any] = {'kind': 'session'}
+        parsed_session['session_id'] = _expect_wire_str(_require_wire_field(data, 'session_id', 'WorkAttentionTarget'), 'WorkAttentionTarget.session.session_id')
+        return parsed_session
+    if tag == 'lowered_owner':
+        parsed_lowered_owner: dict[str, Any] = {'kind': 'lowered_owner'}
+        parsed_lowered_owner['owner_key'] = WorkOwnerKey.from_wire(_require_wire_field(data, 'owner_key', 'WorkAttentionTarget'))
+        return parsed_lowered_owner
+    raise _wire_parse_error('WorkAttentionTarget', f"unknown `kind` value `{tag}`")
+
+
+def parse_work_owner_kind(value: Any) -> "WorkOwnerKind":
+    """Fail-closed wire parser for WorkOwnerKind (K21)."""
+    return _expect_wire_enum(value, ('principal', 'agent', 'session', 'mob', 'label',), 'WorkOwnerKind')

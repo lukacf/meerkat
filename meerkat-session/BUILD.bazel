@@ -332,9 +332,7 @@ rust_test(
         "fast",
     ],
     size = "small",
-    data = [
-        ":package_runfiles",
-    ],
+    data = [],
     env = {
         "RUST_MIN_STACK": "16777216",
     },

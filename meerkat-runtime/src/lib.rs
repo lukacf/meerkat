@@ -49,7 +49,6 @@ pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
-pub mod durability;
 pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
@@ -122,7 +121,6 @@ pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
-pub use durability::DurabilityError;
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,
@@ -218,7 +216,8 @@ where
             if !silent_intents.is_empty() {
                 machine
                     .set_session_silent_intents(&session_id, silent_intents)
-                    .await;
+                    .await
+                    .expect("set silent intents");
             }
             Arc::clone(bindings.peer_comms())
         })
@@ -369,6 +368,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
+                live_interrupt_required,
                 ..
             } => Some(ingress_types::RuntimeInputSemantics {
                 boundary: runtime_boundary.into(),
@@ -376,6 +376,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                     .map(Into::into),
+                live_interrupt_required,
             }),
             _ => None,
         })
@@ -421,7 +422,7 @@ pub use runtime_event::{
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
-pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+pub use service_ext::SessionServiceRuntimeExt;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

@@ -104,15 +104,17 @@ The tool call appears in the event stream like any other tool invocation:
 }
 ```
 
-Results are returned as a JSON array with similarity scores:
+Results are returned as a JSON array with similarity scores and the typed
+source handle (the half-open offset range of the source message(s) the entry
+was indexed from). Memory is scoped to a single session; results do not carry
+a `session_id`, and there is no cross-session recall:
 
 ```json
 [
   {
     "content": "We agreed to use sequential migrations with...",
     "score": 0.87,
-    "session_id": "019467d9-7e3a-7000-8000-000000000000",
-    "turn": 3
+    "source_range": { "start": 3, "end": 4 }
   }
 ]
 ```

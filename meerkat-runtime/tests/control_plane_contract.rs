@@ -15,7 +15,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorError,
 };
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_runtime::completion::CompletionOutcome;
@@ -49,9 +49,8 @@ fn make_progress_input(label: &str) -> Input {
             request_id: format!("req-{label}"),
             phase: ResponseProgressPhase::InProgress,
         }),
-        body: format!("progress-{label}"),
+        content: format!("progress-{label}").into(),
         payload: Some(serde_json::json!({ "label": label })),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -121,13 +120,12 @@ impl CoreExecutor for RecordingExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+            receipt: RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             session_snapshot: None,
             terminal: self.terminal.clone(),
@@ -186,7 +184,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "reset should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -211,7 +209,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -263,7 +261,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "stop-runtime-executor should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -288,7 +286,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -304,7 +302,10 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let _bindings = adapter
         .prepare_bindings(sid.clone())
         .await
@@ -329,7 +330,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
         .await
         .expect("completion waiter should resolve")
     {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -351,7 +352,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -435,7 +436,10 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_progress_input("retire-without-loop");
     let input_id = input.id().clone();
@@ -458,7 +462,7 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "retire without a runtime loop should terminate the waiter, got {result:?}"
     );
     assert_eq!(
@@ -473,7 +477,7 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Retired,
         })

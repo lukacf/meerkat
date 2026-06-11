@@ -23,7 +23,7 @@ use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
-    StopReason, ToolDef, ToolProvenance, ToolResult, Usage, UserMessage,
+    StopReason, ToolDef, ToolName, ToolProvenance, ToolResult, Usage, UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -32,25 +32,16 @@ use std::sync::Arc;
 
 /// Current session format version.
 ///
-/// Version history:
-/// - v1 — pre-wave-c. `SessionMetadata.auth_binding` inner fields were
-///   untyped strings (`realm_id`, `binding_id`, `profile`); no per-entity
-///   schema version byte on `SessionMetadata`.
-/// - v2 — wave-c C-3. `AuthBindingRef` inner fields are typed
-///   `RealmId`/`BindingId`/`ProfileId` newtypes; `SessionMetadata` carries
-///   a `schema_version` byte. Opportunistic upgrade-on-read —
-///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
-///   into v2 shape; the next `save()` persists v2.
+/// The persisted `version` byte is mandatory and fail-closed: a stored row
+/// with a missing or non-current version (including pre-typed-owner v0/v1
+/// rows) is rejected at the serde boundary by the generated persistence
+/// version authority — it never silently defaults or upgrades on read.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
 ///
-/// - v1 — pre-wave-c. Default on read for rows written before the byte
-///   was introduced.
-/// - v2 — wave-c C-3. Typed `AuthBindingRef` inner fields; any future
-///   `SessionMetadata`-local shape change bumps this without moving
-///   `SESSION_VERSION`.
+/// Mandatory and fail-closed on read, same contract as `SESSION_VERSION`.
 pub use crate::generated::session_persistence_version_authority::SESSION_METADATA_SCHEMA_VERSION;
 
 /// Current session format version accepted by generated persistence authority.
@@ -302,7 +293,6 @@ fn message_role_name(message: &Message) -> &'static str {
         Message::System(_) => "system",
         Message::SystemNotice(_) => "system_notice",
         Message::User(_) => "user",
-        Message::Assistant(_) => "assistant",
         Message::BlockAssistant(_) => "block_assistant",
         Message::ToolResults { .. } => "tool_results",
     }
@@ -310,11 +300,6 @@ fn message_role_name(message: &Message) -> &'static str {
 
 fn assistant_tool_use_ids(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.as_str())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -693,7 +678,8 @@ fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_
 /// Uses Arc<Vec<Message>> internally for efficient forking (copy-on-write).
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Format version for migrations
+    /// Persisted envelope format version, validated fail-closed on read by
+    /// the generated persistence version authority.
     version: u32,
     /// Unique identifier
     id: SessionId,
@@ -713,7 +699,6 @@ pub struct Session {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct SessionSerde {
-    #[serde(default = "default_version")]
     version: u32,
     id: SessionId,
     messages: Vec<Message>,
@@ -765,10 +750,6 @@ impl<'de> Deserialize<'de> for Session {
     }
 }
 
-fn default_version() -> u32 {
-    session_persistence_version_authority::legacy_session_envelope_version()
-}
-
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 
@@ -783,14 +764,6 @@ pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_sta
 
 /// Metadata key used to store the typed session lifecycle-terminal fact.
 pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
-
-/// Legacy raw-bool metadata key for session archival.
-///
-/// Sessions archived before the typed [`SessionLifecycleTerminal`] owner was
-/// introduced persist `session_archived: true` here. The only remaining reader
-/// is the legacy back-read in [`Session::try_lifecycle_terminal`]; no code path
-/// writes it anymore.
-pub const SESSION_ARCHIVED_LEGACY_KEY: &str = "session_archived";
 
 /// Canonical tool name gated by `image_tool_results` capability.
 pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
@@ -1100,7 +1073,14 @@ impl SystemContextSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct PendingSystemContextAppend {
-    pub text: String,
+    /// Typed renderable append content, carried end-to-end from the surface
+    /// request ([`AppendSystemContextRequest.content`]). The ONE lowering to
+    /// model-facing prompt text happens where the transcript consumes the
+    /// append ([`CoreRenderable::render_text`] inside the render seam) —
+    /// surfaces never pre-flatten this into a string.
+    ///
+    /// [`CoreRenderable::render_text`]: crate::lifecycle::run_primitive::CoreRenderable::render_text
+    pub content: crate::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1120,14 +1100,20 @@ pub struct PendingSystemContextAppend {
     pub accepted_at: SystemTime,
 }
 
-/// Canonical typed terminal-lifecycle fact for the standalone (runtime-less)
-/// session path.
+/// Typed terminal-lifecycle projection of the canonical
+/// [`session_document::SessionDocumentMachine`] `session_lifecycle_terminal`
+/// fact.
 ///
-/// The runtime-backed path owns terminality through `RuntimeState::Retired`;
-/// the standalone path has no runtime store, so this typed reserved-key field
-/// is the authoritative owner there. A two-variant enum (rather than a bare
-/// bool) keeps future terminal classes — e.g. `Destroyed` — extending the type
-/// rather than the call sites.
+/// The machine owns archive lifecycle truth for ALL profiles (LUC-524 R004
+/// fold): both the runtime-backed and the store-only archive paths drive the
+/// machine's `ArchiveSessionDocument` input, and this reserved-key field is
+/// the machine-realized durable projection of the emitted verdict — the shell
+/// realizes it, it never decides it. `RuntimeState::Retired` is the runtime
+/// realization of the SAME verdict; the fail-closed realization order (durable
+/// document commit first, runtime retire second) keeps the two projections
+/// convergent. A two-variant enum (rather than a bare bool) keeps future
+/// terminal classes — e.g. `Destroyed` — extending the type rather than the
+/// call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleTerminal {
@@ -1142,6 +1128,24 @@ impl SessionLifecycleTerminal {
     #[must_use]
     pub fn is_archived(self) -> bool {
         matches!(self, Self::Archived)
+    }
+}
+
+impl From<SessionLifecycleTerminal> for session_document::SessionDocumentLifecycle {
+    fn from(value: SessionLifecycleTerminal) -> Self {
+        match value {
+            SessionLifecycleTerminal::Active => Self::Active,
+            SessionLifecycleTerminal::Archived => Self::Archived,
+        }
+    }
+}
+
+impl From<session_document::SessionDocumentLifecycle> for SessionLifecycleTerminal {
+    fn from(value: session_document::SessionDocumentLifecycle) -> Self {
+        match value {
+            session_document::SessionDocumentLifecycle::Active => Self::Active,
+            session_document::SessionDocumentLifecycle::Archived => Self::Archived,
+        }
     }
 }
 
@@ -1222,21 +1226,20 @@ pub fn capability_base_filter_for_image_tool_results(image_tool_results: bool) -
 }
 
 /// Persisted witness for a durable tool-visibility name.
+///
+/// `last_seen_provenance` is the single typed identity owner. The formatted
+/// `stable_owner_key` string is a read-only projection derived on demand via
+/// [`crate::tool_catalog::stable_owner_key_from_provenance`], never stored
+/// beside the owner.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolVisibilityWitness {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stable_owner_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
 impl ToolVisibilityWitness {
     pub fn has_identity_witness(&self) -> bool {
-        self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
-    }
-
-    pub fn has_provenance_identity_witness(&self) -> bool {
         self.last_seen_provenance.is_some()
     }
 }
@@ -1249,19 +1252,19 @@ impl ToolVisibilityWitness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeferredToolLoadAuthority {
-    pub name: String,
+    pub name: ToolName,
     pub witness: ToolVisibilityWitness,
 }
 
 impl DeferredToolLoadAuthority {
-    pub fn new(name: impl Into<String>, witness: ToolVisibilityWitness) -> Self {
+    pub fn new(name: impl Into<ToolName>, witness: ToolVisibilityWitness) -> Self {
         Self {
             name: name.into(),
             witness,
         }
     }
 
-    pub fn into_parts(self) -> (String, ToolVisibilityWitness) {
+    pub fn into_parts(self) -> (ToolName, ToolVisibilityWitness) {
         (self.name, self.witness)
     }
 }
@@ -1273,15 +1276,15 @@ impl DeferredToolLoadAuthority {
 pub struct WitnessedToolFilter {
     pub filter: ToolFilter,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl WitnessedToolFilter {
-    pub fn new(filter: ToolFilter, witnesses: BTreeMap<String, ToolVisibilityWitness>) -> Self {
+    pub fn new(filter: ToolFilter, witnesses: BTreeMap<ToolName, ToolVisibilityWitness>) -> Self {
         Self { filter, witnesses }
     }
 
-    pub fn into_parts(self) -> (ToolFilter, BTreeMap<String, ToolVisibilityWitness>) {
+    pub fn into_parts(self) -> (ToolFilter, BTreeMap<ToolName, ToolVisibilityWitness>) {
         (self.filter, self.witnesses)
     }
 }
@@ -1295,13 +1298,13 @@ impl WitnessedToolFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InheritedToolVisibilityAuthority {
     filter: ToolFilter,
-    witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl InheritedToolVisibilityAuthority {
     pub(crate) fn from_generated_composition_authority(
         filter: ToolFilter,
-        witnesses: BTreeMap<String, ToolVisibilityWitness>,
+        witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     ) -> Self {
         Self { filter, witnesses }
     }
@@ -1310,7 +1313,7 @@ impl InheritedToolVisibilityAuthority {
         &self.filter
     }
 
-    pub fn witnesses(&self) -> &BTreeMap<String, ToolVisibilityWitness> {
+    pub fn witnesses(&self) -> &BTreeMap<ToolName, ToolVisibilityWitness> {
         &self.witnesses
     }
 
@@ -1336,17 +1339,17 @@ pub struct SessionToolVisibilityState {
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
     pub staged_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub active_requested_deferred_names: BTreeSet<String>,
+    pub active_requested_deferred_names: BTreeSet<ToolName>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub staged_requested_deferred_names: BTreeSet<String>,
+    pub staged_requested_deferred_names: BTreeSet<ToolName>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub active_revision: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub staged_revision: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub requested_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub requested_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub filter_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 /// Generated-authority-approved durable tool visibility projection.
@@ -1378,8 +1381,11 @@ impl AuthorizedSessionToolVisibilityState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionBuildState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::config::SystemPromptOverride::is_inherit"
+    )]
+    pub system_prompt: crate::config::SystemPromptOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<crate::OutputSchema>,
     #[serde(default, skip_serializing_if = "is_default_hook_run_overrides")]
@@ -1460,7 +1466,8 @@ impl ConsumedDeferredTurnInputs {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct SeenSystemContextKey {
-    pub text: String,
+    /// Typed renderable content of the accepted append for this key.
+    pub content: crate::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Typed provenance carried from the append, so runtime-steer cleanup can
@@ -1988,7 +1995,9 @@ fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
         rendered.push_str(source);
     }
     rendered.push_str("\n\n");
-    rendered.push_str(&append.text);
+    // The single CoreRenderable -> prompt-text lowering for system-context
+    // appends. Surfaces carry the typed renderable through untouched.
+    rendered.push_str(append.content.render_text().trim());
     rendered
 }
 
@@ -2124,7 +2133,7 @@ mod system_context_authority {
                 .chain(state.applied.iter())
                 .any(|append| {
                     append.idempotency_key.as_ref() == Some(key)
-                        && seen.text == append.text
+                        && seen.content == append.content
                         && seen.source.as_deref() == append.source.as_deref()
                 })
         });
@@ -2144,17 +2153,21 @@ mod system_context_authority {
         accepted_at: SystemTime,
         active_turn_scoped: bool,
     ) -> Result<AppendSystemContextStatus, SystemContextStageError> {
-        let text = req.text.trim();
+        // Emptiness is judged on the canonical text projection; the typed
+        // renderable itself is what gets stored (lowering happens once, at
+        // the transcript render seam).
+        let rendered_text = req.content.render_text();
+        let rendered_len = rendered_text.trim().len();
         let existing = req
             .idempotency_key
             .as_ref()
             .and_then(|key| state.seen.get(key));
         let existing_key_matches = existing.is_some_and(|existing| {
-            existing.text == text && existing.source.as_deref() == req.source.as_deref()
+            existing.content == req.content && existing.source.as_deref() == req.source.as_deref()
         });
         let existing_key_conflicts = existing.is_some() && !existing_key_matches;
         let decision = resolve_append_decision(
-            usize_to_u64(text.len()),
+            usize_to_u64(rendered_len),
             req.idempotency_key.is_some(),
             existing_key_matches,
             existing_key_conflicts,
@@ -2182,7 +2195,7 @@ mod system_context_authority {
                 };
                 return Err(SystemContextStageError::Conflict {
                     key: key.clone(),
-                    existing_text: existing.text.clone(),
+                    existing_text: existing.content.render_text(),
                     existing_source: existing.source.clone(),
                 });
             }
@@ -2193,7 +2206,7 @@ mod system_context_authority {
         }
 
         let append = PendingSystemContextAppend {
-            text: text.to_string(),
+            content: req.content.clone(),
             source: req.source.clone(),
             idempotency_key: req.idempotency_key.clone(),
             source_kind: req.source_kind,
@@ -2207,7 +2220,7 @@ mod system_context_authority {
             state.seen.insert(
                 key.clone(),
                 SeenSystemContextKey {
-                    text: append.text.clone(),
+                    content: append.content.clone(),
                     source: append.source.clone(),
                     source_kind: append.source_kind,
                     state: SeenSystemContextState::Pending,
@@ -2398,7 +2411,7 @@ mod system_context_authority {
     ) -> Vec<PendingSystemContextAppend> {
         let mut new_appends: Vec<PendingSystemContextAppend> = Vec::new();
         for append in appends {
-            if append.text.trim().is_empty() {
+            if append.content.render_text().trim().is_empty() {
                 continue;
             }
             let rendered = render_system_context_block(append);
@@ -2457,7 +2470,7 @@ mod system_context_authority {
             state.seen.insert(
                 key.clone(),
                 SeenSystemContextKey {
-                    text: append.text.clone(),
+                    content: append.content.clone(),
                     source: append.source.clone(),
                     source_kind: append.source_kind,
                     state: SeenSystemContextState::Applied,
@@ -2480,14 +2493,14 @@ mod system_context_authority {
         seen: &SeenSystemContextKey,
         append: &PendingSystemContextAppend,
     ) -> bool {
-        seen.text == append.text && seen.source.as_deref() == append.source.as_deref()
+        seen.content == append.content && seen.source.as_deref() == append.source.as_deref()
     }
 
     fn pending_system_context_matches(
         existing: &PendingSystemContextAppend,
         append: &PendingSystemContextAppend,
     ) -> bool {
-        existing.text == append.text && existing.source.as_deref() == append.source.as_deref()
+        existing.content == append.content && existing.source.as_deref() == append.source.as_deref()
     }
 }
 
@@ -2578,6 +2591,39 @@ impl Session {
             return Ok(None);
         }
         self.replace_messages_internal(retained, reason)
+    }
+
+    /// Atomically refresh the synthetic runtime notices of one kind.
+    ///
+    /// This is the ONE transcript authority operation for synthetic-notice
+    /// refresh: it strips every existing `SystemNotice` message of `kind` and
+    /// appends `replacements` (possibly empty, meaning "no current notice")
+    /// as a single edit. On a strip fault nothing is pushed and the typed
+    /// [`TranscriptEditError`] propagates — callers must not re-implement
+    /// the strip-then-push pair (the swallowed-strip variant leaves a stale
+    /// notice beside a fresh one: a divergence window).
+    pub fn replace_synthetic_notices(
+        &mut self,
+        kind: crate::types::SystemNoticeKind,
+        replacements: Vec<Message>,
+    ) -> Result<(), TranscriptEditError> {
+        for (index, message) in replacements.iter().enumerate() {
+            let matches_kind =
+                matches!(message, Message::SystemNotice(notice) if notice.kind == kind);
+            if !matches_kind {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "replacement {index} for synthetic notice kind {kind:?} is not a                      system notice of that kind"
+                )));
+            }
+        }
+        self.retain_messages_internal(
+            |message| !matches!(message, Message::SystemNotice(notice) if notice.kind == kind),
+            TranscriptRewriteReason::new("synthetic_notice_cleanup"),
+        )?;
+        for message in replacements {
+            self.push(message);
+        }
+        Ok(())
     }
 
     /// Get creation time
@@ -2979,7 +3025,6 @@ impl Session {
                 }
                 if buf.is_empty() { None } else { Some(buf) }
             }
-            Message::Assistant(a) if !a.content.is_empty() => Some(a.content.clone()),
             _ => None,
         })
     }
@@ -2995,7 +3040,6 @@ impl Session {
                         .filter(|b| matches!(b, crate::types::AssistantBlock::ToolUse { .. }))
                         .count(),
                 ),
-                Message::Assistant(a) => Some(a.tool_calls.len()),
                 _ => None,
             })
             .sum()
@@ -3201,7 +3245,14 @@ impl Session {
         }
     }
 
-    /// Store the typed session lifecycle-terminal fact in the session metadata map.
+    /// Realize the typed session lifecycle-terminal projection in the session
+    /// metadata map.
+    ///
+    /// The lifecycle-terminal fact is owned by the canonical
+    /// [`session_document::SessionDocumentMachine`]; production archive paths
+    /// call this only to realize a machine-emitted `SessionArchiveResolved`
+    /// verdict (the value written mirrors the machine's decision — the shell
+    /// decides nothing here).
     pub fn set_lifecycle_terminal(
         &mut self,
         terminal: SessionLifecycleTerminal,
@@ -3213,27 +3264,14 @@ impl Session {
 
     /// Try to load the typed session lifecycle-terminal fact.
     ///
-    /// Reads the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`] first. When that key
-    /// is absent, falls back to folding the legacy raw
-    /// `session_archived: true` bool (the only place that literal string is
-    /// still honored) into [`SessionLifecycleTerminal::Archived`] so sessions
-    /// persisted before the typed owner existed still read as terminal.
+    /// Reads the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`]; an absent key means
+    /// no terminal fact.
     pub fn try_lifecycle_terminal(
         &self,
     ) -> Result<Option<SessionLifecycleTerminal>, serde_json::Error> {
-        if let Some(value) = self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
-            return serde_json::from_value(value.clone()).map(Some);
-        }
-        // Legacy back-read: pre-typed-owner archive writes persisted a raw
-        // `session_archived: true` JSON bool. Fold a `true` into Archived; an
-        // absent/false legacy bool means no terminal fact.
-        match self
-            .metadata
-            .get(SESSION_ARCHIVED_LEGACY_KEY)
-            .and_then(serde_json::Value::as_bool)
-        {
-            Some(true) => Ok(Some(SessionLifecycleTerminal::Archived)),
-            _ => Ok(None),
+        match self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
+            Some(value) => serde_json::from_value(value.clone()).map(Some),
+            None => Ok(None),
         }
     }
 
@@ -3762,10 +3800,10 @@ pub struct SessionMeta {
 pub struct SessionMetadata {
     /// Per-entity schema version byte.
     ///
-    /// Defaults to `1` on read so pre-wave-c rows without the field
-    /// deserialize cleanly; rewritten as `SESSION_METADATA_SCHEMA_VERSION`
-    /// on the next `save()` after a successful migration pass.
-    #[serde(default = "default_session_metadata_schema_version")]
+    /// Mandatory on read: a persisted row missing the byte (or carrying a
+    /// non-current value) fails closed through the generated persistence
+    /// version authority instead of silently defaulting. Stamped with the
+    /// current `SESSION_METADATA_SCHEMA_VERSION` on every persist.
     pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
@@ -3774,8 +3812,10 @@ pub struct SessionMetadata {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_hosted_server_id: Option<String>,
+    /// Typed provider parameter overrides persisted with the session.
+    /// Parsed fail-closed at the serde boundary — no JSON bag survives here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub tooling: SessionTooling,
     #[serde(default)]
     pub keep_alive: bool,
@@ -3826,10 +3866,6 @@ pub struct SessionMetadata {
     pub mob_member_binding: Option<crate::MobMemberBinding>,
 }
 
-fn default_session_metadata_schema_version() -> u32 {
-    session_persistence_version_authority::legacy_session_metadata_schema_version()
-}
-
 /// Canonical durable LLM identity for a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -3838,8 +3874,9 @@ pub struct SessionLlmIdentity {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_hosted_server_id: Option<String>,
+    /// Typed provider parameter overrides carried on the durable identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Realm-scoped auth binding this session resolves credentials
     /// through. Carried on the identity so mid-session hot-swaps
     /// (`apply_live_session_llm_identity`) re-resolve against the
@@ -3866,7 +3903,8 @@ pub struct SessionLlmIdentity {
 pub struct SessionLlmIdentityOverride<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<TurnMetadataOverride<&'a serde_json::Value>>,
+    pub provider_params:
+        Option<TurnMetadataOverride<&'a crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<&'a crate::AuthBindingRef>>,
 }
 
@@ -3974,10 +4012,12 @@ pub fn resolve_session_llm_identity_override(
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmRequestPolicy {
     pub model: String,
+    /// Typed explicit provider parameter overrides for the next LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// Typed provider-native tool defaults resolved for the swapped target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    pub provider_tool_defaults: Option<crate::lifecycle::run_primitive::ProviderTag>,
 }
 
 impl SessionMetadata {
@@ -4084,54 +4124,6 @@ impl ToolCategoryOverride {
     }
 }
 
-/// Backward-compatible deserializer: accepts both old `bool` JSON and new
-/// tri-state `"inherit"` / `"enable"` / `"disable"` strings.
-///
-/// Old persisted sessions have `"mob": false` or `"builtins": true`.
-/// - `true`  → `Enable`  (user explicitly had it on)
-/// - `false` → `Inherit` (can't distinguish "disabled" from "didn't exist")
-/// - string  → normal enum deserialization
-fn deserialize_tool_category_compat<'de, D>(
-    deserializer: D,
-) -> Result<ToolCategoryOverride, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct ToolCategoryVisitor;
-
-    impl de::Visitor<'_> for ToolCategoryVisitor {
-        type Value = ToolCategoryOverride;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a boolean or one of \"inherit\", \"enable\", \"disable\"")
-        }
-
-        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
-            Ok(if v {
-                ToolCategoryOverride::Enable
-            } else {
-                ToolCategoryOverride::Inherit
-            })
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            match v {
-                "inherit" => Ok(ToolCategoryOverride::Inherit),
-                "enable" => Ok(ToolCategoryOverride::Enable),
-                "disable" => Ok(ToolCategoryOverride::Disable),
-                _ => Err(de::Error::unknown_variant(
-                    v,
-                    &["inherit", "enable", "disable"],
-                )),
-            }
-        }
-    }
-
-    deserializer.deserialize_any(ToolCategoryVisitor)
-}
-
 /// Tooling intent captured at session creation time.
 ///
 /// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
@@ -4141,29 +4133,29 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionTooling {
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub builtins: ToolCategoryOverride,
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub shell: ToolCategoryOverride,
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub comms: ToolCategoryOverride,
     /// Mob (multi-agent orchestration) tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub mob: ToolCategoryOverride,
     /// Semantic memory.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub memory: ToolCategoryOverride,
     /// Scheduler tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub schedule: ToolCategoryOverride,
     /// WorkGraph durable work tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub workgraph: ToolCategoryOverride,
     /// Assistant image generation.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub image_generation: ToolCategoryOverride,
     /// Meerkat-owned fallback web search.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub web_search: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4189,7 +4181,7 @@ mod tests {
     use super::*;
     use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
-        AssistantMessage, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
+        AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
         UserMessage,
     };
     use std::sync::Arc;
@@ -4203,6 +4195,103 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// K4 invariant: synthetic-notice refresh is ONE atomic transcript edit —
+    /// after a refresh, at most the replacement notices of that kind exist
+    /// (no stale notice survives beside a fresh one).
+    #[test]
+    fn replace_synthetic_notices_leaves_only_replacements_of_kind() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale one",
+        )));
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale two",
+        )));
+        // A notice of another kind must be untouched.
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::BackgroundJob,
+            "other-kind",
+        )));
+
+        session
+            .replace_synthetic_notices(
+                SystemNoticeKind::McpPending,
+                vec![Message::SystemNotice(SystemNoticeMessage::new(
+                    SystemNoticeKind::McpPending,
+                    "fresh",
+                ))],
+            )
+            .expect("notice refresh succeeds");
+
+        let mcp_pending: Vec<&SystemNoticeMessage> = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::McpPending => {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mcp_pending.len(), 1, "exactly one notice of the kind");
+        assert_eq!(mcp_pending[0].body.as_deref(), Some("fresh"));
+        assert!(
+            session.messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::BackgroundJob
+            )),
+            "other-kind notices are untouched"
+        );
+
+        // Empty replacements = pure strip.
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
+            .expect("pure strip succeeds");
+        assert!(
+            !session.messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::McpPending
+            )),
+            "empty replacement clears the kind"
+        );
+    }
+
+    /// K4 invariant (fail-closed): an invalid replacement is rejected with a
+    /// typed fault BEFORE any strip happens — the transcript is unchanged, so
+    /// a fault can never strand a half-refreshed notice state.
+    #[test]
+    fn replace_synthetic_notices_rejects_mismatched_kind_without_mutation() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale",
+        )));
+        let before = session.messages().to_vec();
+
+        let err = session
+            .replace_synthetic_notices(
+                SystemNoticeKind::McpPending,
+                vec![Message::User(UserMessage::text("not a notice".to_string()))],
+            )
+            .expect_err("mismatched replacement must fail typed");
+        assert!(
+            matches!(err, TranscriptEditError::InvalidTranscriptShape(_)),
+            "expected InvalidTranscriptShape, got {err:?}"
+        );
+        assert_eq!(
+            session.messages(),
+            before.as_slice(),
+            "fault must leave the transcript unchanged (no partial strip)"
+        );
     }
 
     #[test]
@@ -4285,11 +4374,12 @@ mod tests {
     fn transcript_rewrite_rejects_trailing_block_assistant_tool_call() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4324,11 +4414,12 @@ mod tests {
         session.push(Message::User(UserMessage::text(
             "keep this exact transcript".to_string(),
         )));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "unchanged".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "unchanged".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4359,11 +4450,12 @@ mod tests {
     fn transcript_rewrite_run_boundary_guard_accepts_rewrite_then_append() {
         let mut original = Session::new();
         original.push(Message::User(UserMessage::text("question".to_string())));
-        original.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        original.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4372,11 +4464,12 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4385,11 +4478,12 @@ mod tests {
             )
             .expect("rewrite should commit");
         incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
-        incoming.push(Message::Assistant(AssistantMessage {
-            content: "follow-up answer".to_string(),
-            tool_calls: Vec::new(),
+        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "follow-up answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4421,11 +4515,12 @@ mod tests {
         let err = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "no tool after all".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "no tool after all".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4443,11 +4538,12 @@ mod tests {
     fn transcript_rewrite_rejects_trailing_assistant_tool_call() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4455,15 +4551,15 @@ mod tests {
         let err = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![crate::types::ToolCall::new(
-                        "toolu_1".to_string(),
-                        "lookup".to_string(),
-                        serde_json::json!({}),
-                    )],
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4481,11 +4577,12 @@ mod tests {
     fn transcript_rewrite_rejects_duplicate_tool_results() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("use a tool".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4524,11 +4621,12 @@ mod tests {
     fn transcript_rewrite_record_rejects_prefix_or_suffix_tampering() {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("keep prefix")));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("keep suffix".to_string())));
@@ -4537,11 +4635,12 @@ mod tests {
         let commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4584,11 +4683,12 @@ mod tests {
     fn transcript_rewrite_replay_allows_normal_turn_revisions_between_rewrites() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("first".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose first answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose first answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4596,11 +4696,12 @@ mod tests {
         let first_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact first answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact first answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4610,11 +4711,12 @@ mod tests {
             .expect("first rewrite");
 
         session.push(Message::User(UserMessage::text("normal turn".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose second answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose second answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let bridge_parent = session
@@ -4632,11 +4734,12 @@ mod tests {
         let second_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact second answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact second answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4682,11 +4785,12 @@ mod tests {
     fn transcript_rewrite_replay_rejects_branched_rewrite_records() {
         let mut base = Session::new();
         base.push(Message::User(UserMessage::text("question".to_string())));
-        base.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        base.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent = base.transcript_revision().expect("parent revision");
@@ -4695,11 +4799,12 @@ mod tests {
         let first_commit = first
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "first compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "first compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4716,11 +4821,12 @@ mod tests {
         let second_commit = second
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "second compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "second compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4765,11 +4871,12 @@ mod tests {
     fn internal_message_rewrites_refresh_transcript_history_head() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4777,11 +4884,12 @@ mod tests {
         session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4819,11 +4927,12 @@ mod tests {
             .replace_messages_internal(
                 vec![
                     Message::User(UserMessage::text("compacted question".to_string())),
-                    Message::Assistant(AssistantMessage {
-                        content: "compacted answer".to_string(),
-                        tool_calls: Vec::new(),
+                    Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "compacted answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: crate::types::Usage::default(),
                         created_at: crate::types::message_timestamp_now(),
                     }),
                 ],
@@ -4853,11 +4962,12 @@ mod tests {
     fn set_system_prompt_refreshes_transcript_history_head_after_rewrite() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4865,11 +4975,12 @@ mod tests {
         let rewrite = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4909,11 +5020,12 @@ mod tests {
     fn apply_transcript_history_state_uses_latest_commit_time_for_restored_head() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let original_messages = session.messages().to_vec();
@@ -4921,11 +5033,12 @@ mod tests {
         let compact = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -6012,11 +6125,12 @@ mod tests {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("System prompt")));
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -6204,44 +6318,6 @@ mod tests {
                 )
                 .is_err(),
             "the typed lifecycle-terminal key is reserved for session authority"
-        );
-    }
-
-    #[test]
-    fn lifecycle_terminal_legacy_session_archived_bool_reads_as_archived() {
-        // Sessions persisted before the typed owner existed stored a raw
-        // `session_archived: true` bool. The typed reader must fold it into
-        // Archived (durable back-read), without the typed key present.
-        let mut session = Session::new();
-        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
-        assert!(
-            session
-                .metadata()
-                .get(SESSION_LIFECYCLE_TERMINAL_KEY)
-                .is_none()
-        );
-        assert_eq!(
-            session.lifecycle_terminal(),
-            Some(SessionLifecycleTerminal::Archived)
-        );
-
-        // A legacy `false`/absent bool means no terminal fact.
-        let mut active = Session::new();
-        active.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(false));
-        assert_eq!(active.lifecycle_terminal(), None);
-    }
-
-    #[test]
-    fn lifecycle_terminal_typed_key_takes_precedence_over_legacy_bool() {
-        let mut session = Session::new();
-        // Legacy bool says archived, typed owner says active — the typed owner wins.
-        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
-        session
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
-            .expect("typed terminal write should serialize");
-        assert_eq!(
-            session.lifecycle_terminal(),
-            Some(SessionLifecycleTerminal::Active)
         );
     }
 
@@ -6545,16 +6621,12 @@ mod tests {
     fn test_session_meta_from_session() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-            },
             created_at: crate::types::message_timestamp_now(),
         }));
         session.record_usage(Usage {
@@ -6577,7 +6649,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Authoritative peer token is birch seventeen.".to_string(),
+                    ),
                     source: Some(
                         "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                             .to_string(),
@@ -6595,7 +6669,7 @@ mod tests {
         assert!(state.pending.is_empty());
         assert_eq!(state.applied.len(), 1);
         assert_eq!(
-            state.applied[0].text,
+            state.applied[0].content.render_text(),
             "Authoritative peer token is birch seventeen."
         );
         assert_eq!(
@@ -6615,7 +6689,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &AppendSystemContextRequest {
-                    text: "only for the active run".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "only for the active run".to_string(),
+                    ),
                     source: Some("runtime:steer:input-1".to_string()),
                     idempotency_key: Some("runtime:steer:input-1".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6644,7 +6720,9 @@ mod tests {
             state
                 .stage_active_turn_append(
                     &AppendSystemContextRequest {
-                        text: format!("context for {key}"),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(format!(
+                            "context for {key}"
+                        )),
                         source: Some(key.to_string()),
                         idempotency_key: Some(key.to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
@@ -6688,7 +6766,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &AppendSystemContextRequest {
-                    text: "visible to this run".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "visible to this run".to_string(),
+                    ),
                     source: Some("runtime:steer:input-2".to_string()),
                     idempotency_key: Some("runtime:steer:input-2".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6722,7 +6802,9 @@ mod tests {
             "base{}{}{}{}",
             SYSTEM_CONTEXT_SEPARATOR,
             render_system_context_block(&PendingSystemContextAppend {
-                text: "old steer".to_string(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "old steer".to_string()
+                ),
                 source: Some("steer-source-old".to_string()),
                 idempotency_key: Some("steer-key-old".to_string()),
                 source_kind: SystemContextSource::RuntimeSteer,
@@ -6731,7 +6813,9 @@ mod tests {
             }),
             SYSTEM_CONTEXT_SEPARATOR,
             render_system_context_block(&PendingSystemContextAppend {
-                text: "durable peer fact".to_string(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "durable peer fact".to_string()
+                ),
                 source: Some("peer_response_terminal:analyst:req".to_string()),
                 idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                 source_kind: SystemContextSource::Normal,
@@ -6742,7 +6826,9 @@ mod tests {
         session
             .set_system_context_state(SessionSystemContextState {
                 pending: vec![PendingSystemContextAppend {
-                    text: "pending steer".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "pending steer".to_string(),
+                    ),
                     source: Some("steer-source-pending".to_string()),
                     idempotency_key: Some("steer-key-pending".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6751,7 +6837,9 @@ mod tests {
                 }],
                 applied: vec![
                     PendingSystemContextAppend {
-                        text: "old steer".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "old steer".to_string(),
+                        ),
                         source: Some("steer-source-old".to_string()),
                         idempotency_key: Some("steer-key-old".to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
@@ -6759,7 +6847,9 @@ mod tests {
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                     PendingSystemContextAppend {
-                        text: "durable peer fact".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "durable peer fact".to_string(),
+                        ),
                         source: Some("peer_response_terminal:analyst:req".to_string()),
                         idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                         source_kind: SystemContextSource::Normal,
@@ -6770,7 +6860,9 @@ mod tests {
                 seen: BTreeMap::from([(
                     "steer-key-old".to_string(),
                     SeenSystemContextKey {
-                        text: "old steer".to_string(),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                            "old steer".to_string(),
+                        ),
                         source: Some("steer-source-old".to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
                         state: SeenSystemContextState::Applied,
@@ -6792,7 +6884,7 @@ mod tests {
         let state = session.system_context_state().unwrap_or_default();
         assert!(state.pending.is_empty());
         assert_eq!(state.applied.len(), 1);
-        assert_eq!(state.applied[0].text, "durable peer fact");
+        assert_eq!(state.applied[0].content.render_text(), "durable peer fact");
         assert!(state.seen.is_empty());
         assert!(state.active_turn_pending_keys.is_empty());
     }
@@ -6800,7 +6892,9 @@ mod tests {
     #[test]
     fn append_system_context_blocks_records_typed_applied_context() {
         let append = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some(
                 "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
             ),
@@ -6826,7 +6920,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Apply this staged context at the request boundary.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Apply this staged context at the request boundary.".to_string(),
+                    ),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: Some("ctx-boundary".to_string()),
                     source_kind: SystemContextSource::Normal,
@@ -6870,7 +6966,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Apply this unkeyed staged context at the request boundary.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Apply this unkeyed staged context at the request boundary.".to_string(),
+                    ),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: None,
                     source_kind: SystemContextSource::Normal,
@@ -6901,10 +6999,52 @@ mod tests {
         );
     }
 
+    /// K5 invariant: the typed `CoreRenderable` travels end-to-end through
+    /// staging — the pending append stores the renderable itself, and the
+    /// ONE lowering to prompt text happens at the transcript render seam.
+    #[test]
+    fn staged_system_context_carries_typed_renderable_to_render_seam() {
+        use crate::lifecycle::run_primitive::CoreRenderable;
+
+        let accepted_at = SystemTime::UNIX_EPOCH;
+        let mut state = SessionSystemContextState::default();
+        let renderable = CoreRenderable::Json {
+            value: serde_json::json!({"alert": "disk-full", "severity": 2}),
+        };
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    content: renderable.clone(),
+                    source: Some("ops/monitor".to_string()),
+                    idempotency_key: Some("alert-1".to_string()),
+                    source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+                accepted_at,
+            )
+            .expect("typed renderable append should stage");
+
+        // The pending append owns the typed renderable — no pre-flattened
+        // text shadow exists anywhere on the staging path.
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].content, renderable);
+
+        // Lowering happens exactly once, at the render seam, via the single
+        // canonical projection.
+        let rendered = render_system_context_block(&state.pending[0]);
+        assert!(rendered.starts_with(SYSTEM_CONTEXT_RENDER_LABEL));
+        assert!(
+            rendered.contains(renderable.render_text().trim()),
+            "render seam must lower via CoreRenderable::render_text: {rendered}"
+        );
+    }
+
     #[test]
     fn append_system_context_blocks_skips_duplicate_idempotency_key() {
         let first = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
@@ -6943,7 +7083,9 @@ mod tests {
     #[test]
     fn append_system_context_blocks_skips_conflicting_duplicate_idempotency_key() {
         let first = PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
@@ -6951,7 +7093,9 @@ mod tests {
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let conflicting = PendingSystemContextAppend {
-            text: "Conflicting peer token should not reach the prompt.".to_string(),
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "Conflicting peer token should not reach the prompt.".to_string(),
+            ),
             accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
             ..first.clone()
         };

@@ -427,12 +427,12 @@ pub struct SessionToolVisibilityState {
     pub inherited_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
-    pub active_requested_deferred_names: std::collections::BTreeSet<String>,
-    pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
+    pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub staged_requested_deferred_names: std::collections::BTreeSet<ToolName>,
     pub active_revision: u64,
     pub staged_revision: u64,
-    pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub requested_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub filter_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl SessionToolVisibilityState {
@@ -596,8 +596,14 @@ impl SessionToolVisibilityDelta {
     }
 }
 
+/// Canonical typed tool identity. This IS the domain type —
+/// [`meerkat_core::types::ToolName`] — carried directly through the machine
+/// (K8a fold: the tool-visibility name domain is `ToolName`-keyed end to end;
+/// no stringly bridge inside the machine).
+pub type ToolName = meerkat_core::types::ToolName;
+
 /// Typed mirror of [`meerkat_core::ToolFilter`] — closed 3-variant
-/// discriminant with a `BTreeSet<String>` name payload for
+/// discriminant with a `BTreeSet<ToolName>` name payload for
 /// `Allow`/`Deny` so the value is `Ord + Hash` and deterministic across
 /// iteration, matching the R3 `InputAbandonReason::MaxAttemptsExhausted {
 /// attempts }` pattern of carrying the discriminant's companion data in a
@@ -606,20 +612,16 @@ impl SessionToolVisibilityDelta {
 pub enum ToolFilter {
     #[default]
     All,
-    Allow(std::collections::BTreeSet<String>),
-    Deny(std::collections::BTreeSet<String>),
+    Allow(std::collections::BTreeSet<ToolName>),
+    Deny(std::collections::BTreeSet<ToolName>),
 }
 
 impl From<&meerkat_core::ToolFilter> for ToolFilter {
     fn from(f: &meerkat_core::ToolFilter) -> Self {
         match f {
             meerkat_core::ToolFilter::All => Self::All,
-            meerkat_core::ToolFilter::Allow(names) => {
-                Self::Allow(names.iter().map(|name| name.as_str().to_string()).collect())
-            }
-            meerkat_core::ToolFilter::Deny(names) => {
-                Self::Deny(names.iter().map(|name| name.as_str().to_string()).collect())
-            }
+            meerkat_core::ToolFilter::Allow(names) => Self::Allow(names.iter().cloned().collect()),
+            meerkat_core::ToolFilter::Deny(names) => Self::Deny(names.iter().cloned().collect()),
         }
     }
 }
@@ -696,14 +698,12 @@ impl From<&meerkat_core::types::ToolProvenance> for ToolProvenance {
 /// projection of the two optional witness fields.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ToolVisibilityWitness {
-    pub stable_owner_key: Option<String>,
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
 impl From<&meerkat_core::ToolVisibilityWitness> for ToolVisibilityWitness {
     fn from(w: &meerkat_core::ToolVisibilityWitness) -> Self {
         Self {
-            stable_owner_key: w.stable_owner_key.clone(),
             last_seen_provenance: w.last_seen_provenance.as_ref().map(ToolProvenance::from),
         }
     }
@@ -715,7 +715,7 @@ impl ToolVisibilityWitness {
     }
 
     fn len(&self) -> u64 {
-        u64::from(self.stable_owner_key.is_some()) + u64::from(self.last_seen_provenance.is_some())
+        u64::from(self.last_seen_provenance.is_some())
     }
 }
 
@@ -1023,6 +1023,22 @@ pub enum PeerIngressResponseStatus {
     Accepted,
     Completed,
     Failed,
+}
+
+/// Closed classifier for peer-ingress request intents that drive fixed
+/// lifecycle routing (mob peer add/retire/unwire) plus the supervisor-bridge
+/// channel. The machine guards on this typed class; arbitrary user-configured
+/// silent intents remain an open set matched against the raw `request_intent`
+/// string via `silent_intent_overrides`, so `Other` covers everything outside
+/// the closed routing set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressRequestClass {
+    #[default]
+    Other,
+    MobPeerAdded,
+    MobPeerRetired,
+    MobPeerUnwired,
+    SupervisorBridge,
 }
 
 /// DSL-owned response progress/terminal classifier.
@@ -1742,6 +1758,25 @@ pub enum LlmFailureRecoveryKind {
     Exhausted,
 }
 
+/// #323: pre-selected call-timeout source carried into the machine's
+/// `ClassifyCallTimeout` classifier. Source selection is shell-side; the
+/// machine owns the retryable-vs-terminal verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutSource {
+    #[default]
+    CallBudget,
+    TurnBudget,
+}
+
+/// #323: machine-owned call-timeout verdict emitted by `ClassifyCallTimeout`.
+/// The agent loop mirrors this into the existing retry / budget-terminal paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutVerdict {
+    #[default]
+    RetryableCallTimeout,
+    TerminalTurnBudget,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff.
 /// MeerkatMachine maps this to terminal outcome/cause before public
 /// projection.
@@ -1988,6 +2023,21 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
+/// Closed top-level classifier for a published `RuntimeEvent`, mirroring the
+/// five `RuntimeEvent` discriminants in `meerkat-runtime` (`InputLifecycle`,
+/// `RunLifecycle`, `RuntimeStateChange`, `Topology`, `Projection`). Replaces the
+/// former Debug-derived discriminant *string* on `PublishEvent.kind` so the DSL
+/// carries a typed discriminant the shell maps exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEventKind {
+    #[default]
+    InputLifecycle,
+    RunLifecycle,
+    RuntimeStateChange,
+    Topology,
+    Projection,
+}
+
 /// Closed classifier for runtime-loop executor effects emitted as neutral DSL
 /// facts before the runtime shell converts them to sealed executable effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2055,6 +2105,9 @@ pub enum UserInterruptObservationKind {
 pub enum UserInterruptPublicResultKind {
     #[default]
     Interrupted,
+    /// #348: a staged (not-yet-promoted) session interrupt is a typed no-op
+    /// terminal — distinct from `Interrupted` (a live run was cancelled).
+    StagedNoop,
     NotFound,
     SessionBusy,
     Conflict,
@@ -2330,6 +2383,25 @@ pub enum LiveChannelDegradationReason {
     ProviderThrottled,
     NetworkUnstable,
     Other,
+}
+
+/// #51: provider-neutral role for a staged realtime transcript item, carried on
+/// the `RealtimeTranscriptAppended` staging effect. Mirror of
+/// `meerkat_core::realtime_transcript::RealtimeTranscriptRole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    User,
+    Assistant,
+}
+
+/// #51: output lane for a staged realtime transcript item (display text vs
+/// spoken transcript). Mirror of `meerkat_core::realtime_transcript::TranscriptLane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    Display,
+    Spoken,
 }
 
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
@@ -2758,18 +2830,17 @@ impl From<OperationStatus> for meerkat_core::ops_lifecycle::OperationStatus {
 }
 
 /// Typed discriminant mirror of
-/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] — replaces the
-/// former opaque JSON string carried in the DSL's `op_terminal_outcomes`
-/// map. Unit variants only; payload data (completion result, failure error,
-/// cancellation reason, terminated reason) rides on the companion
-/// `op_terminal_payload: Map<String, String>` field of the DSL state as
-/// JSON keyed to the same operation id, and is reconstructed in the shell
-/// by pairing the typed discriminant with the companion entry.
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`]. Unit variants
+/// only; the full typed payload (completion result, failure error,
+/// cancellation reason, terminated reason) is carried by the companion
+/// `op_terminal_payload: Map<String, OpTerminalPayload>` field, keyed by the
+/// same operation id. The machine guards that the payload variant matches
+/// the discriminant on every terminal transition.
 ///
 /// The DSL writes these variants directly on each terminal transition
 /// (`CompleteOp`, `FailOp`, `CancelOp`, `AbortOp`, `RetireCompletedOp`,
-/// `TerminateOp`); the shell reads them through the typed map and rebuilds
-/// the domain enum in `ShellState::terminal_outcome`.
+/// `TerminateOp`); the shell reads the typed payload map directly — no JSON
+/// codec, no string compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationTerminalOutcomeKind {
     #[default]
@@ -2779,6 +2850,30 @@ pub enum OperationTerminalOutcomeKind {
     Cancelled,
     Retired,
     Terminated,
+}
+
+/// Typed terminal payload carried by the ops-lifecycle authority. This IS the
+/// domain type — the machine state stores
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] directly, so the
+/// shell needs no codec in either direction (K8b fold: the former
+/// `Map<String, String>` opaque-JSON payload carrier is deleted).
+pub type OpTerminalPayload = meerkat_core::ops_lifecycle::OperationTerminalOutcome;
+
+/// Result payload for completed operations, referenced by the
+/// `OpTerminalPayload::Completed` structural variant binding.
+pub type OperationResult = meerkat_core::ops::OperationResult;
+
+impl From<&OpTerminalPayload> for OperationTerminalOutcomeKind {
+    fn from(payload: &OpTerminalPayload) -> Self {
+        match payload {
+            OpTerminalPayload::Completed(_) => Self::Completed,
+            OpTerminalPayload::Failed { .. } => Self::Failed,
+            OpTerminalPayload::Aborted { .. } => Self::Aborted,
+            OpTerminalPayload::Cancelled { .. } => Self::Cancelled,
+            OpTerminalPayload::Retired => Self::Retired,
+            OpTerminalPayload::Terminated { .. } => Self::Terminated,
+        }
+    }
 }
 
 /// Typed public result class for operation lifecycle projections. Shell/tool
@@ -3289,10 +3384,16 @@ pub enum PeerResponseTerminalObservedStatus {
     Cancelled,
 }
 
+/// Typed admission-validation rejection reason emitted on
+/// `AdmissionValidationResolved`. The machine names which validation rule
+/// fired; shells render display text from this fact instead of mirroring the
+/// guard rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionRejectReasonKind {
     #[default]
-    DurabilityViolation,
+    DurabilityMissing,
+    ExternalDerivedDurabilityForbidden,
+    DerivedDurabilityForbiddenForInputKind,
     PeerHandlingModeInvalid,
     PeerResponseTerminalInvalid,
 }

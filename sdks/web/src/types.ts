@@ -1,73 +1,21 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
-import type { AgentEvent, SkillKey, Usage } from './generated/events.js';
+import type { AgentEvent, SkillKey } from './generated/events.js';
 import type { WireMobMemberStatus } from './generated/mob.js';
 
-// ─── Bootstrap config ───────────────────────────────────────────
-
-/** Configuration for {@link MeerkatRuntime.init}. */
-export interface RuntimeConfig {
-  /** Anthropic API key. */
-  anthropicApiKey?: string;
-  /** OpenAI API key. */
-  openaiApiKey?: string;
-  /** Gemini API key. */
-  geminiApiKey?: string;
-  /** Default model for new sessions. */
-  model?: string;
-  /** Maximum concurrent sessions. Default: 64. */
-  maxSessions?: number;
-  /** Anthropic base URL (e.g. for proxy deployments). */
-  anthropicBaseUrl?: string;
-  /** OpenAI base URL. */
-  openaiBaseUrl?: string;
-  /** Gemini base URL. */
-  geminiBaseUrl?: string;
-}
-
-/** Result from runtime initialization. */
-export interface InitResult {
-  status: 'initialized';
-  model: string;
-  providers: string[];
-  max_sessions?: number;
-}
-
-// ─── Session config ─────────────────────────────────────────────
-
-/** Structural reference to a realm binding. */
-export interface AuthBindingRef {
-  realm: string;
-  binding: string;
-  profile?: string;
-}
-
-/** Configuration for creating a direct (non-mob) session.
- *
- * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
- * deleted. Credentials flow from bootstrap-populated realm config
- * (`initRuntimeFromConfig`) or the host's registered external-auth
- * resolver (`register_external_auth_resolver`).
- */
-export interface SessionConfig {
-  /** LLM model identifier. */
-  model: string;
-  /** Optional structural auth binding reference. */
-  authBinding?: AuthBindingRef;
-  /** System prompt. */
-  systemPrompt?: string;
-  /** Max tokens per response. Default: 4096. */
-  maxTokens?: number;
-  /** Enable comms for this session. */
-  commsName?: string;
-  /** Whether this session runs in keep-alive mode. */
-  keepAlive?: boolean;
-  /** Application-defined labels. */
-  labels?: Record<string, string>;
-  /** Additional instruction sections appended to the system prompt. */
-  additionalInstructions?: string[];
-  /** Opaque application context. */
-  appContext?: unknown;
-}
+// ─── Bootstrap / session config (generated wire parity) ─────────
+//
+// K19: RuntimeConfig / InitResult / SessionConfig / AuthBindingRef are
+// generated wire types (sdk-codegen `runtime` module), not hand-modeled
+// here. The generated module also owns the fail-closed parse guards
+// (`parseInitResult`) consumed by `runtime.ts`.
+export type {
+  AuthBindingRef,
+  InitResult,
+  MobpackTrustConfig,
+  MobpackTrustPolicy,
+  RuntimeConfig,
+  SessionConfig,
+} from './generated/runtime.js';
 
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
@@ -119,19 +67,7 @@ export interface AppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
-/** Runtime-backed state for a direct browser session façade. */
-export interface SessionState {
-  handle: number;
-  session_id: string;
-  mob_id: string;
-  model: string;
-  usage: Usage;
-  /** @deprecated Direct browser sessions no longer expose a local run counter. */
-  run_counter?: number;
-  message_count: number;
-  is_active: boolean;
-  last_assistant_text?: string | null;
-}
+export type { SessionState, WireRunResult } from './generated/session.js';
 
 /** Result of appending runtime system context to a mob member session. */
 export interface MobAppendSystemContextResult {
@@ -160,18 +96,20 @@ export interface MobRespawnResult {
   failed_peer_ids?: string[];
 }
 
-/** Result of a turn execution. */
-export interface TurnResult {
-  /** Canonical text returned by the runtime. */
-  text: string;
-  /** Backward-compatible alias for {@link text}. */
+/**
+ * Result of a turn execution.
+ *
+ * The wire truth is the generated {@link WireRunResult} twin (the same
+ * envelope RPC's `turn/start` returns); this SDK type only adds the
+ * backward-compatible `response` alias for the canonical `text`. The
+ * runtime-owned terminal class is carried by `terminal_cause_kind`; there is
+ * no fabricated in-band `status` string. Agent-level faults reject the
+ * underlying promise instead of resolving with a synthetic failure payload.
+ */
+export type TurnResult = import('./generated/session.js').WireRunResult & {
+  /** Backward-compatible alias for the canonical `text`. */
   response: string;
-  usage: Usage;
-  tool_calls: number;
-  turns?: number;
-  session_id?: string;
-  status?: string;
-}
+};
 
 export type {
   AgentEvent,
@@ -225,6 +163,39 @@ export type SkillId = SkillKey;
 
 // ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 
+/** Closed provider vocabulary (matches Rust `meerkat_core::Provider`). */
+export type ProviderName =
+  | 'anthropic'
+  | 'openai'
+  | 'gemini'
+  | 'self_hosted'
+  | 'other';
+
+/** Profile fields that win over durable session metadata on resume. */
+export type ResumeOverrideField = 'model' | 'provider' | 'provider_params';
+
+/**
+ * User-defined model registry entry (`[models.<id>]`).
+ *
+ * Matches Rust `meerkat_core::config::CustomModelConfig`.
+ */
+export interface CustomModelEntry {
+  /** Typed provider that serves this model. */
+  provider: ProviderName;
+  /** Human-readable display name (defaults to the model id). */
+  display_name?: string;
+  /** Model context window in tokens (drives compaction scaling). */
+  context_window?: number;
+  /** Maximum output tokens per call. */
+  max_output_tokens?: number;
+  /** Whether the model accepts image input (conservative default: false). */
+  vision?: boolean;
+  /** Whether the model supports provider-native web search. */
+  web_search?: boolean;
+  /** Default call timeout in seconds. */
+  call_timeout_secs?: number;
+}
+
 /**
  * Mob definition passed to {@link MeerkatRuntime.createMob}.
  *
@@ -233,6 +204,10 @@ export type SkillId = SkillKey;
 export interface MobDefinition {
   id: string;
   profiles: Record<string, Profile>;
+  /** Mob-scoped custom model registry entries (`[models.<id>]`). */
+  models?: Record<string, CustomModelEntry>;
+  /** Mob-level default provider for Auto image-generation targets. */
+  image_generation_provider?: ProviderName;
   /** Wiring rules for automatic peer connections. */
   wiring?: WiringRules;
   /** Named flow definitions. */
@@ -256,6 +231,16 @@ export interface MobDefinition {
 export interface Profile {
   /** LLM model name (e.g. "claude-sonnet-4-5"). */
   model: string;
+  /** Explicit typed provider for the profile model. */
+  provider?: ProviderName;
+  /** Durable self-hosted server binding for configured self-hosted aliases. */
+  self_hosted_server_id?: string;
+  /** Configured default provider for Auto image-generation targets. */
+  image_generation_provider?: ProviderName;
+  /** Per-profile auto-compaction threshold override (tokens, non-zero). */
+  auto_compact_threshold?: number;
+  /** Profile fields that win over durable session metadata on resume. */
+  resume_overrides?: ResumeOverrideField[];
   /** Skill references to load. */
   skills?: string[];
   /** Tool configuration. */
@@ -343,7 +328,6 @@ export interface MobMember {
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
-  state?: string;
   wired_to?: string[];
   labels?: Record<string, string>;
   status?: string;
@@ -369,8 +353,6 @@ export type MobPeerTarget = string | ExternalPeerTarget;
 export interface MobStatus {
   mob_id: string;
   status: string;
-  /** @deprecated Use `status`. Kept as an inert projection of generated status. */
-  state: string;
 }
 
 /** Unreachable peer entry from a live member connectivity snapshot. */
@@ -385,6 +367,19 @@ export interface MobPeerConnectivitySnapshot {
   unknown_peer_count: number;
   unreachable_peers: MobUnreachablePeer[];
 }
+
+/**
+ * Tri-state peer-connectivity projection for a mob member snapshot.
+ *
+ * Distinguishes a member with no bridge session (`not_applicable`) from a
+ * transiently-unresolved live probe (`probe_timed_out`) from a resolved
+ * connectivity snapshot (`known`). The legacy projection collapsed the first
+ * two cases into an absent field.
+ */
+export type MobPeerConnectivity =
+  | { status: 'not_applicable' }
+  | { status: 'probe_timed_out' }
+  | { status: 'known'; snapshot: MobPeerConnectivitySnapshot };
 
 export interface ResolvedModelCapabilities {
   vision: boolean;
@@ -408,7 +403,7 @@ export interface MobMemberSnapshot {
   resolved_capabilities?: ResolvedModelCapabilities;
   external_member?: unknown;
   kickoff?: Record<string, unknown>;
-  peer_connectivity?: MobPeerConnectivitySnapshot;
+  peer_connectivity?: MobPeerConnectivity;
 }
 
 /** Result envelope for helper-style mob flows. */
@@ -433,7 +428,6 @@ export type EventSourceIdentity =
 export interface EventEnvelope {
   event_id: string;
   source: EventSourceIdentity;
-  source_id: string;
   seq: number;
   mob_id?: string;
   timestamp_ms: number;
@@ -443,17 +437,17 @@ export interface EventEnvelope {
   payload: AgentEvent | { type: string; [key: string]: unknown };
 }
 
-/** Poll/subscribe lag sentinel emitted by the browser runtime. */
-export interface SubscriptionLaggedEvent {
-  type: 'lagged';
-  skipped: number;
-}
-
-/** Direct-session event item. */
-export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
+/**
+ * Direct-session event item.
+ *
+ * K19: a lagged receiver surfaces the generated `stream_truncated` AgentEvent
+ * (reason `stream_lagged`) — the handwritten `{type:'lagged'}` sentinel is
+ * deleted; the lag contract is the same generated event the RPC stream emits.
+ */
+export type SessionEvent = AgentEvent;
 
 /** Member subscription item from the browser runtime. */
-export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
+export type MemberEventItem = EventEnvelope;
 
 /** Runtime identity for one mob member incarnation. */
 export interface AgentRuntimeId {
@@ -470,7 +464,7 @@ export interface AttributedEvent {
 }
 
 /** Mob-wide subscription item from the browser runtime. */
-export type AttributedEventItem = AttributedEvent | SubscriptionLaggedEvent;
+export type AttributedEventItem = AttributedEvent;
 
 /** Structural mob event from the mob event log. */
 export interface MobEvent {
@@ -553,9 +547,7 @@ function isKnownSkillResolutionEvent(event: { type: string }): boolean {
   if (event.type === 'skill_resolution_failed') {
     return (
       (value.skill_key == null || isWireSkillKey(value.skill_key)) &&
-      (value.reason == null || isSkillResolutionFailureReason(value.reason)) &&
-      (value.reference == null || typeof value.reference === 'string') &&
-      (value.error == null || typeof value.error === 'string')
+      (value.reason == null || isSkillResolutionFailureReason(value.reason))
     );
   }
 
@@ -575,9 +567,17 @@ export function isKnownEvent(event: { type: string }): event is AgentEvent {
 /** JSON schema object for tool input. */
 export type JsonSchema = Record<string, unknown>;
 
-/** Result returned from a tool callback. */
+/**
+ * Result returned from a tool callback.
+ *
+ * `content` mirrors the canonical `WireToolResultContent` union
+ * (`string | ContentBlock[]`): plain text OR typed multimodal blocks
+ * (images, video). Block content survives to the agent as typed
+ * {@link ContentBlock}s rather than being narrowed to a string at the
+ * WASM boundary.
+ */
 export interface ToolCallbackResult {
-  content: string;
+  content: string | ContentBlock[];
   is_error: boolean;
 }
 

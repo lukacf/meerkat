@@ -3,7 +3,9 @@
 use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use crate::error::AgentError;
 use crate::event::AgentEvent;
-use crate::hooks::{HookDecision, HookEngineError, HookExecutionReport, HookInvocation};
+use crate::hooks::{
+    HookDecision, HookEngineError, HookExecutionReport, HookFailureReason, HookInvocation,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use tokio::sync::mpsc;
@@ -40,7 +42,7 @@ where
             }
         }
 
-        let mut report = match hook_engine
+        let report = match hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
         {
@@ -51,28 +53,16 @@ where
                 return Err(Self::map_hook_engine_error(err));
             }
         };
-        let mut published = match hook_engine
-            .drain_published_patches(&invocation.session_id)
-            .await
-        {
-            Ok(published) => published,
-            Err(err) => {
-                self.emit_hook_engine_error(&invocation, event_tx, &err)
-                    .await;
-                return Err(Self::map_hook_engine_error(err));
-            }
-        };
-        report.published_patches.append(&mut published);
 
         for outcome in &report.outcomes {
-            if let Some(error) = &outcome.error {
+            if let Some(reason) = &outcome.failure_reason {
                 crate::event_tap::tap_emit(
                     &self.event_tap,
                     event_tx,
                     AgentEvent::HookFailed {
                         hook_id: outcome.hook_id.clone(),
                         point: outcome.point,
-                        error: error.clone(),
+                        reason: reason.clone(),
                     },
                 )
                 .await;
@@ -131,7 +121,7 @@ where
                 AgentEvent::HookFailed {
                     hook_id: hook_id.clone(),
                     point: invocation.point,
-                    error: err.to_string(),
+                    reason: HookFailureReason::from_engine_error(err),
                 },
             )
             .await;

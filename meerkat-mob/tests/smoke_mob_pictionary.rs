@@ -134,6 +134,11 @@ fn sanitize_gemini_key_error(api_key: &str, error: reqwest::Error) -> String {
 fn comms_profile(model: &str, peer_desc: &str) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             comms: true,
@@ -153,31 +158,31 @@ fn pictionary_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("artist"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "claude-sonnet-4-5",
             "Artist — validates guesses",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-a"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "claude-opus-4-8",
             "guesser-a (Opus) — lead, literal/shapes",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-b"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "gemini-3.1-pro-preview",
             "guesser-b (Gemini) — emotions/mood",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-c"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "gpt-5.4",
             "guesser-c (GPT) — context/narrative",
-        )),
+        ))),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("pictionary"));
@@ -425,9 +430,6 @@ async fn wait_for_member_histories_to_settle(
                     }
                     meerkat_core::types::Message::User(u) => {
                         format!("user:{}", meerkat_core::types::text_content(&u.content))
-                    }
-                    meerkat_core::types::Message::Assistant(a) => {
-                        format!("assistant:{}", a.content)
                     }
                     meerkat_core::types::Message::BlockAssistant(ba) => format!(
                         "block_assistant:{}",
@@ -1039,7 +1041,6 @@ async fn print_conversation(
                     }
                     ("←recv", parts.join(" "))
                 }
-                meerkat_core::types::Message::Assistant(a) => ("said", a.content.clone()),
                 meerkat_core::types::Message::BlockAssistant(ba) => {
                     // Extract text + tool send calls
                     let mut parts = Vec::new();
@@ -1356,13 +1357,6 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
                                     "blocks={} has_img={has_img} text={preview}",
                                     u.content.len()
                                 ),
-                            )
-                        }
-                        meerkat_core::types::Message::Assistant(a) => {
-                            let preview: String = a.content.chars().take(120).collect();
-                            (
-                                "assistant",
-                                format!("tools={} text={preview}", a.tool_calls.len()),
                             )
                         }
                         meerkat_core::types::Message::BlockAssistant(ba) => {

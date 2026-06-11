@@ -118,7 +118,7 @@ fn validate_pending_body_frame_loops(run: &MobRun) -> Result<(), RestoreIncompat
     let mut pending_loop_ids: Vec<LoopInstanceId> = run
         .loops
         .iter()
-        .filter(|(loop_id, snap)| loop_is_pending_body_frame(loop_id, snap))
+        .filter(|(_, snap)| loop_is_pending_body_frame(snap))
         .map(|(loop_id, _)| loop_id.clone())
         .collect();
     pending_loop_ids.sort();
@@ -164,20 +164,16 @@ fn validate_active_counts(run: &MobRun) -> Result<(), RestoreIncompatible> {
 
 /// Return true if a loop snapshot represents a loop that is pending a body frame start.
 ///
-/// A loop is pending iff it is in Running phase with no active body frame
-/// (`active_body_frame_id == None`). The `None` (field absent) arm
-/// guards against corrupt snapshots — legitimate Running loops always initialize
-/// this field; if it is missing entirely, we treat the loop as pending and emit a
-/// warning so the anomaly is visible in logs.
-fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
-    if snap.kernel_state.phase != loop_iteration::Phase::Running {
-        return false;
-    }
-    if snap.kernel_state.active_body_frame_id.is_none() {
-        return true;
-    }
-    let _ = loop_id;
-    false
+/// This is the typed owner's predicate — identical to the live engine's
+/// pending-body-frame recovery check: the loop kernel is in `Running` phase
+/// AND its machine-owned `stage` is `AwaitingBodyFrame`. Pending-ness is never
+/// re-derived from the absence of `active_body_frame_id`; a snapshot whose
+/// stage says a body frame is active but whose frame id is missing is a
+/// corrupt projection and surfaces through the active-count validation rather
+/// than being silently reclassified as pending.
+fn loop_is_pending_body_frame(snap: &LoopSnapshot) -> bool {
+    snap.kernel_state.phase == loop_iteration::Phase::Running
+        && snap.kernel_state.stage == loop_iteration::LoopIterationStage::AwaitingBodyFrame
 }
 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
@@ -316,6 +312,10 @@ mod tests {
 
         let mut loop_state = crate::run::loop_iteration::initial_state();
         loop_state.phase = crate::run::loop_iteration::Phase::Running;
+        // The machine-owned stage must agree with the active body frame so the
+        // pending-body-frame validation passes and the authority projection
+        // check is what rejects the unbacked counts.
+        loop_state.stage = crate::run::loop_iteration::LoopIterationStage::BodyFrameActive;
         loop_state.active_body_frame_id = Some(FrameId::from("body-frame"));
         run.loops.insert(
             LoopInstanceId::from("loop-1"),
@@ -331,6 +331,31 @@ mod tests {
             result,
             Err(RestoreIncompatible::FlowAuthorityProjectionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn test_pending_body_frame_uses_machine_owned_stage_not_field_absence() {
+        // The typed owner's predicate: Running + AwaitingBodyFrame is pending.
+        let mut awaiting = crate::run::loop_iteration::initial_state();
+        awaiting.phase = crate::run::loop_iteration::Phase::Running;
+        awaiting.stage = crate::run::loop_iteration::LoopIterationStage::AwaitingBodyFrame;
+        assert!(loop_is_pending_body_frame(&LoopSnapshot {
+            kernel_state: awaiting,
+        }));
+
+        // Regression: a corrupt snapshot whose stage says a body frame is
+        // ACTIVE but whose `active_body_frame_id` is missing must NOT be
+        // reclassified as pending from the field's absence.
+        let mut corrupt = crate::run::loop_iteration::initial_state();
+        corrupt.phase = crate::run::loop_iteration::Phase::Running;
+        corrupt.stage = crate::run::loop_iteration::LoopIterationStage::BodyFrameActive;
+        corrupt.active_body_frame_id = None;
+        assert!(
+            !loop_is_pending_body_frame(&LoopSnapshot {
+                kernel_state: corrupt,
+            }),
+            "missing active_body_frame_id must not fabricate pending-ness"
+        );
     }
 
     #[test]

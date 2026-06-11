@@ -68,11 +68,17 @@ pub struct ArchiveSessionParams {
 }
 
 /// Parameters for `session/inject_context`.
+///
+/// The injected body is the typed [`CoreRenderable`] owner rather than a bare
+/// `text` string: surfaces parse their inbound payload into the renderable at
+/// the ingress boundary and the handler threads it straight through to
+/// `AppendSystemContextRequest.content`. A plain-text client payload still
+/// deserializes via `CoreRenderable`'s tagged `text` variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InjectSystemContextParams {
     pub session_id: String,
-    pub text: String,
+    pub content: meerkat_core::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,4 +129,21 @@ pub struct ScheduleToolCallParams {
     pub name: String,
     #[serde(default)]
     pub arguments: Value,
+}
+
+/// Basic server identity advertised by the RPC `initialize` handshake.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ServerInfo {
+    pub name: String,
+    pub version: String,
+}
+
+/// Capabilities returned by the RPC server during `initialize`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ServerCapabilities {
+    pub server_info: ServerInfo,
+    pub contract_version: String,
+    pub methods: Vec<String>,
 }

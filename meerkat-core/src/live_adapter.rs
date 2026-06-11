@@ -11,10 +11,11 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::image_generation::ToolCallId;
 use crate::provider::Provider;
 use crate::realtime_transcript::RealtimeTranscriptEvent;
 use crate::session::PendingSystemContextAppend;
-use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, Usage};
+use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, ToolName, Usage};
 
 // ---------------------------------------------------------------------------
 // Adapter status — typed lifecycle, not Option<T> hiding five states
@@ -73,10 +74,15 @@ pub enum LiveDegradationReason {
 /// Tool result at the adapter seam. Carries structured content blocks so
 /// callers can preserve fidelity (text, image, video) instead of stringifying
 /// into a single text block.
+///
+/// `call_id` is the typed provider-call identity (#270): the same
+/// [`ToolCallId`] newtype the observation seam emits in
+/// [`LiveAdapterObservation::ToolCallRequested`] correlates the result back —
+/// raw provider strings are never the identity carrier across this seam.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveToolResult {
-    pub call_id: String,
+    pub call_id: ToolCallId,
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
 }
@@ -191,7 +197,9 @@ pub enum LiveAdapterCommand {
         result: LiveToolResult,
     },
     SubmitToolError {
-        call_id: String,
+        /// Typed provider-call identity the error correlates to (same
+        /// [`ToolCallId`] newtype as the observation seam — #270).
+        call_id: ToolCallId,
         error: String,
     },
     Close,
@@ -319,9 +327,15 @@ pub enum LiveAdapterObservation {
     RealtimeTranscript {
         event: RealtimeTranscriptEvent,
     },
+    /// #270: the provider-native call id and tool name are parsed into typed
+    /// newtypes at the provider boundary (`event_to_observation`) so the raw
+    /// provider string is never the identity owner past this seam. Downstream
+    /// the host re-projects them to the meerkat-core `ToolCall` / wire-edge
+    /// `String` shapes via `.0` / `Display` only where the foreign API still
+    /// demands a bare string.
     ToolCallRequested {
-        provider_call_id: String,
-        tool_name: String,
+        provider_call_id: ToolCallId,
+        tool_name: ToolName,
         arguments: serde_json::Value,
     },
     /// Barge-in: the user interrupted the assistant mid-turn.
@@ -620,9 +634,10 @@ pub struct LiveProjectionSnapshot {
     pub system_prompt: Option<String>,
     pub model_id: String,
     // Typed in memory (the realtime refresh guard compares
-    // `Provider == Provider`), but serialized with the canonical provider
-    // names (`"openai"`, not the derive's `"open_a_i"`) so the durable/adapter
-    // wire shape matches the prior `String` carrier exactly.
+    // `Provider == Provider`), but presented as a plain canonical provider
+    // string on the wire (schema is `String`) so the durable/adapter shape
+    // matches the prior `String` carrier exactly, with lenient deserialization
+    // of an opaque carrier value into `Provider::Other`.
     #[serde(with = "crate::provider::provider_canonical_str")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub provider_id: Provider,
@@ -1075,16 +1090,18 @@ mod tests {
     fn command_submit_tool_result_round_trips() {
         let cmd = LiveAdapterCommand::SubmitToolResult {
             result: LiveToolResult {
-                call_id: "call_123".into(),
+                call_id: ToolCallId::new("call_123"),
                 content: vec![ContentBlock::Text { text: "42".into() }],
                 is_error: false,
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
+        // Wire shape stays a plain string (ToolCallId is serde-transparent).
+        assert!(json.contains("\"call_id\":\"call_123\""));
         let deser: LiveAdapterCommand = serde_json::from_str(&json).unwrap();
         match deser {
             LiveAdapterCommand::SubmitToolResult { result } => {
-                assert_eq!(result.call_id, "call_123");
+                assert_eq!(result.call_id, ToolCallId::new("call_123"));
                 assert!(!result.is_error);
                 assert_eq!(result.content.len(), 1);
                 match &result.content[0] {
@@ -1157,7 +1174,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![crate::session::PendingSystemContextAppend {
-                text: "peer terminal: pty=42".into(),
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "peer terminal: pty=42",
+                ),
                 source: Some("peer_terminal".into()),
                 idempotency_key: Some("k1".into()),
                 source_kind: crate::session::SystemContextSource::Normal,
@@ -1171,7 +1190,7 @@ mod tests {
         let deser: LiveProjectionSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.runtime_system_context.len(), 1);
         assert_eq!(
-            deser.runtime_system_context[0].text,
+            deser.runtime_system_context[0].content.render_text(),
             "peer terminal: pty=42"
         );
         assert_eq!(
@@ -1185,8 +1204,8 @@ mod tests {
     #[test]
     fn observation_tool_call_requested_round_trips() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_456".into(),
-            tool_name: "web_search".into(),
+            provider_call_id: ToolCallId::new("call_456"),
+            tool_name: ToolName::new("web_search"),
             arguments: serde_json::json!({"query": "meerkat habitat"}),
         };
         let json = serde_json::to_string(&obs).unwrap();
@@ -1197,15 +1216,15 @@ mod tests {
     #[test]
     fn observation_tool_call_uses_provider_call_id_not_domain_handle() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_789".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_789"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         if let LiveAdapterObservation::ToolCallRequested {
             provider_call_id, ..
         } = &obs
         {
-            assert!(provider_call_id.starts_with("call_"));
+            assert!(provider_call_id.0.starts_with("call_"));
         } else {
             panic!("wrong variant");
         }
@@ -2053,7 +2072,7 @@ mod tests {
     #[test]
     fn live_tool_result_round_trips() {
         let result = LiveToolResult {
-            call_id: "call_abc".into(),
+            call_id: ToolCallId::new("call_abc"),
             content: vec![ContentBlock::Text {
                 text: "answer is 42".into(),
             }],
@@ -2067,7 +2086,7 @@ mod tests {
     #[test]
     fn live_tool_result_error_flag_round_trips() {
         let result = LiveToolResult {
-            call_id: "call_err".into(),
+            call_id: ToolCallId::new("call_err"),
             content: vec![ContentBlock::Text {
                 text: "tool not found".into(),
             }],
@@ -2081,7 +2100,7 @@ mod tests {
     #[test]
     fn live_tool_result_preserves_multiple_content_blocks() {
         let result = LiveToolResult {
-            call_id: "call_multi".into(),
+            call_id: ToolCallId::new("call_multi"),
             content: vec![
                 ContentBlock::Text {
                     text: "first".into(),

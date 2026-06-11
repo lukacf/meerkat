@@ -418,7 +418,14 @@ impl BuiltinTool for BlobLoadFileTool {
             )));
         }
         let media_type = match args.media_type {
-            Some(media_type) => media_type,
+            // Caller-supplied media type is untrusted ingress: parse it
+            // fail-closed into the canonical `type/subtype` identity form via
+            // the typed owner (`MediaType::parse`) so garbage strings never
+            // become stored blob truth or blob-id hash input.
+            Some(raw) => meerkat_core::MediaType::parse(&raw)
+                .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?
+                .as_str()
+                .to_string(),
             None => infer_media_type(&resolved)?,
         };
         let bytes = tokio::fs::read(&resolved).await.map_err(|err| {
@@ -662,6 +669,45 @@ mod tests {
             .unwrap();
         assert_eq!(output["media_type"], "application/custom");
         assert_eq!(output["bytes_read"], 3);
+    }
+
+    #[tokio::test]
+    async fn load_file_rejects_malformed_explicit_media_type() {
+        let temp = tempfile::tempdir().unwrap();
+        tokio::fs::write(temp.path().join("source.bin"), b"abc")
+            .await
+            .unwrap();
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let tool = BlobLoadFileTool::new(temp.path().to_path_buf(), store);
+        // Garbage media-type strings must fail closed at the tool boundary
+        // instead of becoming stored blob truth / blob-id hash input.
+        let err = tool
+            .call(json!({"path": "source.bin", "media_type": "not-a-media-type"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid type/subtype"),
+            "expected fail-closed MediaType parse error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_file_canonicalizes_explicit_media_type() {
+        let temp = tempfile::tempdir().unwrap();
+        tokio::fs::write(temp.path().join("source.bin"), b"abc")
+            .await
+            .unwrap();
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let tool = BlobLoadFileTool::new(temp.path().to_path_buf(), store);
+        // Cosmetic variants canonicalize to the single identity form so they
+        // never mint divergent blob identities for identical bytes.
+        let output = tool
+            .call(json!({"path": "source.bin", "media_type": "image/PNG; charset=binary"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(output["media_type"], "image/png");
     }
 
     #[tokio::test]

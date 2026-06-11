@@ -17,12 +17,13 @@ use meerkat_contracts::{
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
-    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType, Message,
-    ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
-    SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, TranscriptRevisionBody,
-    TranscriptRewriteCommit, TranscriptRewriteReason, TranscriptRewriteRecord,
-    TranscriptRewriteSelection, Usage, UserMessage, transcript_messages_digest,
+    BudgetType, ContentBlock, ContentInput, HookFailureReason, HookId, HookPoint, HookReasonCode,
+    InteractionFailureReason, MediaType, Message, ProviderImageMetadata, RevisedPromptDisposition,
+    RunResult, SessionId, SkillResolutionFailureReason, StopReason, ToolCallArguments,
+    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
+    TranscriptRevisionBody, TranscriptRewriteCommit, TranscriptRewriteReason,
+    TranscriptRewriteRecord, TranscriptRewriteSelection, Usage, UserMessage,
+    transcript_messages_digest,
 };
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
@@ -406,7 +407,9 @@ fn agent_event_all_variants_roundtrip() {
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
             session_id: session_id.clone(),
-            prompt: ContentInput::Text("hello".to_string()),
+            input: meerkat_core::types::RunInput::Content {
+                content: ContentInput::Text("hello".to_string()),
+            },
         },
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
@@ -423,9 +426,11 @@ fn agent_event_all_variants_roundtrip() {
         },
         AgentEvent::RunFailed {
             session_id,
-            error_class: AgentErrorClass::Internal,
-            error: "boom".to_string(),
-            error_report: None,
+            error_report: meerkat_core::event::AgentErrorReport {
+                class: AgentErrorClass::Internal,
+                reason: None,
+                message: "boom".to_string(),
+            },
             terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {
@@ -440,7 +445,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::HookFailed {
             hook_id: HookId::new("h1"),
             point: HookPoint::RunStarted,
-            error: "hook error".to_string(),
+            reason: HookFailureReason::execution_failed("hook error"),
         },
         AgentEvent::HookDenied {
             hook_id: HookId::new("h1"),
@@ -484,7 +489,6 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolExecutionCompleted {
             id: "tc2".to_string(),
             name: "shell".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 100,
@@ -505,7 +509,10 @@ fn agent_event_all_variants_roundtrip() {
             messages_after: 8,
         },
         AgentEvent::CompactionFailed {
-            error: "LLM failed".to_string(),
+            reason: meerkat_core::CompactionFailureReason::LlmFailed {
+                error_class: meerkat_core::AgentErrorClass::Llm,
+                message: "LLM failed".to_string(),
+            },
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Tokens,
@@ -514,11 +521,24 @@ fn agent_event_all_variants_roundtrip() {
             percent: 0.8,
         },
         AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 3,
-            error: "rate limited".to_string(),
-            delay_ms: 1000,
-            retry: None,
+            retry: meerkat_core::LlmRetrySchedule {
+                failure: meerkat_core::LlmRetryFailure {
+                    provider: "anthropic".to_string(),
+                    kind: meerkat_core::LlmRetryFailureKind::RateLimited,
+                    retry_after_ms: Some(1000),
+                    duration_ms: None,
+                    message: "rate limited".to_string(),
+                },
+                plan: meerkat_core::LlmRetryPlan {
+                    attempt: 1,
+                    max_retries: 3,
+                    computed_delay_ms: 1000,
+                    selected_delay_ms: 1000,
+                    retry_after_hint_ms: Some(1000),
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
         },
         AgentEvent::SkillsResolved {
             skills: vec![meerkat_core::skills::SkillKey::builtin(
@@ -529,15 +549,13 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::SkillResolutionFailed {
             skill_key: Some(failed_skill_key.clone()),
             reason: SkillResolutionFailureReason::NotFound {
-                key: failed_skill_key.clone(),
+                key: failed_skill_key,
             },
-            reference: failed_skill_key.to_string(),
-            error: format!("skill not found: {failed_skill_key}"),
         },
         // InteractionComplete and InteractionFailed are constructed via JSON
         // below to avoid a direct uuid crate dependency.
         AgentEvent::StreamTruncated {
-            reason: "channel full".to_string(),
+            reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
         },
         AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(
@@ -575,10 +593,13 @@ fn agent_event_all_variants_roundtrip() {
             assert!(json.get("skill_key").is_some(), "missing typed skill_key");
             assert!(json.get("reason").is_some(), "missing typed failure reason");
             assert_eq!(json["reason"]["reason_type"], "not_found");
-            assert_eq!(json["reference"], failed_skill_key.to_string());
-            assert_eq!(
-                json["error"],
-                format!("skill not found: {failed_skill_key}")
+            assert!(
+                json.get("reference").is_none(),
+                "legacy display mirror `reference` must not be serialized"
+            );
+            assert!(
+                json.get("error").is_none(),
+                "legacy display mirror `error` must not be serialized"
             );
         }
 
@@ -596,10 +617,12 @@ fn agent_event_all_variants_roundtrip() {
             "interaction_id": "550e8400-e29b-41d4-a716-446655440000",
             "result": "response"
         }),
-        // InteractionFailed requires uuid::Uuid for InteractionId
+        // InteractionFailed requires uuid::Uuid for InteractionId and the
+        // typed `reason` cause (the `error` string is the fused display mirror).
         serde_json::json!({
             "type": "interaction_failed",
             "interaction_id": "550e8400-e29b-41d4-a716-446655440001",
+            "reason": { "kind": "abandoned", "detail": "timeout" },
             "error": "timeout"
         }),
     ];
@@ -639,7 +662,9 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
             session_id: SessionId::new(),
-            prompt: ContentInput::Text("hello".to_string()),
+            input: meerkat_core::types::RunInput::Content {
+                content: ContentInput::Text("hello".to_string()),
+            },
         },
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
@@ -651,9 +676,11 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         },
         AgentEvent::RunFailed {
             session_id: SessionId::new(),
-            error_class: AgentErrorClass::Internal,
-            error: "nope".to_string(),
-            error_report: None,
+            error_report: meerkat_core::event::AgentErrorReport {
+                class: AgentErrorClass::Internal,
+                reason: None,
+                message: "nope".to_string(),
+            },
             terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {
@@ -668,7 +695,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::HookFailed {
             hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
-            error: "boom".to_string(),
+            reason: HookFailureReason::execution_failed("boom"),
         },
         AgentEvent::HookDenied {
             hook_id: HookId::new("hook-1"),
@@ -712,7 +739,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolExecutionCompleted {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 1,
@@ -733,7 +759,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             messages_after: 1,
         },
         AgentEvent::CompactionFailed {
-            error: "failed".to_string(),
+            reason: meerkat_core::CompactionFailureReason::LlmFailed {
+                error_class: meerkat_core::AgentErrorClass::Llm,
+                message: "failed".to_string(),
+            },
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Time,
@@ -742,11 +771,24 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             percent: 50.0,
         },
         AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 2,
-            error: "retry".to_string(),
-            delay_ms: 100,
-            retry: None,
+            retry: meerkat_core::LlmRetrySchedule {
+                failure: meerkat_core::LlmRetryFailure {
+                    provider: "openai".to_string(),
+                    kind: meerkat_core::LlmRetryFailureKind::RetryableProviderError,
+                    retry_after_ms: None,
+                    duration_ms: None,
+                    message: "retry".to_string(),
+                },
+                plan: meerkat_core::LlmRetryPlan {
+                    attempt: 1,
+                    max_retries: 2,
+                    computed_delay_ms: 100,
+                    selected_delay_ms: 100,
+                    retry_after_hint_ms: None,
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
         },
         AgentEvent::SkillsResolved {
             skills: vec![],
@@ -757,8 +799,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             reason: SkillResolutionFailureReason::Unknown {
                 message: "missing".to_string(),
             },
-            reference: "skill".to_string(),
-            error: "missing".to_string(),
         },
         AgentEvent::InteractionComplete {
             interaction_id: serde_json::from_value(serde_json::json!(
@@ -773,10 +813,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 "550e8400-e29b-41d4-a716-446655440001"
             ))
             .unwrap(),
-            error: "failed".to_string(),
+            reason: InteractionFailureReason::abandoned("failed"),
         },
         AgentEvent::StreamTruncated {
-            reason: "lag".to_string(),
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped: 3 },
         },
         AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(
@@ -973,7 +1013,7 @@ fn core_create_params_minimal_deserialize() {
     assert!(params.model.is_none());
     assert!(params.provider.is_none());
     assert!(params.max_tokens.is_none());
-    assert!(params.system_prompt.is_none());
+    assert!(params.system_prompt.is_inherit());
     assert!(params.labels.is_none());
     assert!(params.additional_instructions.is_none());
     assert!(params.app_context.is_none());

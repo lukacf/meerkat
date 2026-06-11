@@ -139,6 +139,99 @@ impl std::fmt::Display for SkillName {
     }
 }
 
+/// Canonical identity of a skill-defined function.
+///
+/// Typed owner of the function-name fact on the skill invocation seam:
+/// parsed fail-closed at ingress (non-empty, no surrounding whitespace,
+/// printable identifier), so no bare `&str` ferries function identity into
+/// [`SkillSource::invoke_function`] / [`SkillEngine::invoke_function`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillFunctionName(String);
+
+impl SkillFunctionName {
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        if value.is_empty() {
+            return Err(SkillError::Parse("function_name cannot be empty".into()));
+        }
+        if value.trim() != value {
+            return Err(SkillError::Parse(
+                format!("invalid function_name '{value}': surrounding whitespace").into(),
+            ));
+        }
+        if value.chars().any(char::is_whitespace) || value.chars().any(char::is_control) {
+            return Err(SkillError::Parse(
+                format!("invalid function_name '{value}': whitespace/control characters").into(),
+            ));
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SkillFunctionName {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillFunctionName> for String {
+    fn from(value: SkillFunctionName) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for SkillFunctionName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Wire-opaque output of a skill-defined function invocation.
+///
+/// Skill function results are third-party JSON produced by the skill, not a
+/// shape core interprets — the typed owner is therefore a pass-through
+/// `RawValue` carrier (the sanctioned opaque-JSON boundary type), never a
+/// bare `serde_json::Value` ferried through the system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SkillFunctionOutput(Box<serde_json::value::RawValue>);
+
+impl SkillFunctionOutput {
+    /// Wrap an already-serialized JSON payload.
+    pub fn from_raw(raw: Box<serde_json::value::RawValue>) -> Self {
+        Self(raw)
+    }
+
+    /// Serialize a structured value into the opaque carrier. Fails closed on
+    /// serialization faults rather than fabricating an empty payload.
+    pub fn from_serialize<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+        serde_json::value::to_raw_value(value).map(Self)
+    }
+
+    /// Borrow the raw JSON text.
+    pub fn as_raw(&self) -> &serde_json::value::RawValue {
+        &self.0
+    }
+
+    /// Consume into the raw JSON payload.
+    pub fn into_raw(self) -> Box<serde_json::value::RawValue> {
+        self.0
+    }
+}
+
+impl PartialEq for SkillFunctionOutput {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
 /// Canonical runtime identity for a skill.
 ///
 /// This is the single identity carried across every surface — the wire parses
@@ -266,6 +359,110 @@ impl From<CapabilityId> for String {
 impl std::fmt::Display for CapabilityId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Typed key for a skill extension entry.
+///
+/// Extension keys follow a `namespace.key` convention (e.g. `vendor.policy`).
+/// The split is parsed once, fail-closed, at the construction boundary so the
+/// namespace/key form is a typed owner rather than a string re-split on every
+/// read. The namespace is the segment before the first `.`; the key is the
+/// remainder (which may itself contain dots, e.g. `vendor.sub.field`). The
+/// original string is preserved verbatim so the key round-trips on the wire.
+///
+/// Values stay open-ended `String` author metadata; only the key space is
+/// typed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillExtensionKey {
+    /// Full original `namespace.key` string.
+    raw: String,
+    /// Byte offset of the `.` separating namespace from key, so accessors
+    /// borrow slices without re-splitting.
+    dot: usize,
+}
+
+impl SkillExtensionKey {
+    /// Parse a `namespace.key` extension key, fail-closed on malformed input.
+    ///
+    /// Rejects keys with no `.`, an empty namespace, or an empty key. Malformed
+    /// keys fail here at the parse boundary rather than silently surviving as
+    /// re-split strings downstream.
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        let Some((namespace, key)) = value.split_once('.') else {
+            return Err(SkillError::Parse(
+                format!(
+                    "invalid extension key '{value}': extension keys must be namespaced as 'vendor.key'"
+                )
+                .into(),
+            ));
+        };
+        if namespace.is_empty() || key.is_empty() {
+            return Err(SkillError::Parse(
+                format!(
+                    "invalid extension key '{value}': expected non-empty namespace and key segments"
+                )
+                .into(),
+            ));
+        }
+        Ok(Self {
+            raw: value.to_string(),
+            dot: namespace.len(),
+        })
+    }
+
+    /// The namespace segment (before the first `.`).
+    pub fn namespace(&self) -> &str {
+        &self.raw[..self.dot]
+    }
+
+    /// The key segment (after the first `.`; may itself contain dots).
+    pub fn key(&self) -> &str {
+        &self.raw[self.dot + 1..]
+    }
+
+    /// The full original `namespace.key` string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// The companion `<namespace>.version` key for this extension's namespace.
+    ///
+    /// Always well-formed (non-empty namespace, non-empty `version` key), so it
+    /// is constructed directly rather than re-parsed.
+    pub fn version_companion(&self) -> Self {
+        let namespace = self.namespace();
+        Self {
+            raw: format!("{namespace}.version"),
+            dot: namespace.len(),
+        }
+    }
+
+    /// Whether this key's key segment is exactly `version`.
+    pub fn is_version(&self) -> bool {
+        self.key() == "version"
+    }
+}
+
+impl TryFrom<String> for SkillExtensionKey {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillExtensionKey> for String {
+    fn from(value: SkillExtensionKey) -> Self {
+        value.raw
+    }
+}
+
+impl std::fmt::Display for SkillExtensionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
     }
 }
 
@@ -411,11 +608,47 @@ impl Default for SourceHealthSnapshot {
     }
 }
 
+/// Identity of a quarantined skill entry.
+///
+/// Deliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an
+/// entry that failed validation, so it must never be confusable with a
+/// canonical, loadable key. The raw identifier is preserved verbatim for
+/// operator diagnostics (it may be an invalid slug, e.g. `"Not A Valid
+/// Slug"`), but it cannot be parsed back into a `SkillKey` and handed to
+/// `load()`. This closes the "fabricated canonical-looking SkillKey" gap: a
+/// quarantine placeholder can never shadow or collide with a real skill named
+/// `invalid-skill`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QuarantinedSkillIdentity {
+    /// Source that emitted the invalid entry.
+    pub source_uuid: SourceUuid,
+    /// Raw, possibly-invalid skill identifier as it appeared at the source
+    /// (directory name, catalog `name`, etc.). Not validated as a `SkillName`.
+    pub raw_id: String,
+}
+
+impl QuarantinedSkillIdentity {
+    pub fn new(source_uuid: SourceUuid, raw_id: impl Into<String>) -> Self {
+        Self {
+            source_uuid,
+            raw_id: raw_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for QuarantinedSkillIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.source_uuid, self.raw_id)
+    }
+}
+
 /// Per-skill quarantine diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillQuarantineDiagnostic {
-    pub key: SkillKey,
+    /// Typed, non-loadable identity of the quarantined entry.
+    pub identity: QuarantinedSkillIdentity,
     pub location: String,
     pub error_code: String,
     pub error_class: String,
@@ -430,6 +663,14 @@ pub struct SkillQuarantineDiagnostic {
 pub struct SkillRuntimeDiagnostics {
     pub source_health: SourceHealthSnapshot,
     pub quarantined: Vec<SkillQuarantineDiagnostic>,
+    /// Typed fault recorded when run-terminal diagnostics collection failed.
+    ///
+    /// When set, `source_health` and `quarantined` are vacuous defaults — NOT
+    /// observed truth. Surfaces must read this fault instead of treating the
+    /// default snapshot as a successful healthy observation (dogma row #239:
+    /// collection faults are typed run-result facts, never silently dropped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_fault: Option<crate::event::SkillResolutionFailureReason>,
 }
 
 /// Determine health state from invalid ratio + failure streak + handshake state.
@@ -527,7 +768,9 @@ impl SkillDescriptor {
 pub struct SkillDocument {
     pub descriptor: SkillDescriptor,
     pub body: String,
-    pub extensions: IndexMap<String, String>,
+    /// Author-defined extension metadata. Keys are typed `namespace.key`
+    /// owners; values stay open-ended `String` author metadata.
+    pub extensions: IndexMap<SkillExtensionKey, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +964,24 @@ pub enum SkillError {
         source_uuid: String,
         skill_name: String,
     },
+
+    #[error(
+        "duplicate skill remap from {from}: a later remap to {new_to} would silently shadow the existing remap to {existing_to}"
+    )]
+    DuplicateRemap {
+        from: String,
+        existing_to: String,
+        new_to: String,
+    },
+
+    #[error(
+        "duplicate skill alias '{alias}': a later alias to {new_to} would silently shadow the existing alias to {existing_to}"
+    )]
+    DuplicateAlias {
+        alias: String,
+        existing_to: String,
+        new_to: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -806,13 +1067,13 @@ pub trait SkillSource: Send + Sync {
         async move { Err(SkillError::NotFound { key: missing }) }
     }
 
-    /// Invoke a skill-defined function with structured arguments.
+    /// Invoke a skill-defined function with typed, object-shaped arguments.
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send {
         let missing = key.clone();
         let _ = function_name;
         let _ = arguments;
@@ -903,9 +1164,9 @@ where
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send {
         async move {
             (**self)
                 .invoke_function(key, function_name, arguments)
@@ -973,13 +1234,13 @@ pub trait SkillEngine: Send + Sync {
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send;
 
-    /// Invoke a skill-defined function with structured arguments.
+    /// Invoke a skill-defined function with typed, object-shaped arguments.
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send;
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send;
 
     /// List all skills with provenance and shadow information.
     fn list_all_with_provenance(
@@ -1042,7 +1303,11 @@ type HealthSnapshotFn = dyn Fn() -> OwnedSkillFuture<SourceHealthSnapshot> + Sen
 type ListArtifactsFn = dyn Fn(SkillKey) -> OwnedSkillFuture<Vec<SkillArtifact>> + Send + Sync;
 type ReadArtifactFn =
     dyn Fn(SkillKey, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
-type InvokeFunctionFn = dyn Fn(SkillKey, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value>
+type InvokeFunctionFn = dyn Fn(
+        SkillKey,
+        SkillFunctionName,
+        crate::event::ToolCallArguments,
+    ) -> OwnedSkillFuture<SkillFunctionOutput>
     + Send
     + Sync;
 type ListAllWithProvenanceFn =
@@ -1120,7 +1385,9 @@ impl SkillRuntime {
                 Box::pin(async move { engine.read_artifact(&key, &artifact_path).await })
             }),
             invoke_function_fn: Arc::new(
-                move |key: SkillKey, function_name: String, arguments: serde_json::Value| {
+                move |key: SkillKey,
+                      function_name: SkillFunctionName,
+                      arguments: crate::event::ToolCallArguments| {
                     let engine = Arc::clone(&invoke_function_engine);
                     Box::pin(async move {
                         engine
@@ -1191,10 +1458,10 @@ impl SkillRuntime {
     pub async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
-        (self.invoke_function_fn)(key.clone(), function_name.to_string(), arguments).await
+        function_name: &SkillFunctionName,
+        arguments: crate::event::ToolCallArguments,
+    ) -> Result<SkillFunctionOutput, SkillError> {
+        (self.invoke_function_fn)(key.clone(), function_name.clone(), arguments).await
     }
 
     pub async fn list_all_with_provenance(
@@ -1275,6 +1542,48 @@ mod tests {
         assert_eq!(json, "\"builtins\"");
         let decoded: CapabilityId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, cap);
+    }
+
+    #[test]
+    fn test_skill_extension_key_parse_and_accessors() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        assert_eq!(key.namespace(), "vendor");
+        assert_eq!(key.key(), "policy");
+        assert_eq!(key.as_str(), "vendor.policy");
+        assert!(!key.is_version());
+
+        // Key segment may itself contain dots; only the first '.' splits.
+        let nested = SkillExtensionKey::parse("vendor.sub.field").expect("valid nested");
+        assert_eq!(nested.namespace(), "vendor");
+        assert_eq!(nested.key(), "sub.field");
+    }
+
+    #[test]
+    fn test_skill_extension_key_fail_closed() {
+        // No '.' separator.
+        assert!(SkillExtensionKey::parse("vendor").is_err());
+        // Empty namespace.
+        assert!(SkillExtensionKey::parse(".key").is_err());
+        // Empty key.
+        assert!(SkillExtensionKey::parse("vendor.").is_err());
+    }
+
+    #[test]
+    fn test_skill_extension_key_version_companion() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        let companion = key.version_companion();
+        assert_eq!(companion.as_str(), "vendor.version");
+        assert_eq!(companion.namespace(), "vendor");
+        assert!(companion.is_version());
+    }
+
+    #[test]
+    fn test_skill_extension_key_json_roundtrip() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        let json = serde_json::to_string(&key).expect("serialize");
+        assert_eq!(json, "\"vendor.policy\"");
+        let decoded: SkillExtensionKey = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, key);
     }
 
     #[test]

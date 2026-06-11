@@ -94,6 +94,24 @@ export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export type CapabilityId = string;
 
+export type CompactionFailureReason = {
+  error_class: AgentErrorClass;
+  kind: "llm_failed";
+  message: string;
+} | {
+  kind: "empty_summary";
+} | {
+  kind: "estimation_failed";
+  message: string;
+} | {
+  attempted_entries: number;
+  kind: "memory_indexing_failed";
+  message: string;
+} | {
+  kind: "transcript_rewrite_failed";
+  message: string;
+};
+
 export type ContentBlock = {
   text: string;
   type: "text";
@@ -106,14 +124,21 @@ export type ContentBlock = {
 } | {
   data: string;
   source: "inline";
+} | {
+  data: unknown;
+  type: "structured";
+} | {
+  skill_key: SkillKey;
+  text: string;
+  type: "skill_context";
 };
 
 export type ContentInput = string | ContentBlock[];
 
 export interface DeferredCatalogDelta {
-  added_hidden_names?: string[];
+  added_hidden_names?: ToolName[];
   pending_sources?: string[];
-  removed_hidden_names?: string[];
+  removed_hidden_names?: ToolName[];
 }
 
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
@@ -124,11 +149,34 @@ export type GeminiImageMetadata = {
   target_model: string;
 };
 
+export type HookFailureReason = {
+  reason_code: "timeout";
+  timeout_ms: number;
+} | {
+  message: string;
+  reason_code: "execution_failed";
+} | {
+  message: string;
+  reason_code: "config_invalid";
+} | {
+  reason_code: "observe_only_violation";
+};
+
 export type HookId = string;
 
 export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_llm_request" | "post_llm_response" | "pre_tool_execution" | "post_tool_execution" | "turn_boundary";
 
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
+
+export type InteractionFailureReason = {
+  kind: "cancelled";
+} | {
+  detail: string;
+  kind: "abandoned";
+} | {
+  detail: string;
+  kind: "finalization_failed";
+};
 
 export type InteractionId = string;
 
@@ -171,7 +219,7 @@ export interface PromptText {
   content: string;
 }
 
-export type Provider = "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 
 export type ProviderImageMetadata = {
   provider: "not_emitted";
@@ -191,11 +239,27 @@ export type RevisedPromptDisposition = {
 
 export type RevisedPromptSource = "provider" | "meerkat_projection";
 
+export type RunInput = {
+  content: ContentInput;
+  kind: "content";
+} | {
+  kind: "pending_tool_results";
+};
+
 export interface SchemaWarning {
   message: string;
   path: string;
   provider: Provider;
 }
+
+export type ServerToolKind = {
+  kind: "web_search";
+} | {
+  kind: "google_search";
+} | {
+  kind: "provider_native";
+  name: string;
+};
 
 export type SessionId = string;
 
@@ -255,6 +319,16 @@ export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
 
+export type StreamTruncationReason = {
+  kind: "channel_full";
+} | {
+  dropped: number;
+  kind: "stream_lagged";
+} | {
+  dropped: number;
+  kind: "output_audio_degraded";
+};
+
 export interface SystemTime {
   nanos_since_epoch: number;
   secs_since_epoch: number;
@@ -291,10 +365,11 @@ export type ToolConfigChangedPayload = {
   domain?: ToolConfigChangeDomain | null;
   operation: ToolConfigChangeOperation;
   persisted: boolean;
-  status: string;
   status_info: ToolConfigChangeStatus;
   target: string;
 };
+
+export type ToolName = string;
 
 export type TranscriptRevisionBody = {
   created_at: SystemTime;
@@ -345,7 +420,7 @@ export type Usage = {
 };
 
 export interface RunStartedEvent {
-  prompt: ContentInput;
+  input: RunInput;
   session_id: SessionId;
   type: "run_started";
 }
@@ -376,9 +451,7 @@ export interface ExtractionFailedEvent {
 }
 
 export interface RunFailedEvent {
-  error: string;
-  error_class: AgentErrorClass;
-  error_report?: AgentErrorReport | null;
+  error_report: AgentErrorReport;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";
@@ -398,9 +471,9 @@ export interface HookCompletedEvent {
 }
 
 export interface HookFailedEvent {
-  error: string;
   hook_id: HookId;
   point: HookPoint;
+  reason: HookFailureReason;
   type: "hook_failed";
 }
 
@@ -441,7 +514,7 @@ export interface TextCompleteEvent {
 export interface ServerToolContentEvent {
   content: unknown;
   id?: string | null;
-  name: string;
+  kind: ServerToolKind;
   type: "server_tool_content";
 }
 
@@ -458,7 +531,7 @@ export interface ToolCallRequestedEvent {
 }
 
 export interface ToolResultReceivedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   id: string;
   is_error: boolean;
   name: string;
@@ -478,12 +551,11 @@ export interface ToolExecutionStartedEvent {
 }
 
 export interface ToolExecutionCompletedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   duration_ms: number;
   id: string;
   is_error: boolean;
   name: string;
-  result: string;
   type: "tool_execution_completed";
 }
 
@@ -509,7 +581,7 @@ export interface CompactionCompletedEvent {
 }
 
 export interface CompactionFailedEvent {
-  error: string;
+  reason: CompactionFailureReason;
   type: "compaction_failed";
 }
 
@@ -522,11 +594,7 @@ export interface BudgetWarningEvent {
 }
 
 export interface RetryingEvent {
-  attempt: number;
-  delay_ms: number;
-  error: string;
-  max_attempts: number;
-  retry?: LlmRetrySchedule | null;
+  retry: LlmRetrySchedule;
   type: "retrying";
 }
 
@@ -537,9 +605,7 @@ export interface SkillsResolvedEvent {
 }
 
 export interface SkillResolutionFailedEvent {
-  error?: string;
-  reason?: SkillResolutionFailureReason;
-  reference?: string;
+  reason: SkillResolutionFailureReason;
   skill_key?: SkillKey | null;
   type: "skill_resolution_failed";
 }
@@ -559,13 +625,13 @@ export interface InteractionCallbackPendingEvent {
 }
 
 export interface InteractionFailedEvent {
-  error: string;
   interaction_id: InteractionId;
+  reason: InteractionFailureReason;
   type: "interaction_failed";
 }
 
 export interface StreamTruncatedEvent {
-  reason: string;
+  reason: StreamTruncationReason;
   type: "stream_truncated";
 }
 
@@ -578,7 +644,6 @@ export interface BackgroundJobCompletedEvent {
   detail: string;
   display_name: string;
   job_id: string;
-  status?: string | null;
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 }

@@ -10,6 +10,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_first_turn_phase`: `Map<SessionId, SessionFirstTurnPhase>`
 - `session_pending_initial_prompt_present`: `Map<SessionId, Bool>`
 - `session_pending_tool_results_count`: `Map<SessionId, u64>`
+- `session_lifecycle_terminal`: `Map<SessionId, SessionDocumentLifecycle>`
 
 ## Inputs
 - `MarkSessionInitialTurnPending`(session_id: SessionId)
@@ -41,6 +42,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
+- `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool)
+- `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
+- `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
+- `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
+- `ArchiveSessionDocument`(session_id: SessionId, runtime_backed: Bool, durable_snapshot_present: Bool, runtime_session_registered: Bool)
 
 ## Signals
 
@@ -68,6 +74,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionResumeOverridesAuthorized`(provider_selection: ResumeProviderSelection, self_hosted_selection: ResumeSelfHostedSelection, provider_overridden: Bool)
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
+- `SessionStoreRecoverySourceResolved`(recoverable: Bool)
+- `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
+- `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
+- `SessionLifecycleTerminalRecovered`
+- `SessionArchiveResolved`(disposition: SessionArchiveDisposition, write_document: Bool, retire_runtime: Bool)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -89,6 +100,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_reject_build_only_after_first_turn`(has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
+- `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool) -> `Bool`
+- `archive_should_retire_runtime`(runtime_backed: Bool, durable_snapshot_present: Bool, runtime_session_registered: Bool) -> `Bool`
 
 ## Invariants
 
@@ -665,9 +678,71 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveSessionAuthorityClassified`
 - To: `Ready`
 
+### `RecoverSessionFromStoreAuthorized`
+- From: `Ready`
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- Guards:
+  - ``
+- Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `RecoverSessionFromStoreUnrecoverable`
+- From: `Ready`
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- Guards:
+  - ``
+- Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `ApplyPendingToolResults`
+- From: `Ready`
+- On: `ApplyPendingToolResults`(session_id, result_count)
+- Emits: `SessionToolResultsApplied`
+- To: `Ready`
+
+### `TranscriptEditFork`
+- From: `Ready`
+- On: `TranscriptEdit`(session_id, fork_or_rewrite_directive)
+- Guards:
+  - ``
+- Emits: `TranscriptRewriteCommitted`
+- To: `Ready`
+
+### `TranscriptEditRewrite`
+- From: `Ready`
+- On: `TranscriptEdit`(session_id, fork_or_rewrite_directive)
+- Guards:
+  - ``
+- Emits: `TranscriptRewriteCommitted`
+- To: `Ready`
+
+### `RecoverSessionLifecycleTerminal`
+- From: `Ready`
+- On: `RecoverSessionLifecycleTerminal`(session_id, terminal)
+- Guards:
+  - ``
+- Emits: `SessionLifecycleTerminalRecovered`
+- To: `Ready`
+
+### `ArchiveSessionDocumentActive`
+- From: `Ready`
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- Guards:
+  - ``
+- Emits: `SessionArchiveResolved`
+- To: `Ready`
+
+### `ArchiveSessionDocumentAlreadyArchived`
+- From: `Ready`
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- Guards:
+  - ``
+- Emits: `SessionArchiveResolved`
+- To: `Ready`
+
 ## Coverage
 ### Code Anchors
-- `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, AuthorizeSystemPromptMutation, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized
+- `session_document_authority` (machine `SessionDocumentMachine`): `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, AuthorizeSystemPromptMutation, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized
 
 ### Scenarios
 - `session_first_turn_pending_consume` — MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, and ConsumeSessionDeferredInputsConsumed own the per-session first-turn phase registry and emit SessionFirstTurnPhaseResolved without handwritten phase mutation

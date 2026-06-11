@@ -525,7 +525,7 @@ async fn inject_context_via_rpc() {
         "method": "session/inject_context",
         "params": {
             "session_id": &sid,
-            "text": "Important context for the agent",
+            "content": { "type": "text", "text": "Important context for the agent" },
             "source": "test"
         }
     });
@@ -920,7 +920,6 @@ async fn initialize_methods_list_complete() {
         "config/patch",
         "capabilities/get",
         "models/catalog",
-        "skills/list",
     ];
     for method in &expected_core {
         assert!(
@@ -928,6 +927,14 @@ async fn initialize_methods_list_complete() {
             "Missing method '{method}' in initialize response. Got: {method_names:?}"
         );
     }
+
+    // `skills/list` is advertised only when a skill runtime is bound.
+    // `spawn_test_server` builds `RpcServer::new` with `skill_runtime: None`,
+    // so the surface must NOT advertise it (advertise == deliver, row #321).
+    assert!(
+        !method_names.contains(&"skills/list"),
+        "skills/list must be absent when no skill runtime is bound. Got: {method_names:?}"
+    );
 
     #[cfg(feature = "mob")]
     {

@@ -19,15 +19,16 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest,
-    MachineProductionOwnerRelation, MachineSchema, SchedulerRule, SemanticCoverageEntry,
+    CompositionCoverageManifest, CompositionSchema, CoverageClaims, CoverageSchemaTarget,
+    MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema, SemanticCoverageEntry,
     TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
-    canonical_machine_schemas,
+    canonical_machine_schemas, scheduler_rule_coverage_name,
 };
 use quote::ToTokens;
 use serde::Serialize;
 use syn::spanned::Spanned;
+use syn::visit::Visit;
 
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
@@ -294,10 +295,9 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
 
     for machine in &selection.machines {
         remove_legacy_authority_path(&machine_authority_path(root, &machine.slug))?;
-        write_generated(
-            &machine_model_path(root, &machine.slug),
-            &render_machine_semantic_model(&machine.schema),
-        )?;
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
+        write_generated(&machine_model_path(root, &machine.slug), &machine_model)?;
         write_generated(
             &machine_ci_path(root, &machine.slug),
             &render_machine_ci_cfg(&machine.schema, false),
@@ -350,9 +350,16 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
 
     for composition in &selection.compositions {
         remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
         write_generated(
             &composition_model_path(root, &composition.slug),
-            &render_composition_semantic_model(&composition.schema),
+            &composition_model,
         )?;
         write_generated(
             &composition_ci_path(root, &composition.slug),
@@ -441,6 +448,20 @@ fn machine_verify_at_root(
                 profile,
                 workers,
             )?;
+            // Structural requirements (expected routes / scheduler rules /
+            // states / transitions) are enforced in EVERY verify profile via the
+            // structural invariants emitted into the composition `ci.cfg`
+            // INVARIANTS block (see render_composition_ci_cfg) — that is the
+            // promotion (#188) that makes the standard CI gate fail closed on a
+            // structurally under-specified composition.
+            //
+            // The per-witness `.cfg` TLC model-checks are TEMPORAL/liveness
+            // checks: they assert that a scripted input sequence drives the
+            // composition through the expected routes. They REQUIRE the Deep
+            // profile's witness-script driving machinery — an un-driven witness
+            // run stutters and vacuously violates its temporal property. Those
+            // (and the coverage-aggregation audit they feed, which also needs
+            // Deep's `-coverage 1` instrumentation) therefore stay Deep-gated.
             if matches!(profile, VerifyProfile::Deep) {
                 let mut aggregated_coverage = main_coverage.unwrap_or_default();
                 let mut witness_covered_routes = BTreeSet::new();
@@ -525,9 +546,11 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &machine_authority_path(root, &machine.slug),
             &mut mismatches,
         );
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
         compare_generated(
             &machine_model_path(root, &machine.slug),
-            &render_machine_semantic_model(&machine.schema),
+            &machine_model,
             &mut mismatches,
         )?;
         compare_generated(
@@ -580,9 +603,16 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &composition_authority_path(root, &composition.slug),
             &mut mismatches,
         );
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
         compare_generated(
             &composition_model_path(root, &composition.slug),
-            &render_composition_semantic_model(&composition.schema),
+            &composition_model,
             &mut mismatches,
         )?;
         compare_generated(
@@ -627,6 +657,12 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
     Ok(mismatches)
 }
 
+/// Deliberately text-level tombstone gate: these are retired
+/// authority-language names banned from *documentation prose*
+/// (`docs/` + spec READMEs — see `authority_language_paths`), where the
+/// stale word itself is the violation regardless of context. This is not a
+/// Rust-source structure check; structural source-shape governance lives in
+/// the syn-AST gates in this file and `rmat_audit`/`effect_authority`.
 pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let banned = ["schema.yaml", "PureHandKernel", "PureHand"];
@@ -648,26 +684,88 @@ pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>>
     Ok(mismatches)
 }
 
+/// Parse a whole Rust source file and structurally drop every `#[cfg(test)]`
+/// item (top-level, nested in `mod`, or impl member) so the production-only
+/// contract scanners never see test fixtures — and never fail to parse. The
+/// prior approach split the text at the first `#[cfg(test)]`, which truncates
+/// an inline `#[cfg(test)] fn` mid-file and yields unbalanced (unparseable)
+/// Rust. The full file is always balanced, so it always parses.
+fn parse_production_file(contents: &str) -> syn::Result<syn::File> {
+    let mut file = syn::parse_file(contents)?;
+    strip_cfg_test_items(&mut file.items);
+    Ok(file)
+}
+
+fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+    items.retain(|item| !item_attrs(item).iter().any(attr_is_cfg_test));
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = module.content.as_mut() {
+                    strip_cfg_test_items(inner);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                item_impl.items.retain(|impl_item| {
+                    let attrs = match impl_item {
+                        syn::ImplItem::Const(inner) => &inner.attrs,
+                        syn::ImplItem::Fn(inner) => &inner.attrs,
+                        syn::ImplItem::Type(inner) => &inner.attrs,
+                        syn::ImplItem::Macro(inner) => &inner.attrs,
+                        _ => return true,
+                    };
+                    !attrs.iter().any(attr_is_cfg_test)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The attributes attached to a top-level item, for the variants that can carry
+/// a `#[cfg(test)]` gate. Variants that cannot are reported as having none.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(inner) => &inner.attrs,
+        syn::Item::Enum(inner) => &inner.attrs,
+        syn::Item::ExternCrate(inner) => &inner.attrs,
+        syn::Item::Fn(inner) => &inner.attrs,
+        syn::Item::ForeignMod(inner) => &inner.attrs,
+        syn::Item::Impl(inner) => &inner.attrs,
+        syn::Item::Macro(inner) => &inner.attrs,
+        syn::Item::Mod(inner) => &inner.attrs,
+        syn::Item::Static(inner) => &inner.attrs,
+        syn::Item::Struct(inner) => &inner.attrs,
+        syn::Item::Trait(inner) => &inner.attrs,
+        syn::Item::TraitAlias(inner) => &inner.attrs,
+        syn::Item::Type(inner) => &inner.attrs,
+        syn::Item::Union(inner) => &inner.attrs,
+        syn::Item::Use(inner) => &inner.attrs,
+        _ => &[],
+    }
+}
+
+/// `true` for a `#[cfg(test)]` attribute.
+fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    let mut is_test = false;
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("test") {
+            is_test = true;
+        }
+        Ok(())
+    });
+    is_test
+}
+
 pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let boundary_files = [
         "meerkat-runtime/src/accept.rs",
         "meerkat-runtime/src/input.rs",
         "meerkat-runtime/src/runtime_loop.rs",
-    ];
-    let banned = [
-        (
-            "PeerConversationProjection::ResponseTerminal",
-            "direct terminal projection construction",
-        ),
-        (
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
-            "handwritten terminal render text",
-        ),
-        (
-            "peer_response_terminal_context_key(",
-            "handwritten terminal context key projection",
-        ),
     ];
 
     for rel in boundary_files {
@@ -681,21 +779,20 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 path.display()
             )
         })?;
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-
-        for (line_idx, line) in production.lines().enumerate() {
-            for (token, reason) in banned {
-                if line.contains(token) {
-                    mismatches.push(format!(
-                        "{rel}:{}: {reason} `{token}` must route through typed core peer-response terminal facts",
-                        line_idx + 1
-                    ));
-                }
-            }
-        }
+        // AST node kinds, not file text: the banned terminal-projection
+        // *construction* (enum variant path), the handwritten render string
+        // *literal*, and the context-key *call* are detected structurally, so
+        // a token rename that keeps the banned relationship still fails and a
+        // doc/comment mention does not false-positive. We parse the whole
+        // (always balanced) file and drop `#[cfg(test)]` items structurally so
+        // test fixtures don't trip the production contract — a textual prefix
+        // split at `#[cfg(test)]` truncates inline test helpers mid-file and
+        // breaks the parse.
+        let parsed = parse_production_file(&contents)
+            .with_context(|| format!("parse peer-response terminal boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalProjectionVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
     }
 
     let core_projection_owner = root.join("meerkat-core/src/handles.rs");
@@ -707,11 +804,7 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 core_projection_owner.display()
             )
         })?;
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-        collect_peer_response_terminal_core_fact_mismatches(rel, production, &mut mismatches)?;
+        collect_peer_response_terminal_core_fact_mismatches(rel, &contents, &mut mismatches)?;
     }
 
     let shell_boundary_files = [
@@ -719,28 +812,6 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         "meerkat-rest/src/lib.rs",
         "meerkat-rpc/src/handlers/event.rs",
         "meerkat-rpc/src/session_runtime.rs",
-    ];
-    let shell_banned = [
-        (
-            "pub peer_name: PeerName",
-            "terminal shell peer_name identity bus",
-        ),
-        (
-            "peer_name: meerkat_core::comms::PeerName",
-            "terminal shell peer_name identity bus",
-        ),
-        (
-            "PeerResponseTerminalRouteIdentity::parse(peer_name",
-            "terminal route identity projected from peer_name",
-        ),
-        (
-            "PeerResponseTerminalDisplayIdentity::parse(peer_name",
-            "terminal display identity projected from peer_name",
-        ),
-        (
-            "peer_response_terminal_input(&peer_name",
-            "terminal input projected from peer_name",
-        ),
     ];
 
     for rel in shell_boundary_files {
@@ -754,24 +825,237 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 path.display()
             )
         })?;
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-
-        for (line_idx, line) in production.lines().enumerate() {
-            for (token, reason) in shell_banned {
-                if line.contains(token) {
-                    mismatches.push(format!(
-                        "{rel}:{}: {reason} `{token}` must transport typed route/display/correlation facts",
-                        line_idx + 1
-                    ));
-                }
-            }
-        }
+        let parsed = parse_production_file(&contents)
+            .with_context(|| format!("parse peer-response terminal shell boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalShellVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
     }
 
     Ok(mismatches)
+}
+
+/// Functions whose `peer_name` argument projects a typed terminal identity from
+/// the inert presentation string instead of transporting the typed route /
+/// display / correlation facts the core already owns.
+const PEER_NAME_PROJECTION_CALLS: &[(&str, &str)] = &[
+    (
+        "PeerResponseTerminalRouteIdentity::parse",
+        "terminal route identity projected from peer_name",
+    ),
+    (
+        "PeerResponseTerminalDisplayIdentity::parse",
+        "terminal display identity projected from peer_name",
+    ),
+    (
+        "peer_response_terminal_input",
+        "terminal input projected from peer_name",
+    ),
+];
+
+/// AST visitor for the production runtime boundary files. Flags the typed
+/// terminal-projection construction, the handwritten terminal render string
+/// literal, and the handwritten terminal context-key call.
+struct PeerResponseTerminalProjectionVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalProjectionVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must route through typed core peer-response terminal facts"
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalProjectionVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && path_tail_ident(&path.path).as_deref() == Some("peer_response_terminal_context_key")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal context key projection",
+                "peer_response_terminal_context_key(",
+            );
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if path_tail_pair_is(node, "PeerConversationProjection", "ResponseTerminal") {
+            self.push(
+                node.span(),
+                "direct terminal projection construction",
+                "PeerConversationProjection::ResponseTerminal",
+            );
+        }
+        syn::visit::visit_path(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node
+            .value()
+            .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal render text",
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
+            );
+        }
+        syn::visit::visit_lit_str(self, node);
+    }
+}
+
+/// AST visitor for the shell boundary files. Flags a `peer_name: PeerName`
+/// identity-bus field declaration and any call that projects a typed terminal
+/// identity from a `peer_name` argument.
+struct PeerResponseTerminalShellVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalShellVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must transport typed route/display/correlation facts"
+        ));
+    }
+
+    fn check_fields(&mut self, fields: &syn::Fields) {
+        // Only a `pub` struct field is the terminal shell identity bus the rule
+        // bans. Enum-variant `peer_name` carriers (e.g. the RMAT-exempt
+        // WirePersistedInput projection) are a different, allowed shape, so we
+        // do not descend into enum variants and we require `pub` here — this
+        // preserves the prior `pub peer_name: PeerName` text-scan contract.
+        for field in fields {
+            let is_pub = matches!(field.vis, syn::Visibility::Public(_));
+            let is_peer_name = field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "peer_name");
+            if is_pub && is_peer_name && type_is_named(&field.ty, "PeerName") {
+                // Token mirrors the prior text-scan contract (`pub peer_name:
+                // PeerName`); the `pub` is what makes this the terminal shell
+                // identity bus the rule bans (enum-variant carriers are exempt),
+                // so it belongs in the reported token.
+                self.push(
+                    field.span(),
+                    "terminal shell peer_name identity bus",
+                    "pub peer_name: PeerName",
+                );
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalShellVisitor<'_> {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.check_fields(&node.fields);
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            for (banned_callee, reason) in PEER_NAME_PROJECTION_CALLS {
+                // Match on the path *tail* so a fully-qualified callee
+                // (`meerkat_runtime::peer_response_terminal_input`,
+                // `crate::..::PeerResponseTerminalRouteIdentity::parse`) is
+                // recognized regardless of import/qualification style.
+                if path_tail_matches(&path.path, banned_callee)
+                    && call_args_reference_peer_name(&node.args)
+                {
+                    self.push(node.span(), reason, banned_callee);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when any call argument reads `peer_name` (by value or by reference).
+fn call_args_reference_peer_name(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> bool {
+    args.iter().any(expr_references_peer_name)
+}
+
+fn expr_references_peer_name(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Reference(reference) => expr_references_peer_name(&reference.expr),
+        syn::Expr::Path(path) => path_tail_ident(&path.path).as_deref() == Some("peer_name"),
+        syn::Expr::Field(field) => {
+            expr_references_peer_name(&field.base)
+                || matches!(
+                    &field.member,
+                    syn::Member::Named(ident) if ident == "peer_name"
+                )
+        }
+        // Peel the common wrapping forms so a projection fed `peer_name` through
+        // a conversion chain (`peer_name.as_str().to_string()`,
+        // `(&peer_name).clone()`, `peer_name.into()`) is still recognized — the
+        // prior text-scan matched `peer_name` anywhere in the call argument.
+        syn::Expr::MethodCall(call) => expr_references_peer_name(&call.receiver),
+        syn::Expr::Paren(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Group(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Cast(cast) => expr_references_peer_name(&cast.expr),
+        syn::Expr::Try(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Await(inner) => expr_references_peer_name(&inner.base),
+        _ => false,
+    }
+}
+
+/// The last segment ident of a path, e.g. `a::b::peer_name` -> `peer_name`.
+fn path_tail_ident(path: &syn::Path) -> Option<String> {
+    path.segments.last().map(|seg| seg.ident.to_string())
+}
+
+/// `true` when the path's last two segments are exactly `outer::inner`
+/// (e.g. `crate::foo::PeerConversationProjection::ResponseTerminal`).
+fn path_tail_pair_is(path: &syn::Path, outer: &str, inner: &str) -> bool {
+    let len = path.segments.len();
+    if len < 2 {
+        return false;
+    }
+    path.segments[len - 2].ident == outer && path.segments[len - 1].ident == inner
+}
+
+/// `true` when the path's trailing segments equal the `::`-joined `expected`
+/// callee (e.g. `expected = "PeerResponseTerminalRouteIdentity::parse"` matches
+/// `crate::a::PeerResponseTerminalRouteIdentity::parse`, and
+/// `expected = "peer_response_terminal_input"` matches
+/// `meerkat_runtime::peer_response_terminal_input`).
+fn path_tail_matches(path: &syn::Path, expected: &str) -> bool {
+    let expected_segments = expected.split("::").collect::<Vec<_>>();
+    if path.segments.len() < expected_segments.len() {
+        return false;
+    }
+    let skip = path.segments.len() - expected_segments.len();
+    path.segments
+        .iter()
+        .skip(skip)
+        .zip(expected_segments.iter())
+        .all(|(seg, want)| seg.ident == *want)
 }
 
 fn collect_peer_response_terminal_core_fact_mismatches(
@@ -779,7 +1063,7 @@ fn collect_peer_response_terminal_core_fact_mismatches(
     source: &str,
     mismatches: &mut Vec<String>,
 ) -> Result<()> {
-    let parsed = syn::parse_file(source)
+    let parsed = parse_production_file(source)
         .with_context(|| format!("parse peer-response terminal core fact owner {rel}"))?;
 
     let Some(source_struct) = find_struct_item(&parsed, "PeerResponseTerminalSource") else {
@@ -1018,136 +1302,860 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         "output_recorded",
         "node_condition_results",
     ];
+    // Forbidden projection CAS-writer *method names* — resolved structurally
+    // (method-call / UFCS callee idents in the AST), never as line-text
+    // substrings, so comments/strings cannot false-positive and a call split
+    // across lines is still caught.
     let forbidden_projection_cas_writes = [
-        ".cas_flow_state(",
-        ".cas_run_snapshot(",
-        ".cas_frame_state(",
-        ".cas_complete_step_and_record_output(",
-        ".cas_loop_state(",
-        ".cas_grant_node_slot(",
-        ".cas_start_loop(",
-        ".cas_grant_body_frame_start(",
-        ".cas_complete_body_frame(",
-        ".cas_loop_request_body_frame(",
-        ".cas_complete_loop(",
+        "cas_flow_state",
+        "cas_run_snapshot",
+        "cas_frame_state",
+        "cas_complete_step_and_record_output",
+        "cas_loop_state",
+        "cas_grant_node_slot",
+        "cas_start_loop",
+        "cas_grant_body_frame_start",
+        "cas_complete_body_frame",
+        "cas_loop_request_body_frame",
+        "cas_complete_loop",
     ];
 
     for path in production_rust_source_paths(root)? {
         let rel = relative_slash_path(root, &path)?;
+        // Whole-file test fixtures (`.../tests.rs`) are out of scope for this
+        // production gate (path-name membership, not a source scan). Inline
+        // `#[cfg(test)]` items are dropped structurally by
+        // `parse_production_file` before the walk, which also closes the old
+        // line-counting hole where code *after* a closed inline test module
+        // was treated as test-only.
+        if rel.ends_with("/tests.rs") {
+            continue;
+        }
         let contents = fs::read_to_string(&path).with_context(|| {
             format!("read flow reducer transition candidate {}", path.display())
         })?;
-        let lines = contents.lines().collect::<Vec<_>>();
-        let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
-        let mut module_aliases = BTreeMap::new();
-        let mut bare_transition_aliases = BTreeMap::new();
-        let mut bare_input_aliases = BTreeMap::new();
 
-        for module in forbidden_modules {
-            module_aliases.insert(module.to_string(), module.to_string());
-        }
-
-        for line in contents.lines() {
-            let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            for module in forbidden_modules {
-                if let Some(alias) = reducer_module_alias(&compact, module) {
-                    module_aliases.insert(alias, module.to_string());
-                }
-                if compact.contains(&format!("{module}::transition"))
-                    || compact.contains(&format!("{module}::Input"))
-                    || compact.contains(&format!("{module}::{{"))
-                {
-                    collect_reducer_bare_aliases(
-                        &compact,
-                        module,
-                        &mut bare_transition_aliases,
-                        &mut bare_input_aliases,
-                    );
-                }
-            }
-        }
-
-        for (line_index, line) in lines.iter().enumerate() {
-            if test_only_lines[line_index] {
-                continue;
-            }
-            for alias in module_aliases.keys() {
-                let module = module_aliases
-                    .get(alias)
-                    .map(String::as_str)
-                    .unwrap_or(alias);
-                for token in [format!("{alias}::transition("), format!("{alias}::Input::")] {
-                    if line.contains(&token)
-                        && !flow_reducer_direct_use_is_structurally_allowed(
-                            &rel, &lines, line_index, module, &token,
-                        )
-                    {
-                        mismatches.push(format!(
-                            "direct live-flow reducer transition `{token}` is not MobMachine-command gated: {rel}:{}",
-                            line_index + 1
-                        ));
+        // The transition-call, reducer-`Input`-construction,
+        // projection-field-write, and CAS store-write detections are
+        // AST-derived: the visitor matches the banned *semantic shape* (a
+        // call whose callee path resolves to `module::transition`, an
+        // enum-variant path under `module::Input`, a place-expression
+        // assignment / mutating method call into `.flow_state.<field>` /
+        // `.kernel_state.<field>`, a method/UFCS call whose callee ident is a
+        // forbidden `cas_*` projection writer) rather than a substring of the
+        // raw line. A token rename that keeps the banned relationship still
+        // fails, a banned token in a comment/string no longer
+        // false-positives, and a write split across lines is still caught.
+        // Import aliases (`use module as alias`, `use module::{...}`, glob)
+        // are resolved structurally from the `use` AST. `#[cfg(test)]` items
+        // are dropped structurally before the walk, mirroring the
+        // peer-response-terminal AST visitors.
+        if let Ok(parsed) = parse_production_file(&contents) {
+            let aliases = collect_flow_reducer_use_aliases(&parsed, forbidden_modules);
+            let mut visitor = FlowReducerTransitionVisitor::new(
+                &aliases,
+                &forbidden_flow_projection_fields,
+                &forbidden_frame_projection_fields,
+                &forbidden_projection_cas_writes,
+            );
+            visitor.visit_file(&parsed);
+            for hit in visitor.hits {
+                let allowed = match &hit.kind {
+                    FlowReducerHitKind::Transition { module }
+                    | FlowReducerHitKind::Input { module } => {
+                        flow_reducer_direct_use_is_structurally_allowed(&rel, module, &hit)
                     }
+                    FlowReducerHitKind::ProjectionWrite => false,
+                    FlowReducerHitKind::CasStoreWrite => {
+                        flow_reducer_projection_commit_is_structurally_allowed(&rel, &hit)
+                    }
+                };
+                if allowed {
+                    continue;
                 }
-            }
-            for (alias, module) in &bare_transition_aliases {
-                if line.contains(&format!("{alias}("))
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, alias,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for (alias, module) in &bare_input_aliases {
-                let token = format!("{alias}::");
-                if line.contains(&token)
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, &token,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_flow_projection_fields {
-                let token = format!(".flow_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_frame_projection_fields {
-                let token = format!(".kernel_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for token in forbidden_projection_cas_writes {
-                if line.contains(token)
-                    && !flow_reducer_projection_commit_is_structurally_allowed(
-                        &rel, &lines, line_index,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
+                mismatches.push(format!("{}: {rel}:{}", hit.message, hit.line));
             }
         }
     }
 
     Ok(mismatches)
+}
+
+/// Resolved import aliases for the forbidden flow-reducer modules in one file.
+///
+/// Built structurally from the `use` AST (not a line text-scan) so a banned
+/// reducer reached through `use module as alias`, `use module::transition as x`,
+/// `use module::{Input as Y}`, or `use module::*` is recognized regardless of
+/// formatting or how the import is wrapped.
+struct FlowReducerUseAliases {
+    /// alias path-head segment -> canonical module (e.g. `fr` -> `flow_run`,
+    /// and each `module` -> itself so unaliased `module::transition` resolves).
+    module_aliases: BTreeMap<String, String>,
+    /// bare imported `transition` (possibly renamed) -> canonical module.
+    transition_aliases: BTreeMap<String, String>,
+    /// bare imported `Input` (possibly renamed) -> canonical module.
+    input_aliases: BTreeMap<String, String>,
+}
+
+fn collect_flow_reducer_use_aliases(
+    file: &syn::File,
+    forbidden_modules: [&str; 3],
+) -> FlowReducerUseAliases {
+    let mut module_aliases = BTreeMap::new();
+    let mut transition_aliases = BTreeMap::new();
+    let mut input_aliases = BTreeMap::new();
+    for module in forbidden_modules {
+        module_aliases.insert(module.to_string(), module.to_string());
+    }
+    let mut visitor = FlowReducerUseVisitor {
+        forbidden_modules,
+        module_aliases: &mut module_aliases,
+        transition_aliases: &mut transition_aliases,
+        input_aliases: &mut input_aliases,
+    };
+    visitor.visit_file(file);
+    FlowReducerUseAliases {
+        module_aliases,
+        transition_aliases,
+        input_aliases,
+    }
+}
+
+struct FlowReducerUseVisitor<'a> {
+    forbidden_modules: [&'a str; 3],
+    module_aliases: &'a mut BTreeMap<String, String>,
+    transition_aliases: &'a mut BTreeMap<String, String>,
+    input_aliases: &'a mut BTreeMap<String, String>,
+}
+
+impl FlowReducerUseVisitor<'_> {
+    /// Walk a `use` tree, tracking the trailing path segment of the module
+    /// currently in scope. When a forbidden module segment is reached, descend
+    /// to classify the imported leaf (`transition` / `Input` / glob / rename /
+    /// `as` on the module itself).
+    fn walk_tree(&mut self, tree: &syn::UseTree, parent_segment: Option<&str>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let segment = path.ident.to_string();
+                self.walk_tree(&path.tree, Some(&segment));
+            }
+            syn::UseTree::Name(name) => {
+                // `use a::b::flow_run;` — `flow_run` brings the module into
+                // scope under its own name, or as the leaf of a forbidden
+                // module path. Either way `module::...` keeps resolving.
+                let ident = name.ident.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    self.module_aliases.insert(ident, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition;` / `use module::Input;`.
+                    self.classify_leaf(&ident, None, &module);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let ident = rename.ident.to_string();
+                let alias = rename.rename.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    // `use a::b::flow_run as fr;`
+                    self.module_aliases.insert(alias, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition as run_transition;`
+                    self.classify_leaf(&ident, Some(&alias), &module);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if let Some(module) = parent_segment.and_then(|p| self.forbidden_module_for(p)) {
+                    // `use module::*;` brings both `transition` and `Input`
+                    // into scope under their canonical names.
+                    self.transition_aliases
+                        .insert("transition".to_string(), module.clone());
+                    self.input_aliases.insert("Input".to_string(), module);
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.walk_tree(item, parent_segment);
+                }
+            }
+        }
+    }
+
+    fn forbidden_module_for(&self, ident: &str) -> Option<String> {
+        self.forbidden_modules
+            .iter()
+            .find(|module| **module == ident)
+            .map(|module| module.to_string())
+    }
+
+    fn classify_leaf(&mut self, leaf: &str, alias: Option<&str>, module: &str) {
+        match leaf {
+            "transition" => {
+                let name = alias.unwrap_or("transition").to_string();
+                self.transition_aliases.insert(name, module.to_string());
+            }
+            "Input" => {
+                let name = alias.unwrap_or("Input").to_string();
+                self.input_aliases.insert(name, module.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerUseVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.walk_tree(&node.tree, None);
+        syn::visit::visit_item_use(self, node);
+    }
+}
+
+/// What kind of banned flow-reducer relationship a visitor hit represents.
+enum FlowReducerHitKind {
+    Transition {
+        module: String,
+    },
+    Input {
+        module: String,
+    },
+    ProjectionWrite,
+    /// A CAS store-write call (`.cas_flow_state(..)` and friends) — detected
+    /// structurally as a method call / UFCS call whose callee name is one of
+    /// the forbidden projection CAS writers, not as a line-text substring.
+    CasStoreWrite,
+}
+
+/// One AST-detected banned flow-reducer use, carrying the already-rendered
+/// message prefix (line/path appended by the caller so the report shape
+/// matches the prior text scanner exactly) plus the structural allow-list
+/// context for the hit kind.
+struct FlowReducerHit {
+    line: usize,
+    kind: FlowReducerHitKind,
+    message: String,
+    /// Structural context for the CAS-write allow decision (K22(c)): the
+    /// allow-list keys off AST facts captured at the hit (enclosing function,
+    /// signature types, preceding callees, call-argument idents, enclosing
+    /// match-arm patterns) instead of line-text windows.
+    cas_allow: Option<CasWriteAllowContext>,
+    /// Structural context for the direct Transition/Input allow decision in
+    /// the `run.rs` reducer-owned wrappers — same AST-fact discipline as
+    /// `cas_allow`, never line-text windows.
+    direct_allow: Option<DirectUseAllowContext>,
+}
+
+/// AST-derived context for one direct reducer Transition/Input hit, used by
+/// `flow_reducer_direct_use_is_structurally_allowed`. Every field is
+/// resolved structurally (syn visitors) — never as raw-line substrings or
+/// compacted-signature text — so comments/strings cannot false-allow and a
+/// signature or `authority.require(..)` call split across lines is still
+/// classified correctly.
+#[derive(Default, Clone)]
+struct DirectUseAllowContext {
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to
+    /// an `authority.require(..)` call earlier (in source order) in the
+    /// enclosing function body.
+    preceding_authority_require_kinds: BTreeSet<String>,
+    /// Path-segment idents of the enclosing `impl` block's self type.
+    enclosing_impl_type_idents: BTreeSet<String>,
+    /// Path segments of the enclosing function's structural return type
+    /// (`-> flow_run::Input` yields `["flow_run", "Input"]`).
+    fn_return_type_segments: Vec<String>,
+}
+
+/// AST-derived context for one forbidden `cas_*` projection-write hit, used
+/// by `flow_reducer_projection_commit_is_structurally_allowed`. Every field
+/// is resolved structurally (syn visitors) — never as raw-line substrings —
+/// so comments/strings cannot false-positive and calls split across lines
+/// are still classified correctly.
+#[derive(Default, Clone)]
+struct CasWriteAllowContext {
+    /// Callee name of the CAS write (e.g. `cas_flow_state`).
+    cas_method: String,
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Path-segment idents appearing in the enclosing function signature.
+    signature_type_idents: BTreeSet<String>,
+    /// Callee idents (method calls / call-path tails) visited earlier in the
+    /// enclosing function body, in source order, before this CAS write.
+    preceding_callee_idents: BTreeSet<String>,
+    /// Path-segment idents of expression paths visited earlier in the
+    /// enclosing function body before this CAS write (catches
+    /// `MobMachineFlowRunCommand::Variant` command sources).
+    preceding_path_idents: BTreeSet<String>,
+    /// Idents (path segments + named field members) inside this CAS call's
+    /// argument expressions.
+    call_arg_idents: BTreeSet<String>,
+    /// Rendered `Path::Segments` of every enclosing `match`-arm pattern.
+    enclosing_match_arm_patterns: Vec<String>,
+    /// Whole-function fact: the enclosing function commits prepared DSL
+    /// inputs via `commit_prepared_dsl_input(prepared)`.
+    fn_commits_prepared_inputs: bool,
+    /// Whole-function fact: the enclosing function prepares machine inputs
+    /// via `prepare_dsl_inputs(plan.machine_inputs(), ..)`.
+    fn_prepares_machine_inputs: bool,
+}
+
+/// Per-function tracking state for the flow-reducer visitor: facts needed by
+/// the structural CAS allow-list, accumulated in source order while walking
+/// the function body.
+#[derive(Default)]
+struct FlowReducerFnContext {
+    name: String,
+    signature_type_idents: BTreeSet<String>,
+    callee_idents: BTreeSet<String>,
+    path_idents: BTreeSet<String>,
+    commits_prepared_inputs: bool,
+    prepares_machine_inputs: bool,
+    /// `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to an
+    /// `authority.require(..)` call seen so far (in source order) in this
+    /// function body — structural input to the direct-use allow-list.
+    authority_require_kinds: BTreeSet<String>,
+    /// Path segments of this function's structural return type, if any.
+    return_type_segments: Vec<String>,
+    /// Indices into `hits` for CAS hits inside this function; whole-function
+    /// facts are backfilled when the function walk completes.
+    cas_hit_indices: Vec<usize>,
+}
+
+/// Collect every path-segment ident under a syntax node.
+struct PathIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for PathIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+}
+
+/// Collect path-segment idents and named field-member idents inside an
+/// expression (used for CAS call arguments, so `outcome.next_state` and a
+/// bare `next_state` binding both resolve to `next_state`).
+struct ExprIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ExprIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+
+    fn visit_member(&mut self, node: &'ast syn::Member) {
+        if let syn::Member::Named(ident) = node {
+            self.idents.insert(ident.to_string());
+        }
+        syn::visit::visit_member(self, node);
+    }
+}
+
+/// Collect rendered paths from a match-arm pattern
+/// (`FlowFrameLoopStorePlan::RunStateOnly { .. }` -> "FlowFrameLoopStorePlan::RunStateOnly").
+struct PatternPathCollector<'a> {
+    paths: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for PatternPathCollector<'_> {
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        let rendered = node
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        self.paths.push(rendered);
+        syn::visit::visit_path(self, node);
+    }
+}
+
+/// True when an expression contains a `plan.machine_inputs()` method call.
+struct MachineInputsOnPlanFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MachineInputsOnPlanFinder {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "machine_inputs"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("plan"))
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST visitor matching the banned flow-reducer shapes: a transition call, a
+/// reducer `Input` enum-variant construction, and a direct projection-field
+/// write. Detection is structural so a token rename that keeps the banned
+/// relationship still fails.
+struct FlowReducerTransitionVisitor<'a> {
+    aliases: &'a FlowReducerUseAliases,
+    flow_fields: &'a [&'a str],
+    frame_fields: &'a [&'a str],
+    cas_write_methods: &'a [&'a str],
+    hits: Vec<FlowReducerHit>,
+    /// Enclosing-function context stack (innermost last) for the structural
+    /// CAS allow-list.
+    fn_stack: Vec<FlowReducerFnContext>,
+    /// Enclosing `match`-arm pattern paths (innermost last).
+    arm_patterns: Vec<String>,
+    /// Path-segment idents of enclosing `impl` self types (innermost last)
+    /// for the structural direct-use allow-list.
+    impl_type_stack: Vec<BTreeSet<String>>,
+}
+
+impl<'a> FlowReducerTransitionVisitor<'a> {
+    fn new(
+        aliases: &'a FlowReducerUseAliases,
+        flow_fields: &'a [&'a str],
+        frame_fields: &'a [&'a str],
+        cas_write_methods: &'a [&'a str],
+    ) -> Self {
+        Self {
+            aliases,
+            flow_fields,
+            frame_fields,
+            cas_write_methods,
+            hits: Vec::new(),
+            fn_stack: Vec::new(),
+            arm_patterns: Vec::new(),
+            impl_type_stack: Vec::new(),
+        }
+    }
+
+    fn enter_fn(&mut self, sig: &syn::Signature) {
+        let mut signature_type_idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut signature_type_idents,
+        }
+        .visit_signature(sig);
+        let return_type_segments = match &sig.output {
+            syn::ReturnType::Type(_, ty) => structural_type_path_segments(ty),
+            syn::ReturnType::Default => Vec::new(),
+        };
+        self.fn_stack.push(FlowReducerFnContext {
+            name: sig.ident.to_string(),
+            signature_type_idents,
+            return_type_segments,
+            ..FlowReducerFnContext::default()
+        });
+    }
+
+    fn exit_fn(&mut self) {
+        if let Some(context) = self.fn_stack.pop() {
+            for index in context.cas_hit_indices {
+                if let Some(allow) = self
+                    .hits
+                    .get_mut(index)
+                    .and_then(|hit| hit.cas_allow.as_mut())
+                {
+                    allow.fn_commits_prepared_inputs = context.commits_prepared_inputs;
+                    allow.fn_prepares_machine_inputs = context.prepares_machine_inputs;
+                }
+            }
+        }
+    }
+
+    /// Record whole-function preparation/commit facts and the source-ordered
+    /// callee set for a call with the given callee ident and arguments.
+    fn record_callee<'e>(
+        &mut self,
+        callee: &str,
+        args: impl Iterator<Item = &'e syn::Expr> + Clone,
+    ) {
+        let Some(context) = self.fn_stack.last_mut() else {
+            return;
+        };
+        context.callee_idents.insert(callee.to_string());
+        if callee == "commit_prepared_dsl_input"
+            && args
+                .clone()
+                .any(|arg| matches!(arg, syn::Expr::Path(path) if path.path.is_ident("prepared")))
+        {
+            context.commits_prepared_inputs = true;
+        }
+        if callee == "prepare_dsl_inputs" {
+            let mut finder = MachineInputsOnPlanFinder { found: false };
+            for arg in args {
+                finder.visit_expr(arg);
+            }
+            if finder.found {
+                context.prepares_machine_inputs = true;
+            }
+        }
+    }
+
+    /// Build the structural allow context for one CAS hit from the current
+    /// visitor position.
+    fn cas_allow_context<'e>(
+        &self,
+        method: &str,
+        args: impl Iterator<Item = &'e syn::Expr>,
+    ) -> CasWriteAllowContext {
+        let mut call_arg_idents = BTreeSet::new();
+        for arg in args {
+            ExprIdentCollector {
+                idents: &mut call_arg_idents,
+            }
+            .visit_expr(arg);
+        }
+        let fn_context = self.fn_stack.last();
+        CasWriteAllowContext {
+            cas_method: method.to_string(),
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            signature_type_idents: fn_context
+                .map(|context| context.signature_type_idents.clone())
+                .unwrap_or_default(),
+            preceding_callee_idents: fn_context
+                .map(|context| context.callee_idents.clone())
+                .unwrap_or_default(),
+            preceding_path_idents: fn_context
+                .map(|context| context.path_idents.clone())
+                .unwrap_or_default(),
+            call_arg_idents,
+            enclosing_match_arm_patterns: self.arm_patterns.clone(),
+            fn_commits_prepared_inputs: false,
+            fn_prepares_machine_inputs: false,
+        }
+    }
+
+    /// Build the structural allow context for one direct Transition/Input
+    /// hit from the current visitor position.
+    fn direct_use_allow_context(&self) -> DirectUseAllowContext {
+        let fn_context = self.fn_stack.last();
+        DirectUseAllowContext {
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            preceding_authority_require_kinds: fn_context
+                .map(|context| context.authority_require_kinds.clone())
+                .unwrap_or_default(),
+            enclosing_impl_type_idents: self.impl_type_stack.last().cloned().unwrap_or_default(),
+            fn_return_type_segments: fn_context
+                .map(|context| context.return_type_segments.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Classify a callee path as a reducer `transition` call.
+    ///
+    /// Two shapes resolve: a module-qualified call `alias::transition(...)`
+    /// (head segment is a forbidden module / module-alias and the tail is
+    /// `transition`), and a bare imported transition alias `frame_transition(...)`.
+    fn transition_call_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segments.len() >= 2 && segments[segments.len() - 1] == "transition" {
+            let head = &segments[0];
+            if let Some(module) = self.aliases.module_aliases.get(head) {
+                return Some((module.clone(), format!("{head}::transition(")));
+            }
+        }
+        if segments.len() == 1
+            && let Some(module) = self.aliases.transition_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    /// Classify a path as a reducer `Input` enum-variant construction.
+    ///
+    /// Resolves `alias::Input::Variant` (module-qualified) and `FrameInput::Variant`
+    /// / `Input::Variant` (bare imported input alias).
+    fn input_path_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // module-qualified: `..::module::Input::Variant`
+        for (idx, segment) in segments.iter().enumerate() {
+            if segment == "Input"
+                && idx >= 1
+                && idx + 1 < segments.len()
+                && let Some(module) = self.aliases.module_aliases.get(&segments[idx - 1])
+            {
+                return Some((module.clone(), format!("{}::Input::", segments[idx - 1])));
+            }
+        }
+        // bare imported input alias: `<alias>::Variant`
+        if segments.len() >= 2
+            && let Some(module) = self.aliases.input_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    fn push_transition(&mut self, span: proc_macro2::Span, module: String, display: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition { module },
+            message: format!(
+                "direct live-flow reducer transition `{display}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    fn push_transition_alias(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition { module },
+            message: format!(
+                "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    fn push_input(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Input { module },
+            message: format!(
+                "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    /// Record a reducer `Input` enum-variant construction from a path
+    /// reference. Transition *calls* are detected at the call site
+    /// (`visit_expr_call`) to carry the `alias::transition(` token shape; bare
+    /// transition-alias references that are not calls are not reducer
+    /// transitions, so they are intentionally not reported here.
+    fn record_input_path(&mut self, path: &syn::Path) {
+        if let Some((module, alias)) = self.input_path_for(path) {
+            self.push_input(path.span(), module, alias);
+        }
+    }
+
+    /// The forbidden projection field touched by a place expression, if any.
+    /// Matches `<recv>.flow_state.<field>` and `<recv>.kernel_state.<field>`
+    /// across the AST (so a multi-line place expression is still caught).
+    fn projection_field_token(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Field(outer) = expr else {
+            return None;
+        };
+        let syn::Member::Named(field_ident) = &outer.member else {
+            return None;
+        };
+        let field = field_ident.to_string();
+        let syn::Expr::Field(base) = outer.base.as_ref() else {
+            return None;
+        };
+        let syn::Member::Named(base_ident) = &base.member else {
+            return None;
+        };
+        let base_name = base_ident.to_string();
+        if base_name == "flow_state" && self.flow_fields.contains(&field.as_str()) {
+            return Some(format!(".flow_state.{field}"));
+        }
+        if base_name == "kernel_state" && self.frame_fields.contains(&field.as_str()) {
+            return Some(format!(".kernel_state.{field}"));
+        }
+        None
+    }
+
+    fn push_projection_write(&mut self, span: proc_macro2::Span, token: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::ProjectionWrite,
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow: None,
+        });
+    }
+
+    fn push_cas_store_write(
+        &mut self,
+        span: proc_macro2::Span,
+        method: &str,
+        cas_allow: CasWriteAllowContext,
+    ) {
+        // Keep the `.method(` token shape so the report matches the prior
+        // text scanner exactly.
+        let token = format!(".{method}(");
+        let hit_index = self.hits.len();
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::CasStoreWrite,
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+            cas_allow: Some(cas_allow),
+            direct_allow: None,
+        });
+        if let Some(context) = self.fn_stack.last_mut() {
+            context.cas_hit_indices.push(hit_index);
+        }
+    }
+
+    /// `true` for a method that mutates the receiver in place (the set the
+    /// prior `projection_field_is_directly_written` text scanner recognized).
+    fn is_mutating_method(name: &str) -> bool {
+        matches!(name, "insert" | "remove" | "clear" | "push" | "retain")
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let mut idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut idents,
+        }
+        .visit_type(node.self_ty.as_ref());
+        self.impl_type_stack.push(idents);
+        syn::visit::visit_item_impl(self, node);
+        self.impl_type_stack.pop();
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let depth = self.arm_patterns.len();
+        let mut paths = Vec::new();
+        PatternPathCollector { paths: &mut paths }.visit_pat(&node.pat);
+        self.arm_patterns.extend(paths);
+        syn::visit::visit_arm(self, node);
+        self.arm_patterns.truncate(depth);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(last) = path.path.segments.last() {
+                self.record_callee(&last.ident.to_string(), node.args.iter());
+            }
+            if let Some((module, display)) = self.transition_call_for(&path.path) {
+                if display.ends_with("::transition(") {
+                    self.push_transition(node.span(), module, display);
+                } else {
+                    self.push_transition_alias(node.span(), module, display);
+                }
+            }
+            // UFCS form of a CAS store write (`Store::cas_flow_state(&store, ..)`)
+            // is the same banned semantic shape as the method-call form.
+            if let Some(last) = path.path.segments.last() {
+                let name = last.ident.to_string();
+                if self.cas_write_methods.contains(&name.as_str()) {
+                    let cas_allow = self.cas_allow_context(&name, node.args.iter());
+                    self.push_cas_store_write(last.ident.span(), &name, cas_allow);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.record_input_path(&node.path);
+        if let Some(context) = self.fn_stack.last_mut() {
+            for segment in &node.path.segments {
+                context.path_idents.insert(segment.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Some(token) = self.projection_field_token(&node.left) {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        // Compound assignment (`+=` / `-=`) parses as a binary op whose left is
+        // the place expression; the prior text scanner banned these too.
+        if matches!(node.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_))
+            && let Some(token) = self.projection_field_token(&node.left)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if Self::is_mutating_method(&node.method.to_string())
+            && let Some(token) = self.projection_field_token(&node.receiver)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        let method = node.method.to_string();
+        self.record_callee(&method, node.args.iter());
+        // `authority.require(MobMachineFlowAuthorityKind::..)` is the
+        // structural authority fact the direct-use allow-list keys on:
+        // resolve the kind from the argument path AST, never from line text.
+        if method == "require"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("authority"))
+            && let Some(context) = self.fn_stack.last_mut()
+        {
+            for arg in &node.args {
+                collect_flow_authority_kind_pairs(arg, &mut context.authority_require_kinds);
+            }
+        }
+        if self.cas_write_methods.contains(&method.as_str()) {
+            let cas_allow = self.cas_allow_context(&method, node.args.iter());
+            self.push_cas_store_write(node.method.span(), &method, cas_allow);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Collect rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs from
+/// every path inside the expression subtree.
+fn collect_flow_authority_kind_pairs(expr: &syn::Expr, kinds: &mut BTreeSet<String>) {
+    struct KindPairCollector<'a> {
+        kinds: &'a mut BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for KindPairCollector<'_> {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            let segments: Vec<String> = node.segments.iter().map(|s| s.ident.to_string()).collect();
+            for window in segments.windows(2) {
+                if window[0] == "MobMachineFlowAuthorityKind" {
+                    self.kinds
+                        .insert(format!("MobMachineFlowAuthorityKind::{}", window[1]));
+                }
+            }
+            syn::visit::visit_path(self, node);
+        }
+    }
+    KindPairCollector { kinds }.visit_expr(expr);
+}
+
+/// Path segments of a structural type, unwrapping references/parens/groups
+/// (`-> &flow_run::Input` yields `["flow_run", "Input"]`).
+fn structural_type_path_segments(ty: &syn::Type) -> Vec<String> {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        syn::Type::Reference(reference) => structural_type_path_segments(&reference.elem),
+        syn::Type::Paren(paren) => structural_type_path_segments(&paren.elem),
+        syn::Type::Group(group) => structural_type_path_segments(&group.elem),
+        _ => Vec::new(),
+    }
 }
 
 pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Result<Vec<String>> {
@@ -1158,8 +2166,9 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
 
     let contents = fs::read_to_string(&actor_path)
         .with_context(|| format!("read Mob runtime actor {}", actor_path.display()))?;
-    let lines = contents.lines().collect::<Vec<_>>();
     let rel = relative_slash_path(root, &actor_path)?;
+    let parsed = parse_production_file(&contents)
+        .map_err(|error| anyhow!("parse Mob runtime actor {}: {error}", actor_path.display()))?;
     let critical_inputs = [
         MobCatalogCommandGateSpec {
             input: "RunFlow",
@@ -1181,11 +2190,7 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
     let mut mismatches = Vec::new();
 
     for spec in critical_inputs {
-        let scope = spec.scope.resolve(&lines);
-        let gated = scope.is_some_and(|(start, end)| {
-            mob_catalog_input_has_fail_closed_gate(&lines[start..=end], spec.input)
-        });
-        if !gated {
+        if !mob_catalog_command_gate_is_fail_closed(&parsed, spec) {
             mismatches.push(format!(
                 "MobCommand::{} is catalog-classified but does not fail-close on MobMachineInput::{} in {}",
                 spec.input, spec.input, rel
@@ -1208,186 +2213,309 @@ enum MobCatalogCommandGateScope {
     CommandArm(&'static str),
 }
 
-impl MobCatalogCommandGateScope {
-    fn resolve(self, lines: &[&str]) -> Option<(usize, usize)> {
-        match self {
-            Self::Function(name) => function_scope_bounds(lines, name),
-            Self::CommandArm(variant) => command_arm_scope_bounds(lines, variant),
+/// MobMachine admission seams whose successful, propagated result proves the
+/// shell consulted machine authority before mutating shell state.
+const MOB_CATALOG_GATE_METHODS: [&str; 5] = [
+    "probe_mob_machine_input",
+    "apply_dsl_input",
+    "prepare_dsl_input",
+    "apply_command_admission",
+    "prepare_command_admission",
+];
+
+/// AST-level fail-closed audit for one catalog-classified Mob command.
+///
+/// The prior implementation located the scope by compacted-text needle +
+/// brace counting and classified fail-closed handling by joining a ±N line
+/// window into a token string (`compact.contains("apply_dsl_input(")` &&
+/// `compact.contains('?')`). That recognized banned/required *relationships*
+/// only as substrings: a `?` anywhere in the window (e.g. inside an
+/// unrelated call or a string literal) satisfied the gate, and a rename or
+/// reformat could silently change what the window saw.
+///
+/// This version resolves the scope structurally (named fn item / `match` arm
+/// whose pattern is `MobCommand::<variant>`) and classifies the gate on AST
+/// shape: a gate-seam call (one of [`MOB_CATALOG_GATE_METHODS`]) that
+/// *carries the input variant* must have its `Result` propagated — wrapped
+/// in `?` (`syn::Expr::Try`) or mapped through `.map_err(..)` — or be the
+/// probe seam, which is fail-closed by construction. A discarded result
+/// (`let _ = self.apply_dsl_input(..)`) has neither ancestor and fails.
+fn mob_catalog_command_gate_is_fail_closed(
+    file: &syn::File,
+    spec: MobCatalogCommandGateSpec,
+) -> bool {
+    match spec.scope {
+        MobCatalogCommandGateScope::Function(name) => {
+            let Some(block) = find_named_fn_block(file, name) else {
+                return false;
+            };
+            let mut analyzer = MobCatalogGateAnalyzer::for_block(spec.input, block);
+            analyzer.visit_block(block);
+            analyzer.gated
+        }
+        MobCatalogCommandGateScope::CommandArm(variant) => {
+            let mut finder = MobCommandArmFinder {
+                variant,
+                input: spec.input,
+                gated: false,
+            };
+            finder.visit_file(file);
+            finder.gated
         }
     }
 }
 
-fn reducer_module_alias(line: &str, module: &str) -> Option<String> {
-    let marker = format!("{module} as ");
-    let index = line.find(&marker)?;
-    Some(
-        line[index + marker.len()..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect(),
-    )
-    .filter(|alias: &String| !alias.is_empty())
+/// Locate the body block of a named production `fn` (free or impl member).
+fn find_named_fn_block<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::Block> {
+    struct FnFinder<'a, 'n> {
+        name: &'n str,
+        block: Option<&'a syn::Block>,
+    }
+    impl<'a> Visit<'a> for FnFinder<'a, '_> {
+        fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+        fn visit_impl_item_fn(&mut self, node: &'a syn::ImplItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+    let mut finder = FnFinder { name, block: None };
+    finder.visit_file(file);
+    finder.block
 }
 
-fn collect_reducer_bare_aliases(
-    line: &str,
-    module: &str,
-    transition_aliases: &mut BTreeMap<String, String>,
-    input_aliases: &mut BTreeMap<String, String>,
-) {
-    if let Some((_, after)) = line.split_once(&format!("{module}::transition")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            transition_aliases.insert(alias, module.to_string());
-        } else {
-            transition_aliases.insert("transition".to_string(), module.to_string());
-        }
-    }
-    if let Some((_, after)) = line.split_once(&format!("{module}::Input")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            input_aliases.insert(alias, module.to_string());
-        } else {
-            input_aliases.insert("Input".to_string(), module.to_string());
-        }
-    }
-    if line.contains(&format!("{module}::*")) {
-        transition_aliases.insert("transition".to_string(), module.to_string());
-        input_aliases.insert("Input".to_string(), module.to_string());
-    }
-    if let Some((_, imports)) = line.split_once(&format!("{module}::{{"))
-        && let Some((imports, _)) = imports.split_once('}')
-    {
-        for item in imports.split(',').map(str::trim) {
-            if let Some(alias) = item.strip_prefix("transition as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    transition_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "transition" {
-                transition_aliases.insert("transition".to_string(), module.to_string());
-            } else if let Some(alias) = item.strip_prefix("Input as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    input_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "Input" {
-                input_aliases.insert("Input".to_string(), module.to_string());
+/// Find every `match` arm whose pattern is `MobCommand::<variant>` and run
+/// the gate analyzer over the arm body. Any gated arm satisfies the audit.
+struct MobCommandArmFinder<'n> {
+    variant: &'n str,
+    input: &'n str,
+    gated: bool,
+}
+
+impl<'a> Visit<'a> for MobCommandArmFinder<'_> {
+    fn visit_arm(&mut self, node: &'a syn::Arm) {
+        if pat_is_mob_command_variant(&node.pat, self.variant) {
+            let mut analyzer = MobCatalogGateAnalyzer::for_expr(self.input, &node.body);
+            analyzer.visit_expr(&node.body);
+            if analyzer.gated {
+                self.gated = true;
             }
         }
+        syn::visit::visit_arm(self, node);
     }
 }
 
-fn projection_field_is_directly_written(line: &str, token: &str) -> bool {
-    let Some(index) = line.find(token) else {
-        return false;
+fn pat_is_mob_command_variant(pat: &syn::Pat, variant: &str) -> bool {
+    let path = match pat {
+        syn::Pat::Struct(pat) => &pat.path,
+        syn::Pat::TupleStruct(pat) => &pat.path,
+        syn::Pat::Path(pat) => &pat.path,
+        _ => return false,
     };
-    let tail = &line[index + token.len()..];
-    let tail = tail.trim_start();
-    (tail.starts_with('=') && !tail.starts_with("==") && !tail.starts_with("=>"))
-        || tail.starts_with("+=")
-        || tail.starts_with("-=")
-        || tail.starts_with(".insert(")
-        || tail.starts_with(".remove(")
-        || tail.starts_with(".clear(")
-        || tail.starts_with(".push(")
-        || tail.starts_with(".retain(")
+    path_ends_with(path, &["MobCommand", variant])
 }
 
-fn mob_catalog_input_has_fail_closed_gate(lines: &[&str], input: &str) -> bool {
-    let token = format!("MobMachineInput::{input}");
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(&token))
-        .any(|(line_index, _)| mob_catalog_input_occurrence_is_fail_closed(lines, line_index))
+fn path_ends_with(path: &syn::Path, suffix: &[&str]) -> bool {
+    let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segments.len() >= suffix.len()
+        && segments[segments.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(seg, want)| seg == want)
 }
 
-fn mob_catalog_input_occurrence_is_fail_closed(lines: &[&str], line_index: usize) -> bool {
-    let start = line_index.saturating_sub(4);
-    let end = (line_index + 18).min(lines.len());
-    let window = lines[start..end].join("\n");
-    let compact = window.split_whitespace().collect::<Vec<_>>().join(" ");
+/// Scope analyzer: `gated` flips true when a gate-seam call carrying the
+/// input variant sits under a `?` or `.map_err(..)` ancestor (or is the
+/// probe seam). Built in two passes: first collect idents that a macro
+/// assertion in the same scope structurally binds to the input variant
+/// (e.g. `debug_assert!(matches!(run_flow, ..MobMachineInput::RunFlow {..}))`
+/// — macro interiors have no typed AST, so their parsed token stream is the
+/// structural truth available), then classify gate calls.
+struct MobCatalogGateAnalyzer<'n> {
+    input: &'n str,
+    asserted_idents: BTreeSet<String>,
+    gated: bool,
+}
 
-    if compact.contains("let _ = self.apply_dsl_input") || compact.contains("may diverge") {
-        return false;
+impl<'n> MobCatalogGateAnalyzer<'n> {
+    fn for_block(input: &'n str, block: &syn::Block) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_block(block);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
+        }
     }
 
-    compact.contains("probe_mob_machine_input(")
-        || (compact.contains("apply_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("apply_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
+    fn for_expr(input: &'n str, expr: &syn::Expr) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_expr(expr);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
+        }
+    }
+
+    /// `true` when `expr`'s subtree contains a gate-seam call whose
+    /// arguments carry the input variant.
+    fn subtree_has_input_carrying_gate_call(&self, expr: &syn::Expr) -> bool {
+        let mut finder = GateCallFinder {
+            input: self.input,
+            asserted_idents: &self.asserted_idents,
+            found: false,
+        };
+        finder.visit_expr(expr);
+        finder.found
+    }
 }
 
-fn function_scope_bounds(lines: &[&str], function_name: &str) -> Option<(usize, usize)> {
-    let needle = format!("fn{function_name}(");
-    let start = lines.iter().position(|line| {
-        let compact = line.split_whitespace().collect::<String>();
-        compact.contains(&needle)
-    })?;
-    brace_scope_bounds(lines, start)
+impl<'a> Visit<'a> for MobCatalogGateAnalyzer<'_> {
+    fn visit_expr_try(&mut self, node: &'a syn::ExprTry) {
+        if self.subtree_has_input_carrying_gate_call(&node.expr) {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_try(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        if method == "map_err" && self.subtree_has_input_carrying_gate_call(&node.receiver) {
+            self.gated = true;
+        }
+        if method == "probe_mob_machine_input"
+            && node
+                .args
+                .iter()
+                .any(|arg| expr_carries_mob_machine_input(arg, self.input, &self.asserted_idents))
+        {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
 }
 
-fn command_arm_scope_bounds(lines: &[&str], variant: &str) -> Option<(usize, usize)> {
-    let needle = format!("MobCommand::{variant}");
-    let start = lines.iter().position(|line| line.contains(&needle))?;
-    brace_scope_bounds(lines, start)
+/// Collect idents bound to the input variant by a macro assertion in scope.
+struct MacroAssertedIdentCollector<'n> {
+    input: &'n str,
+    idents: BTreeSet<String>,
 }
 
-fn brace_scope_bounds(lines: &[&str], start: usize) -> Option<(usize, usize)> {
-    let mut depth = 0usize;
-    let mut opened = false;
-    for (index, line) in lines.iter().enumerate().skip(start) {
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
-                }
-                '}' if depth > 0 => depth -= 1,
-                _ => {}
+impl<'a> Visit<'a> for MacroAssertedIdentCollector<'_> {
+    fn visit_macro(&mut self, node: &'a syn::Macro) {
+        let compact: String = node
+            .tokens
+            .to_string()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        if compact.contains(&format!("MobMachineInput::{}", self.input)) {
+            collect_token_idents(node.tokens.clone(), &mut self.idents);
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn collect_token_idents(tokens: proc_macro2::TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                idents.insert(ident.to_string());
             }
-        }
-        if opened && depth == 0 {
-            return Some((start, index));
+            proc_macro2::TokenTree::Group(group) => collect_token_idents(group.stream(), idents),
+            _ => {}
         }
     }
-    None
+}
+
+/// Subtree search for a gate-seam call whose arguments carry the input.
+struct GateCallFinder<'n> {
+    input: &'n str,
+    asserted_idents: &'n BTreeSet<String>,
+    found: bool,
+}
+
+impl GateCallFinder<'_> {
+    fn args_carry_input<'e>(&self, mut args: impl Iterator<Item = &'e syn::Expr>) -> bool {
+        args.any(|arg| expr_carries_mob_machine_input(arg, self.input, self.asserted_idents))
+    }
+}
+
+impl<'a> Visit<'a> for GateCallFinder<'_> {
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        if MOB_CATALOG_GATE_METHODS.contains(&node.method.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'a syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(last) = path.path.segments.last()
+            && MOB_CATALOG_GATE_METHODS.contains(&last.ident.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when the expression subtree carries `MobMachineInput::<input>` —
+/// either as a direct enum-variant construction/path, or as an ident the
+/// scope structurally asserted to be that variant.
+fn expr_carries_mob_machine_input(
+    expr: &syn::Expr,
+    input: &str,
+    asserted_idents: &BTreeSet<String>,
+) -> bool {
+    struct InputCarrierFinder<'n> {
+        input: &'n str,
+        asserted_idents: &'n BTreeSet<String>,
+        found: bool,
+    }
+    impl<'a> Visit<'a> for InputCarrierFinder<'_> {
+        fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            if node.path.segments.len() == 1
+                && let Some(segment) = node.path.segments.first()
+                && self.asserted_idents.contains(&segment.ident.to_string())
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut finder = InputCarrierFinder {
+        input,
+        asserted_idents,
+        found: false,
+    };
+    finder.visit_expr(expr);
+    finder.found
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1440,28 +2568,32 @@ impl FlowReducerFamily {
     }
 }
 
-fn flow_reducer_test_only_lines(path: &str, lines: &[&str]) -> Vec<bool> {
-    if path.ends_with("/tests.rs") {
-        return vec![true; lines.len()];
-    }
-
-    let mut test_only = Vec::with_capacity(lines.len());
-    let mut in_test_module = false;
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 && lines[index - 1].trim() == "#[cfg(test)]" && line.contains("mod tests") {
-            in_test_module = true;
-        }
-        test_only.push(in_test_module);
-    }
-    test_only
-}
-
+/// Structural allow-list for direct reducer use in the `run.rs` reducer-owned
+/// wrappers (K22(b) shape).
+///
+/// The prior implementation located the enclosing function by scanning raw
+/// lines backwards for a compacted `fn`-prefixed line, re-derived the
+/// function name from that single line's text, and classified the allowance
+/// with `token.contains(..)` / `line.contains("authority.require(..")`
+/// windows — so a comment or string literal containing the require text
+/// could false-allow, and a signature wrapped across lines broke the name
+/// and return-type derivation.
+///
+/// This version keys entirely off the AST-derived [`DirectUseAllowContext`]
+/// captured at the hit: the enclosing function name, the structural
+/// `authority.require(MobMachineFlowAuthorityKind::..)` facts seen earlier
+/// in that body, the enclosing `impl` self type, and the structural return
+/// type. Two shapes are allowed, both only in `meerkat-mob/src/run.rs`:
+///
+/// 1. the reducer-owned apply wrapper — a `transition` use inside the
+///    family's `apply_mob_machine_<family>_command` function after that
+///    body structurally required the family's flow authority; and
+/// 2. the typed command adapter — a reducer `Input` construction inside
+///    `into_input` on the family's command type, returning `<module>::Input`.
 fn flow_reducer_direct_use_is_structurally_allowed(
     path: &str,
-    lines: &[&str],
-    line_index: usize,
     module: &str,
-    token: &str,
+    hit: &FlowReducerHit,
 ) -> bool {
     if path != "meerkat-mob/src/run.rs" {
         return false;
@@ -1469,184 +2601,112 @@ fn flow_reducer_direct_use_is_structurally_allowed(
     let Some(family) = FlowReducerFamily::from_module(module) else {
         return false;
     };
-
-    let Some(function_start) = nearest_function_start(lines, line_index) else {
+    let Some(context) = hit.direct_allow.as_ref() else {
         return false;
     };
-    let function_name = function_name_from_signature(lines[function_start]);
 
-    if function_name.as_deref() == Some(family.apply_function())
-        && token.contains("transition")
-        && lines[function_start..=line_index]
-            .iter()
-            .any(|line| line.contains(&format!("authority.require({}", family.authority_kind())))
-    {
-        return true;
+    match &hit.kind {
+        FlowReducerHitKind::Transition { .. } => {
+            context.enclosing_fn.as_deref() == Some(family.apply_function())
+                && context
+                    .preceding_authority_require_kinds
+                    .contains(family.authority_kind())
+        }
+        FlowReducerHitKind::Input { .. } => {
+            context.enclosing_fn.as_deref() == Some("into_input")
+                && context
+                    .enclosing_impl_type_idents
+                    .contains(family.command_type())
+                && context
+                    .fn_return_type_segments
+                    .windows(2)
+                    .any(|window| window[0] == family.module() && window[1] == "Input")
+        }
+        FlowReducerHitKind::ProjectionWrite | FlowReducerHitKind::CasStoreWrite => false,
     }
-
-    let function_signature = lines[function_start].split_whitespace().collect::<String>();
-    let expected_input_return = format!("->{}::Input", family.module());
-    function_name.as_deref() == Some("into_input")
-        && nearest_impl_start(lines, function_start)
-            .is_some_and(|impl_start| lines[impl_start].contains(family.command_type()))
-        && function_signature.contains(expected_input_return.as_str())
-        && token.contains("Input::")
 }
 
 fn flow_reducer_projection_commit_is_structurally_allowed(
     path: &str,
-    lines: &[&str],
-    line_index: usize,
+    hit: &FlowReducerHit,
 ) -> bool {
-    let Some(function_start) = nearest_function_start(lines, line_index) else {
+    // K22(c): the allow decision keys off the AST-derived `CasWriteAllowContext`
+    // captured at the hit (same structural resolution as the denial leg), not
+    // line-text windows. Comments/strings cannot false-allow and calls split
+    // across lines are still classified correctly.
+    let Some(context) = hit.cas_allow.as_ref() else {
         return false;
     };
-    let function_name = function_name_from_signature(lines[function_start]);
-    let scope = &lines[function_start..=line_index];
-
+    // True when an enclosing match-arm pattern destructures the named
+    // `FlowFrameLoopStorePlan` variant.
+    let arm_matches = |variant: &str| {
+        context.enclosing_match_arm_patterns.iter().any(|pattern| {
+            let mut segments = pattern.rsplit("::");
+            segments.next() == Some(variant) && segments.next() == Some("FlowFrameLoopStorePlan")
+        })
+    };
     match path {
         "meerkat-mob/src/runtime/flow.rs" => {
-            let signature = compact_function_signature(lines, function_start);
-            let call_window = lines[line_index..(line_index + 8).min(lines.len())].join(" ");
-            let has_authority_setup = scope
-                .iter()
-                .any(|line| line.contains("project_machine_input("))
-                && scope
-                    .iter()
-                    .any(|line| line.contains("from_accepted_mob_machine_input("));
-            let has_typed_authority_args = signature.contains("MobMachineFlowRunCommand")
-                && signature.contains("MobMachineFlowAuthorityToken");
-            let has_typed_authority_token_and_command_source = signature
+            let has_authority_setup = context
+                .preceding_callee_idents
+                .contains("project_machine_input")
+                && context
+                    .preceding_callee_idents
+                    .contains("from_accepted_mob_machine_input");
+            let has_typed_authority_args = context
+                .signature_type_idents
+                .contains("MobMachineFlowRunCommand")
+                && context
+                    .signature_type_idents
+                    .contains("MobMachineFlowAuthorityToken");
+            let has_typed_authority_token_and_command_source = context
+                .signature_type_idents
                 .contains("MobMachineFlowAuthorityToken")
-                && (signature.contains("MobMachineFlowRunCommand")
-                    || scope
-                        .iter()
-                        .any(|line| line.contains("MobMachineFlowRunCommand::")));
-            scope
-                .iter()
-                .any(|line| line.contains("apply_mob_machine_flow_run_command("))
+                && (context
+                    .signature_type_idents
+                    .contains("MobMachineFlowRunCommand")
+                    || context
+                        .preceding_path_idents
+                        .contains("MobMachineFlowRunCommand"));
+            context
+                .preceding_callee_idents
+                .contains("apply_mob_machine_flow_run_command")
                 && (has_authority_setup
                     || has_typed_authority_args
                     || has_typed_authority_token_and_command_source)
-                && (call_window.contains("outcome.next_state")
-                    || call_window.contains("next_state"))
+                && context.call_arg_idents.contains("next_state")
         }
         "meerkat-mob/src/runtime/actor.rs" => {
-            if function_name.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
+            if context.enclosing_fn.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
                 return false;
             }
-            let function_commits_prepared_inputs = lines
-                .iter()
-                .skip(function_start)
-                .take(420)
-                .any(|line| line.contains("commit_prepared_dsl_input(prepared)"));
-            let function_prepares_machine_inputs = lines
-                .iter()
-                .skip(function_start)
-                .take(420)
-                .any(|line| line.contains("prepare_dsl_inputs(plan.machine_inputs()"));
-            if !function_prepares_machine_inputs || !function_commits_prepared_inputs {
+            if !context.fn_prepares_machine_inputs || !context.fn_commits_prepared_inputs {
                 return false;
             }
-            let window_start = line_index.saturating_sub(32);
-            let local_scope = &lines[window_start..=line_index];
-            let call_window = lines[line_index..(line_index + 12).min(lines.len())].join(" ");
-            (call_window.contains(".cas_flow_state(")
-                && call_window.contains("next_run_state")
-                && local_scope
-                    .iter()
-                    .any(|line| line.contains("FlowFrameLoopStorePlan::RunStateOnly")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("next_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::FrameState")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("initial_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::InsertFrame")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("next_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::SealFrame")))
-                || (call_window.contains(".cas_complete_step_and_record_output(")
-                    && local_scope.iter().any(|line| {
-                        line.contains("FlowFrameLoopStorePlan::CompleteStepAndRecordOutput")
-                    }))
-                || (call_window.contains(".cas_grant_node_slot(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantNodeSlot")))
-                || (call_window.contains(".cas_start_loop(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::StartLoop")))
-                || (call_window.contains(".cas_grant_body_frame_start(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantBodyFrameStart")))
-                || (call_window.contains(".cas_complete_body_frame(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteBodyFrame")))
-                || (call_window.contains(".cas_loop_request_body_frame(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::LoopRequestBodyFrame")))
-                || (call_window.contains(".cas_complete_loop(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteLoop")))
+            match context.cas_method.as_str() {
+                "cas_flow_state" => {
+                    context.call_arg_idents.contains("next_run_state")
+                        && arm_matches("RunStateOnly")
+                }
+                "cas_frame_state" => {
+                    (context.call_arg_idents.contains("next_frame")
+                        && (arm_matches("FrameState") || arm_matches("SealFrame")))
+                        || (context.call_arg_idents.contains("initial_frame")
+                            && arm_matches("InsertFrame"))
+                }
+                "cas_complete_step_and_record_output" => arm_matches("CompleteStepAndRecordOutput"),
+                "cas_grant_node_slot" => arm_matches("GrantNodeSlot"),
+                "cas_start_loop" => arm_matches("StartLoop"),
+                "cas_grant_body_frame_start" => arm_matches("GrantBodyFrameStart"),
+                "cas_complete_body_frame" => arm_matches("CompleteBodyFrame"),
+                "cas_loop_request_body_frame" => arm_matches("LoopRequestBodyFrame"),
+                "cas_complete_loop" => arm_matches("CompleteLoop"),
+                _ => false,
+            }
         }
         "meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
         _ => false,
     }
-}
-
-fn nearest_function_start(lines: &[&str], line_index: usize) -> Option<usize> {
-    (0..=line_index).rev().find(|index| {
-        let compact = lines[*index].split_whitespace().collect::<String>();
-        compact.starts_with("fn")
-            || compact.starts_with("pubfn")
-            || compact.starts_with("pub(crate)fn")
-            || compact.starts_with("pub(super)fn")
-            || compact.starts_with("asyncfn")
-            || compact.starts_with("pubasyncfn")
-            || compact.starts_with("pub(crate)asyncfn")
-            || compact.starts_with("pub(super)asyncfn")
-    })
-}
-
-fn nearest_impl_start(lines: &[&str], line_index: usize) -> Option<usize> {
-    (0..=line_index).rev().find(|index| {
-        let compact = lines[*index].split_whitespace().collect::<String>();
-        compact.starts_with("impl")
-    })
-}
-
-fn compact_function_signature(lines: &[&str], function_start: usize) -> String {
-    let mut signature = String::new();
-    for line in &lines[function_start..] {
-        for part in line.split_whitespace() {
-            signature.push_str(part);
-        }
-        if line.contains('{') {
-            break;
-        }
-    }
-    signature
-}
-
-fn function_name_from_signature(line: &str) -> Option<String> {
-    let compact = line.split_whitespace().collect::<String>();
-    let after_fn = compact.split_once("fn")?.1;
-    let name = after_fn
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect::<String>();
-    (!name.is_empty()).then_some(name)
 }
 
 pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<String>> {
@@ -1812,12 +2872,34 @@ fn retired_generated_source_paths() -> &'static [&'static str] {
     ]
 }
 
+/// Validate every selected coverage anchor against both the on-disk code
+/// location it names and the canonical schema element it claims to realize.
+///
+/// Two fail-closed checks run per anchor:
+///
+/// 1. **Symbol resolution** — the anchor's `symbol` path must exist on disk.
+/// 2. **Schema-target resolution** — the anchor's typed `target` must name a
+///    real schema element. A [`CoverageSchemaTarget::Machine`] must name a
+///    machine in the canonical machine-id set; a [`CoverageSchemaTarget::Route`]
+///    must name a route declared by the owning composition. An anchor that
+///    names a machine/route absent from the schema is a generated-artifact
+///    drift and pushes a mismatch (it never silently passes).
+///
+/// Machine targets resolve against the full canonical machine set rather than
+/// the current selection, so a composition anchor that references a machine
+/// bound elsewhere (e.g. `MeerkatMachine`) still resolves under a narrowed
+/// `--composition` selection.
 pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
     let mut mismatches = Vec::new();
 
+    let canonical_machine_names = canonical_machine_schemas()
+        .iter()
+        .map(|schema| schema.machine.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
     for machine in &selection.machines {
         for anchor in &machine.coverage.code_anchors {
-            let path = root.join(&anchor.path);
+            let path = root.join(anchor.symbol.as_str());
             if !path.exists() {
                 mismatches.push(format!(
                     "missing machine coverage anchor {} for {}",
@@ -1825,18 +2907,61 @@ pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) ->
                     machine.schema.machine
                 ));
             }
+            // Machine coverage manifests own no routes; every anchor must
+            // target a canonical machine.
+            match &anchor.target {
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "machine coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, machine.schema.machine, machine_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Route(route_id) => {
+                    mismatches.push(format!(
+                        "machine coverage anchor `{}` for {} targets route `{}` but a machine coverage manifest declares no routes",
+                        anchor.id, machine.schema.machine, route_id
+                    ));
+                }
+            }
         }
     }
 
     for composition in &selection.compositions {
+        let route_names = composition
+            .schema
+            .routes
+            .iter()
+            .map(|route| route.name.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+
         for anchor in &composition.coverage.code_anchors {
-            let path = root.join(&anchor.path);
+            let path = root.join(anchor.symbol.as_str());
             if !path.exists() {
                 mismatches.push(format!(
                     "missing composition coverage anchor {} for {}",
                     path.display(),
                     composition.schema.name
                 ));
+            }
+            match &anchor.target {
+                CoverageSchemaTarget::Route(route_id) => {
+                    if !route_names.contains(route_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets undeclared route `{}`",
+                            anchor.id, composition.schema.name, route_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, composition.schema.name, machine_id
+                        ));
+                    }
+                }
             }
         }
     }
@@ -2468,6 +3593,51 @@ fn validate_machine_semantic_coverage(
         .map(|scenario| scenario.id.as_str())
         .collect::<BTreeSet<_>>();
 
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A machine coverage
+    // manifest declares no routes or scheduler rules, so claims of those
+    // kinds are structurally mismatched.
+    let owner = format!("machine {}", schema.machine);
+    let transition_names = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            Some(&transition_names),
+            Some(&effect_names),
+            &invariant_names,
+            None,
+            None,
+        )?;
+    }
+
     validate_semantic_entries(
         &format!("machine {}", schema.machine),
         "transition",
@@ -2524,6 +3694,54 @@ fn validate_composition_semantic_coverage(
         .map(|scenario| scenario.id.as_str())
         .collect::<BTreeSet<_>>();
 
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A composition
+    // coverage manifest declares no machine transitions or effects, so
+    // claims of those kinds are structurally mismatched.
+    let owner = format!("composition {}", schema.name);
+    let route_names = schema
+        .routes
+        .iter()
+        .map(|route| route.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let scheduler_rule_names = schema
+        .scheduler_rules
+        .iter()
+        .map(scheduler_rule_coverage_name)
+        .collect::<Vec<_>>();
+    let scheduler_rule_names = scheduler_rule_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            None,
+            None,
+            &invariant_names,
+            Some(&route_names),
+            Some(&scheduler_rule_names),
+        )?;
+    }
+
     validate_semantic_entries(
         &format!("composition {}", schema.name),
         "route",
@@ -2542,7 +3760,7 @@ fn validate_composition_semantic_coverage(
         &schema
             .scheduler_rules
             .iter()
-            .map(scheduler_rule_name)
+            .map(scheduler_rule_coverage_name)
             .collect::<Vec<_>>(),
         &manifest.scheduler_rule_coverage,
         &anchor_ids,
@@ -2594,18 +3812,11 @@ fn validate_semantic_entries(
                 entry.name
             );
         }
-        if entry.anchor_ids.is_empty() {
-            bail!(
-                "{owner} semantic coverage entry `{}` has no code-anchor mappings",
-                entry.name
-            );
-        }
-        if entry.scenario_ids.is_empty() {
-            bail!(
-                "{owner} semantic coverage entry `{}` has no scenario mappings",
-                entry.name
-            );
-        }
+        // Empty anchor/scenario id lists are permitted: under the
+        // full-containment matching rule an element nothing fully describes
+        // is honestly UNCLAIMED rather than mis-attributed to whichever
+        // anchor coincidentally shares a token. Wrong claims (unknown ids,
+        // tautological everything-maps-to-everything) remain rejected below.
         if anchor_ids.len() > 1
             && scenario_ids.len() > 1
             && entry.anchor_ids.len() == anchor_ids.len()
@@ -2639,12 +3850,70 @@ fn validate_semantic_entries(
     Ok(())
 }
 
-fn scheduler_rule_name(rule: &SchedulerRule) -> String {
-    match rule {
-        SchedulerRule::PreemptWhenReady { higher, lower } => {
-            format!("PreemptWhenReady({higher}, {lower})")
+/// Resolve one claimant's typed claims against the owning schema's element
+/// name sets. `None` for a kind means the manifest type structurally owns no
+/// elements of that kind, so any claim of it is a mismatch.
+#[allow(clippy::too_many_arguments)]
+fn validate_claims_against(
+    owner: &str,
+    claimant_kind: &str,
+    claimant_id: &str,
+    claims: &CoverageClaims,
+    transitions: Option<&BTreeSet<&str>>,
+    effects: Option<&BTreeSet<&str>>,
+    invariants: &BTreeSet<&str>,
+    routes: Option<&BTreeSet<&str>>,
+    scheduler_rules: Option<&BTreeSet<&str>>,
+) -> Result<()> {
+    type KindRow<'a> = (&'a str, Vec<&'a str>, Option<&'a BTreeSet<&'a str>>);
+    let kinds: [KindRow<'_>; 5] = [
+        (
+            "transition",
+            claims.transitions.iter().map(|id| id.as_str()).collect(),
+            transitions,
+        ),
+        (
+            "effect",
+            claims.effects.iter().map(|id| id.as_str()).collect(),
+            effects,
+        ),
+        (
+            "invariant",
+            claims.invariants.iter().map(String::as_str).collect(),
+            Some(invariants),
+        ),
+        (
+            "route",
+            claims.routes.iter().map(|id| id.as_str()).collect(),
+            routes,
+        ),
+        (
+            "scheduler rule",
+            claims.scheduler_rules.iter().map(String::as_str).collect(),
+            scheduler_rules,
+        ),
+    ];
+    for (kind, claimed, declared) in kinds {
+        match declared {
+            None => {
+                if let Some(first) = claimed.first() {
+                    bail!(
+                        "{owner} {claimant_kind} `{claimant_id}` claims {kind} `{first}` but this manifest type declares no {kind}s"
+                    );
+                }
+            }
+            Some(declared) => {
+                for name in claimed {
+                    if !declared.contains(name) {
+                        bail!(
+                            "{owner} {claimant_kind} `{claimant_id}` claims nonexistent {kind} `{name}`"
+                        );
+                    }
+                }
+            }
         }
     }
+    Ok(())
 }
 
 pub struct Selection {

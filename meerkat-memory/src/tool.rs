@@ -9,14 +9,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::memory::{MemorySearchScope, MemoryStore};
-use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
+use meerkat_core::memory::{MemorySearchScope, MemoryStore, MemoryStoreError};
+use meerkat_core::types::{
+    ContentBlock, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 const TOOL_NAME: &str = "memory_search";
 const DEFAULT_LIMIT: usize = 5;
+
+/// Map a typed [`MemoryStoreError`] onto a distinguishable [`ToolError`],
+/// preserving the failure class via a stable structured `code` rather than
+/// collapsing every cause into an opaque message string.
+fn memory_search_error(error: MemoryStoreError) -> ToolError {
+    ToolError::ExecutionFailedWithData {
+        message: error.to_string(),
+        data: json!({ "code": error.error_code() }),
+    }
+}
 
 /// Input schema for the memory_search tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -32,7 +44,7 @@ struct MemorySearchInput {
 /// `required` keys are always present (tool schema contract).
 fn input_schema() -> Value {
     let schema = schemars::schema_for!(MemorySearchInput);
-    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+    let mut value = schema.to_value();
     if let Value::Object(ref mut obj) = value
         && obj.get("type").and_then(Value::as_str) == Some("object")
     {
@@ -121,38 +133,57 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
             .store
             .search(&self.scope, &input.query, limit)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: e.to_string(),
-            })?;
+            .map_err(memory_search_error)?;
         let items: Vec<Value> = results
             .into_iter()
             .map(|r| {
-                json!({
+                let mut entry = json!({
                     "content": r.content,
                     "score": r.score,
-                    "turn": r.metadata.turn,
-                })
+                });
+                // Expose the typed source handle (provenance), not a proxy turn.
+                if let (Value::Object(obj), Some(range)) =
+                    (&mut entry, r.metadata.source.source_range())
+                {
+                    obj.insert(
+                        "source_range".to_string(),
+                        json!({ "start": range.start(), "end": range.end() }),
+                    );
+                }
+                entry
             })
             .collect();
-        // Bare-array wire shape: the tool returns a list of result objects,
-        // and every test in this module expects `Vec<Value>` via
-        // `serde_json::from_str`. The `0c9acc473` wave-d baseline wrapped
-        // items in `{"results": items}` but that wrapper isn't consumed by
-        // any production caller (only test fixtures that parse as Vec),
-        // and MCP-style tool outputs conventionally emit the list directly
-        // when the result is a list.
-        let payload = Value::Array(items).to_string();
+        // Bare-array wire shape: the tool returns a list of result objects.
+        // Emitted as a typed `ContentBlock::Structured` so the canonical
+        // transcript carries the JSON array shape rather than a stringified
+        // `Text` block. The model-facing text projection is derived from the
+        // JSON, never the other way around. Tests still parse the projection
+        // as `Vec<Value>`. The `0c9acc473` wave-d baseline wrapped items in
+        // `{"results": items}` but that wrapper isn't consumed by any
+        // production caller, and MCP-style tool outputs conventionally emit
+        // the list directly when the result is a list.
+        // Result-encoding failure keeps the same structured failure-class shape
+        // as store errors: a stable `code` travels with the message instead of
+        // collapsing the cause into an opaque string-only failure.
+        let block =
+            ContentBlock::structured(&items).map_err(|e| ToolError::ExecutionFailedWithData {
+                message: format!("failed to encode memory_search results: {e}"),
+                data: json!({ "code": "memory_result_encoding" }),
+            })?;
         Ok(meerkat_core::ops::ToolDispatchOutcome::from(
-            ToolResult::new(call.id.to_string(), payload, false),
+            ToolResult::with_blocks(call.id.to_string(), vec![block], false),
         ))
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore};
+    use meerkat_core::memory::{
+        MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MemoryStore,
+        MessageRange,
+    };
     use meerkat_core::types::SessionId;
     use serde_json::value::RawValue;
     use std::time::SystemTime;
@@ -176,7 +207,9 @@ mod tests {
     fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
             session_id: session_id.clone(),
-            turn: Some(1),
+            source: MemorySource::Compaction {
+                source_range: MessageRange::single(7),
+            },
             indexed_at: SystemTime::now(),
         }
     }
@@ -184,7 +217,7 @@ mod tests {
     fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
         MemoryIndexRequest::new(
             MemoryIndexScope::for_session(session_id.clone()),
-            content.into(),
+            meerkat_core::MemoryIndexableContent::Indexable(content.into()),
             meta(session_id),
         )
         .unwrap()
@@ -277,6 +310,57 @@ mod tests {
             parsed[0].get("session_id").is_none(),
             "memory tool must not leak raw source session ids"
         );
+        // The typed source handle (provenance) is exposed, not a proxy turn.
+        assert!(
+            parsed[0].get("turn").is_none(),
+            "memory tool must expose the typed source handle, not a turn proxy"
+        );
+        let range = parsed[0]
+            .get("source_range")
+            .expect("memory result exposes typed source range");
+        assert_eq!(range["start"].as_u64().unwrap(), 7);
+        assert_eq!(range["end"].as_u64().unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn test_search_error_preserves_typed_failure_class() {
+        use async_trait::async_trait;
+        use meerkat_core::memory::{MemoryIndexBatch, MemoryIndexReceipt, MemoryResult};
+
+        struct FailingStore;
+
+        #[async_trait]
+        impl MemoryStore for FailingStore {
+            async fn index_scoped_batch(
+                &self,
+                _batch: MemoryIndexBatch,
+            ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+                Err(MemoryStoreError::LockPoisoned)
+            }
+
+            async fn search(
+                &self,
+                _scope: &MemorySearchScope,
+                _query: &str,
+                _limit: usize,
+            ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+                Err(MemoryStoreError::LockPoisoned)
+            }
+        }
+
+        let store: Arc<dyn MemoryStore> = Arc::new(FailingStore);
+        let session_id = SessionId::new();
+        let dispatcher = dispatcher(store, &session_id);
+        let (id, raw, name) = make_call(r#"{"query": "anything"}"#);
+        let view = call_view(&id, &raw, &name);
+
+        let err = dispatcher.dispatch(view).await.unwrap_err();
+        match err {
+            ToolError::ExecutionFailedWithData { data, .. } => {
+                assert_eq!(data["code"].as_str(), Some("memory_lock_poisoned"));
+            }
+            other => panic!("expected typed execution failure with data, got {other:?}"),
+        }
     }
 
     #[tokio::test]

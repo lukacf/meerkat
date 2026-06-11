@@ -25,6 +25,34 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct ClaimOwner(pub String);
+impl From<String> for ClaimOwner {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ClaimOwner {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for ClaimOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ClaimToken(pub String);
 impl From<String> for ClaimToken {
     fn from(value: String) -> Self {
@@ -207,6 +235,34 @@ impl std::convert::TryFrom<String> for CompletionSupersessionDisposition {
 impl std::fmt::Display for CompletionSupersessionDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct CorrelationId(pub String);
+impl From<String> for CorrelationId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for CorrelationId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for CorrelationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 #[allow(non_camel_case_types)]
@@ -1165,6 +1221,34 @@ impl std::fmt::Display for RuntimeCompletionOutcome {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct RuntimeOutcomeKey(pub String);
+impl From<String> for RuntimeOutcomeKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RuntimeOutcomeKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RuntimeOutcomeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ScheduleId(pub String);
 impl From<String> for ScheduleId {
     fn from(value: String) -> Self {
@@ -1209,6 +1293,62 @@ impl std::fmt::Display for SessionId {
         f.write_str(&self.0)
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct TargetBindingId(pub String);
+impl From<String> for TargetBindingId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for TargetBindingId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for TargetBindingId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct TriggerKey(pub String);
+impl From<String> for TriggerKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for TriggerKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for TriggerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -1235,8 +1375,8 @@ pub struct State {
     pub schedule_id: ScheduleId,
     pub schedule_revision: u64,
     pub occurrence_ordinal: u64,
-    pub trigger_key: String,
-    pub target_binding_key: String,
+    pub trigger_key: TriggerKey,
+    pub target_binding_key: TargetBindingId,
     pub misfire_policy: MisfirePolicy,
     pub misfire_policy_key: String,
     pub overlap_policy: OverlapPolicy,
@@ -1245,11 +1385,11 @@ pub struct State {
     pub missing_target_policy_key: String,
     pub due_at_utc_ms: u64,
     pub misfire_deadline_utc_ms: u64,
-    pub claimed_by: Option<String>,
+    pub claimed_by: Option<ClaimOwner>,
     pub lease_expires_at_utc_ms: Option<u64>,
     pub claimed_at_utc_ms: Option<u64>,
     pub claim_token: Option<ClaimToken>,
-    pub delivery_correlation_id: Option<String>,
+    pub delivery_correlation_id: Option<CorrelationId>,
     pub target_materialized_session_id: Option<SessionId>,
     pub receipt_recorded_at_utc_ms: Option<u64>,
     pub last_receipt_recorded_at_utc_ms: Option<u64>,
@@ -1257,9 +1397,9 @@ pub struct State {
     pub last_receipt_stage: Option<DeliveryReceiptStage>,
     pub last_receipt_failure_class: Option<OccurrenceFailureClass>,
     pub last_receipt_detail: Option<String>,
-    pub last_receipt_correlation_id: Option<String>,
+    pub last_receipt_correlation_id: Option<CorrelationId>,
     pub last_receipt_materialized_session_id: Option<SessionId>,
-    pub runtime_outcome_key: Option<String>,
+    pub runtime_outcome_key: Option<RuntimeOutcomeKey>,
     pub receipt_stage: Option<DeliveryReceiptStage>,
     pub receipt_failure_class: Option<OccurrenceFailureClass>,
     pub receipt_detail: Option<String>,
@@ -1285,8 +1425,8 @@ pub mod inputs {
         pub schedule_id: ScheduleId,
         pub schedule_revision: u64,
         pub occurrence_ordinal: u64,
-        pub trigger_key: String,
-        pub target_binding_key: String,
+        pub trigger_key: TriggerKey,
+        pub target_binding_key: TargetBindingId,
         pub misfire_policy: MisfirePolicy,
         pub misfire_policy_key: String,
         pub overlap_policy: OverlapPolicy,
@@ -1299,15 +1439,15 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncTargetSnapshot {
-        pub target_binding_key: String,
+        pub target_binding_key: TargetBindingId,
         pub target_materialized_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordReceipt {
-        pub correlation_id: Option<String>,
+        pub correlation_id: Option<CorrelationId>,
         pub detail: Option<String>,
         pub materialized_session_id: Option<SessionId>,
-        pub runtime_outcome_key: Option<String>,
+        pub runtime_outcome_key: Option<RuntimeOutcomeKey>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyDue {
@@ -1327,14 +1467,14 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
-        pub owner_id: String,
+        pub owner_id: ClaimOwner,
         pub at_utc_ms: u64,
         pub lease_expires_at_utc_ms: u64,
         pub claim_token: ClaimToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DispatchStarted {
-        pub correlation_id: Option<String>,
+        pub correlation_id: Option<CorrelationId>,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1822,8 +1962,8 @@ pub fn initial_state() -> State {
         schedule_id: ScheduleId("schedule-0".to_string()),
         schedule_revision: 1,
         occurrence_ordinal: 0,
-        trigger_key: "trigger-0".to_string(),
-        target_binding_key: "target-0".to_string(),
+        trigger_key: TriggerKey("trigger-0".to_string()),
+        target_binding_key: TargetBindingId("target-0".to_string()),
         misfire_policy: MisfirePolicy::Skip,
         misfire_policy_key: "misfire:skip".to_string(),
         overlap_policy: OverlapPolicy::SkipIfRunning,

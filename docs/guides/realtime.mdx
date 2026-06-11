@@ -48,7 +48,7 @@ Key invariants:
 
 ## Realtime-capable models
 
-`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat_core::model_profile`, re-exported by `meerkat-models`). Capability is catalog data, not prefix inference:
+`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat_core::model_profile`). Capability is catalog data, not prefix inference:
 
 - **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog.
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.
@@ -139,7 +139,7 @@ Use `live/status` to read the current state of a live channel:
 | `live/close` | Close a live channel |
 
 <Warning>
-`live/open` requires `rkat-rpc` to be started with the `--live-ws <addr>` flag for WebSocket transport. Without it the `live/*` methods are not registered.
+The `live/*` methods are registered when at least one live transport is configured: the WebSocket listener (`rkat-rpc --live-ws <addr>`) or WebRTC (builds with the `live-webrtc` feature). When no WebSocket listener is configured, `live/open` defaults to WebRTC transport; with neither transport configured, the `live/*` methods are not registered.
 </Warning>
 
 ## End-to-end example

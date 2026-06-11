@@ -6,9 +6,10 @@
 
 use crate::definition::{MobDefinition, SkillSource};
 use crate::error::MobError;
-use crate::ids::{MeerkatId, MobId, ProfileName};
+use crate::ids::{AgentIdentity, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
+use meerkat::SystemPromptOverride;
 use meerkat_core::InheritedToolVisibilityAuthority;
 use meerkat_core::PeerMeta;
 use meerkat_core::RealmId;
@@ -80,7 +81,7 @@ pub(crate) fn open_profile_tool_categories_for_inherited_filter(profile: &mut Pr
 pub struct BuildAgentConfigParams<'a> {
     pub mob_id: &'a MobId,
     pub profile_name: &'a ProfileName,
-    pub(crate) agent_identity: &'a MeerkatId,
+    pub(crate) agent_identity: &'a AgentIdentity,
     pub profile: &'a Profile,
     pub definition: &'a MobDefinition,
     pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
@@ -190,10 +191,10 @@ pub async fn build_agent_config(
     config.mob_member_binding = Some(member_binding);
     match system_prompt_override {
         Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
-            config.system_prompt = Some(prompt);
+            config.system_prompt = SystemPromptOverride::Set(prompt);
         }
         None if !system_prompt.is_empty() => {
-            config.system_prompt = Some(system_prompt);
+            config.system_prompt = SystemPromptOverride::Set(system_prompt);
         }
         None => {}
     }
@@ -263,15 +264,37 @@ pub async fn build_agent_config(
     config.shell_env = shell_env;
     config.provider_params = profile.provider_params.clone();
 
-    // Structured output: convert JSON schema value to OutputSchema
-    if let Some(schema_value) = &profile.output_schema {
-        let schema = meerkat_core::MeerkatSchema::new(schema_value.clone()).map_err(|e| {
-            MobError::WiringError(format!(
-                "invalid output_schema for profile '{profile_name}': {e}"
-            ))
-        })?;
+    // Profile-declared provider identity: the typed provider (parsed
+    // fail-closed at profile ingress) and the optional self-hosted server
+    // binding flow straight into the build config; the registry rejects a
+    // provider that contradicts a catalogued model's owner at build time.
+    config.provider = profile.provider;
+    config.self_hosted_server_id = profile.self_hosted_server_id.clone();
+
+    // Mob-scoped `[models.<id>]` entries ride the build config into the
+    // effective model registry (single owner for provider inference,
+    // compaction scaling, capability gates, and timeouts).
+    config.custom_models = definition.models.clone();
+
+    // `Auto` image-generation target default: profile-level wins over the
+    // mob-level default; absent both, the planner falls back to the
+    // session's effective text provider.
+    config.image_generation_provider = profile
+        .image_generation_provider
+        .or(definition.image_generation_provider);
+
+    // Per-profile compaction threshold override (typed non-zero at ingress).
+    config.auto_compact_threshold_override = profile.auto_compact_threshold;
+
+    // Declared resume-override intent: list-ed profile fields win over
+    // durable session metadata when this member resumes.
+    config.resume_override_mask = profile.resume_override_mask();
+
+    // Structured output: the profile carries the typed, already-validated
+    // schema (validated once at profile ingress).
+    if let Some(schema) = &profile.output_schema {
         config.output_schema = Some(meerkat_core::OutputSchema {
-            schema,
+            schema: schema.clone(),
             name: Some(format!("{mob_id}_{profile_name}")),
             strict: true,
             compat: Default::default(),
@@ -323,7 +346,7 @@ pub async fn build_resumed_agent_config(
     apply_resumed_session_metadata(&mut config, &metadata)?;
     config.resume_session = Some(resumed_session);
     // Preserve the durable session prompt/history exactly as stored.
-    config.system_prompt = None;
+    config.system_prompt = SystemPromptOverride::Inherit;
     // Do not silently reapply prompt-affecting surface-local context on resume.
     config.additional_instructions = None;
     config.app_context = None;
@@ -349,10 +372,22 @@ fn apply_resumed_session_metadata(
         )));
     }
 
-    config.model = metadata.model.clone();
+    // Durable metadata restores only the fields the profile did not claim via
+    // `resume_overrides` (typed mask, set from the profile in
+    // `build_agent_config`). A masked field keeps the freshly-built profile
+    // value so a definition edit applies to resumed durable sessions.
+    let mask = config.resume_override_mask;
+    if !mask.model {
+        config.model = metadata.model.clone();
+    }
     config.max_tokens = Some(metadata.max_tokens);
-    config.provider = Some(metadata.provider);
-    config.provider_params = metadata.provider_params.clone();
+    if !mask.provider {
+        config.provider = Some(metadata.provider);
+        config.self_hosted_server_id = metadata.self_hosted_server_id.clone();
+    }
+    if !mask.provider_params {
+        config.provider_params = metadata.provider_params.clone();
+    }
     config.override_builtins = metadata.tooling.builtins;
     config.override_shell = metadata.tooling.shell;
     config.override_memory = metadata.tooling.memory;
@@ -386,12 +421,10 @@ pub fn to_create_session_request(
     CreateSessionRequest {
         model: config.model.clone(),
         prompt,
-        render_metadata: None,
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,
 
-        skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution
         // during create_session so spawn does not block on LLM latency, and do
@@ -504,8 +537,13 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("lead"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "claude-opus-4-8".into(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: vec!["leader-skill".into()],
                 tools: ToolConfig {
                     builtins: true,
@@ -526,12 +564,17 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "claude-sonnet-4-5".into(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: vec![],
                 tools: ToolConfig {
                     builtins: true,
@@ -552,7 +595,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut skills = BTreeMap::new();
@@ -758,7 +801,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -785,7 +828,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -825,7 +868,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -862,7 +905,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -895,7 +938,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -951,7 +994,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -1002,7 +1045,7 @@ mod tests {
         let mut config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1075,7 +1118,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-inherit"),
+            agent_identity: &AgentIdentity::from("w-inherit"),
             profile: &profile,
             definition: &def,
             external_tools: None,
@@ -1128,7 +1171,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -1197,7 +1240,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-operator"),
+            agent_identity: &AgentIdentity::from("lead-operator"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1244,7 +1287,7 @@ mod tests {
             base: BuildAgentConfigParams {
                 mob_id: &def.id,
                 profile_name: &ProfileName::from("lead"),
-                agent_identity: &MeerkatId::from("lead-1"),
+                agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
                 external_tools: None,
@@ -1291,7 +1334,7 @@ mod tests {
             base: BuildAgentConfigParams {
                 mob_id: &def.id,
                 profile_name: &ProfileName::from("lead"),
-                agent_identity: &MeerkatId::from("lead-1"),
+                agent_identity: &AgentIdentity::from("lead-1"),
                 profile: &lead,
                 definition: &def,
                 external_tools: None,
@@ -1345,24 +1388,28 @@ mod tests {
             staged_filter: meerkat_core::tool_scope::ToolFilter::Allow(
                 ["staged_visible".to_string()].into_iter().collect(),
             ),
-            active_requested_deferred_names: BTreeSet::from(["deferred_active".to_string()]),
-            staged_requested_deferred_names: BTreeSet::from(["deferred_staged".to_string()]),
+            active_requested_deferred_names: BTreeSet::from(["deferred_active".into()]),
+            staged_requested_deferred_names: BTreeSet::from(["deferred_staged".into()]),
             active_revision: 7,
             staged_revision: 9,
             requested_witnesses: [(
-                "deferred_active".to_string(),
+                "deferred_active".into(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:deferred_active".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "deferred_active".into(),
+                    }),
                 },
             )]
             .into_iter()
             .collect(),
             filter_witnesses: [(
-                "active_secret".to_string(),
+                "active_secret".into(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:active_secret".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "active_secret".into(),
+                    }),
                 },
             )]
             .into_iter()
@@ -1376,7 +1423,7 @@ mod tests {
             base: BuildAgentConfigParams {
                 mob_id: &def.id,
                 profile_name: &ProfileName::from("lead"),
-                agent_identity: &MeerkatId::from("lead-1"),
+                agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
                 external_tools: None,
@@ -1474,7 +1521,7 @@ mod tests {
             base: BuildAgentConfigParams {
                 mob_id: &def.id,
                 profile_name: &ProfileName::from("lead"),
-                agent_identity: &MeerkatId::from("lead-1"),
+                agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
                 external_tools: None,
@@ -1519,7 +1566,7 @@ mod tests {
         let result = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -1547,7 +1594,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1562,7 +1609,10 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        let prompt = config.system_prompt.as_deref().expect("system_prompt set");
+        let prompt = config
+            .system_prompt
+            .as_set_prompt()
+            .expect("system_prompt set");
         assert!(
             prompt.contains("You are the team lead."),
             "prompt should contain resolved inline skill"
@@ -1581,7 +1631,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1599,7 +1649,7 @@ mod tests {
         .expect("build_agent_config");
 
         assert_eq!(
-            config.system_prompt.as_deref(),
+            config.system_prompt.as_set_prompt(),
             Some("OB3 replacement prompt"),
             "typed Replace must bypass profile prompt assembly"
         );
@@ -1620,7 +1670,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1662,7 +1712,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -1704,7 +1754,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1740,7 +1790,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &lead_key,
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1767,7 +1817,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1794,7 +1844,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1812,7 +1862,7 @@ mod tests {
         let req = to_create_session_request(&config, "Hello mob".to_string().into());
         assert_eq!(req.model, "claude-opus-4-8");
         assert_eq!(req.prompt.text_content(), "Hello mob");
-        assert!(req.system_prompt.is_some());
+        assert!(req.system_prompt.is_explicit());
         assert_eq!(
             req.initial_turn,
             meerkat_core::service::InitialTurnPolicy::Defer
@@ -1854,7 +1904,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -1909,7 +1959,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1924,7 +1974,7 @@ mod tests {
         .await
         .expect("build_agent_config should resolve path skill");
 
-        let prompt = config.system_prompt.expect("system prompt");
+        let prompt = config.system_prompt.as_set_prompt().expect("system prompt");
         assert!(prompt.contains("Path skill content for leader."));
         assert!(!prompt.contains("[skill from:"));
     }
@@ -1958,7 +2008,7 @@ mod tests {
         let err = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1992,7 +2042,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -2023,7 +2073,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -2053,16 +2103,24 @@ mod tests {
             .expect("lead profile")
             .as_inline_mut()
             .unwrap()
-            .provider_params = Some(serde_json::json!({
-            "thinking_budget": 4096,
-            "top_k": 40
-        }));
+            .provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                    meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                        thinking_budget: Some(4096),
+                        top_k: Some(40),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        );
 
         let lead = def.profiles[&lead_key].as_inline().unwrap();
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &lead_key,
-            agent_identity: &MeerkatId::from("lead-1"),
+            agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -2079,10 +2137,20 @@ mod tests {
 
         assert_eq!(
             config.provider_params,
-            Some(serde_json::json!({
-                "thinking_budget": 4096,
-                "top_k": 40
-            })),
+            Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                            meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                                thinking_budget: Some(4096),
+                                top_k: Some(40),
+                                ..Default::default()
+                            },
+                        )
+                    ),
+                    ..Default::default()
+                }
+            ),
             "provider_params should be passed through to AgentBuildConfig"
         );
 
@@ -2090,12 +2158,210 @@ mod tests {
         let build = req.build.expect("build options should be set");
         assert_eq!(
             build.provider_params,
-            Some(serde_json::json!({
-                "thinking_budget": 4096,
-                "top_k": 40
-            })),
+            Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+                            meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                                thinking_budget: Some(4096),
+                                top_k: Some(40),
+                                ..Default::default()
+                            },
+                        )
+                    ),
+                    ..Default::default()
+                }
+            ),
             "provider_params should survive into SessionBuildOptions"
         );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_maps_profile_provider_and_definition_models() {
+        let mut def = sample_definition();
+        def.models.insert(
+            "claude-internal-preview".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: meerkat_core::Provider::Anthropic,
+                display_name: None,
+                context_window: Some(500_000),
+                max_output_tokens: None,
+                vision: None,
+                web_search: None,
+                call_timeout_secs: None,
+            },
+        );
+        def.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        let lead_key = ProfileName::from("lead");
+        {
+            let lead = def
+                .profiles
+                .get_mut(&lead_key)
+                .expect("lead profile")
+                .as_inline_mut()
+                .unwrap();
+            lead.model = "claude-internal-preview".to_string();
+            lead.provider = Some(meerkat_core::Provider::Anthropic);
+            lead.self_hosted_server_id = None;
+            lead.image_generation_provider = Some(meerkat_core::Provider::Gemini);
+            lead.auto_compact_threshold = std::num::NonZeroU64::new(60_000);
+            lead.resume_overrides = vec![
+                crate::profile::ResumeOverrideField::Model,
+                crate::profile::ResumeOverrideField::Provider,
+            ];
+        }
+
+        let lead = def.profiles[&lead_key].as_inline().unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &lead_key,
+            agent_identity: &AgentIdentity::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(config.provider, Some(meerkat_core::Provider::Anthropic));
+        assert_eq!(
+            config
+                .custom_models
+                .get("claude-internal-preview")
+                .map(|model| model.provider),
+            Some(meerkat_core::Provider::Anthropic),
+            "definition [models.<id>] entries must ride the build config"
+        );
+        assert_eq!(
+            config.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini),
+            "profile-level image_generation_provider wins over the mob-level default"
+        );
+        assert_eq!(
+            config.auto_compact_threshold_override,
+            std::num::NonZeroU64::new(60_000)
+        );
+        assert!(config.resume_override_mask.model);
+        assert!(config.resume_override_mask.provider);
+        assert!(!config.resume_override_mask.provider_params);
+
+        // The seam survives into SessionBuildOptions (deferred materialization).
+        let req = to_create_session_request(&config, "hello".to_string().into());
+        let build = req.build.expect("build options should be set");
+        assert_eq!(build.provider, Some(meerkat_core::Provider::Anthropic));
+        assert!(build.custom_models.contains_key("claude-internal-preview"));
+        assert_eq!(
+            build.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+        assert_eq!(
+            build.auto_compact_threshold_override,
+            std::num::NonZeroU64::new(60_000)
+        );
+        assert!(build.resume_override_mask.model);
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_uses_mob_level_image_provider_default() {
+        let mut def = sample_definition();
+        def.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &AgentIdentity::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        assert_eq!(
+            config.image_generation_provider,
+            Some(meerkat_core::Provider::OpenAI),
+            "mob-level image_generation_provider applies when the profile is silent"
+        );
+    }
+
+    #[test]
+    fn test_resumed_metadata_respects_profile_resume_overrides() {
+        // Profile says model+provider win on resume; metadata carries stale
+        // identity. Masked fields keep profile truth, unmasked fields restore
+        // durable truth.
+        let mut config = AgentBuildConfig::new("claude-opus-4-8");
+        config.provider = Some(meerkat_core::Provider::Anthropic);
+        config.comms_name = Some("mob.m/lead/lead-1".to_string());
+        let fresh_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.1),
+            ..Default::default()
+        };
+        let stale_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.9),
+            ..Default::default()
+        };
+        config.provider_params = Some(fresh_params);
+        config.resume_override_mask.model = true;
+        config.resume_override_mask.provider = true;
+
+        let metadata = SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.4".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: Some(stale_params.clone()),
+            tooling: Default::default(),
+            keep_alive: false,
+            comms_name: Some("mob.m/lead/lead-1".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        };
+
+        apply_resumed_session_metadata(&mut config, &metadata).expect("metadata applies");
+
+        assert_eq!(
+            config.model, "claude-opus-4-8",
+            "masked model keeps the (possibly updated) profile value"
+        );
+        assert_eq!(
+            config.provider,
+            Some(meerkat_core::Provider::Anthropic),
+            "masked provider keeps the profile value"
+        );
+        assert_eq!(
+            config.provider_params,
+            Some(stale_params),
+            "unmasked provider_params restore durable truth"
+        );
+
+        // Without the mask, durable metadata wins (existing behavior pinned).
+        let mut config = AgentBuildConfig::new("claude-opus-4-8");
+        config.comms_name = Some("mob.m/lead/lead-1".to_string());
+        apply_resumed_session_metadata(&mut config, &metadata).expect("metadata applies");
+        assert_eq!(config.model, "gpt-5.4");
+        assert_eq!(config.provider, Some(meerkat_core::Provider::OpenAI));
     }
 
     #[tokio::test]
@@ -2112,7 +2378,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            agent_identity: &MeerkatId::from("w-1"),
+            agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,

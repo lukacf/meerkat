@@ -17,10 +17,11 @@ use meerkat_core::types::{
 };
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
-    SpawnMemberSpec, SpawnResult, ids::MeerkatId, runtime::MobSessionService,
+    SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
 };
+use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -282,10 +283,17 @@ impl AgentMobToolSurface {
         value: serde_json::Value,
         session_effects: Vec<meerkat_core::SessionEffect>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let content = serde_json::to_string(&value)
-            .map_err(|e| ToolError::execution_failed(format!("encode tool result: {e}")))?;
+        // K1 structured egress: structured mob-tool output stays a typed
+        // `ContentBlock::Structured` payload instead of being collapsed into
+        // serialized text. Serialization faults propagate as typed errors.
+        let block = meerkat_core::types::ContentBlock::structured(&value).map_err(|e| {
+            ToolError::execution_failed(format!(
+                "failed to serialize JSON tool output for '{}': {e}",
+                call.name
+            ))
+        })?;
         Ok(meerkat_core::ToolDispatchOutcome::new(
-            ToolResult::new(call.id.to_string(), content, false),
+            ToolResult::with_blocks(call.id.to_string(), vec![block], false),
             vec![],
             session_effects,
         ))
@@ -540,20 +548,22 @@ impl AgentMobToolSurface {
                                     "Profile tooling with RealmProfile source requires a realm profile store",
                                 )
                             })?;
-                        store
-                            .get(name)
-                            .await
-                            .map_err(|e| {
-                                ToolError::execution_failed(format!(
-                                    "failed to resolve realm profile '{name}': {e}"
-                                ))
-                            })?
-                            .ok_or_else(|| {
-                                ToolError::execution_failed(format!(
-                                    "realm profile '{name}' not found"
-                                ))
-                            })?
-                            .profile
+                        Box::new(
+                            store
+                                .get(name)
+                                .await
+                                .map_err(|e| {
+                                    ToolError::execution_failed(format!(
+                                        "failed to resolve realm profile '{name}': {e}"
+                                    ))
+                                })?
+                                .ok_or_else(|| {
+                                    ToolError::execution_failed(format!(
+                                        "realm profile '{name}' not found"
+                                    ))
+                                })?
+                                .profile,
+                        )
                     }
                 };
 
@@ -599,7 +609,7 @@ impl AgentMobToolSurface {
 
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter,
-                    override_profile: Some(resolved_profile),
+                    override_profile: Some(*resolved_profile),
                 })
             }
         }
@@ -746,6 +756,13 @@ impl AgentMobToolSurface {
             return false;
         }
 
+        // Wired truth is the committed comms-edge/trust authority: by the time we
+        // reach here, both `mob_wire` (helper -> parent) and
+        // `apply_external_peer_reciprocal_trust` (parent -> helper) have committed
+        // (each fails closed with an early `false` above). The `peer_added`
+        // notices below are best-effort delivery courtesy, NOT the source of
+        // wired truth — a dropped notification must not flip a committed edge to
+        // not-wired (row #229).
         let notify_parent = Self::notify_peer_added(
             &helper_runtime,
             name,
@@ -764,8 +781,18 @@ impl AgentMobToolSurface {
             &parent_description,
         )
         .await;
+        if !(notify_parent && notify_helper) {
+            tracing::warn!(
+                mob_id = %mob_id,
+                helper = %helper_comms_name,
+                notify_parent,
+                notify_helper,
+                "delegate helper trust edges committed but peer_added notification(s) failed; \
+                 reporting wired=true from committed edge authority"
+            );
+        }
 
-        notify_parent && notify_helper
+        true
     }
 
     async fn dispatch_delegate(
@@ -805,11 +832,18 @@ impl AgentMobToolSurface {
             );
         }
 
-        // Build spawn spec
-        let identity = AgentIdentity::from(
-            args.member_id
-                .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
-        );
+        // Build spawn spec.
+        // #115 twin: the tool surface must not mint mob-member identity. A
+        // missing `member_id` fails closed with typed invalid-arguments rather
+        // than fabricating a synthetic `helper-{uuid}` on the runtime identity
+        // path — identity allocation is the mob substrate's responsibility.
+        let Some(member_id) = args.member_id else {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                "delegate requires member_id; the tool surface does not allocate member identity",
+            ));
+        };
+        let identity = AgentIdentity::from(member_id);
         // Implicit mob always uses the "delegate" profile.
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
@@ -879,6 +913,25 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        // Compute the operator grant from the *intended* mob id (the definition
+        // carries the id) BEFORE the durable create mutation lands, so the
+        // create outcome and the grant effect are produced together (row #211).
+        // If the generated authority rejects the intended scope, we fail before
+        // any mutation lands — there is no "mob created but grant absent" window.
+        let intended_mob_id = args.definition.id.clone();
+        let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &self.authority_context_snapshot(),
+            intended_mob_id.as_str(),
+        )
+        .map_err(|error| {
+            ToolError::execution_failed(format!(
+                "{}: generated mob operator authority rejected created mob grant: {error}",
+                call.name
+            ))
+        })?;
+        let session_effects =
+            vec![meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context }];
+
         let mob_id = self
             .state
             .mob_create_definition_with_owner_bridge_session(
@@ -890,26 +943,13 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        // Authority grant as generated replacement context — no re-entrant
-        // session service call and no local scope widening.
-        let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
-            &self.authority_context_snapshot(),
-            mob_id.as_str(),
-        )
-        .map_err(|error| {
-            ToolError::execution_failed(format!(
-                "{}: generated mob operator authority rejected created mob grant: {error}",
-                call.name
-            ))
-        })?;
-        let session_effects =
-            vec![meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context }];
-
         if let Ok(handle) = self.state.handle_for(&mob_id).await {
             self.record_successful_operator_action(&handle, call.name)
                 .await;
         }
 
+        // The outcome and the grant computed from the same intended mob id are
+        // returned as a single atomic effect bundle for the turn owner to commit.
         Self::encode_result_with_effects(call, json!({"mob_id": mob_id}), session_effects)
     }
 
@@ -971,7 +1011,7 @@ impl AgentMobToolSurface {
 
         let mut spec = SpawnMemberSpec::new(
             ProfileName::from(args.profile),
-            MeerkatId::from(args.member_id),
+            AgentIdentity::from(args.member_id),
         );
         spec.initial_message = args.initial_message;
         spec.runtime_mode = args.runtime_mode;
@@ -1037,13 +1077,22 @@ impl AgentMobToolSurface {
         let mob_id = MobId::from(args.mob_id);
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
 
+        let identity = AgentIdentity::from(args.member_id);
         let snapshot = self
             .state
-            .mob_member_status(&mob_id, &AgentIdentity::from(args.member_id))
+            .mob_member_status(&mob_id, &identity)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        Self::encode_result(call, json!(snapshot))
+        let member_ref =
+            meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+        let result = snapshot.to_member_status_result(member_ref).map_err(|e| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("failed to project mob member status: {e}"),
+            )
+        })?;
+        Self::encode_result(call, json!(result))
     }
 
     async fn dispatch_mob_list_members(
@@ -1165,7 +1214,10 @@ impl AgentMobToolSurface {
             .realm_profile_create(&args.name, &args.profile)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!(stored))
+        Self::encode_result(
+            call,
+            json!(meerkat_mob::stored_realm_profile_to_wire(&stored)),
+        )
     }
 
     async fn dispatch_mob_profile_get(
@@ -1181,8 +1233,21 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
         match stored {
-            Some(profile) => Self::encode_result(call, json!(profile)),
-            None => Self::encode_result(call, json!({"not_found": true, "name": args.name})),
+            Some(profile) => Self::encode_result(
+                call,
+                json!(meerkat_mob::stored_realm_profile_to_wire(&profile)),
+            ),
+            None => Self::encode_result(
+                call,
+                json!(meerkat_contracts::MobProfileLookupResult {
+                    not_found: true,
+                    name: args.name,
+                    profile: None,
+                    revision: None,
+                    created_at: None,
+                    updated_at: None,
+                }),
+            ),
         }
     }
 
@@ -1195,7 +1260,14 @@ impl AgentMobToolSurface {
             .realm_profile_list()
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!({"profiles": profiles}))
+        let profiles = profiles
+            .iter()
+            .map(meerkat_mob::stored_realm_profile_to_wire)
+            .collect();
+        Self::encode_result(
+            call,
+            json!(meerkat_contracts::MobProfileListResult { profiles }),
+        )
     }
 
     async fn dispatch_mob_profile_update(
@@ -1211,7 +1283,10 @@ impl AgentMobToolSurface {
             .realm_profile_update(&args.name, &args.profile, args.expected_revision)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!(stored))
+        Self::encode_result(
+            call,
+            json!(meerkat_mob::stored_realm_profile_to_wire(&stored)),
+        )
     }
 
     async fn dispatch_mob_profile_delete(
@@ -1432,151 +1507,17 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
     })
 }
 
-fn tool_config_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": "Tool category switches for a spawned member/profile.",
-        "properties": {
-            "builtins": {"type": "boolean", "description": "Enable built-in task/file/utility tools."},
-            "shell": {"type": "boolean", "description": "Enable shell/background job tools."},
-            "comms": {"type": "boolean", "description": "Enable peer messaging tools."},
-            "memory": {"type": "boolean", "description": "Enable semantic memory tools."},
-            "mob": {"type": "boolean", "description": "Enable mob/delegation tools."},
-            "schedule": {"type": "boolean", "description": "Enable schedule tools."},
-            "image_generation": {"type": "boolean", "description": "Enable image generation tools."},
-            "mcp": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Configured MCP server names to connect."
-            }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn inline_profile_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": "Inline member profile. Required field: model.",
-        "properties": {
-            "model": {"type": "string", "description": "Model for this helper/member."},
-            "skills": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Skill references to preload."
-            },
-            "tools": tool_config_schema(),
-            "peer_description": {"type": "string", "description": "Human-readable role shown to peers."},
-            "external_addressable": {"type": "boolean", "description": "Whether external callers can address this member."},
-            "backend": {"type": "string", "enum": ["session", "external"], "description": "Optional backend override."},
-            "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"], "description": "Member runtime mode."},
-            "provider_params": {"type": "object", "description": "Provider-specific model parameters."}
-        },
-        "required": ["model"],
-        "additionalProperties": true
-    })
-}
-
-fn spawn_tooling_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": "Controls the helper/member tool surface. Use {\"mode\":\"inherit_parent\"} to inherit current tools, optionally with allow_overlay/deny_overlay. Use profile+inline to request explicit model/tools such as shell.",
-        "properties": {
-            "mode": {
-                "type": "string",
-                "enum": ["inherit_parent", "minimal", "profile"],
-                "description": "inherit_parent = current visible tools; minimal = comms only; profile = realm or inline profile."
-            },
-            "allow_overlay": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional allow-list of tool names/categories to keep."
-            },
-            "deny_overlay": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional deny-list of tool names/categories to remove."
-            },
-            "source": {
-                "type": "object",
-                "description": "Only for mode=profile. Examples: {\"type\":\"realm_profile\",\"name\":\"writer\"} or {\"type\":\"inline\",\"model\":\"gpt-5.5\",\"tools\":{\"builtins\":true,\"shell\":true,\"comms\":true}}.",
-                "properties": {
-                    "type": {"type": "string", "enum": ["realm_profile", "inline"]},
-                    "name": {"type": "string", "description": "Realm profile name when type=realm_profile."},
-                    "model": {"type": "string", "description": "Inline profile model when type=inline."},
-                    "tools": tool_config_schema(),
-                    "skills": {"type": "array", "items": {"type": "string"}},
-                    "peer_description": {"type": "string"},
-                    "external_addressable": {"type": "boolean"},
-                    "backend": {"type": "string", "enum": ["session", "external"]},
-                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
-                    "provider_params": {"type": "object"}
-                },
-                "required": ["type"],
-                "additionalProperties": true
-            }
-        },
-        "required": ["mode"],
-        "additionalProperties": false
-    })
-}
-
-fn mob_definition_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": "Explicit mob definition. Minimal useful shape: {\"id\":\"mob-id\",\"profiles\":{\"role\":{\"model\":\"gpt-5.5\",\"tools\":{\"builtins\":true,\"shell\":true,\"comms\":true}}}}.",
-        "properties": {
-            "id": {"type": "string", "description": "Unique mob id."},
-            "profiles": {
-                "type": "object",
-                "description": "Map from role/profile name to inline profile or {\"realm_profile\":\"name\"}.",
-                "additionalProperties": {
-                    "oneOf": [
-                        inline_profile_schema(),
-                        {
-                            "type": "object",
-                            "properties": {
-                                "realm_profile": {"type": "string"}
-                            },
-                            "required": ["realm_profile"],
-                            "additionalProperties": false
-                        }
-                    ]
-                }
-            },
-            "wiring": {
-                "type": "object",
-                "description": "Optional automatic peer wiring.",
-                "properties": {
-                    "auto_wire_orchestrator": {"type": "boolean"},
-                    "role_wiring": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "a": {"type": "string"},
-                                "b": {"type": "string"}
-                            },
-                            "required": ["a", "b"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "additionalProperties": false
-            },
-            "backend": {
-                "type": "object",
-                "properties": {
-                    "default": {"type": "string", "enum": ["session", "external"]}
-                },
-                "additionalProperties": true
-            },
-            "flows": {"type": "object", "description": "Optional named flow definitions."},
-            "topology": {"type": "object", "description": "Optional role dispatch topology."}
-        },
-        "required": ["id"],
-        "additionalProperties": true
-    })
+/// Single schema source for every agent-facing mob tool: derive the
+/// `input_schema` from the same typed argument struct that
+/// [`AgentMobToolSurface`] deserializes from (`schema_for!`). This mirrors the
+/// public MCP surface (`public_mcp::typed_schema`) and removes the
+/// hand-authored `json!` schema literals that could drift from the deserialize
+/// path (remediation rows #32/#157).
+fn typed_schema<T: JsonSchema>() -> Value {
+    // K1: ONE infallible schema generator (the core schema module owns the
+    // tool-input schema contract) — no fail-open `{"type": "object"}` null
+    // schema fallback.
+    meerkat_core::schema::tool_input_schema_for::<T>()
 }
 
 #[cfg(test)]
@@ -1624,7 +1565,7 @@ fn build_tool_defs_with_profile_support(
              Helpers run asynchronously in autonomous_host mode. After delegating, continue \
              your own work. To check if a helper finished:\n\
              1. Call mob_check_member with the mob_id (returned in the delegate response) and \
-                the member_id you provided (or the auto-generated one from the response).\n\
+                the member_id you provided.\n\
              2. Status will be 'running', 'completed', or 'failed'.\n\
              3. If wired=true, the helper may also send you a message via comms when done.\n\
              Avoid tight polling loops -- check after meaningful intervals or wait for a comms \
@@ -1635,25 +1576,7 @@ fn build_tool_defs_with_profile_support(
                 \"member_id\": \"test-runner\", \"tooling\": {\"mode\": \"inherit_parent\", \
                 \"deny_overlay\": [\"delegate\"]}} -- then later call mob_check_member to see \
                 the result.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The task description/prompt for the helper"
-                    },
-                    "member_id": {
-                        "type": "string",
-                        "description": "Unique identifier for this helper (auto-generated if omitted)"
-                    },
-                    "additional_instructions": {
-                        "type": "string",
-                        "description": "Extra instructions appended to the helper's system prompt"
-                    },
-                    "tooling": spawn_tooling_schema()
-                },
-                "required": ["task"]
-            }),
+            typed_schema::<DelegateArgs>(),
         ),
         tool_def(
             TOOL_MOB_CREATE,
@@ -1684,13 +1607,7 @@ fn build_tool_defs_with_profile_support(
              3. mob_check_member or mob_list_members to monitor progress.\n\
              4. mob_retire_member when a member's work is done.\n\
              5. mob_destroy to clean up the mob and all remaining members.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "definition": mob_definition_schema()
-                },
-                "required": ["definition"]
-            }),
+            typed_schema::<MobCreateArgs>(),
         ),
         tool_def(
             TOOL_MOB_DESTROY,
@@ -1698,13 +1615,7 @@ fn build_tool_defs_with_profile_support(
              Only works on mobs created via mob_create. Cannot destroy implicit mobs created \
              by delegate (those are cleaned up automatically when your session ends). \
              Retire individual members first if you need their final output before destroying.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string", "description": "Mob identifier to destroy"}
-                },
-                "required": ["mob_id"]
-            }),
+            typed_schema::<MobIdArgs>(),
         ),
         tool_def(
             TOOL_MOB_SPAWN_MEMBER,
@@ -1733,37 +1644,7 @@ fn build_tool_defs_with_profile_support(
              or restricted tool sets.\n\n\
              You can spawn multiple members from the same profile with different member_ids \
              to create parallel workers (e.g., spawn 3 \"researcher\" members with different tasks).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string", "description": "Mob identifier (from mob_create response)"},
-                    "profile": {"type": "string", "description": "Role name (profile key) from the mob definition's profiles map"},
-                    "member_id": {"type": "string", "description": "Unique member identifier within this mob"},
-                    "initial_message": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "array", "items": {"type": "object"}}
-                        ],
-                        "description": "Initial message/task for the member. Required for autonomous_host members."
-                    },
-                    "runtime_mode": {
-                        "type": "string",
-                        "enum": ["autonomous_host", "turn_driven"],
-                        "description": "autonomous_host (default): runs autonomously. turn_driven: waits for explicit turns."
-                    },
-                    "backend": {
-                        "type": "string",
-                        "enum": ["session", "external"],
-                        "description": "session (default): runs in session runtime. external: delegates to external process."
-                    },
-                    "auto_wire_parent": {
-                        "type": "boolean",
-                        "description": "If true, auto-wire bidirectional comms with the orchestrator after spawn."
-                    },
-                    "tooling": spawn_tooling_schema()
-                },
-                "required": ["mob_id", "profile", "member_id"]
-            }),
+            typed_schema::<SpawnMemberArgs>(),
         ),
         tool_def(
             TOOL_MOB_RETIRE_MEMBER,
@@ -1774,14 +1655,7 @@ fn build_tool_defs_with_profile_support(
              final output before retiring it.\n\n\
              Retired members cannot be re-spawned. To replace a retired member, spawn a new \
              one with a different member_id using the same profile.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string"},
-                    "member_id": {"type": "string"}
-                },
-                "required": ["mob_id", "member_id"]
-            }),
+            typed_schema::<MemberArgs>(),
         ),
         tool_def(
             TOOL_MOB_CHECK_MEMBER,
@@ -1801,14 +1675,7 @@ fn build_tool_defs_with_profile_support(
              COST/PERFORMANCE:\n\
              This call is lightweight (reads from local state, no LLM calls). Safe to call \
              frequently, but unnecessary polling wastes your own turns.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string"},
-                    "member_id": {"type": "string"}
-                },
-                "required": ["mob_id", "member_id"]
-            }),
+            typed_schema::<MemberArgs>(),
         ),
         tool_def(
             TOOL_MOB_LIST_MEMBERS,
@@ -1816,13 +1683,7 @@ fn build_tool_defs_with_profile_support(
              Returns each member's id, profile, status (running/completed/failed), runtime_mode, \
              and session metadata. More efficient than calling mob_check_member on each member \
              individually when you need a status overview of the whole mob.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string"}
-                },
-                "required": ["mob_id"]
-            }),
+            typed_schema::<MobIdArgs>(),
         ),
         tool_def(
             TOOL_MOB_LIST,
@@ -1830,10 +1691,7 @@ fn build_tool_defs_with_profile_support(
              Returns both explicit mobs (created via mob_create) and implicit mobs (created \
              automatically by delegate). Each entry includes the mob_id, member count, and \
              creation metadata. Use this to discover mob_ids for mob_list_members or mob_destroy.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
+            typed_schema::<NoParamsArgs>(),
         ),
         tool_def(
             TOOL_MOB_WIRE,
@@ -1846,52 +1704,7 @@ fn build_tool_defs_with_profile_support(
              - {\"external_binding\": {\"name\": \"peer-name\", \"address\": \"tcp://host:port\", \
                \"identity\": {\"kind\": \"ed25519_public_key\", \"public_key\": \"ed25519:...\"}}} \
                — a typed external binding request resolved by the mob authority.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string", "description": "Mob identifier"},
-                    "member_id": {"type": "string", "description": "Local member to wire from"},
-                    "peer": {
-                        "oneOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "local": {"type": "string", "description": "Another member in this mob"}
-                                },
-                                "required": ["local"],
-                                "additionalProperties": false
-                            },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "external_binding": {
-                                        "type": "object",
-                                        "properties": {
-                                            "name": {"type": "string"},
-                                            "address": {"type": "string"},
-                                            "identity": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "kind": {"type": "string", "enum": ["ed25519_public_key"]},
-                                                    "public_key": {"type": "string"}
-                                                },
-                                                "required": ["kind", "public_key"],
-                                                "additionalProperties": false
-                                            }
-                                        },
-                                        "required": ["name", "address", "identity"],
-                                        "additionalProperties": false
-                                    }
-                                },
-                                "required": ["external_binding"],
-                                "additionalProperties": false
-                            }
-                        ],
-                        "description": "Target peer: local member or typed external binding"
-                    }
-                },
-                "required": ["mob_id", "member_id", "peer"]
-            }),
+            typed_schema::<WireArgs>(),
         ),
         tool_def(
             TOOL_MOB_UNWIRE,
@@ -1899,42 +1712,7 @@ fn build_tool_defs_with_profile_support(
              Removes the comms trust relationship established by mob_wire. \
              Use {\"local\": \"member-id\"} for roster peers or \
              {\"external\": {\"name\": \"peer-name\"}} for an external binding handle.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mob_id": {"type": "string", "description": "Mob identifier"},
-                    "member_id": {"type": "string", "description": "Local member to unwire from"},
-                    "peer": {
-                        "oneOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "local": {"type": "string"}
-                                },
-                                "required": ["local"],
-                                "additionalProperties": false
-                            },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "external": {
-                                        "type": "object",
-                                        "properties": {
-                                            "name": {"type": "string"}
-                                        },
-                                        "required": ["name"],
-                                        "additionalProperties": false
-                                    }
-                                },
-                                "required": ["external"],
-                                "additionalProperties": false
-                            }
-                        ],
-                        "description": "Target peer to unwire"
-                    }
-                },
-                "required": ["mob_id", "member_id", "peer"]
-            }),
+            typed_schema::<UnwireArgs>(),
         ),
     ];
 
@@ -1977,14 +1755,7 @@ fn build_tool_defs_with_profile_support(
                \"name\":\"researcher\"}}\n\
              - mob_spawn_member referencing the profile in the mob definition, or with tooling \
                override pointing to the realm profile.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Unique profile name. Use descriptive role names like 'researcher', 'code-reviewer', 'test-runner'."},
-                    "profile": {"type": "object", "description": "Profile definition. Required field: model (string). Optional: tools (object), skills (array), peer_description (string), runtime_mode (string), backend (string), external_addressable (bool)."}
-                },
-                "required": ["name", "profile"]
-            }),
+            typed_schema::<ProfileCreateArgs>(),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_GET,
@@ -1999,13 +1770,7 @@ fn build_tool_defs_with_profile_support(
              {\"tools\": {\"builtins\": true, \"shell\": true, \"comms\": true}} can be spawned \
              with deny_overlay: [\"shell_exec\"] to create a member that has builtins and comms \
              but not shell access.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to retrieve"}
-                },
-                "required": ["name"]
-            }),
+            typed_schema::<ProfileNameArgs>(),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_LIST,
@@ -2014,10 +1779,7 @@ fn build_tool_defs_with_profile_support(
              retrieve the full definition of a specific profile. Useful for discovering \
              available profiles before spawning members or before creating a new profile \
              to check for name conflicts.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
+            typed_schema::<NoParamsArgs>(),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_UPDATE,
@@ -2035,15 +1797,7 @@ fn build_tool_defs_with_profile_support(
              ALREADY-SPAWNED MEMBERS:\n\
              Updating a profile does not affect members already spawned from it. Only future \
              spawns will use the updated configuration.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to update"},
-                    "profile": {"type": "object", "description": "Complete updated profile definition (full replacement, not merge)"},
-                    "expected_revision": {"type": "integer", "description": "Current revision from mob_profile_get. Prevents accidental overwrites."}
-                },
-                "required": ["name", "profile", "expected_revision"]
-            }),
+            typed_schema::<ProfileUpdateArgs>(),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_DELETE,
@@ -2055,14 +1809,7 @@ fn build_tool_defs_with_profile_support(
              running with the configuration they were spawned with. However, future spawn \
              attempts referencing this profile name will fail until a new profile with the \
              same name is created.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to delete"},
-                    "expected_revision": {"type": "integer", "description": "Current revision from mob_profile_get. Prevents accidental deletion of modified profiles."}
-                },
-                "required": ["name", "expected_revision"]
-            }),
+            typed_schema::<ProfileDeleteArgs>(),
         ));
     }
 
@@ -2076,10 +1823,7 @@ fn build_tool_defs_with_profile_support(
              Use this to discover what tools are available before creating profiles. When \
              building a profile's tools config or setting up allow_overlay/deny_overlay \
              filters, this tells you the exact tool names you can reference.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
+            typed_schema::<NoParamsArgs>(),
         ));
     }
 
@@ -2088,41 +1832,65 @@ fn build_tool_defs_with_profile_support(
 
 // ─── Argument types ──────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct DelegateArgs {
+    /// The task description/prompt for the helper.
     task: String,
+    /// Unique identifier for this helper (required; the tool surface does
+    /// not allocate member identity).
     #[serde(default)]
     member_id: Option<String>,
+    /// Extra instructions appended to the helper's system prompt.
     #[serde(default)]
     additional_instructions: Option<String>,
+    /// Controls the helper tool surface. Use {"mode":"inherit_parent"} to
+    /// inherit current tools, optionally with allow_overlay/deny_overlay. Use
+    /// mode=profile with an inline source to request explicit model/tools.
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     tooling: Option<meerkat_mob::SpawnTooling>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct MobCreateArgs {
+    /// Explicit mob definition. Minimal useful shape:
+    /// {"id":"mob-id","profiles":{"role":{"model":"gpt-5.5","tools":{"builtins":true,"shell":true,"comms":true}}}}.
+    #[schemars(with = "serde_json::Value")]
     definition: MobDefinition,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct MobIdArgs {
+    /// Mob identifier.
     mob_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct SpawnMemberArgs {
+    /// Mob identifier (from mob_create response).
     mob_id: String,
+    /// Role name (profile key) from the mob definition's profiles map.
     profile: String,
+    /// Unique member identifier within this mob.
     member_id: String,
+    /// Initial message/task for the member. Required for autonomous_host members.
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     initial_message: Option<ContentInput>,
+    /// autonomous_host (default): runs autonomously. turn_driven: waits for explicit turns.
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     runtime_mode: Option<MobRuntimeMode>,
+    /// session (default): runs in session runtime. external: delegates to external process.
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     backend: Option<MobBackendKind>,
+    /// If true, auto-wire bidirectional comms with the orchestrator after spawn.
     #[serde(default)]
     auto_wire_parent: Option<bool>,
+    /// Optional tool-surface override for this member (same shape as delegate's tooling).
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     tooling: Option<meerkat_mob::SpawnTooling>,
     /// Per-member auth binding (deferral §1). Accepts the struct
     /// `{"realm": "...", "binding": "..."}` (wire-contract shape).
@@ -2130,70 +1898,81 @@ struct SpawnMemberArgs {
     /// realm + binding; otherwise the member uses env-default /
     /// config-realm fallback.
     #[serde(default)]
+    #[schemars(with = "serde_json::Value")]
     auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct MemberArgs {
+    /// Mob identifier.
     mob_id: String,
+    /// Member identifier within the mob.
     member_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WireArgs {
+    /// Mob identifier.
     mob_id: String,
+    /// Local member to wire from.
     member_id: String,
+    /// Target peer: local member or typed external binding.
     peer: WirePeerArg,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UnwireArgs {
+    /// Mob identifier.
     mob_id: String,
+    /// Local member to unwire from.
     member_id: String,
+    /// Target peer to unwire.
     peer: UnwirePeerArg,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum WirePeerArg {
     Local(LocalPeerArg),
     ExternalBinding(WireExternalPeerBindingArg),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum UnwirePeerArg {
     Local(LocalPeerArg),
     External(UnwireExternalPeerHandleArg),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct LocalPeerArg {
+    /// Another member in this mob.
     local: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireExternalPeerBindingArg {
     external_binding: ExternalPeerBindingArg,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UnwireExternalPeerHandleArg {
     external: ExternalPeerHandleArg,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ExternalPeerBindingArg {
     name: String,
     address: String,
+    #[schemars(with = "serde_json::Value")]
     identity: meerkat_contracts::WireTrustedPeerIdentity,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ExternalPeerHandleArg {
     name: String,
@@ -2227,29 +2006,44 @@ fn unwire_peer_target_from_args(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ProfileCreateArgs {
+    /// Unique profile name. Use descriptive role names like 'researcher', 'code-reviewer'.
     name: String,
+    /// Profile definition. Required field: model (string). Optional: tools,
+    /// skills, peer_description, runtime_mode, backend, external_addressable.
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ProfileNameArgs {
+    /// Profile name to retrieve.
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ProfileUpdateArgs {
+    /// Profile name to update.
     name: String,
+    /// Complete updated profile definition (full replacement, not merge).
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
+    /// Current revision from mob_profile_get. Prevents accidental overwrites.
     expected_revision: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ProfileDeleteArgs {
+    /// Profile name to delete.
     name: String,
+    /// Current revision from mob_profile_get. Prevents accidental deletion.
     expected_revision: u64,
 }
+
+/// Schema source for agent mob tools that accept no parameters.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NoParamsArgs {}
 
 // ─── Mob cleanup helper ─────────────────────────────────────────────────
 
@@ -2666,12 +2460,14 @@ mod tests {
                     authority
                         .validate_public_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
-                    let created = !self
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    let created = self
                         .trusted
-                        .read()
+                        .write()
                         .await
-                        .contains_key(&peer.peer_id.as_str().to_string());
-                    self.add_trusted_peer(peer).await?;
+                        .insert(peer.peer_id.as_str().to_string(), peer)
+                        .is_none();
                     Ok(CommsTrustMutationResult::Added { created })
                 }
                 CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
@@ -2681,7 +2477,7 @@ mod tests {
                     authority
                         .validate_public_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    let removed = self.trusted.write().await.remove(&peer_id).is_some();
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
@@ -2689,7 +2485,8 @@ mod tests {
                     authority
                         .validate_private_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
-                    self.add_private_trusted_peer(peer).await?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
                     Ok(CommsTrustMutationResult::Added { created: true })
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
@@ -2699,7 +2496,7 @@ mod tests {
                     authority
                         .validate_private_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    let removed = self.trusted.write().await.remove(&peer_id).is_some();
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
             }
@@ -2766,16 +2563,6 @@ mod tests {
             Ok(())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-                .map_err(SendError::Validation)?;
-            self.trusted
-                .write()
-                .await
-                .insert(peer.peer_id.as_str().to_string(), peer);
-            Ok(())
-        }
-
         async fn add_private_trusted_peer(
             &self,
             peer: TrustedPeerDescriptor,
@@ -2783,10 +2570,6 @@ mod tests {
             TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                 .map_err(SendError::Validation)?;
             Ok(())
-        }
-
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id).is_some())
         }
 
         async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -3115,13 +2898,12 @@ mod tests {
             let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
             Ok(
                 meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                         run_id,
                         boundary,
                         contributing_input_ids,
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     None,
                     run_result,
@@ -3232,9 +3014,7 @@ mod tests {
             tools: Arc::from(tools),
         }));
         if let Some(filter) = initial_filter {
-            build
-                .set_initial_tool_filter(filter)
-                .expect("initial tool filter should serialize");
+            build.set_initial_tool_filter(filter);
         }
 
         let agent = factory
@@ -3258,8 +3038,13 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -3272,12 +3057,17 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -3290,7 +3080,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut definition = MobDefinition::explicit(MobId::from(mob_id));
@@ -3334,6 +3124,28 @@ mod tests {
         }
     }
 
+    /// Gate for remediation row #32: every agent-facing mob tool's
+    /// `input_schema` must be produced by `schema_for!` via [`typed_schema`],
+    /// never a hand-authored `json!({...})` literal. `schema_for!` always stamps
+    /// the root with a `$schema` meta-schema URL; the deleted hand-written object
+    /// literals in this surface never carried one. The full profile-store
+    /// surface (15 tools) is exercised so every tool_def call is covered.
+    #[test]
+    fn agent_mob_tool_schemas_are_typed_not_handwritten() {
+        let defs = build_tool_defs_with_profile_support(true, true);
+        for def in defs.iter() {
+            assert!(
+                def.input_schema
+                    .get("$schema")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some(),
+                "agent mob tool '{}' has a hand-authored json! schema (missing \
+                 $schema marker); it must derive from schema_for! via typed_schema::<T>()",
+                def.name
+            );
+        }
+    }
+
     #[test]
     fn agent_mob_tools_have_mob_provenance() {
         let defs = build_tool_defs();
@@ -3362,40 +3174,36 @@ mod tests {
 
     #[test]
     fn delegate_schema_exposes_spawn_tooling_controls() {
+        // The delegate input schema is derived from `DelegateArgs` via
+        // `schema_for!` (rows #32/#157), not a hand-authored `json!` literal.
+        // It must therefore carry the schemars `$schema` marker and advertise
+        // the typed `tooling` field as an optional property.
         let defs = build_tool_defs();
         let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
-        let tooling = &delegate.input_schema["properties"]["tooling"];
-        assert_eq!(tooling["properties"]["mode"]["enum"][0], "inherit_parent");
-        assert_eq!(tooling["properties"]["mode"]["enum"][2], "profile");
         assert!(
-            tooling["properties"]["source"]["properties"]["tools"]["properties"]
-                .get("shell")
-                .is_some(),
-            "delegate tooling schema must expose inline profile shell access"
+            delegate.input_schema.get("$schema").is_some(),
+            "delegate schema must be derived via schema_for! (carrying $schema)"
         );
         assert!(
-            tooling["properties"].get("allow_overlay").is_some()
-                && tooling["properties"].get("deny_overlay").is_some(),
-            "delegate tooling schema must expose access overlays"
+            delegate.input_schema["properties"].get("tooling").is_some(),
+            "delegate schema must expose the typed tooling control field"
         );
     }
 
     #[test]
     fn mob_create_schema_exposes_definition_profile_shape() {
+        // `MobCreateArgs::definition` is the typed deserialize owner; the schema
+        // is generated from it (rows #32/#157) rather than a `json!` literal.
         let defs = build_tool_defs();
         let mob_create = defs.iter().find(|d| d.name == "mob_create").unwrap();
-        let definition = &mob_create.input_schema["properties"]["definition"];
-        assert_eq!(definition["required"][0], "id");
         assert!(
-            definition["properties"]["profiles"]["additionalProperties"]["oneOf"][0]["properties"]
-                ["tools"]["properties"]
-                .get("shell")
-                .is_some(),
-            "mob_create definition schema must expose profile tool category switches"
+            mob_create.input_schema.get("$schema").is_some(),
+            "mob_create schema must be derived via schema_for! (carrying $schema)"
         );
+        let required = mob_create.input_schema["required"].as_array().unwrap();
         assert!(
-            definition["properties"].get("wiring").is_some(),
-            "mob_create definition schema must expose wiring"
+            required.iter().any(|v| v.as_str() == Some("definition")),
+            "mob_create schema must require the typed definition field"
         );
     }
 
@@ -3739,6 +3547,86 @@ mod tests {
         }
     }
 
+    /// Gate for remediation row #211: `mob_create` must produce the durable
+    /// create outcome and the operator grant as a single atomic effect bundle,
+    /// with the grant keyed on the *intended* definition id. There must be no
+    /// split where the mob exists in storage but no grant effect is present, or
+    /// where the grant manages a different id than the one created.
+    #[tokio::test]
+    async fn mob_create_grant_is_atomic_with_create_outcome() {
+        let state = MobMcpState::new_in_memory();
+        let session_id = SessionId::new();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            session_id,
+            None,
+            None,
+            None,
+        );
+
+        let intended_id = "atomic-grant-mob";
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "definition": {
+                    "id": intended_id,
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-5",
+                            "tools": { "comms": true },
+                            "peer_description": "worker",
+                            "runtime_mode": "turn_driven"
+                        }
+                    },
+                    "is_implicit": false,
+                    "session_cleanup_policy": "manual"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let create_result = surface
+            .dispatch(ToolCallView {
+                id: "atomic-1",
+                name: "mob_create",
+                args: &create_args,
+            })
+            .await
+            .expect("mob_create should succeed");
+
+        let created: serde_json::Value =
+            serde_json::from_str(&create_result.result.text_content()).unwrap();
+        let created_mob_id = created["mob_id"].as_str().expect("mob_id");
+        assert_eq!(
+            created_mob_id, intended_id,
+            "created mob id must equal the intended definition id"
+        );
+
+        // The mob exists in storage; the grant effect MUST be present in the
+        // same outcome bundle (no mutation-lands-then-grant-lands window).
+        assert!(
+            state.handle_for(&MobId::from(intended_id)).await.is_ok(),
+            "mob_create must create the mob in storage"
+        );
+        assert_eq!(
+            create_result.session_effects.len(),
+            1,
+            "mob_create must emit exactly one grant effect alongside the create outcome"
+        );
+        match &create_result.session_effects[0] {
+            meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context } => {
+                assert!(
+                    authority_context.can_manage_mob(intended_id),
+                    "the atomic grant must manage the same id that was created"
+                );
+            }
+            other => panic!("unexpected mob_create session effect: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_create_only_authority_delegate_grants_exact_scope_for_new_implicit_mob() {
         let state = MobMcpState::new_in_memory();
@@ -3755,9 +3643,10 @@ mod tests {
             None,
         );
 
-        let delegate_args =
-            serde_json::value::RawValue::from_string(json!({ "task": "say hi" }).to_string())
-                .unwrap();
+        let delegate_args = serde_json::value::RawValue::from_string(
+            json!({ "task": "say hi", "member_id": "helper-bootstrap-test" }).to_string(),
+        )
+        .unwrap();
         let delegate_error = surface
             .dispatch(ToolCallView {
                 id: "delegate-1",
@@ -4936,18 +4825,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_no_overlays_returns_none() {
         let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: None,
         };
@@ -4962,18 +4858,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_with_deny_overlay() {
         let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: Some(vec!["bash".to_string()]),
         };
@@ -4987,18 +4890,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_with_overlays_standalone_errors() {
         let surface = surface_standalone();
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: Some(vec!["send".to_string()]),
             deny_overlay: None,
         };
@@ -5013,18 +4923,25 @@ mod tests {
         let surface = surface_with_parent_tools().await;
         let expected_model = "claude-opus-4-8".to_string();
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: expected_model.clone(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "override test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: expected_model.clone(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "override test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: None,
         };

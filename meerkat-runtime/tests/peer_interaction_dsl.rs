@@ -39,7 +39,7 @@ fn request_sent_advances_pending_map_to_sent() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
     assert!(handle.outbound_state(corr_id).is_none());
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     assert_eq!(
         handle.outbound_state(corr_id),
         Some(OutboundPeerRequestState::Sent)
@@ -50,9 +50,9 @@ fn request_sent_advances_pending_map_to_sent() {
 fn request_sent_rejects_duplicate() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     let err = handle
-        .request_sent(corr_id, "peer-a".into())
+        .request_sent(corr_id)
         .expect_err("duplicate send must reject");
     assert_eq!(err.context, "PeerInteractionHandle::request_sent");
 }
@@ -88,7 +88,7 @@ fn response_reply_terminality_comes_from_machine_signal() {
 fn progress_advances_state_to_accepted() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle.response_progress(corr_id).unwrap();
     assert_eq!(
         handle.outbound_state(corr_id),
@@ -113,7 +113,7 @@ fn terminal_completed_removes_entry_and_emits_cleanup() {
     // corr_id can be dropped by the shell-side cleanup observer.
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle
         .response_terminal(corr_id, PeerTerminalDisposition::Completed)
         .unwrap();
@@ -130,7 +130,7 @@ fn terminal_completed_removes_entry_and_emits_cleanup() {
 fn terminal_failed_removes_entry() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle
         .response_terminal(corr_id, PeerTerminalDisposition::Failed)
         .unwrap();
@@ -141,7 +141,7 @@ fn terminal_failed_removes_entry() {
 fn response_rejected_removes_entry() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle.response_rejected(corr_id).unwrap();
     assert!(handle.outbound_state(corr_id).is_none());
 }
@@ -160,7 +160,7 @@ fn response_rejected_rejects_unknown_corr_id() {
 fn timeout_removes_entry_and_emits_cleanup() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle.request_timed_out(corr_id).unwrap();
     assert!(handle.outbound_state(corr_id).is_none());
     // Second timeout rejects — cleanup is exactly once.
@@ -232,7 +232,7 @@ fn cleanup_observer_fires_on_terminal_transitions() {
 
     // Sent / Progress do NOT fire cleanup.
     let a = PeerCorrelationId::new();
-    handle.request_sent(a, "peer-a".into()).unwrap();
+    handle.request_sent(a).unwrap();
     handle.response_progress(a).unwrap();
     assert!(
         rec.0.lock().unwrap().is_empty(),
@@ -247,7 +247,7 @@ fn cleanup_observer_fires_on_terminal_transitions() {
 
     // Terminal Failed fires cleanup once.
     let b = PeerCorrelationId::new();
-    handle.request_sent(b, "peer-b".into()).unwrap();
+    handle.request_sent(b).unwrap();
     handle
         .response_terminal(b, PeerTerminalDisposition::Failed)
         .unwrap();
@@ -255,7 +255,7 @@ fn cleanup_observer_fires_on_terminal_transitions() {
 
     // TimedOut fires cleanup once.
     let c = PeerCorrelationId::new();
-    handle.request_sent(c, "peer-c".into()).unwrap();
+    handle.request_sent(c).unwrap();
     handle.request_timed_out(c).unwrap();
     assert_eq!(rec.0.lock().unwrap().clone(), vec![a, b, c]);
 
@@ -318,7 +318,7 @@ fn cleanup_observer_is_weakly_held_no_arc_cycle() {
     // DSL side and must not panic in the dispatch path when the weak fails
     // to upgrade.
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle
         .response_terminal(corr_id, PeerTerminalDisposition::Completed)
         .expect("terminal transition must succeed with dropped observer");
@@ -330,7 +330,7 @@ fn outbound_inbound_are_independent_namespaces() {
     // Mixing outbound and inbound on the same corr_id must not alias.
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.request_sent(corr_id).unwrap();
     handle
         .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
         .unwrap();

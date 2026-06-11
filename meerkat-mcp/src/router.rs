@@ -31,7 +31,6 @@ use meerkat_core::handles::{
     ExternalToolSurfaceTransition as CoreSurfaceTransition, McpServerLifecycleHandle,
     SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
-use meerkat_core::tool_catalog::stable_owner_key_for_tool;
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use meerkat_core::{
@@ -92,6 +91,16 @@ impl From<McpServerConfig> for McpReloadTarget {
 pub type McpLifecyclePhase = ExternalToolDeltaPhase;
 pub type McpLifecycleAction = ExternalToolDelta;
 
+/// Typed per-server boundary-apply rejection (K14).
+///
+/// Carried on [`McpApplyDelta`] so a partially-rejected boundary apply is a
+/// typed per-server fact in the result, not a `tracing::warn!`-and-continue.
+#[derive(Debug, Clone)]
+pub struct McpBoundaryRejection {
+    pub server: String,
+    pub error: ExternalToolSurfaceError,
+}
+
 /// Result of applying staged MCP operations.
 #[derive(Debug, Clone, Default)]
 pub struct McpApplyDelta {
@@ -100,6 +109,8 @@ pub struct McpApplyDelta {
     pub reloaded_servers: Vec<String>,
     pub lifecycle_actions: Vec<McpLifecycleAction>,
     pub degraded_removals: Vec<String>,
+    /// Staged intents whose `ApplyBoundary` the surface owner rejected.
+    pub rejected_boundaries: Vec<McpBoundaryRejection>,
 }
 
 /// Return value of [`McpRouter::apply_staged`].
@@ -813,6 +824,24 @@ fn local_surface_operation(op: ExternalToolSurfaceDeltaOperation) -> SurfaceDelt
     }
 }
 
+/// Map a completion-obligation operation to the lifecycle-action vocabulary.
+///
+/// Completion obligations only exist for Add/Reload pending spawns; `Remove`
+/// never spawns a pending task and `None` is unreachable on an obligation.
+/// Both map to `Add` so a fault report on a malformed obligation still names
+/// a concrete operation rather than being dropped.
+fn obligation_lifecycle_operation(
+    op: ExternalToolSurfaceDeltaOperation,
+) -> ToolConfigChangeOperation {
+    match op {
+        ExternalToolSurfaceDeltaOperation::Reload => ToolConfigChangeOperation::Reload,
+        ExternalToolSurfaceDeltaOperation::Remove => ToolConfigChangeOperation::Remove,
+        ExternalToolSurfaceDeltaOperation::Add | ExternalToolSurfaceDeltaOperation::None => {
+            ToolConfigChangeOperation::Add
+        }
+    }
+}
+
 fn core_surface_effects(effects: &[ExternalToolSurfaceEffect]) -> Vec<CoreSurfaceEffect> {
     effects
         .iter()
@@ -1014,7 +1043,15 @@ impl McpRouter {
         self.surface_owner.runtime_handle_slot()
     }
 
-    fn with_lifecycle_handle<F>(&self, f: F)
+    /// Route a lifecycle transition into the bound session DSL mirror.
+    ///
+    /// K14: rejected applies are typed faults, not debug-swallowed log lines.
+    /// Synchronous ingress paths (`stage_add`, `stage_reload`) propagate the
+    /// `Err` directly; async completion paths convert it into a `Failed`
+    /// lifecycle action on the canonical action channel. With no handle bound
+    /// (standalone routers, tests) the mirror is absent by construction and
+    /// the apply is `Ok`.
+    fn with_lifecycle_handle<F>(&self, server_name: &str, f: F) -> Result<(), McpError>
     where
         F: FnOnce(&dyn McpServerLifecycleHandle) -> Result<(), DslTransitionError>,
     {
@@ -1027,34 +1064,37 @@ impl McpRouter {
                 poisoned.into_inner()
             }
         };
-        if let Some(handle) = guard.as_deref()
-            && let Err(error) = f(handle)
-        {
-            tracing::debug!(
-                error = %error,
-                "McpServerLifecycleHandle DSL apply rejected"
-            );
+        match guard.as_deref() {
+            None => Ok(()),
+            Some(handle) => f(handle).map_err(|source| McpError::LifecycleMirrorRejected {
+                server: server_name.to_string(),
+                source,
+            }),
         }
     }
 
-    fn notify_lifecycle_connect_pending(&self, server_name: &str) {
-        self.with_lifecycle_handle(|handle| handle.apply_connect_pending(server_name));
+    fn notify_lifecycle_connect_pending(&self, server_name: &str) -> Result<(), McpError> {
+        self.with_lifecycle_handle(server_name, |handle| {
+            handle.apply_connect_pending(server_name)
+        })
     }
 
-    fn notify_lifecycle_connected(&self, server_name: &str) {
-        self.with_lifecycle_handle(|handle| handle.apply_connected(server_name));
+    fn notify_lifecycle_connected(&self, server_name: &str) -> Result<(), McpError> {
+        self.with_lifecycle_handle(server_name, |handle| handle.apply_connected(server_name))
     }
 
-    fn notify_lifecycle_failed(&self, server_name: &str, failure: &str) {
-        self.with_lifecycle_handle(|handle| handle.apply_failed(server_name, failure));
+    fn notify_lifecycle_failed(&self, server_name: &str, failure: &str) -> Result<(), McpError> {
+        self.with_lifecycle_handle(server_name, |handle| {
+            handle.apply_failed(server_name, failure)
+        })
     }
 
-    fn notify_lifecycle_disconnected(&self, server_name: &str) {
-        self.with_lifecycle_handle(|handle| handle.apply_disconnected(server_name));
+    fn notify_lifecycle_disconnected(&self, server_name: &str) -> Result<(), McpError> {
+        self.with_lifecycle_handle(server_name, |handle| handle.apply_disconnected(server_name))
     }
 
-    fn notify_lifecycle_reload(&self, server_name: &str) {
-        self.with_lifecycle_handle(|handle| handle.apply_reload(server_name));
+    fn notify_lifecycle_reload(&self, server_name: &str) -> Result<(), McpError> {
+        self.with_lifecycle_handle(server_name, |handle| handle.apply_reload(server_name))
     }
 
     /// Create a new empty router without a generated surface authority.
@@ -1165,7 +1205,7 @@ impl McpRouter {
     }
 
     /// Stage a server add for the next boundary apply.
-    pub fn stage_add(&mut self, config: McpServerConfig) -> Result<(), ExternalToolSurfaceError> {
+    pub fn stage_add(&mut self, config: McpServerConfig) -> Result<(), McpError> {
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());
         match self
@@ -1173,7 +1213,12 @@ impl McpRouter {
             .apply(ExternalToolSurfaceInput::StageAdd { surface_id: sid })
         {
             Ok(_) => {
-                self.notify_lifecycle_connect_pending(&server_name);
+                // K14: the lifecycle DSL mirror must accept the transition
+                // before any shell mirror mutation. On rejection the staged
+                // payload is NOT installed and the typed fault propagates;
+                // the owner-side staged intent then fails explicitly at
+                // `apply_staged` with a missing-payload protocol error.
+                self.notify_lifecycle_connect_pending(&server_name)?;
                 self.staged_payloads.insert(server_name, config);
                 Ok(())
             }
@@ -1183,7 +1228,7 @@ impl McpRouter {
                     error = %error,
                     "Surface owner rejected StageAdd"
                 );
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -1191,10 +1236,7 @@ impl McpRouter {
     /// Stage a server remove intent for the next boundary apply.
     ///
     /// This only records intent. Removal lifecycle starts on `apply_staged`.
-    pub fn stage_remove(
-        &mut self,
-        server_name: impl Into<String>,
-    ) -> Result<(), ExternalToolSurfaceError> {
+    pub fn stage_remove(&mut self, server_name: impl Into<String>) -> Result<(), McpError> {
         let server_name = server_name.into();
         let sid = SurfaceId::from(server_name.as_str());
         if let Err(error) = self
@@ -1206,17 +1248,14 @@ impl McpRouter {
                 error = %error,
                 "Surface owner rejected StageRemove"
             );
-            return Err(error);
+            return Err(error.into());
         }
         self.staged_payloads.remove(&server_name);
         Ok(())
     }
 
     /// Stage a server reload by server name (reuse existing config) or full config.
-    pub fn stage_reload<T: Into<McpReloadTarget>>(
-        &mut self,
-        target: T,
-    ) -> Result<(), ExternalToolSurfaceError> {
+    pub fn stage_reload<T: Into<McpReloadTarget>>(&mut self, target: T) -> Result<(), McpError> {
         let (server_name, requested_payload) = match target.into() {
             McpReloadTarget::ServerName(server_name) => (server_name, None),
             McpReloadTarget::Config(config) => (config.name.clone(), Some(config)),
@@ -1227,7 +1266,9 @@ impl McpRouter {
             .apply(ExternalToolSurfaceInput::StageReload { surface_id: sid })
         {
             Ok(_) => {
-                self.notify_lifecycle_reload(&server_name);
+                // K14: rejected mirror apply propagates typed; the staged
+                // payload bookkeeping below only runs on accepted apply.
+                self.notify_lifecycle_reload(&server_name)?;
                 // Lifecycle legality is owner-owned. Shell payload lookup is
                 // execution context only and does not decide whether StageReload
                 // is legal.
@@ -1253,7 +1294,7 @@ impl McpRouter {
                     error = %error,
                     "Surface owner rejected StageReload"
                 );
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -1319,12 +1360,18 @@ impl McpRouter {
                         error = %error,
                         "Surface owner rejected ApplyBoundary for staged intent"
                     );
+                    // K14: the rejection is a typed per-server fact on the
+                    // apply result, not just a log line.
+                    delta.rejected_boundaries.push(McpBoundaryRejection {
+                        server: server_name,
+                        error,
+                    });
                 }
             }
         }
 
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await;
+            .await?;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
@@ -1413,7 +1460,21 @@ impl McpRouter {
                         });
                         entry.tools.clear();
                     }
-                    self.notify_lifecycle_disconnected(&surface_id.0);
+                    // K14: the close effect comes from an already-accepted
+                    // surface transition, so it must execute; a rejected
+                    // lifecycle mirror apply propagates as a typed Failed
+                    // action on the canonical lifecycle channel instead of
+                    // being debug-swallowed.
+                    if let Err(error) = self.notify_lifecycle_disconnected(&surface_id.0) {
+                        self.completed_updates.push_back(CompletedLifecycleUpdate {
+                            action: McpLifecycleAction::new(
+                                surface_id.0.clone(),
+                                ToolConfigChangeOperation::Remove,
+                                McpLifecyclePhase::Failed,
+                            )
+                            .with_detail(Some(error.to_string())),
+                        });
+                    }
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -1502,7 +1563,6 @@ impl McpRouter {
                         applied_at_turn: TurnNumber(obligation.applied_at_turn),
                     }) {
                     Ok(transition) => {
-                        self.notify_lifecycle_connected(&server_name);
                         self.pending_obligations.remove(&server_name);
                         let Some(operation) = lifecycle_operation_from_effects(
                             &transition.effects,
@@ -1515,6 +1575,35 @@ impl McpRouter {
                             return None;
                         };
                         let snapshot_alignment = latest_snapshot_alignment(&transition.effects);
+
+                        // K14: the lifecycle DSL mirror must accept the
+                        // connected transition before the shell installs the
+                        // server entry. On rejection the fresh connection is
+                        // closed, the shell mirror stays unchanged, and the
+                        // typed fault propagates as a Failed action on the
+                        // canonical lifecycle channel (the same channel
+                        // background connection failures use).
+                        if let Err(error) = self.notify_lifecycle_connected(&server_name) {
+                            let name = server_name.clone();
+                            tokio::spawn(async move {
+                                if let Err(close_error) = conn.close().await {
+                                    tracing::debug!(
+                                        "Error closing MCP connection '{}' after rejected lifecycle mirror apply: {}",
+                                        name,
+                                        close_error
+                                    );
+                                }
+                            });
+                            self.completed_updates.push_back(CompletedLifecycleUpdate {
+                                action: McpLifecycleAction::new(
+                                    server_name,
+                                    operation,
+                                    McpLifecyclePhase::Failed,
+                                )
+                                .with_detail(Some(error.to_string())),
+                            });
+                            return snapshot_alignment;
+                        }
 
                         // For reload: close old connection.
                         if obligation.operation == ExternalToolSurfaceDeltaOperation::Reload
@@ -1577,7 +1666,12 @@ impl McpRouter {
                 }
             }
             Err(err) => {
-                self.notify_lifecycle_failed(&server_name, &err.to_string());
+                // K14: a rejected mirror apply is a typed fault folded into
+                // the Failed action's detail below (the canonical lifecycle
+                // channel), never debug-swallowed.
+                let mirror_fault = self
+                    .notify_lifecycle_failed(&server_name, &err.to_string())
+                    .err();
 
                 let (snapshot_alignment, operation) = match self.surface_owner.apply(
                     ExternalToolSurfaceInput::PendingFailed {
@@ -1609,6 +1703,19 @@ impl McpRouter {
                             error = %e,
                             "Surface owner rejected PendingFailed"
                         );
+                        // Even when the surface owner rejects the failure
+                        // input, a rejected lifecycle mirror apply must still
+                        // surface typed on the canonical action channel.
+                        if let Some(mirror_fault) = mirror_fault {
+                            self.completed_updates.push_back(CompletedLifecycleUpdate {
+                                action: McpLifecycleAction::new(
+                                    server_name,
+                                    obligation_lifecycle_operation(obligation.operation),
+                                    McpLifecyclePhase::Failed,
+                                )
+                                .with_detail(Some(mirror_fault.to_string())),
+                            });
+                        }
                         return None;
                     }
                 };
@@ -1620,13 +1727,19 @@ impl McpRouter {
                     "MCP server background connection failed"
                 );
 
+                let detail = match mirror_fault {
+                    None => err.to_string(),
+                    Some(mirror_fault) => {
+                        format!("{err}; {mirror_fault}")
+                    }
+                };
                 self.completed_updates.push_back(CompletedLifecycleUpdate {
                     action: McpLifecycleAction::new(
                         server_name,
                         operation,
                         McpLifecyclePhase::Failed,
                     )
-                    .with_detail(Some(err.to_string())),
+                    .with_detail(Some(detail)),
                 });
                 snapshot_alignment
             }
@@ -1765,11 +1878,17 @@ impl McpRouter {
     }
 
     /// Process removal finalization based on owner-owned timeout tracking.
+    ///
+    /// A surface-owner rejection of a finalize-removal input is authoritative
+    /// divergence: the router has computed a finalized set the machine refuses
+    /// to commit, so router/surface state would silently diverge if we
+    /// continued. Fail closed by surfacing the rejection as a typed
+    /// [`McpError`] instead of warn-and-continue.
     async fn process_removals(
         &mut self,
         delta: &mut McpApplyDelta,
         snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
-    ) {
+    ) -> Result<(), McpError> {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
@@ -1810,22 +1929,20 @@ impl McpRouter {
                     applied_at_turn,
                 }
             };
-            match self.surface_owner.apply(input) {
-                Ok(transition) => {
-                    self.execute_effects(&transition.effects, delta, None, snapshot_alignment);
-                    if degraded {
-                        delta.degraded_removals.push(server_name);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server_name,
-                        error = %e,
-                        "Surface owner rejected finalize removal"
-                    );
-                }
+            let transition =
+                self.surface_owner
+                    .apply(input)
+                    .map_err(|e| McpError::ProtocolError {
+                        message: format!(
+                            "surface owner rejected finalize removal for '{server_name}': {e}"
+                        ),
+                    })?;
+            self.execute_effects(&transition.effects, delta, None, snapshot_alignment);
+            if degraded {
+                delta.degraded_removals.push(server_name);
             }
         }
+        Ok(())
     }
 
     fn align_snapshot_if_requested(
@@ -1915,8 +2032,8 @@ impl McpRouter {
         let catalog_entries: Arc<[ToolCatalogEntry]> = canonical_tools
             .values()
             .map(|tool| {
-                if let Some(stable_owner_key) = stable_owner_key_for_tool(tool) {
-                    ToolCatalogEntry::session_deferred(Arc::clone(tool), true, stable_owner_key)
+                if let Some(provenance) = tool.provenance.clone() {
+                    ToolCatalogEntry::session_deferred(Arc::clone(tool), true, provenance)
                 } else {
                     ToolCatalogEntry::session_inline(Arc::clone(tool), true)
                 }
@@ -1995,18 +2112,22 @@ impl McpRouter {
     }
 
     /// Progress only server removals (drain/timeout finalization) without applying staged ops.
-    pub async fn progress_removals(&mut self) -> McpApplyDelta {
+    ///
+    /// Fails closed if the surface owner rejects a finalize-removal: a rejected
+    /// finalize is authoritative divergence (router computed a finalized set the
+    /// machine refuses to commit), not a benign no-op.
+    pub async fn progress_removals(&mut self) -> Result<McpApplyDelta, McpError> {
         let mut delta = McpApplyDelta::default();
         let mut snapshot_alignment = None;
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await;
+            .await?;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
             let obligation = self.pending_snapshot_alignment.take();
             self.align_snapshot_if_requested(obligation);
         }
-        delta
+        Ok(delta)
     }
 
     /// Call a tool by name, returning multimodal content blocks.
@@ -2165,10 +2286,13 @@ impl AgentToolDispatcher for McpRouter {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        // K1: external dispatch goes through the typed tool-argument
+        // contract — malformed / non-object args fail closed instead of
+        // being wrapped into a `Value::String` and forwarded.
+        let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
+            .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
         let blocks = self
-            .call_tool(call.name, &args)
+            .call_tool(call.name, args.as_value())
             .await
             .map_err(|e| match e {
                 McpError::ToolNotFound(name) => ToolError::NotFound { name },
@@ -2634,6 +2758,204 @@ mod tests {
             SurfaceBaseState::Removed
         );
         assert_eq!(router.surface_owner.inflight_call_count(&sid), 0);
+    }
+
+    /// Surface handle decorator that delegates every read/transition to a real
+    /// generated handle, but rejects finalize-removal inputs. Used to prove the
+    /// router fails closed (does not silently continue with diverged state)
+    /// when the surface owner rejects a finalize the router already computed.
+    struct RejectFinalizeSurfaceHandle {
+        inner: Arc<dyn ExternalToolSurfaceHandle>,
+    }
+
+    impl RejectFinalizeSurfaceHandle {
+        fn new() -> Self {
+            Self {
+                inner: generated_surface_handle(),
+            }
+        }
+    }
+
+    impl ExternalToolSurfaceHandle for RejectFinalizeSurfaceHandle {
+        fn apply_surface_input(
+            &self,
+            input: CoreSurfaceInput,
+        ) -> Result<CoreSurfaceTransition, DslTransitionError> {
+            match input {
+                CoreSurfaceInput::FinalizeRemovalClean { .. }
+                | CoreSurfaceInput::FinalizeRemovalForced { .. } => {
+                    Err(DslTransitionError::guard_rejected(
+                        "RejectFinalizeSurfaceHandle",
+                        "finalize removal forcibly rejected for test",
+                    ))
+                }
+                other => self.inner.apply_surface_input(other),
+            }
+        }
+
+        fn register(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.register(surface_id)
+        }
+
+        fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_add(surface_id, now_ms)
+        }
+
+        fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_remove(surface_id, now_ms)
+        }
+
+        fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_reload(surface_id, now_ms)
+        }
+
+        fn apply_boundary(
+            &self,
+            surface_id: String,
+            now_ms: u64,
+            staged_intent_sequence: u64,
+            applied_at_turn: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner
+                .apply_boundary(surface_id, now_ms, staged_intent_sequence, applied_at_turn)
+        }
+
+        fn mark_pending_succeeded(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_succeeded(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+            )
+        }
+
+        fn mark_pending_failed(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+            cause: ExternalToolSurfaceFailureCause,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_failed(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+                cause,
+            )
+        }
+
+        fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.call_started(surface_id)
+        }
+
+        fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.call_finished(surface_id)
+        }
+
+        fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalClean { surface_id })
+                .map(|_| ())
+        }
+
+        fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalForced { surface_id })
+                .map(|_| ())
+        }
+
+        fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
+            self.inner.snapshot_aligned(epoch)
+        }
+
+        fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
+            self.inner.shutdown_surface()
+        }
+
+        fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot> {
+            self.inner.surface_snapshot(surface_id)
+        }
+
+        fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot {
+            self.inner.diagnostic_snapshot()
+        }
+
+        fn visible_surfaces(&self) -> BTreeSet<String> {
+            self.inner.visible_surfaces()
+        }
+
+        fn removing_surfaces(&self) -> BTreeSet<String> {
+            self.inner.removing_surfaces()
+        }
+
+        fn pending_surfaces(&self) -> BTreeSet<String> {
+            self.inner.pending_surfaces()
+        }
+
+        fn has_pending_or_staged(&self) -> bool {
+            self.inner.has_pending_or_staged()
+        }
+
+        fn snapshot_epoch(&self) -> u64 {
+            self.inner.snapshot_epoch()
+        }
+
+        fn snapshot_aligned_epoch(&self) -> u64 {
+            self.inner.snapshot_aligned_epoch()
+        }
+    }
+
+    /// Gate for dogma row #112: a surface-owner rejection of a finalize-removal
+    /// is authoritative divergence. The router must fail closed (return a typed
+    /// error) instead of warn-and-continuing with router/machine state diverged.
+    #[tokio::test]
+    async fn finalize_removal_rejection_fails_closed_not_silently_continue() {
+        let mut router =
+            McpRouter::new_with_surface_handle(Arc::new(RejectFinalizeSurfaceHandle::new()));
+        let sid = SurfaceId::from("reject-finalize");
+
+        // Drive the surface to Active, then to Removing with zero inflight calls
+        // so process_removals decides to clean-finalize it.
+        complete_add(&mut router, "reject-finalize");
+        router
+            .surface_owner
+            .apply(ExternalToolSurfaceInput::StageRemove {
+                surface_id: sid.clone(),
+            })
+            .expect("stage remove");
+        let staged_sequence = router.surface_owner.staged_intents_in_order()[0].2;
+        router
+            .surface_owner
+            .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                surface_id: sid.clone(),
+                staged_intent_sequence: staged_sequence,
+                applied_at_turn: TurnNumber(staged_sequence),
+            })
+            .expect("apply remove boundary");
+
+        assert_eq!(
+            router.surface_owner.inflight_call_count(&sid),
+            0,
+            "surface should have no inflight calls so finalize-clean is attempted"
+        );
+        assert!(
+            router.surface_owner.removing_surfaces().contains(&sid),
+            "surface should be in the removing set"
+        );
+
+        // process_removals computes the finalized set then asks the surface owner
+        // to commit it; the owner rejects. The OLD behavior warned and returned
+        // Ok with diverged state — this must now be a typed error.
+        let result = router.progress_removals().await;
+        let err = result.expect_err(
+            "surface-owner rejection of finalize removal must fail closed, not silently continue",
+        );
+        assert!(
+            matches!(err, McpError::ProtocolError { .. }),
+            "expected a typed ProtocolError fault, got {err:?}"
+        );
     }
 
     #[test]

@@ -63,7 +63,6 @@ import type {
   WireMemberRef,
   WireMobBackendKind,
   WireMobProfile,
-  WireMemberState,
   WireMobMemberStatus,
   WireMobRuntimeMode,
   WireMobToolConfig,
@@ -241,15 +240,22 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   systemPrompt: "system",
   outputSchema: { type: "object" },
   structuredOutputRetries: 2,
-  providerParams: { temperature: 0.2 },
-  authBinding: { realm: "dev", binding: "default_openai" },
+  providerParams: { action: "set", value: { temperature: 0.2 } },
+  authBinding: { action: "set", value: { realm: "dev", binding: "default_openai" } },
 };
 
 const publicMobTurnStartOptionsClear: MobTurnStartOptions = {
-  clearProviderParams: true,
-  clearAuthBinding: true,
+  providerParams: { action: "clear" },
+  authBinding: { action: "clear" },
 };
 void publicMobTurnStartOptionsClear;
+
+const publicMobTurnStartOptionsWithRetiredSplitClear: MobTurnStartOptions = {
+  model: "gpt-test",
+  // @ts-expect-error the retired split clear_* option form fails closed.
+  clearProviderParams: true,
+};
+void publicMobTurnStartOptionsWithRetiredSplitClear;
 
 const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
   model: "gpt-test",
@@ -552,6 +558,7 @@ void generatedMobSpawnResult;
 
 const generatedMobMemberStatus: MobMemberStatusResult = {
   status: "active",
+  member_ref: "opaque-member-ref",
   tokens_used: 0,
   is_final: false,
 };
@@ -561,11 +568,9 @@ void generatedMobMemberStatus;
 const generatedMobMemberRef: WireMemberRef = "opaque-member-ref";
 
 const generatedMobRuntimeMode: WireMobRuntimeMode = "turn_driven";
-const generatedMobMemberState: WireMemberState = "active";
 const generatedMobMemberListStatus: WireMobMemberStatus = "active";
 
 void generatedMobRuntimeMode;
-void generatedMobMemberState;
 void generatedMobMemberListStatus;
 
 const generatedMobSpawnReceipt: MobSpawnReceiptWire = {
@@ -580,7 +585,6 @@ const generatedMobMemberListEntry: MobMemberListEntryWire = {
   member_ref: generatedMobMemberRef,
   role: "worker",
   runtime_mode: "turn_driven",
-  state: "active",
   status: "active",
   is_final: false,
 };
@@ -627,7 +631,6 @@ const generatedMobBadMemberStatus: MobMemberListEntryWire = {
   member_ref: generatedMobMemberRef,
   role: "worker",
   runtime_mode: "turn_driven",
-  state: "active",
   // @ts-expect-error member-list status is a closed wire enum.
   status: "paused",
   is_final: false,
@@ -983,6 +986,17 @@ void liveChannelWithOpts;
 // channelId is string | undefined before open().
 const maybeChannelId: string | undefined = liveChannel.channelId;
 void maybeChannelId;
+
+// commitInput() only accepts the typed response-modality distinction the
+// contract owns — arbitrary strings are not widened into the generated union.
+type LiveCommitInputModality = Parameters<LiveChannel["commitInput"]>[0];
+const liveCommitAudio: LiveCommitInputModality = "audio";
+const liveCommitText: LiveCommitInputModality = "text";
+// @ts-expect-error arbitrary strings are not a live response modality.
+const liveCommitArbitrary: LiveCommitInputModality = "speech";
+void liveCommitAudio;
+void liveCommitText;
+void liveCommitArbitrary;
 
 // sessionId is always a string.
 const liveSessionId: string = liveChannel.sessionId;

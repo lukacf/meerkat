@@ -107,7 +107,7 @@ impl MeerkatMachine {
                 // of `maybe_spawn_comms_drain` observes.
                 let spawned = self
                     .update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
-                    .await;
+                    .await?;
                 Ok(MeerkatMachineCommandResult::Spawned(spawned))
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {
@@ -117,14 +117,6 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     });
                 }
-                // Guard: DrainBindingInvariant — no drain mutation on destroyed
-                // sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
 
                 let gate = self.session_mutation_gate(&session_id).await;
                 let _gate_guard = match gate {
@@ -132,15 +124,24 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                self.stage_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
-                        reason: crate::meerkat_machine::dsl::DrainExitReason::from(reason),
-                    },
-                    "NotifyDrainExited",
-                )
-                .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                // Stage-first: NotifyDrainExited is not declared from
+                // Destroyed (DrainBindingInvariant); the machine rejects it
+                // there and the rejection is classified as the terminal
+                // `Destroyed` truth.
+                if let Err(reason) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
+                            reason: crate::meerkat_machine::dsl::DrainExitReason::from(reason),
+                        },
+                        "NotifyDrainExited",
+                    )
+                    .await
+                {
+                    return Err(self
+                        .classify_session_dsl_rejection(&session_id, reason)
+                        .await);
+                }
                 self.notify_comms_drain_exited_inner(&session_id, reason)
                     .await;
                 Ok(MeerkatMachineCommandResult::Unit)

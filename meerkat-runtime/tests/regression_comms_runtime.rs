@@ -17,7 +17,7 @@ use meerkat_core::interaction::{
     PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, ResponseStatus,
 };
 use meerkat_core::lifecycle::RunId;
-use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
+use meerkat_runtime::comms_bridge::classified_interaction_to_runtime_input;
 use meerkat_runtime::driver::ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
@@ -104,7 +104,10 @@ fn make_request(from: &str, intent: &str) -> InboxInteraction {
         from: from.into(),
         content: InteractionContent::Request {
             intent: intent.into(),
-            params: serde_json::json!({}),
+            // K15: lifecycle-classed requests must carry the typed peer
+            // subject (a missing subject is rejected at ingress); the field
+            // is inert payload for non-lifecycle intents.
+            params: serde_json::json!({ "peer": from }),
             blocks: None,
         },
         rendered_text: format!("[{from}]: request ({intent})"),
@@ -123,7 +126,7 @@ fn runtime_input_for_interaction(
 ) -> Input {
     let peer_id = interaction.from_route.unwrap_or_else(response_route_id);
     let candidate = test_peer_input_candidate_from_interaction(interaction.clone(), peer_id);
-    peer_input_candidate_to_runtime_input(&candidate, runtime_id)
+    classified_interaction_to_runtime_input(&candidate, runtime_id)
         .expect("test interaction should project to runtime input")
 }
 
@@ -297,7 +300,11 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
     let projection = driver
         .admitted_primitive_projection(&input_id)
         .expect("accepted input should have primitive projection");
-    assert!(projection.append.is_none());
+    assert!(
+        projection.append.is_some(),
+        "terminal response must carry its typed comms notice append so the mandatory \
+         requester reaction turn has model-visible content"
+    );
     assert!(
         projection.context_append.is_none(),
         "terminal response context projection is supplied by the machine-selected runtime batch"
@@ -579,7 +586,7 @@ async fn request_prompt_uses_rendered_text_projection() {
     let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
-        assert_eq!(peer.body, interaction.rendered_text);
+        assert_eq!(peer.content.text_content(), interaction.rendered_text);
     } else {
         panic!("Expected PeerInput");
     }
@@ -591,7 +598,7 @@ async fn response_prompt_uses_rendered_text_projection() {
     let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
-        assert_eq!(peer.body, interaction.rendered_text);
+        assert_eq!(peer.content.text_content(), interaction.rendered_text);
     } else {
         panic!("Expected PeerInput");
     }
@@ -603,10 +610,13 @@ async fn message_blocks_survive_bridge() {
     let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
-        assert!(peer.blocks.is_some());
-        // peer.body is the canonical rendered projection, while blocks preserve
-        // the original multimodal content.
-        assert_eq!(peer.body, interaction.rendered_text);
+        // `content` is the single typed owner: block-bearing messages carry
+        // the original multimodal blocks; any text projection is derived at
+        // read time, never stored alongside.
+        assert!(matches!(
+            peer.content,
+            meerkat_core::types::ContentInput::Blocks(_)
+        ));
     } else {
         panic!("Expected PeerInput");
     }

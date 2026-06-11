@@ -43,10 +43,6 @@ pub struct BuiltinDispatcherConfig {
     pub external: Option<Arc<dyn AgentToolDispatcher>>,
     pub session_id: Option<String>,
     pub ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
-    /// Whether the model can process image blocks in tool results.
-    /// When false, `view_image` is hidden from the tool list.
-    /// Defaults to `true`.
-    pub image_tool_results: bool,
 }
 
 /// Configuration for a comms-enabled dispatcher
@@ -70,7 +66,7 @@ impl Default for ToolDispatcherConfig {
             source: ToolDispatcherSource::Empty,
             #[cfg(feature = "comms")]
             comms: None,
-            default_timeout: Duration::from_secs(30),
+            default_timeout: crate::timeout::ToolTimeoutPolicy::default().default_timeout(),
         }
     }
 }
@@ -120,7 +116,6 @@ impl ToolDispatcherBuilder {
                     comp.external,
                     comp.session_id,
                     comp.ops_lifecycle,
-                    comp.image_tool_results,
                 )?)
             }
         };
@@ -156,6 +151,5 @@ pub fn build_builtin_dispatcher(
         config.external,
         config.session_id,
         config.ops_lifecycle,
-        config.image_tool_results,
     )?))
 }

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 pub mod archive;
+pub mod deploy_policy;
 pub mod digest;
-pub mod exec_bits;
 pub mod manifest;
 pub mod pack;
 pub mod signing;
@@ -11,3 +11,4 @@ pub mod targz;
 mod test_utils;
 pub mod trust;
 pub mod validate;
+pub mod vocabulary;

@@ -132,8 +132,64 @@ Profiles are role contracts. Spawn requests may override selected profile
 fields, but the definition remains the durable source for the mob's intended
 shape.
 
+### Profile model and provider fields
+
+Beyond `model`, a profile can pin provider identity and per-member behavior:
+
+```toml
+[profiles.lead]
+model = "claude-internal-preview"
+# Explicit typed provider (closed vocabulary: anthropic | openai | gemini |
+# self_hosted | other). Required for uncatalogued model ids; rejected at load
+# if it contradicts a catalogued model's owner.
+provider = "anthropic"
+# Durable self-hosted binding (with provider = "self_hosted" and a
+# [self_hosted.models] entry in the host config).
+# self_hosted_server_id = "local"
+# Default provider for `Auto` image-generation targets (profile-level wins
+# over the mob-level default below).
+image_generation_provider = "gemini"
+# Per-profile auto-compaction threshold in tokens (non-zero; wins over the
+# global config knob and model-aware context-window scaling).
+auto_compact_threshold = 60000
+# Profile fields that win over durable session metadata when a member
+# resumes. Without this, editing `model` in the definition does NOT apply to
+# resumed durable sessions. Vocabulary: model | provider | provider_params.
+resume_overrides = ["model", "provider"]
+```
+
+### Custom model registry entries
+
+`[models.<id>]` tables declare uncatalogued models once, at the definition
+level. One entry feeds provider inference, compaction scaling, capability
+gates, and call timeouts for every profile that references the model:
+
+```toml
+# Mob-level default for `Auto` image-generation targets (top-level key).
+image_generation_provider = "gemini"
+
+[models.claude-internal-preview]
+provider = "anthropic"          # required; concrete API provider only
+display_name = "Claude Internal Preview"
+context_window = 500000          # drives compaction scaling
+max_output_tokens = 16384
+vision = true                    # capability flags default to false
+web_search = false
+call_timeout_secs = 900
+
+[profiles.lead]
+model = "claude-internal-preview"
+```
+
+The same `[models.<id>]` table shape works in the host's `config.toml` under
+`[models]`, next to the per-provider default model strings.
+
+At load time, `rkat mob validate` rejects a profile model that is neither
+catalogued, custom-defined under `[models.<id>]`, nor provider-annotated
+(`unknown_model`), instead of failing at the member's first delivery.
+
 <Warning>
-Mobs do not use prefabs or templates in 0.6.23. Create mobs from
+Mobs do not use prefabs or templates. Create mobs from
 `MobDefinition` directly, or package that definition as a mobpack.
 </Warning>
 

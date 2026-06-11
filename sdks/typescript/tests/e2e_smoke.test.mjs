@@ -427,12 +427,6 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
               peer_description: "Review worker",
               external_addressable: true,
             },
-            broken: {
-              model: "definitely-invalid-live-smoke-model",
-              tools: { comms: true },
-              peer_description: "Deterministic failure worker",
-              external_addressable: true,
-            },
           },
         },
       }));
@@ -538,7 +532,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           (member) =>
             member.agentIdentity === "reviewer-1"
             && member.memberRef === respawn.receipt.memberRef
-            && member.state === "active",
+            && member.status === "active",
         ),
         { timeoutMs: 60000, intervalMs: 200 },
       );
@@ -571,25 +565,30 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       );
       assert.ok(membersAfterRetire.every((member) => member.agentIdentity !== "reviewer-1"));
 
-      try {
-        const broken = await withStepTimeout(scenario, "spawn broken member", mob.spawn({
-          profile: "broken",
-          agentIdentity: "broken-1",
-          runtimeMode: "turn_driven",
-        }));
-        assert.ok(broken.memberRef);
-        await assert.rejects(
-          () => withStepTimeout(
-            scenario,
-            "send broken member turn",
-            mob.member("broken-1").send(
-            "This turn must fail because the member model is invalid.",
-          ),
-          ),
-        );
-      } catch (error) {
-        assert.match(String(error), /definitely-invalid-live-smoke-model/);
-      }
+      // Load-time model validation: a profile model that is neither
+      // catalogued, custom-defined ([models.<id>]), nor provider-annotated
+      // fails fast at mob create instead of bricking the member at first
+      // delivery.
+      await assert.rejects(
+        () => withStepTimeout(scenario, "create mob with unknown model", client.createMob({
+          definition: {
+            id: `ts-sdk-swarm-broken-${Date.now()}`,
+            profiles: {
+              broken: {
+                model: "definitely-invalid-live-smoke-model",
+                tools: { comms: true },
+                peer_description: "Deterministic failure worker",
+                external_addressable: true,
+              },
+            },
+          },
+        })),
+        (error) => {
+          assert.match(String(error), /unknown_model/);
+          assert.match(String(error), /definitely-invalid-live-smoke-model/);
+          return true;
+        },
+      );
       });
       },
     );

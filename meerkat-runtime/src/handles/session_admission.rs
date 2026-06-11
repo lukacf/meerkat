@@ -94,25 +94,4 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
             "SessionAdmissionHandle::prepare",
         )
     }
-
-    fn commit(&self, _input_id: &InputId, _run_id: &RunId) -> Result<(), DslTransitionError> {
-        // Runtime-backed commit terminalization is owned by
-        // MeerkatMachineCommand::Commit and its durable receipt path. The
-        // handle remains an observation-only compatibility hook.
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use uuid::Uuid;
-
-    #[test]
-    fn commit_effect_is_observation_only() {
-        let handle = RuntimeSessionAdmissionHandle::ephemeral();
-        handle
-            .commit(&InputId(Uuid::from_u128(1)), &RunId(Uuid::from_u128(2)))
-            .expect("runtime-backed admission commit is observation-only");
-    }
 }

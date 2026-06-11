@@ -102,15 +102,15 @@ machine! {
             self.lifecycle_phase != Phase::DeliveryFailed || self.failure_class != None
         }
 
-        disposition Claimed => external,
-        disposition DispatchStarted => external,
-        disposition AwaitingCompletion => external,
-        disposition Completed => external,
-        disposition Skipped => external,
-        disposition Misfired => external,
-        disposition Superseded => external,
-        disposition DeliveryFailed => external,
-        disposition LeaseExpired => external,
+        disposition Claimed => external seam OwnerRealizationOnly,
+        disposition DispatchStarted => external seam OwnerRealizationOnly,
+        disposition AwaitingCompletion => external seam OwnerRealizationOnly,
+        disposition Completed => external seam OwnerRealizationOnly,
+        disposition Skipped => external seam OwnerRealizationOnly,
+        disposition Misfired => external seam OwnerRealizationOnly,
+        disposition Superseded => external seam OwnerRealizationOnly,
+        disposition DeliveryFailed => external seam OwnerRealizationOnly,
+        disposition LeaseExpired => external seam OwnerRealizationOnly,
 
         // --- Claim ---
 

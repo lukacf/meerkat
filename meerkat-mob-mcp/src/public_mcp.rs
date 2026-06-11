@@ -18,27 +18,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
 
-fn spawn_result_payload(mob_id: &meerkat_mob::MobId, result: &meerkat_mob::SpawnResult) -> Value {
-    json!({
-        "agent_identity": result.agent_identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(
-            mob_id.as_str(),
-            result.agent_identity.as_ref(),
-        ),
-    })
+fn spawn_result_payload(
+    mob_id: &meerkat_mob::MobId,
+    result: &meerkat_mob::SpawnResult,
+) -> meerkat_contracts::MobSpawnResult {
+    let identity = result.agent_identity.to_string();
+    meerkat_contracts::MobSpawnResult {
+        mob_id: mob_id.to_string(),
+        agent_identity: identity.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity),
+    }
 }
 
 fn respawn_receipt_payload(
     mob_id: &meerkat_mob::MobId,
     receipt: &meerkat_mob::MemberRespawnReceipt,
-) -> Value {
-    json!({
-        "agent_identity": receipt.identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(
-            mob_id.as_str(),
-            receipt.identity.as_ref(),
-        ),
-    })
+) -> meerkat_contracts::MobRespawnReceipt {
+    let identity = receipt.identity.to_string();
+    meerkat_contracts::MobRespawnReceipt {
+        identity: identity.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity),
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -229,33 +229,48 @@ struct MeerkatMobWaitReadyInput {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileCreateInput {
+    /// Unique profile name.
     name: String,
+    /// Profile definition (model, skills, tools, etc.).
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileNameInput {
+    /// Profile name to retrieve.
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileUpdateInput {
+    /// Profile name to update.
     name: String,
+    /// Updated profile definition.
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
+    /// Expected current revision for CAS.
     expected_revision: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileDeleteInput {
+    /// Profile name to delete.
     name: String,
+    /// Expected current revision for CAS.
     expected_revision: u64,
 }
+
+/// Schema source for tools that accept no parameters.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobNoParamsInput {}
 
 const fn default_limit() -> usize {
     100
@@ -264,11 +279,13 @@ const fn default_limit() -> usize {
 /// Single source of truth for every public MCP tool exposed by this surface.
 ///
 /// Each entry carries the advertised name, its description, and a function that
-/// produces the `inputSchema` JSON. Schemas mix two shapes: typed entries derive
-/// from `schema_for!` (via [`typed_schema`]); the four profile tools carry a
-/// hand-written inline JSON object. Both surfaces — [`public_tool_names`] (the
-/// routing roster gated on by the unified MCP server) and [`public_tools_list`]
-/// (the advertised catalog) — are derived from this table so they cannot drift.
+/// produces the `inputSchema` JSON. Every entry's schema derives from
+/// `schema_for!` (via [`typed_schema`]) over a typed input struct; no entry
+/// carries a hand-authored `json!` literal (pinned by the
+/// `public_tool_schemas_are_typed_not_handwritten` gate). Both surfaces —
+/// [`public_tool_names`] (the routing roster gated on by the unified MCP server)
+/// and [`public_tools_list`] (the advertised catalog) — are derived from this
+/// table so they cannot drift.
 /// The dispatch match in [`handle_public_tools_call`] is pinned to this table by
 /// the `public_tool_surfaces_have_no_drift` parity test via `DISPATCH_TOOL_NAMES`.
 struct PublicTool {
@@ -278,7 +295,10 @@ struct PublicTool {
 }
 
 fn typed_schema<T: JsonSchema>() -> Value {
-    serde_json::to_value(schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+    // K1: ONE infallible schema generator (the core schema module owns the
+    // tool-input schema contract) — no fail-open `{"type": "object"}` null
+    // schema fallback.
+    meerkat_core::schema::tool_input_schema_for::<T>()
 }
 
 static PUBLIC_TOOLS: &[PublicTool] = &[
@@ -290,7 +310,7 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     PublicTool {
         name: "meerkat_mob_list",
         description: "List active mobs.",
-        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+        schema: typed_schema::<MeerkatMobNoParamsInput>,
     },
     PublicTool {
         name: "meerkat_mob_status",
@@ -390,63 +410,27 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     PublicTool {
         name: "meerkat_mob_profile_create",
         description: "Create a new realm profile for spawning mob members.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Unique profile name"},
-                    "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
-                },
-                "required": ["name", "profile"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileCreateInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_get",
         description: "Get a realm profile by name.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to retrieve"}
-                },
-                "required": ["name"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileNameInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_list",
         description: "List all realm profiles.",
-        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+        schema: typed_schema::<MeerkatMobNoParamsInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_update",
         description: "Update a realm profile with CAS revision check.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to update"},
-                    "profile": {"type": "object", "description": "Updated profile definition"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
-                },
-                "required": ["name", "profile", "expected_revision"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileUpdateInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_delete",
         description: "Delete a realm profile.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to delete"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
-                },
-                "required": ["name", "expected_revision"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileDeleteInput>,
     },
 ];
 
@@ -461,14 +445,19 @@ pub fn public_tools_list() -> Vec<Value> {
         .collect()
 }
 
-pub fn wrap_public_tool_payload(payload: Value) -> Value {
-    let text = serde_json::to_string(&payload).unwrap_or_default();
-    json!({
+/// Wrap a structured payload in the MCP text-content envelope.
+///
+/// Serialization is a TRUE fault: a payload that fails to serialize must surface
+/// as an error, never as an empty-text content envelope masquerading as success.
+pub fn wrap_public_tool_payload(payload: Value) -> Result<Value, String> {
+    let text = serde_json::to_string(&payload)
+        .map_err(|err| format!("Failed to serialize tool payload: {err}"))?;
+    Ok(json!({
         "content": [{
             "type": "text",
             "text": text
         }]
-    })
+    }))
 }
 
 /// Tool names matched by the dispatch arms in [`handle_public_tools_call`].
@@ -525,13 +514,18 @@ pub async fn handle_public_tools_call(
             Ok(json!({ "mob_id": mob_id }))
         }
         "meerkat_mob_list" => {
+            // Status is projected through the typed wire contract
+            // (`WireMobLifecycleStatus`), never via Display-string folklore.
             let mobs = state
                 .mob_list()
                 .await
                 .into_iter()
-                .map(|(mob_id, status)| json!({"mob_id": mob_id, "status": status.to_string()}))
+                .map(|(mob_id, status)| meerkat_contracts::MobStatusResult {
+                    mob_id: mob_id.to_string(),
+                    status: crate::wire_mob_lifecycle_status(status),
+                })
                 .collect::<Vec<_>>();
-            Ok(json!({ "mobs": mobs }))
+            Ok(json!(meerkat_contracts::MobListResult { mobs }))
         }
         "meerkat_mob_status" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;
@@ -540,7 +534,10 @@ pub async fn handle_public_tools_call(
                 .mob_status(&mob_id)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "mob_id": mob_id, "status": status.to_string() }))
+            Ok(json!(meerkat_contracts::MobStatusResult {
+                mob_id: mob_id.to_string(),
+                status: crate::wire_mob_lifecycle_status(status),
+            }))
         }
         "meerkat_mob_lifecycle" => {
             let input: MobLifecycleParams = parse_args(arguments)?;
@@ -587,9 +584,7 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = spawn_result_payload(&mob_id, &spawn_result);
-            payload["mob_id"] = json!(mob_id);
-            Ok(payload)
+            Ok(json!(spawn_result_payload(&mob_id, &spawn_result)))
         }
         "meerkat_mob_spawn_many" => {
             let input: MeerkatMobSpawnManyInput = parse_args(arguments)?;
@@ -615,20 +610,28 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_many(&mob_id, specs)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({
-                "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobSpawnManyFailure>| match result {
-                    Ok(spawn_result) => {
-                        let identity = spawn_result.agent_identity.to_string();
-                        json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
-                            identity.clone(),
-                            WireMemberRef::encode(mob_id.as_str(), &identity),
-                        ))
-                    }
-                    Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                        error.cause(),
-                        error.to_string(),
-                    )),
-                }).collect::<Vec<_>>()
+            Ok(json!(meerkat_contracts::MobSpawnManyResult {
+                results: results
+                    .into_iter()
+                    .map(
+                        |result: Result<
+                            meerkat_mob::SpawnResult,
+                            meerkat_mob::MobSpawnManyFailure,
+                        >| match result {
+                            Ok(spawn_result) => {
+                                let identity = spawn_result.agent_identity.to_string();
+                                meerkat_contracts::MobSpawnManyResultEntry::spawned(
+                                    identity.clone(),
+                                    WireMemberRef::encode(mob_id.as_str(), &identity),
+                                )
+                            }
+                            Err(error) => meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                error.cause(),
+                                error.to_string(),
+                            ),
+                        },
+                    )
+                    .collect(),
             }))
         }
         "meerkat_mob_retire" => {
@@ -641,7 +644,7 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "retired": true }))
+            Ok(json!(meerkat_contracts::MobRetireResult { retired: true }))
         }
         "meerkat_mob_respawn" => {
             let input: MeerkatMobRespawnInput = parse_args(arguments)?;
@@ -658,17 +661,18 @@ pub async fn handle_public_tools_call(
                 )
                 .await
             {
-                Ok(receipt) => Ok(json!({
-                    "status": "completed",
-                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
+                Ok(receipt) => Ok(json!(meerkat_contracts::MobRespawnResult {
+                    status: meerkat_contracts::WireMobRespawnOutcome::Completed,
+                    receipt: respawn_receipt_payload(&mob_id, &receipt),
+                    failed_peer_ids: Vec::new(),
                 })),
                 Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
                     receipt,
                     failed_peer_ids,
-                }) => Ok(json!({
-                    "status": "topology_restore_failed",
-                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
-                    "failed_peer_ids": failed_peer_ids
+                }) => Ok(json!(meerkat_contracts::MobRespawnResult {
+                    status: meerkat_contracts::WireMobRespawnOutcome::TopologyRestoreFailed,
+                    receipt: respawn_receipt_payload(&mob_id, &receipt),
+                    failed_peer_ids: failed_peer_ids
                         .iter()
                         .map(std::string::ToString::to_string)
                         .collect::<Vec<_>>(),
@@ -756,7 +760,9 @@ pub async fn handle_public_tools_call(
                     &mob_id,
                     &agent_identity,
                     meerkat_core::service::AppendSystemContextRequest {
-                        text: input.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            input.text,
+                        ),
                         source: input.source,
                         idempotency_key: input.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -812,7 +818,8 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "run": run }))
+            serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_flow_cancel" => {
             let input: MeerkatMobRunIdInput = parse_args(arguments)?;
@@ -870,13 +877,25 @@ pub async fn handle_public_tools_call(
                 .realm_profile_create(&input.name, &input.profile)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!(stored))
+            serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_get" => {
             let input: MeerkatMobProfileNameInput = parse_args(arguments)?;
             match state.realm_profile_get(&input.name).await {
-                Ok(Some(stored)) => Ok(json!(stored)),
-                Ok(None) => Ok(json!({"not_found": true, "name": input.name})),
+                Ok(Some(stored)) => {
+                    serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))
+                }
+                Ok(None) => serde_json::to_value(meerkat_contracts::MobProfileLookupResult {
+                    not_found: true,
+                    name: input.name,
+                    profile: None,
+                    revision: None,
+                    created_at: None,
+                    updated_at: None,
+                })
+                .map_err(|err| McpToolError::invalid_params(err.to_string())),
                 Err(err) => Err(McpToolError::invalid_params(err.to_string())),
             }
         }
@@ -885,7 +904,12 @@ pub async fn handle_public_tools_call(
                 .realm_profile_list()
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({"profiles": profiles}))
+            let profiles = profiles
+                .iter()
+                .map(meerkat_mob::stored_realm_profile_to_wire)
+                .collect();
+            serde_json::to_value(meerkat_contracts::MobProfileListResult { profiles })
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_update" => {
             let input: MeerkatMobProfileUpdateInput = parse_args(arguments)?;
@@ -893,7 +917,8 @@ pub async fn handle_public_tools_call(
                 .realm_profile_update(&input.name, &input.profile, input.expected_revision)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!(stored))
+            serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_delete" => {
             let input: MeerkatMobProfileDeleteInput = parse_args(arguments)?;
@@ -1049,7 +1074,7 @@ fn runtime_binding_from_wire(
                 peer_id: resolved.peer_id.to_string(),
                 address,
                 bootstrap_token,
-                pubkey: Some(resolved.pubkey),
+                pubkey: resolved.pubkey,
             })
         }
     }
@@ -1108,6 +1133,26 @@ mod tests {
             26,
             "expected exactly 26 public tools across all surfaces"
         );
+    }
+
+    /// Gate for remediation rows #32/#157: every public mob MCP tool's
+    /// `inputSchema` must be produced by `schema_for!` via [`typed_schema`],
+    /// never a hand-authored `json!` literal. `schema_for!` always stamps the
+    /// root with a `$schema` meta-schema URL; hand-written `json!({...})` object
+    /// literals in this surface never carry one. Asserting `$schema` is present
+    /// on every advertised schema therefore fails on the old hand-literal form
+    /// and passes once each entry routes through `typed_schema::<T>()`.
+    #[test]
+    fn public_tool_schemas_are_typed_not_handwritten() {
+        for entry in PUBLIC_TOOLS {
+            let schema = (entry.schema)();
+            assert!(
+                schema.get("$schema").and_then(Value::as_str).is_some(),
+                "tool {} has a hand-authored json! schema (missing $schema marker); \
+                 it must derive from schema_for! via typed_schema::<T>()",
+                entry.name
+            );
+        }
     }
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
@@ -1265,7 +1310,7 @@ mod tests {
             peer_id,
             meerkat_core::comms::PeerId::from_ed25519_pubkey(&expected_pubkey).to_string()
         );
-        assert_eq!(pubkey, Some(expected_pubkey));
+        assert_eq!(pubkey, expected_pubkey);
     }
 
     #[test]
@@ -1382,8 +1427,13 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::profile::ToolConfig {
                     comms: true,
@@ -1396,7 +1446,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(mob_id));
         definition.profiles = profiles;

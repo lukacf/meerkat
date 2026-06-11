@@ -1,6 +1,6 @@
 //! Wire types for skill introspection.
 
-use meerkat_core::skills::{SkillKey, SourceIdentityRecord};
+use meerkat_core::skills::{SkillKey, SkillScope, SourceIdentityRecord};
 use serde::{Deserialize, Serialize};
 
 /// Typed source provenance for a skill entry. `display_name` is presentation
@@ -22,8 +22,8 @@ pub struct SkillEntry {
     pub name: String,
     /// Short description.
     pub description: String,
-    /// Scope: "builtin", "project", or "user".
-    pub scope: String,
+    /// Typed discovery scope (`builtin`, `project`, or `user`).
+    pub scope: SkillScope,
     /// Typed source provenance.
     pub source: SkillSourceProvenance,
     /// Whether this skill is active (not shadowed by a higher-precedence source).
@@ -50,8 +50,8 @@ pub struct SkillInspectResponse {
     pub name: String,
     /// Short description.
     pub description: String,
-    /// Scope: "builtin", "project", or "user".
-    pub scope: String,
+    /// Typed discovery scope (`builtin`, `project`, or `user`).
+    pub scope: SkillScope,
     /// Typed source provenance.
     pub source: SkillSourceProvenance,
     /// Full skill body (markdown content).

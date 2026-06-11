@@ -206,7 +206,7 @@ async function sameCommand(root) {
       root,
       { RUST_LANE_ID: "same-command-b" },
       "owned-fast-test",
-      ["meerkat-models/tests/guards.rs"],
+      ["meerkat-machine-schema/tests/schema_contracts.rs"],
       ["--jobs=64"],
     ),
   ];

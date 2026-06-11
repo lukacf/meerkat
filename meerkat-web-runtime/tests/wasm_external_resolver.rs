@@ -366,8 +366,6 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
             base_url: "https://self-hosted.example/v1".to_string(),
             api_style: meerkat_core::SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(
@@ -377,7 +375,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             remote_model: "gemma4:e2b".to_string(),
             display_name: "Gemma 4 E2B".into(),
             family: "gemma-4".to_string(),
-            tier: meerkat_models::ModelTier::Supported,
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(128_000),
             max_output_tokens: Some(8_192),
             vision: true,

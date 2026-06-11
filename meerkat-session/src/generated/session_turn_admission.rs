@@ -44,6 +44,22 @@ pub enum StartTurnDispatchAuthorization {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAliveRequest {
+    Enable,
+    Disable,
+    #[default]
+    Preserve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAlivePersistenceDecision {
+    PersistEnabled,
+    PersistDisabled,
+    #[default]
+    PreserveExisting,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTurnAdmissionInput {
     ProjectTurnAdmission,
@@ -58,7 +74,7 @@ pub enum SessionTurnAdmissionInput {
     AuthorizeCancelAfterBoundary,
     ResolveLastStartTurnPublicTerminal,
     ResolveRuntimeKeepAlive {
-        keep_alive_policy_present: bool,
+        keep_alive_request: RuntimeKeepAliveRequest,
     },
     ResolveStartTurnDisposition {
         execution_kind_present: bool,
@@ -91,7 +107,7 @@ pub enum SessionTurnAdmissionEffect {
         terminal: StartTurnPublicTerminal,
     },
     RuntimeKeepAliveResolved {
-        persist_keep_alive: bool,
+        decision: RuntimeKeepAlivePersistenceDecision,
     },
 }
 
@@ -181,6 +197,7 @@ enum SessionTurnAdmissionTransition {
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
     ResolveRuntimeKeepAliveEnable,
+    ResolveRuntimeKeepAliveDisable,
     ResolveRuntimeKeepAlivePreserve,
     ResolveLastStartTurnPublicTerminalNoPendingIdle,
     ResolveLastStartTurnPublicTerminalNoPendingAdmitted,
@@ -723,17 +740,20 @@ impl SessionTurnAdmissionMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "ResolveLastStartTurnPublicTerminal_transition" }),
                 }
             }
-            SessionTurnAdmissionInput::ResolveRuntimeKeepAlive {
-                keep_alive_policy_present,
-            } => {
+            SessionTurnAdmissionInput::ResolveRuntimeKeepAlive { keep_alive_request } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
-                    && (keep_alive_policy_present)
+                    && (keep_alive_request == RuntimeKeepAliveRequest::Enable)
                 {
                     matches.push(SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveEnable);
                 }
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
-                    && (keep_alive_policy_present == false)
+                    && (keep_alive_request == RuntimeKeepAliveRequest::Disable)
+                {
+                    matches.push(SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveDisable);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
+                    && (keep_alive_request == RuntimeKeepAliveRequest::Preserve)
                 {
                     matches.push(SessionTurnAdmissionTransition::ResolveRuntimeKeepAlivePreserve);
                 }
@@ -742,13 +762,19 @@ impl SessionTurnAdmissionMachineAuthority {
                     SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveEnable => {
                         self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
-                            persist_keep_alive: true,
+                            decision: RuntimeKeepAlivePersistenceDecision::PersistEnabled,
+                        }])
+                    }
+                    SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveDisable => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
+                        Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
+                            decision: RuntimeKeepAlivePersistenceDecision::PersistDisabled,
                         }])
                     }
                     SessionTurnAdmissionTransition::ResolveRuntimeKeepAlivePreserve => {
                         self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
-                            persist_keep_alive: false,
+                            decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting,
                         }])
                     }
                     #[allow(unreachable_patterns)]
@@ -938,11 +964,9 @@ impl SessionTurnAdmissionMachineAuthority {
 
     pub fn resolve_runtime_keep_alive(
         &mut self,
-        keep_alive_policy_present: bool,
+        keep_alive_request: RuntimeKeepAliveRequest,
     ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
-        self.apply_input(SessionTurnAdmissionInput::ResolveRuntimeKeepAlive {
-            keep_alive_policy_present,
-        })
+        self.apply_input(SessionTurnAdmissionInput::ResolveRuntimeKeepAlive { keep_alive_request })
     }
 
     pub fn resolve_start_turn_disposition(

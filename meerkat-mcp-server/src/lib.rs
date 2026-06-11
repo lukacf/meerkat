@@ -20,7 +20,7 @@ use meerkat::{
     MachineSessionArchiveProtocol, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
 };
-use meerkat_contracts::SkillsParams;
+use meerkat_contracts::{RequestLifecycle, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -93,20 +93,40 @@ async fn create_runtime_backed_session_and_run_initial_turn(
     }
 }
 
+/// Wrap the REAL source-identity record (projected from the skill runtime's
+/// `SourceIdentityRegistry`) as wire provenance. The MCP surface must never
+/// synthesize identity from display data; the registry record is the single
+/// source of truth (mirrors `meerkat-rpc`'s `skills` handler).
 fn skill_source_provenance(
-    source_uuid: meerkat_core::skills::SourceUuid,
-    display_name: impl Into<String>,
+    identity: meerkat_core::skills::SourceIdentityRecord,
 ) -> meerkat_contracts::SkillSourceProvenance {
-    let display_name = display_name.into();
-    meerkat_contracts::SkillSourceProvenance {
-        identity: meerkat_core::skills::SourceIdentityRecord {
-            source_uuid,
-            display_name: display_name.clone(),
-            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
-            fingerprint: format!("mcp:{display_name}"),
-            status: meerkat_core::skills::SourceIdentityStatus::Active,
-        },
-    }
+    meerkat_contracts::SkillSourceProvenance { identity }
+}
+
+/// Project a registry-backed introspection entry into the wire `SkillEntry`,
+/// failing closed when the typed source identity is absent rather than
+/// fabricating a synthetic provenance record.
+fn skill_entry_from_introspection(
+    entry: &meerkat_core::skills::SkillIntrospectionEntry,
+) -> Result<meerkat_contracts::SkillEntry, String> {
+    let source_identity = entry.source_identity.clone().ok_or_else(|| {
+        format!(
+            "skill {} missing typed source identity",
+            entry.descriptor.key
+        )
+    })?;
+    Ok(meerkat_contracts::SkillEntry {
+        key: entry.descriptor.key.clone(),
+        name: entry.descriptor.name.clone(),
+        description: entry.descriptor.description.clone(),
+        scope: entry.descriptor.scope,
+        source: skill_source_provenance(source_identity),
+        is_active: entry.is_active,
+        shadowed_by: entry
+            .shadowed_by_identity
+            .clone()
+            .map(skill_source_provenance),
+    })
 }
 use meerkat_client::TestClient;
 use tokio::sync::Mutex;
@@ -218,7 +238,7 @@ pub struct MeerkatRunInput {
     pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -502,9 +522,9 @@ pub struct MeerkatMcpState {
     runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
     runtime_pre_admissions: runtime_ingress::SharedMcpRuntimePreAdmissions,
     runtime_registration_locks: runtime_ingress::SharedMcpRuntimeRegistrationLocks,
-    session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
+    session_event_streams: Arc<Mutex<HashMap<McpStreamId, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "mob")]
-    mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
+    mob_event_streams: Arc<Mutex<HashMap<McpStreamId, Arc<MobEventStreamInner>>>>,
     schedule_host: StdMutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Runtime adapter for comms drain lifecycle and runtime operations.
     #[allow(dead_code)] // Only used with `comms` feature
@@ -515,6 +535,36 @@ pub struct MeerkatMcpState {
 
 struct SessionEventStreamHandle {
     stream: Mutex<meerkat_core::EventStream>,
+}
+
+/// Typed owner of an MCP event-stream identity.
+///
+/// Stream identity is its own domain fact — it is NOT a session id (the
+/// previous code minted stream ids through `SessionId::new()`, conflating two
+/// identity spaces). A stream id is minted as a fresh UUID at stream open and
+/// parsed fail-closed from the untrusted wire `stream_id` on read/close,
+/// mirroring the RPC `StreamRef` ownership shape. The stream registries are
+/// keyed by this type — there is no bare-string stream key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct McpStreamId(uuid::Uuid);
+
+impl McpStreamId {
+    fn mint() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Parse an untrusted wire `stream_id`, failing closed on malformed input.
+    fn parse(raw: &str) -> Result<Self, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|e| format!("invalid stream_id '{raw}': {e}"))
+    }
+}
+
+impl std::fmt::Display for McpStreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -1039,7 +1089,7 @@ pub struct MeerkatResumeInput {
     pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -1309,8 +1359,18 @@ pub struct TurnToolOverlayInput {
 impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
     fn from(value: TurnToolOverlayInput) -> Self {
         Self {
-            allowed_tools: value.allowed_tools,
-            blocked_tools: value.blocked_tools,
+            allowed_tools: value.allowed_tools.map(|names| {
+                names
+                    .into_iter()
+                    .map(meerkat_core::ToolName::from)
+                    .collect()
+            }),
+            blocked_tools: value.blocked_tools.map(|names| {
+                names
+                    .into_iter()
+                    .map(meerkat_core::ToolName::from)
+                    .collect()
+            }),
             ..Default::default()
         }
     }
@@ -1389,22 +1449,35 @@ fn format_agent_result(
                 "schema_warnings": result.schema_warnings,
                 "skill_diagnostics": result.skill_diagnostics
             });
-            Ok(wrap_tool_payload(payload))
+            wrap_tool_payload(payload)
         }
         Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
-            let payload = json!({
-                "content": [{
-                    "type": "text",
-                    "text": "Agent is waiting for tool results"
-                }],
-                "session_id": session_id.to_string(),
-                "status": "pending_tool_call",
-                "pending_tool_calls": [{
-                    "tool_name": tool_name,
-                    "args": args
-                }]
-            });
-            Ok(wrap_tool_payload(payload))
+            // Pending state is a typed terminal-control fact, not a success
+            // envelope. Serialize the canonical `WireCallbackPending` contract
+            // rather than hand-building a success-looking JSON object so the
+            // `status` discriminant + pending-tool list stay schema-aligned
+            // across surfaces. The MCP human-readable `content` rides alongside
+            // the contract fields.
+            let pending = meerkat_contracts::WireCallbackPending::single(
+                session_id.clone(),
+                None,
+                false,
+                true,
+                tool_name,
+                args,
+            );
+            let mut payload = serde_json::to_value(&pending)
+                .map_err(|err| format!("Failed to serialize callback pending contract: {err}"))?;
+            if let Value::Object(map) = &mut payload {
+                map.insert(
+                    "content".to_string(),
+                    json!([{
+                        "type": "text",
+                        "text": "Agent is waiting for tool results"
+                    }]),
+                );
+            }
+            wrap_tool_payload(payload)
         }
         Err(e) => Err(format!("Agent error: {e}")),
     }
@@ -1517,112 +1590,235 @@ const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
 #[cfg(not(test))]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 
-fn base_tools_list() -> Vec<Value> {
+/// Typed descriptor for a Meerkat MCP tool.
+///
+/// The descriptor is the single owner of every fact about a base tool:
+/// its wire `name`, the human-readable `description`, the `input_schema`
+/// builder, and — co-located here rather than in a separate string-keyed
+/// catalog — its [`RequestLifecycle`] classification. The rendered
+/// `tools/list` JSON (see [`base_tools_list`]) and the lifecycle lookup (see
+/// [`mcp_tool_request_lifecycle`]) are both read-only projections of this
+/// single typed table, so a tool's lifecycle can never drift from where its
+/// name/description/schema are declared.
+pub struct BaseToolDescriptor {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: fn() -> Value,
+    pub request_lifecycle: RequestLifecycle,
+}
+
+/// Empty input schema for tools that take no arguments.
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "required": []
+    })
+}
+
+/// The typed descriptor table for the base (always-present) MCP tools.
+///
+/// This is the authority for both the advertised descriptor JSON and the
+/// per-tool request lifecycle. Tools contributed by other crates
+/// (`schedule_tools_list`, `workgraph_tools_list`, the mob/comms surfaces)
+/// declare their lifecycle in [`contributed_tool_lifecycles`], keyed by the
+/// surface's own advertised list.
+fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
     vec![
-        json!({
-            "name": "meerkat_run",
-            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
-        }),
-        json!({
-            "name": "meerkat_resume",
-            "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
-        }),
-        json!({
-            "name": "meerkat_help",
-            "description": "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
-            "inputSchema": meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>()
-        }),
-        json!({
-            "name": "meerkat_config",
-            "description": "Get or update Meerkat config for this MCP server instance.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
-        }),
-        json!({
-            "name": "meerkat_capabilities",
-            "description": "Get the list of capabilities available in this Meerkat runtime.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_models_catalog",
-            "description": "Get the catalog of supported LLM models with provider grouping, tiers, and parameter schemas.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_skills",
-            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source UUID selector to see full content.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
-        }),
-        json!({
-            "name": "meerkat_read",
-            "description": "Read current session state.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_sessions",
-            "description": "List sessions in the active realm.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionListInput>()
-        }),
-        json!({
-            "name": "meerkat_history",
-            "description": "Read a session's full history.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionHistoryInput>()
-        }),
-        json!({
-            "name": "meerkat_blob_get",
-            "description": "Fetch raw blob bytes and metadata by blob id.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatBlobGetInput>()
-        }),
-        json!({
-            "name": "meerkat_interrupt",
-            "description": "Interrupt an in-flight turn for a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_archive",
-            "description": "Archive (remove) a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_add",
-            "description": "Stage a live MCP server add operation on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpAddInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_remove",
-            "description": "Stage a live MCP server removal on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpRemoveInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_reload",
-            "description": "Stage a live MCP server reload on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpReloadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_open",
-            "description": "Open a session-level agent event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_read",
-            "description": "Read the next item from an open session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_close",
-            "description": "Close a previously opened session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
-        }),
+        BaseToolDescriptor {
+            name: "meerkat_run",
+            description: "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatRunInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_resume",
+            description: "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatResumeInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_help",
+            description: "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
+            input_schema: || meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_config",
+            description: "Get or update Meerkat config for this MCP server instance.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatConfigInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_capabilities",
+            description: "Get the list of capabilities available in this Meerkat runtime.",
+            input_schema: empty_input_schema,
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_models_catalog",
+            description: "Get the catalog of supported LLM models with provider grouping, tiers, and parameter schemas.",
+            input_schema: empty_input_schema,
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_skills",
+            description: "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source UUID selector to see full content.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSkillsInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_read",
+            description: "Read current session state.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_sessions",
+            description: "List sessions in the active realm.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionListInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_history",
+            description: "Read a session's full history.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionHistoryInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_blob_get",
+            description: "Fetch raw blob bytes and metadata by blob id.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatBlobGetInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_interrupt",
+            description: "Interrupt an in-flight turn for a session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_archive",
+            description: "Archive (remove) a session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_add",
+            description: "Stage a live MCP server add operation on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpAddInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_remove",
+            description: "Stage a live MCP server removal on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpRemoveInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_reload",
+            description: "Stage a live MCP server reload on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpReloadInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_open",
+            description: "Open a session-level agent event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_read",
+            description: "Read the next item from an open session-level event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_close",
+            description: "Close a previously opened session-level event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
     ]
+}
+
+fn base_tools_list() -> Vec<Value> {
+    base_tool_descriptors()
+        .into_iter()
+        .map(|descriptor| {
+            json!({
+                "name": descriptor.name,
+                "description": descriptor.description,
+                "inputSchema": (descriptor.input_schema)(),
+            })
+        })
+        .collect()
+}
+
+/// Feature-owned lifecycle declarations for contributed tool surfaces.
+///
+/// Each contributed surface composed into [`tools_list`] (schedule,
+/// workgraph, mob host tools, mob event streams, comms) declares exactly one
+/// [`RequestLifecycle`] for the tools it advertises. The name set is read
+/// from the surface's own advertised list — the same projection
+/// [`tools_list`] extends — so the lifecycle key set can never drift from
+/// advertisement, and no name-string fall-through exists.
+fn contributed_tool_lifecycles() -> Vec<(Vec<String>, RequestLifecycle)> {
+    fn advertised_names(tools: Vec<Value>) -> Vec<String> {
+        tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    }
+    #[allow(unused_mut)]
+    let mut surfaces = vec![
+        (
+            advertised_names(meerkat::schedule_tools_list()),
+            RequestLifecycle::LongRunningObservation,
+        ),
+        (
+            advertised_names(meerkat::workgraph_tools_list()),
+            RequestLifecycle::LongRunningObservation,
+        ),
+    ];
+    #[cfg(feature = "mob")]
+    surfaces.push((
+        advertised_names(mob_host_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    #[cfg(feature = "mob")]
+    surfaces.push((
+        advertised_names(mob_event_stream_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    #[cfg(feature = "comms")]
+    surfaces.push((
+        advertised_names(comms_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    surfaces
+}
+
+/// Resolve the [`RequestLifecycle`] for a tools/call by name.
+///
+/// Owner-of-record for MCP tool lifecycle: base tools read the
+/// classification straight off the typed [`BaseToolDescriptor`] co-located
+/// with the tool's name/description/schema; contributed tools read the
+/// lifecycle their owning surface declares in
+/// [`contributed_tool_lifecycles`]. Unknown names resolve to `None` — the
+/// caller must fail closed (reject the call as an unknown tool) instead of
+/// classifying an unadvertised name under a default lifecycle.
+pub fn mcp_tool_request_lifecycle(tool_name: &str) -> Option<RequestLifecycle> {
+    if let Some(descriptor) = base_tool_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.name == tool_name)
+    {
+        return Some(descriptor.request_lifecycle);
+    }
+    contributed_tool_lifecycles()
+        .into_iter()
+        .find(|(names, _)| names.iter().any(|name| name == tool_name))
+        .map(|(_, lifecycle)| lifecycle)
 }
 
 #[cfg(feature = "mob")]
@@ -1667,7 +1863,28 @@ fn comms_tools_list() -> Vec<Value> {
     ]
 }
 
-/// Returns the list of tools exposed by this MCP server
+impl MeerkatMcpState {
+    /// Advertised tools for THIS runtime instance.
+    ///
+    /// The static composition ([`tools_list`]) is filtered by the runtime
+    /// capability seam: `meerkat_skills` advertises only when the resolved
+    /// skill runtime exists, so the advertised availability can never split
+    /// from the handler that would otherwise reject the call with
+    /// "skills not enabled".
+    pub fn advertised_tools_list(&self) -> Vec<Value> {
+        let mut tools = tools_list();
+        if self.skill_runtime.is_none() {
+            tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("meerkat_skills"));
+        }
+        tools
+    }
+}
+
+/// Returns the full static list of tools composable by this MCP server.
+///
+/// Runtime-conditional availability (e.g. skills) is applied by
+/// [`MeerkatMcpState::advertised_tools_list`]; serving this static catalog
+/// directly would advertise tools the runtime cannot dispatch.
 pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
     tools.extend(meerkat::schedule_tools_list());
@@ -1715,7 +1932,7 @@ pub async fn handle_tools_call_with_notifier(
                     message: err.message,
                     data: err.data,
                 })?;
-        return Ok(wrap_tool_payload(payload));
+        return wrap_tool_payload(payload).map_err(ToolCallError::internal);
     }
 
     match tool_name {
@@ -1747,23 +1964,23 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_config(state, input)
                 .await
-                .map(wrap_tool_payload)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         "meerkat_capabilities" => handle_meerkat_capabilities(state)
             .await
-            .map(wrap_tool_payload)
-            .map_err(ToolCallError::internal),
+            .map_err(ToolCallError::internal)
+            .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal)),
         "meerkat_models_catalog" => handle_meerkat_models_catalog(state)
             .await
-            .map(wrap_tool_payload)
-            .map_err(ToolCallError::internal),
+            .map_err(ToolCallError::internal)
+            .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal)),
         "meerkat_skills" => {
             let input: MeerkatSkillsInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_skills(state, input)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(ToolCallError::internal)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         "meerkat_read" => {
             let input: MeerkatSessionIdInput = serde_json::from_value(arguments.clone())
@@ -1859,14 +2076,14 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|error| ToolCallError::internal(error.to_string()))?;
             meerkat::handle_schedule_tools_call(&state.schedule_service, name, arguments)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(map_schedule_tool_error)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         name if name.starts_with("workgraph_") => {
             meerkat::handle_workgraph_tools_call(&state.workgraph_service, name, arguments)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(map_workgraph_tool_error)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_event_stream_open" => {
@@ -1933,24 +2150,8 @@ async fn handle_meerkat_skills(
                 .map_err(|e| format!("skill list failed: {e}"))?;
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
-                .map(|e| meerkat_contracts::SkillEntry {
-                    key: e.descriptor.key.clone(),
-                    name: e.descriptor.name.clone(),
-                    description: e.descriptor.description.clone(),
-                    scope: e.descriptor.scope.to_string(),
-                    source: skill_source_provenance(
-                        e.descriptor.key.source_uuid.clone(),
-                        e.descriptor.source_name.clone(),
-                    ),
-                    is_active: e.is_active,
-                    shadowed_by: e.shadowed_by_source_uuid.clone().map(|source_uuid| {
-                        skill_source_provenance(
-                            source_uuid,
-                            e.shadowed_by.clone().unwrap_or_default(),
-                        )
-                    }),
-                })
-                .collect();
+                .map(skill_entry_from_introspection)
+                .collect::<Result<_, _>>()?;
             serde_json::to_value(meerkat_contracts::SkillListResponse { skills: wire })
                 .map_err(|e| format!("serialization failed: {e}"))
         }
@@ -1971,15 +2172,27 @@ async fn handle_meerkat_skills(
                 .load_from_source(&canonical, input.source.as_deref())
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
+            // Project the REAL provenance from the registry-backed introspection
+            // listing (matching the canonical key) rather than fabricating one
+            // from display data. Fail closed if the registry does not surface a
+            // typed identity for this key.
+            let provenance_entries = runtime
+                .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
+                .await
+                .map_err(|e| format!("skill provenance lookup failed: {e}"))?;
+            let source_identity = provenance_entries
+                .into_iter()
+                .find(|entry| entry.descriptor.key == doc.descriptor.key)
+                .and_then(|entry| entry.source_identity)
+                .ok_or_else(|| {
+                    format!("skill {} missing typed source identity", doc.descriptor.key)
+                })?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
                 key: doc.descriptor.key.clone(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
-                scope: doc.descriptor.scope.to_string(),
-                source: skill_source_provenance(
-                    doc.descriptor.key.source_uuid.clone(),
-                    doc.descriptor.source_name.clone(),
-                ),
+                scope: doc.descriptor.scope,
+                source: skill_source_provenance(source_identity),
                 body: doc.body,
             })
             .map_err(|e| format!("serialization failed: {e}"))
@@ -1988,23 +2201,26 @@ async fn handle_meerkat_skills(
 }
 
 async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, String> {
+    // A ConfigError is a TRUE fault (benign absence is already Ok(default) inside the
+    // store), so it must surface as an error, never as a phantom default-config payload.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| format!("Failed to read config: {e}"))?
+        .config;
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
 async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value, String> {
+    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade as success.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| format!("Failed to read config: {e}"))?
+        .config;
     let response =
         meerkat::surface::build_models_catalog_response(&config).map_err(|e| e.to_string())?;
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -2130,23 +2346,6 @@ fn compare_config_payload_shape(
     }
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 fn map_schedule_tool_error(error: meerkat::ScheduleToolError) -> ToolCallError {
     ToolCallError::new(error.code, error.message, error.data)
 }
@@ -2171,10 +2370,9 @@ fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError
 }
 
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
-    let mut value = serde_json::to_value(config)
-        .map_err(|e| ToolCallError::internal(format!("Failed to serialize config: {e}")))?;
-    merge_patch(&mut value, patch);
-    serde_json::from_value(value).map_err(|e| ToolCallError::invalid_params(format!("{e}")))
+    // Single owner of RFC-7386 patch semantics: meerkat-core.
+    meerkat_core::apply_config_patch_preview(config, patch)
+        .map_err(|e| ToolCallError::invalid_params(format!("{e}")))
 }
 
 fn canonical_skill_keys(
@@ -2220,7 +2418,7 @@ async fn handle_meerkat_read(
         "state": view.state,
         "billing": view.billing
     });
-    Ok(wrap_tool_payload(payload))
+    wrap_tool_payload(payload)
 }
 
 async fn handle_meerkat_interrupt(
@@ -2255,10 +2453,10 @@ async fn handle_meerkat_interrupt(
         }
         Err(e) => return Err(format!("Failed to interrupt session: {e}")),
     }
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "interrupted": true
-    })))
+    }))
 }
 
 fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
@@ -2292,7 +2490,7 @@ async fn handle_meerkat_sessions(
         })
         .collect();
     let payload = json!({ "sessions": wire_sessions });
-    Ok(wrap_tool_payload(payload))
+    wrap_tool_payload(payload)
 }
 
 async fn handle_meerkat_history(
@@ -2317,9 +2515,9 @@ async fn handle_meerkat_history(
         &state.realm_id,
         &session_id,
     ));
-    Ok(wrap_tool_payload(
-        serde_json::to_value(payload).unwrap_or(Value::Null),
-    ))
+    let payload_value = serde_json::to_value(payload)
+        .map_err(|e| format!("Failed to serialize session history: {e}"))?;
+    wrap_tool_payload(payload_value)
 }
 
 async fn handle_meerkat_blob_get(
@@ -2333,9 +2531,9 @@ async fn handle_meerkat_blob_get(
         .get(&blob_id)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(wrap_tool_payload(
-        serde_json::to_value(payload).unwrap_or(Value::Null),
-    ))
+    let payload_value = serde_json::to_value(payload)
+        .map_err(|e| format!("Failed to serialize blob payload: {e}"))?;
+    wrap_tool_payload(payload_value)
 }
 
 #[derive(Clone)]
@@ -2466,10 +2664,11 @@ async fn handle_meerkat_archive(
     archive_session_with_runtime_cleanup(state, session_id.clone())
         .await
         .map_err(archive_session_error_to_tool_error)?;
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "archived": true
-    })))
+    }))
+    .map_err(ToolCallError::internal)
 }
 
 fn archive_session_error_to_tool_error(error: SessionError) -> ToolCallError {
@@ -2504,7 +2703,7 @@ async fn handle_meerkat_mcp_add(
         Some(server_name),
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_remove(
@@ -2528,7 +2727,7 @@ async fn handle_meerkat_mcp_remove(
         Some(input.server_name),
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_reload(
@@ -2550,11 +2749,26 @@ async fn handle_meerkat_mcp_reload(
                 .map_err(|e| format!("failed to stage reload: {e}"))?;
         }
         None => {
-            for name in adapter.active_server_names().await {
-                adapter
-                    .stage_reload(McpReloadTarget::ServerName(name))
-                    .await
-                    .map_err(|e| format!("failed to stage reload: {e}"))?;
+            // K14: the lifecycle owner's reload-all primitive stages the whole
+            // roster under one router lock and returns the typed per-server
+            // report; a non-clean report is an explicit fault naming both the
+            // staged servers (whose reloads WILL still apply at the next
+            // boundary) and the rejected ones.
+            let report = adapter
+                .stage_reload_all()
+                .await
+                .map_err(|e| format!("failed to stage reload-all: {e}"))?;
+            if !report.is_clean() {
+                let failed = report
+                    .failed
+                    .iter()
+                    .map(|failure| format!("{}: {}", failure.server, failure.error))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!(
+                    "failed to stage reload for [{failed}]; reload already staged for [{}] and will still apply at the next boundary",
+                    report.staged.join(", ")
+                ));
             }
         }
     }
@@ -2565,7 +2779,7 @@ async fn handle_meerkat_mcp_reload(
         input.server_name,
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 fn mcp_live_response_value(
@@ -2596,31 +2810,33 @@ async fn handle_meerkat_event_stream_open(
         .subscribe_session_events(&session_id)
         .await
         .map_err(|e| format!("Failed to open session event stream: {e}"))?;
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = McpStreamId::mint();
     state.session_event_streams.lock().await.insert(
-        stream_id.clone(),
+        stream_id,
         Arc::new(SessionEventStreamHandle {
             stream: Mutex::new(stream),
         }),
     );
 
-    Ok(wrap_tool_payload(json!({
-        "stream_id": stream_id,
+    wrap_tool_payload(json!({
+        "stream_id": stream_id.to_string(),
         "session_id": session_id.to_string()
-    })))
+    }))
 }
 
 async fn handle_meerkat_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamReadInput,
 ) -> Result<Value, String> {
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let stream_id_str = stream_id.to_string();
     let handle = state
         .session_event_streams
         .lock()
         .await
-        .get(&input.stream_id)
+        .get(&stream_id)
         .cloned()
-        .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
+        .ok_or_else(|| format!("Stream not found: {stream_id}"))?;
 
     let read_timeout = input.timeout.policy.duration();
     let next_event = {
@@ -2630,10 +2846,10 @@ async fn handle_meerkat_event_stream_read(
             Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(item) => item,
                 Err(_) => {
-                    return Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "timeout"
-                    })));
+                    return stream_read_payload(
+                        &stream_id_str,
+                        meerkat_contracts::StreamReadStatus::Timeout,
+                    );
                 }
             },
         }
@@ -2641,24 +2857,12 @@ async fn handle_meerkat_event_stream_read(
 
     match next_event {
         Some(envelope) => {
-            let envelope_json = serde_json::to_value(&envelope)
-                .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "event",
-                "event": envelope_json
-            })))
+            let status = stream_read_event_status(&envelope)?;
+            stream_read_payload(&stream_id_str, status)
         }
         None => {
-            state
-                .session_event_streams
-                .lock()
-                .await
-                .remove(&input.stream_id);
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "closed"
-            })))
+            state.session_event_streams.lock().await.remove(&stream_id);
+            stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
         }
     }
 }
@@ -2667,15 +2871,12 @@ async fn handle_meerkat_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .session_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
-    Ok(wrap_tool_payload(json!({
-        "stream_id": input.stream_id,
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let removed = state.session_event_streams.lock().await.remove(&stream_id);
+    wrap_tool_payload(json!({
+        "stream_id": stream_id.to_string(),
         "closed": removed.is_some()
-    })))
+    }))
 }
 
 #[cfg(feature = "mob")]
@@ -2684,7 +2885,7 @@ async fn handle_meerkat_mob_event_stream_open(
     input: MeerkatMobEventStreamOpenInput,
 ) -> Result<Value, String> {
     let mob_id = meerkat_mob::MobId::from(input.mob_id.as_str());
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = McpStreamId::mint();
 
     let inner = if let Some(member_id) = &input.member_id {
         let identity = meerkat_mob::AgentIdentity::from(member_id.as_str());
@@ -2707,13 +2908,13 @@ async fn handle_meerkat_mob_event_stream_open(
         .mob_event_streams
         .lock()
         .await
-        .insert(stream_id.clone(), Arc::new(inner));
+        .insert(stream_id, Arc::new(inner));
 
-    Ok(wrap_tool_payload(json!({
-        "stream_id": stream_id,
+    wrap_tool_payload(json!({
+        "stream_id": stream_id.to_string(),
         "mob_id": input.mob_id,
         "member_id": input.member_id,
-    })))
+    }))
 }
 
 #[cfg(feature = "mob")]
@@ -2721,13 +2922,15 @@ async fn handle_meerkat_mob_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamReadInput,
 ) -> Result<Value, String> {
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let stream_id_str = stream_id.to_string();
     let handle = state
         .mob_event_streams
         .lock()
         .await
-        .get(&input.stream_id)
+        .get(&stream_id)
         .cloned()
-        .ok_or_else(|| format!("Mob event stream not found: {}", input.stream_id))?;
+        .ok_or_else(|| format!("Mob event stream not found: {stream_id}"))?;
 
     let read_timeout = input.timeout.policy.duration();
 
@@ -2740,34 +2943,22 @@ async fn handle_meerkat_mob_event_stream_read(
                     Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                         Ok(item) => item,
                         Err(_) => {
-                            return Ok(wrap_tool_payload(json!({
-                                "stream_id": input.stream_id,
-                                "status": "timeout"
-                            })));
+                            return stream_read_payload(
+                                &stream_id_str,
+                                meerkat_contracts::StreamReadStatus::Timeout,
+                            );
                         }
                     },
                 }
             };
             match next_event {
                 Some(envelope) => {
-                    let event_json = serde_json::to_value(&envelope)
-                        .map_err(|e| format!("Failed to serialize event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    })))
+                    let status = stream_read_event_status(&envelope)?;
+                    stream_read_payload(&stream_id_str, status)
                 }
                 None => {
-                    state
-                        .mob_event_streams
-                        .lock()
-                        .await
-                        .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    })))
+                    state.mob_event_streams.lock().await.remove(&stream_id);
+                    stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
                 }
             }
         }
@@ -2780,10 +2971,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
                             Ok(item) => item,
                             Err(_) => {
-                                return Ok(wrap_tool_payload(json!({
-                                    "stream_id": input.stream_id,
-                                    "status": "timeout"
-                                })));
+                                return stream_read_payload(
+                                    &stream_id_str,
+                                    meerkat_contracts::StreamReadStatus::Timeout,
+                                );
                             }
                         }
                     }
@@ -2791,24 +2982,12 @@ async fn handle_meerkat_mob_event_stream_read(
             };
             match next_event {
                 Some(attributed) => {
-                    let event_json = serde_json::to_value(&attributed)
-                        .map_err(|e| format!("Failed to serialize attributed event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    })))
+                    let status = stream_read_event_status(&attributed)?;
+                    stream_read_payload(&stream_id_str, status)
                 }
                 None => {
-                    state
-                        .mob_event_streams
-                        .lock()
-                        .await
-                        .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    })))
+                    state.mob_event_streams.lock().await.remove(&stream_id);
+                    stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
                 }
             }
         }
@@ -2820,19 +2999,16 @@ async fn handle_meerkat_mob_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .mob_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
-    Ok(wrap_tool_payload(json!({
-        "stream_id": input.stream_id,
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let removed = state.mob_event_streams.lock().await.remove(&stream_id);
+    wrap_tool_payload(json!({
+        "stream_id": stream_id.to_string(),
         "closed": removed.is_some()
-    })))
+    }))
 }
 
 #[cfg(feature = "comms")]
-fn comms_send_tool_payload(receipt: meerkat_core::comms::SendReceipt) -> Value {
+fn comms_send_tool_payload(receipt: meerkat_core::comms::SendReceipt) -> Result<Value, String> {
     wrap_tool_payload(json!({
         "receipt": meerkat_contracts::CommsSendResult::from(receipt),
     }))
@@ -2877,7 +3053,7 @@ async fn handle_meerkat_comms_send(
         .send(cmd)
         .await
         .map_err(|e| normalize_mcp_comms_send_error(peer_name.as_deref(), &e))?;
-    Ok(comms_send_tool_payload(receipt))
+    comms_send_tool_payload(receipt).map_err(ToolCallError::internal)
 }
 
 #[cfg(feature = "comms")]
@@ -2892,11 +3068,13 @@ async fn handle_meerkat_comms_peers(
         .comms_runtime(&session_id)
         .await
         .ok_or_else(|| format!("Session not found or comms not enabled: {session_id}"))?;
-    Ok(comms_peers_tool_payload(comms.peers().await))
+    comms_peers_tool_payload(comms.peers().await)
 }
 
 #[cfg(feature = "comms")]
-fn comms_peers_tool_payload(peers: Vec<meerkat_core::comms::PeerDirectoryEntry>) -> Value {
+fn comms_peers_tool_payload(
+    peers: Vec<meerkat_core::comms::PeerDirectoryEntry>,
+) -> Result<Value, String> {
     wrap_tool_payload(json!(meerkat_contracts::CommsPeersResult::from_entries(
         &peers
     )))
@@ -3050,12 +3228,14 @@ async fn handle_meerkat_run(
             "keep_alive requires comms_name",
         ));
     }
+    // A ConfigError is a TRUE fault and must not be laundered into a default config
+    // that silently picks a phantom default model.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
+        .config;
     let model = input
         .model
         .as_ref()
@@ -3186,7 +3366,11 @@ async fn handle_meerkat_run(
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
         provider: create_provider,
+        override_comms: Default::default(),
         self_hosted_server_id: None,
         output_schema,
         structured_output_retries: input.structured_output_retries,
@@ -3218,7 +3402,7 @@ async fn handle_meerkat_run(
         preload_skills,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
-        backend: Some(state.backend.clone()),
+        backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
         auth_binding: input
             .auth_binding
@@ -3232,6 +3416,7 @@ async fn handle_meerkat_run(
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
+        initial_tool_filter: None,
         shell_env: input.shell_env.clone(),
         resume_override_mask: ResumeOverrideMask {
             provider: input.provider.is_some() || input.model.is_some(),
@@ -3253,6 +3438,16 @@ async fn handle_meerkat_run(
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         input.enable_mob,
     ));
+    // Dogma K10: initial-turn skill references ride the ONE typed carrier
+    // (`build.initial_turn_metadata`), not a request-level duplicate.
+    if let Some(refs) = skill_references.clone() {
+        build
+            .initial_turn_metadata
+            .get_or_insert_with(Default::default)
+            .skill_references
+            .get_or_insert_with(Vec::new)
+            .extend(refs);
+    }
 
     reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
         archive_with_mcp_machine_authority(
@@ -3271,12 +3466,13 @@ async fn handle_meerkat_run(
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
-        render_metadata: None,
-        system_prompt: input.system_prompt,
+        system_prompt: match input.system_prompt {
+            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+            None => meerkat::SystemPromptOverride::Inherit,
+        },
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
 
-        skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -3346,7 +3542,12 @@ async fn handle_meerkat_run(
         state
             .runtime_adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to update peer ingress context for {session_id}: {error}"
+                ))
+            })?;
     }
     match result {
         Ok(run_result) => format_agent_result_tool(Ok(run_result), &session_id),
@@ -3369,12 +3570,13 @@ async fn handle_meerkat_resume(
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
     let ingress = state.runtime_ingress_context();
+    // A ConfigError is a TRUE fault and must not be laundered into a default config.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
+        .config;
 
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
@@ -3588,7 +3790,11 @@ async fn handle_meerkat_resume(
     .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: llm_binding.provider,
+            override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id.clone(),
             output_schema: output_schema.clone(),
             structured_output_retries: input.structured_output_retries,
@@ -3630,8 +3836,9 @@ async fn handle_meerkat_resume(
                 .or_else(|| state.instance_id.clone()),
             backend: stored_metadata
                 .backend
-                .clone()
-                .or_else(|| Some(state.backend.clone())),
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse)
+                .or_else(|| meerkat_core::RecoveryBackendKind::parse(&state.backend)),
             config_generation: current_generation,
             auth_binding: None,
             mob_member_binding: stored_metadata.mob_member_binding.clone(),
@@ -3642,6 +3849,7 @@ async fn handle_meerkat_resume(
             app_context: None,
             additional_instructions: input.additional_instructions.clone(),
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: input.model.is_some(),
@@ -3728,7 +3936,17 @@ async fn handle_meerkat_resume(
                 }
             };
         mcp_adapter = Some(adapter);
-        let build = build_session_options(resume_bindings, external_tools);
+        let mut build = build_session_options(resume_bindings, external_tools);
+        // Dogma K10: initial-turn skill references ride the ONE typed carrier
+        // (`build.initial_turn_metadata`), not a request-level duplicate.
+        if let Some(refs) = skill_references.clone() {
+            build
+                .initial_turn_metadata
+                .get_or_insert_with(Default::default)
+                .skill_references
+                .get_or_insert_with(Vec::new)
+                .extend(refs);
+        }
         reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
             ingress
                 .clear_session_if_new_locked(
@@ -3743,12 +3961,12 @@ async fn handle_meerkat_resume(
         let req = CreateSessionRequest {
             model,
             prompt: prompt.clone().into(),
-            render_metadata: None,
-            system_prompt: input.system_prompt.clone(),
+            system_prompt: match input.system_prompt.clone() {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens,
             event_tx: event_tx.clone(),
-
-            skill_references: skill_references.clone(),
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -3791,34 +4009,48 @@ async fn handle_meerkat_resume(
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+                .map_err(|error| {
+                    ToolCallError::internal(format!(
+                        "failed to update peer ingress context for {session_id}: {error}"
+                    ))
+                })?;
         }
         // Live MCP resumes still use the runtime/machine service-turn receipt
         // path; the persistent service only owns the live mutation and post-
         // receipt projection, not lifecycle truth.
-        let turn_keep_alive_metadata =
-            keep_alive.then(
-                || meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(30),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                    }),
-                    ..Default::default()
-                },
-            );
+        // Dogma K13: forward the full typed keep-alive tri-state to the
+        // machine. `Some(true)` -> Enable(policy), `Some(false)` -> Disable
+        // (explicit operator intent, never dropped into preserve), `None` ->
+        // preserve the persisted session intent.
+        let turn_seed_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+            keep_alive: keep_alive_override.map(|keep_alive| {
+                if keep_alive {
+                    meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                            ttl: std::time::Duration::from_secs(30),
+                            policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                        },
+                    )
+                } else {
+                    meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable
+                }
+            }),
+            ..Default::default()
+        };
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
             system_prompt: None,
             event_tx: event_tx.clone(),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                skill_references.clone(),
                 input.flow_tool_overlay.clone().map(Into::into),
                 Vec::new(),
-                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
-                    turn_keep_alive_metadata,
-                )),
+                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
+                    turn_seed_metadata,
+                ))),
             ),
         };
         let admission = match live_turn_admission.take() {
@@ -3911,7 +4143,18 @@ async fn handle_meerkat_resume(
                     }
                 };
                 mcp_adapter = Some(adapter);
-                let build = build_session_options(resume_bindings, external_tools);
+                let mut build = build_session_options(resume_bindings, external_tools);
+                // Dogma K10: initial-turn skill references ride the ONE typed
+                // carrier (`build.initial_turn_metadata`), not a request-level
+                // duplicate.
+                if let Some(refs) = skill_references.clone() {
+                    build
+                        .initial_turn_metadata
+                        .get_or_insert_with(Default::default)
+                        .skill_references
+                        .get_or_insert_with(Vec::new)
+                        .extend(refs);
+                }
                 reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
                     ingress
                         .clear_session_if_new_locked(
@@ -3926,12 +4169,13 @@ async fn handle_meerkat_resume(
                 let req = CreateSessionRequest {
                     model,
                     prompt: prompt.into(),
-                    render_metadata: None,
-                    system_prompt: input.system_prompt.clone(),
+                    system_prompt: match input.system_prompt.clone() {
+                        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                        None => meerkat::SystemPromptOverride::Inherit,
+                    },
                     max_tokens,
                     event_tx: event_tx.clone(),
 
-                    skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
@@ -4053,20 +4297,71 @@ async fn handle_meerkat_resume(
         state
             .runtime_adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to update peer ingress context for {session_id}: {error}"
+                ))
+            })?;
     }
 
     format_agent_result_tool(result, &session_id)
 }
 
-fn wrap_tool_payload(payload: Value) -> Value {
-    let text = serde_json::to_string(&payload).unwrap_or_default();
-    json!({
+/// Wrap a structured payload in the MCP text-content envelope.
+///
+/// Serialization is a TRUE fault: a payload that fails to serialize must surface
+/// as an error, never as an empty/`null` content envelope masquerading as success.
+fn wrap_tool_payload(payload: Value) -> Result<Value, String> {
+    let text = serde_json::to_string(&payload)
+        .map_err(|err| format!("Failed to serialize tool payload: {err}"))?;
+    Ok(json!({
         "content": [{
             "type": "text",
             "text": text
         }]
-    })
+    }))
+}
+
+/// Build a stream-read tool payload from the typed
+/// [`meerkat_contracts::StreamReadStatus`] contract.
+///
+/// A stream read resolves into exactly one terminal shape — a delivered event,
+/// an expired timeout, or a closed stream — and that shape is the single typed
+/// authority for read status. The transport-level `stream_id` is carried by the
+/// enclosing response (one fact, one owner), so surfaces never hand-roll
+/// `status: "event" | "timeout" | "closed"` string conventions.
+fn stream_read_payload(
+    stream_id: &str,
+    status: meerkat_contracts::StreamReadStatus,
+) -> Result<Value, String> {
+    let mut payload = serde_json::to_value(&status)
+        .map_err(|err| format!("Failed to serialize stream read status: {err}"))?;
+    match &mut payload {
+        Value::Object(map) => {
+            map.insert(
+                "stream_id".to_string(),
+                Value::String(stream_id.to_string()),
+            );
+        }
+        _ => {
+            return Err("stream read status did not serialize to a JSON object".to_string());
+        }
+    }
+    wrap_tool_payload(payload)
+}
+
+/// Build a [`meerkat_contracts::StreamReadStatus::Event`] from a serializable
+/// event envelope, riding the body as opaque `Box<RawValue>` (never matched at
+/// this layer).
+fn stream_read_event_status(
+    envelope: &impl serde::Serialize,
+) -> Result<meerkat_contracts::StreamReadStatus, String> {
+    let body = serde_json::to_string(envelope)
+        .map_err(|err| format!("Failed to serialize stream event: {err}"))?;
+    let event = serde_json::value::RawValue::from_string(body)
+        .map_err(|err| format!("Failed to encode stream event: {err}"))?;
+    Ok(meerkat_contracts::StreamReadStatus::Event { event })
 }
 
 fn compose_external_tool_dispatchers(
@@ -4164,12 +4459,16 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        // K1: callback ingress goes through the typed tool-argument contract.
+        // Malformed / non-object args fail closed with a typed
+        // `InvalidArguments` error — never a `Value::String` wrap that would
+        // silently reach the callback consumer.
+        let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
+            .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
         // Check if this is a callback tool
         if self.callback_tools.contains(call.name) {
             // Return a special error that signals the agent loop should pause
-            Err(ToolError::callback_pending(call.name, args))
+            Err(ToolError::callback_pending(call.name, args.into_value()))
         } else {
             Err(ToolError::not_found(call.name))
         }
@@ -4228,6 +4527,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_wrap_tool_payload_returns_typed_result_envelope() {
+        // wrap_tool_payload must surface serialization as a typed Result, never a
+        // silent empty-text/null content envelope. The happy path yields the
+        // text-content envelope carrying the serialized payload.
+        let wrapped = wrap_tool_payload(json!({ "key": "value" }))
+            .expect("valid payload serializes into the content envelope");
+        let text = wrapped["content"][0]["text"]
+            .as_str()
+            .expect("content envelope carries serialized text");
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap()["key"], "value");
+        // The envelope is never the fail-open empty-text shape.
+        assert_ne!(text, "");
+    }
+
     fn unwrap_payload(value: Value) -> Value {
         if value.get("content").is_none() {
             return value;
@@ -4280,8 +4594,13 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -4291,7 +4610,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let owner_session_id =
             meerkat::SessionId::parse(owner_session_id).expect("valid owner bridge session id");
@@ -4320,8 +4639,13 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -4334,7 +4658,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
             .with_session_service(mob_state.session_service())
@@ -4464,7 +4788,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("comms send payload serializes");
         let payload = unwrap_payload(wrapped);
         let receipt = &payload["receipt"];
 
@@ -4482,7 +4807,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[test]
     fn test_comms_peers_tool_payload_uses_typed_core_wire_contract() {
-        let wrapped = comms_peers_tool_payload(vec![sample_peer_directory_entry()]);
+        let wrapped = comms_peers_tool_payload(vec![sample_peer_directory_entry()])
+            .expect("comms peers payload serializes");
         let payload = unwrap_payload(wrapped);
 
         assert_peer_directory_wire(&payload);
@@ -4813,6 +5139,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn base_tool_descriptor_owns_request_lifecycle() {
+        // The typed descriptor table is the single owner of base MCP tool
+        // lifecycle: the resolver reads the classification straight off the
+        // descriptor co-located with name/description/schema.
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_help"),
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_run"),
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_resume"),
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_sessions"),
+            Some(RequestLifecycle::LongRunningObservation)
+        );
+        // A tool contributed by another surface resolves through that
+        // surface's feature-owned declaration, not a default fall-through.
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_schedule_create"),
+            Some(RequestLifecycle::LongRunningObservation)
+        );
+        // An unadvertised name has no lifecycle: the resolver fails closed
+        // with `None` rather than classifying it under a default.
+        assert_eq!(mcp_tool_request_lifecycle("definitely_not_a_tool"), None);
+    }
+
+    #[test]
+    fn every_advertised_tool_has_an_owned_lifecycle() {
+        // Completeness gate: every tool `tools_list` advertises — base AND
+        // contributed (schedule/workgraph/mob/comms) — must resolve to a
+        // feature-owned lifecycle. A `None` here means a contributed surface
+        // was composed into the advertisement without declaring its
+        // lifecycle.
+        for tool in tools_list() {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .expect("advertised tool carries a name");
+            assert!(
+                mcp_tool_request_lifecycle(name).is_some(),
+                "advertised tool '{name}' has no feature-owned request lifecycle"
+            );
+        }
+    }
+
+    #[test]
+    fn base_tools_list_projects_every_descriptor() {
+        // The advertised JSON is a faithful projection of the typed descriptor
+        // table — same count, same names, and each carries its schema.
+        let descriptors = base_tool_descriptors();
+        let tools = base_tools_list();
+        assert_eq!(tools.len(), descriptors.len());
+        for (descriptor, tool) in descriptors.iter().zip(tools.iter()) {
+            assert_eq!(tool["name"], descriptor.name);
+            assert_eq!(tool["description"], descriptor.description);
+            assert!(tool["inputSchema"].is_object());
+        }
+    }
+
     #[cfg(not(feature = "comms"))]
     #[test]
     fn test_tools_list_omits_comms_tools_when_feature_disabled() {
@@ -4974,6 +5365,7 @@ mod tests {
                     handshake_failed: true,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
 
@@ -5124,6 +5516,79 @@ mod tests {
         let input: MeerkatSkillsInput =
             serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap();
         assert!(matches!(input.action, MeerkatSkillsAction::List));
+    }
+
+    /// Gate for dogma row #133: MCP skills provenance must PROJECT the real
+    /// `SourceIdentityRecord` from the runtime's identity registry, never
+    /// fabricate a synthetic `mcp:{display}` / Embedded record from display
+    /// data. The wire entry's transport and fingerprint must equal the registry
+    /// record exactly.
+    #[test]
+    fn test_skill_entry_projects_real_registry_provenance_not_synthetic() {
+        use meerkat_core::skills::{
+            SkillDescriptor, SkillKey, SkillName, SkillScope, SourceIdentityRecord,
+            SourceIdentityStatus, SourceTransportKind, SourceUuid,
+        };
+
+        let source_uuid = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").expect("uuid");
+        // The authoritative record the registry would surface: a Filesystem
+        // source with a real content fingerprint — NOT the synthetic
+        // `mcp:{display_name}` / Embedded shape.
+        let registry_identity = SourceIdentityRecord {
+            source_uuid: source_uuid.clone(),
+            display_name: "company-skills".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: "sha256:abc123".to_string(),
+            status: SourceIdentityStatus::Active,
+        };
+
+        let key = SkillKey::new(
+            source_uuid,
+            SkillName::parse("email-extractor").expect("name"),
+        );
+        let mut descriptor = SkillDescriptor::new(key, "Email Extractor", "Extracts email");
+        descriptor.scope = SkillScope::Project;
+        descriptor.source_name = "company-skills".to_string();
+
+        let entry = meerkat_core::skills::SkillIntrospectionEntry {
+            descriptor,
+            source_identity: Some(registry_identity.clone()),
+            shadowed_by: None,
+            shadowed_by_identity: None,
+            shadowed_by_source_uuid: None,
+            is_active: true,
+        };
+
+        let wire = skill_entry_from_introspection(&entry).expect("real provenance projects");
+
+        // Provenance must equal the registry record verbatim.
+        assert_eq!(wire.source.identity, registry_identity);
+        assert_eq!(
+            wire.source.identity.transport_kind,
+            SourceTransportKind::Filesystem
+        );
+        assert_eq!(wire.source.identity.fingerprint, "sha256:abc123");
+        // The synthetic forms must be gone.
+        assert_ne!(
+            wire.source.identity.transport_kind,
+            SourceTransportKind::Embedded
+        );
+        assert!(
+            !wire.source.identity.fingerprint.starts_with("mcp:"),
+            "fingerprint must not be the synthetic mcp: form, got {}",
+            wire.source.identity.fingerprint
+        );
+
+        // Fail closed: an entry without a typed identity must error rather than
+        // fabricate one.
+        let mut orphan = entry;
+        orphan.source_identity = None;
+        let err = skill_entry_from_introspection(&orphan)
+            .expect_err("missing typed identity must fail closed");
+        assert!(
+            err.contains("missing typed source identity"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(not(feature = "comms"))]
@@ -5796,14 +6261,15 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(4096),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
@@ -5918,14 +6384,15 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(4096),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
@@ -6641,14 +7108,15 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                         Arc::new(TestClient::default()),
                     )),
@@ -6661,7 +7129,8 @@ mod tests {
         state
             .runtime_adapter
             .register_session(created.session_id.clone())
-            .await;
+            .await
+            .expect("register session");
         state
             .runtime_adapter
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
@@ -6697,24 +7166,26 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Hello".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Hi there".to_string(),
-                tool_calls: vec![],
+        session.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Hi there".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Follow up".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Second answer".to_string(),
-                tool_calls: vec![],
+        session.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Second answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -6804,19 +7275,6 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "legacy ok".to_string(),
-                tool_calls: vec![meerkat_core::types::ToolCall {
-                    id: "tool-1".to_string(),
-                    name: "search".into(),
-                    args: serde_json::json!({ "query": "history" }),
-                }],
-                stop_reason: meerkat_core::types::StopReason::ToolUse,
-                usage: meerkat_core::types::Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
         session.push(meerkat_core::types::Message::BlockAssistant(
             meerkat_core::types::BlockAssistantMessage::new(
                 vec![meerkat_core::types::AssistantBlock::ToolUse {
@@ -6848,19 +7306,17 @@ mod tests {
             .as_array()
             .expect("history messages should be an array");
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(messages[2]["tool_calls"][0]["name"], "search");
-        assert_eq!(messages[3]["role"], "block_assistant");
-        assert_eq!(messages[3]["blocks"][0]["block_type"], "tool_use");
+        assert_eq!(messages[2]["role"], "block_assistant");
+        assert_eq!(messages[2]["blocks"][0]["block_type"], "tool_use");
         assert_eq!(
-            messages[3]["blocks"][0]["data"]["args"]["item"],
+            messages[2]["blocks"][0]["data"]["args"]["item"],
             "transcript"
         );
-        assert_eq!(messages[4]["role"], "tool_results");
-        assert_eq!(messages[4]["results"][0]["tool_use_id"], "tool-2");
+        assert_eq!(messages[3]["role"], "tool_results");
+        assert_eq!(messages[3]["results"][0]["tool_use_id"], "tool-2");
     }
 
     #[tokio::test]
@@ -7021,10 +7477,10 @@ mod tests {
     async fn test_event_stream_read_default_timeout_and_close_behavior() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-timeout-default".to_string();
+        let stream_id = McpStreamId::mint();
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(pending_stream),
             }),
@@ -7033,7 +7489,7 @@ mod tests {
         let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
-            &json!({ "stream_id": stream_id }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("read should complete with timeout");
@@ -7043,7 +7499,7 @@ mod tests {
         let closed = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-timeout-default" }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("close should succeed");
@@ -7055,10 +7511,10 @@ mod tests {
     async fn test_event_stream_read_no_timeout_opt_in_blocks() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-no-timeout".to_string();
+        let stream_id = McpStreamId::mint();
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(pending_stream),
             }),
@@ -7069,7 +7525,7 @@ mod tests {
             handle_tools_call(
                 &state,
                 "meerkat_event_stream_read",
-                &json!({ "stream_id": stream_id, "no_timeout": true }),
+                &json!({ "stream_id": stream_id.to_string(), "no_timeout": true }),
             ),
         ))
         .await;
@@ -7080,10 +7536,10 @@ mod tests {
     async fn test_event_stream_read_empty_stream_reports_closed_and_removes_entry() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-closed".to_string();
+        let stream_id = McpStreamId::mint();
         let empty_stream: meerkat_core::EventStream = Box::pin(stream::empty());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(empty_stream),
             }),
@@ -7092,7 +7548,7 @@ mod tests {
         let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
-            &json!({ "stream_id": stream_id }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("read should succeed");
@@ -7102,12 +7558,33 @@ mod tests {
         let close = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-closed" }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);
         assert_eq!(close_payload["closed"], false);
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_read_rejects_malformed_stream_id() {
+        // Stream identity is a typed fact parsed fail-closed at ingress
+        // (`McpStreamId::parse`): a malformed wire stream_id is rejected
+        // outright, never treated as a probe into the string-keyed registry.
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_event_stream_read",
+            &json!({ "stream_id": "not-a-stream-id" }),
+        ))
+        .await
+        .expect_err("malformed stream_id must fail closed");
+        assert!(
+            err.message.contains("invalid stream_id"),
+            "expected fail-closed parse error, got: {}",
+            err.message
+        );
     }
 
     #[cfg(feature = "comms")]

@@ -635,7 +635,6 @@ pub struct WorkItem {
     pub owner: Option<WorkOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<WorkClaim>,
-    #[serde(default = "default_workgraph_machine_state")]
     pub machine_state: WorkGraphMachineState,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -652,10 +651,6 @@ pub struct WorkItem {
     pub external_refs: Vec<ExternalWorkRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<WorkEvidenceRef>,
-}
-
-fn default_workgraph_machine_state() -> WorkGraphMachineState {
-    WorkGraphMachineState::default()
 }
 
 #[derive(Deserialize)]
@@ -701,10 +696,12 @@ impl<'de> Deserialize<'de> for WorkItem {
         D: serde::Deserializer<'de>,
     {
         let mut wire = WorkItemWire::deserialize(deserializer)?;
-        let machine_state = wire
-            .machine_state
-            .take()
-            .unwrap_or_else(|| legacy_workgraph_machine_state(&wire));
+        let machine_state = wire.machine_state.take().ok_or_else(|| {
+            serde::de::Error::custom(
+                "WorkItem is missing `machine_state`: lifecycle/revision authority is machine-owned \
+                 and cannot be reconstructed from projected fields",
+            )
+        })?;
         Ok(Self {
             id: wire.id,
             realm_id: wire.realm_id,
@@ -733,6 +730,15 @@ impl<'de> Deserialize<'de> for WorkItem {
 
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for WorkItem {
+    // NOTE (K21): this manual schema inlines the composite field shapes
+    // (`owner`, `claim`, `completion_policy`, `external_refs`,
+    // `evidence_refs`). The SDK generator's inline-object promotion pass
+    // (tools/sdk-codegen/generate.py) dedupes them by structural content
+    // against the derived sibling schemas (`WorkOwnerKey`,
+    // `WorkCompletionPolicy`, `WorkEvidenceRef`); keep these inline copies
+    // structurally identical to the derived shapes or the generator will
+    // mint `WorkItem*`-named twins (visible in the regen diff and the
+    // promotion report).
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "WorkItem".into()
     }
@@ -768,23 +774,23 @@ impl schemars::JsonSchema for WorkItem {
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "self_attest" } }
+                            "properties": { "kind": { "type": "string", "const": "self_attest" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "host_confirmed" } }
+                            "properties": { "kind": { "type": "string", "const": "host_confirmed" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "principal_confirmed" } }
+                            "properties": { "kind": { "type": "string", "const": "principal_confirmed" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind", "owner_key"],
                             "properties": {
-                                "kind": { "const": "supervisor" },
+                                "kind": { "type": "string", "const": "supervisor" },
                                 "owner_key": {
                                     "type": "object",
                                     "required": ["kind", "id"],
@@ -802,8 +808,8 @@ impl schemars::JsonSchema for WorkItem {
                             "type": "object",
                             "required": ["kind", "threshold"],
                             "properties": {
-                                "kind": { "const": "reviewer_quorum" },
-                                "threshold": { "type": "integer", "format": "uint16", "minimum": 1 }
+                                "kind": { "type": "string", "const": "reviewer_quorum" },
+                                "threshold": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 65535 }
                             }
                         }
                     ]
@@ -846,7 +852,24 @@ impl schemars::JsonSchema for WorkItem {
                             "type": "object",
                             "required": ["owner", "claimed_at"],
                             "properties": {
-                                "owner": { "type": "object" },
+                                "owner": {
+                                    "type": "object",
+                                    "required": ["key"],
+                                    "properties": {
+                                        "key": {
+                                            "type": "object",
+                                            "required": ["kind", "id"],
+                                            "properties": {
+                                                "kind": {
+                                                    "type": "string",
+                                                    "enum": ["principal", "agent", "session", "mob", "label"]
+                                                },
+                                                "id": { "type": "string" }
+                                            }
+                                        },
+                                        "display_name": { "type": ["string", "null"] }
+                                    }
+                                },
                                 "claimed_at": { "type": "string", "format": "date-time" },
                                 "lease_expires_at": { "type": ["string", "null"], "format": "date-time" }
                             }
@@ -886,35 +909,48 @@ impl schemars::JsonSchema for WorkItem {
                             "kind": { "type": "string" },
                             "id": { "type": "string" },
                             "label": { "type": ["string", "null"] },
-                            "summary": { "type": ["string", "null"] }
+                            "summary": { "type": ["string", "null"] },
+                            "confirmation_kind": {
+                                "anyOf": [
+                                    {
+                                        "oneOf": [
+                                            {
+                                                "type": "string",
+                                                "enum": [
+                                                    "host_confirmation",
+                                                    "principal_confirmation",
+                                                    "supervisor_confirmation",
+                                                    "reviewer_confirmation"
+                                                ]
+                                            },
+                                            { "type": "string", "const": "self_attest" }
+                                        ]
+                                    },
+                                    { "type": "null" }
+                                ]
+                            },
+                            "confirming_owner_key": {
+                                "anyOf": [
+                                    {
+                                        "type": "object",
+                                        "required": ["kind", "id"],
+                                        "properties": {
+                                            "kind": {
+                                                "type": "string",
+                                                "enum": ["principal", "agent", "session", "mob", "label"]
+                                            },
+                                            "id": { "type": "string" }
+                                        }
+                                    },
+                                    { "type": "null" }
+                                ]
+                            }
                         }
                     }
                 }
             }
         })
     }
-}
-
-fn legacy_workgraph_machine_state(wire: &WorkItemWire) -> WorkGraphMachineState {
-    let mut machine_state = WorkGraphMachineState {
-        lifecycle_phase: work_lifecycle_state_from_status(wire.status),
-        revision: wire.revision,
-        due_at_utc_ms: wire.due_at.map(datetime_to_millis),
-        not_before_utc_ms: wire.not_before.map(datetime_to_millis),
-        snoozed_until_utc_ms: wire.snoozed_until.map(datetime_to_millis),
-        completion_policy: wire.completion_policy.clone().to_machine(),
-        completion_supervisor_owner_key: wire.completion_policy.supervisor_owner_key(),
-        completion_reviewer_quorum_threshold: wire.completion_policy.reviewer_quorum_threshold(),
-        terminal_at_utc_ms: wire.terminal_at.map(datetime_to_millis),
-        evidence_count: wire.evidence_refs.len().try_into().unwrap_or(u64::MAX),
-        ..default_workgraph_machine_state()
-    };
-    if let Some(claim) = &wire.claim {
-        machine_state.claim_owner_key = Some(work_owner_key_to_machine(&claim.owner.key));
-        machine_state.claimed_at_utc_ms = Some(datetime_to_millis(claim.claimed_at));
-        machine_state.lease_expires_at_utc_ms = claim.lease_expires_at.map(datetime_to_millis);
-    }
-    machine_state
 }
 
 pub(crate) fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
@@ -954,10 +990,6 @@ fn work_owner_key_from_machine(owner: wg_dsl::WorkOwnerKey) -> WorkOwnerKey {
         wg_dsl::WorkOwnerKind::Label => WorkOwnerKind::Label,
     };
     WorkOwnerKey { kind, id: owner.id }
-}
-
-fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
-    u64::try_from(dt.timestamp_millis()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1599,4 +1631,60 @@ pub struct WorkGraphItemsResponse {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphEventsResponse {
     pub events: Vec<WorkGraphEvent>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::machine::WorkGraphMachine;
+
+    fn machine_item() -> WorkItem {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                title: "deserialize-authority".to_string(),
+                ..Default::default()
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            Utc::now(),
+        )
+        .expect("machine create_item")
+        .0
+    }
+
+    #[test]
+    fn work_item_round_trip_preserves_machine_state() {
+        let item = machine_item();
+        let json = serde_json::to_string(&item).expect("serialize work item");
+        let decoded: WorkItem = serde_json::from_str(&json).expect("deserialize work item");
+        assert_eq!(
+            decoded, item,
+            "round-trip must preserve the whole work item"
+        );
+        assert_eq!(
+            decoded.machine_state, item.machine_state,
+            "round-trip must preserve machine-owned lifecycle authority verbatim"
+        );
+    }
+
+    #[test]
+    fn work_item_without_machine_state_fails_closed() {
+        let item = machine_item();
+        let mut value = serde_json::to_value(&item).expect("serialize work item to value");
+        value
+            .as_object_mut()
+            .expect("work item json object")
+            .remove("machine_state");
+
+        let result: Result<WorkItem, _> = serde_json::from_value(value);
+        let err = result.expect_err(
+            "deserializing a WorkItem without machine_state must fail closed, \
+             never fabricate lifecycle/revision authority from projected fields",
+        );
+        assert!(
+            err.to_string().contains("machine_state"),
+            "fail-closed error must cite the missing machine_state authority, got: {err}"
+        );
+    }
 }

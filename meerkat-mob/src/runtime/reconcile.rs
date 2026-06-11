@@ -7,7 +7,6 @@
 
 use crate::error::MobError;
 use crate::ids::{AgentIdentity, ProfileName};
-use crate::roster::MemberState;
 use crate::runtime::handle::{MobMemberListEntry, SpawnResult};
 use std::collections::BTreeMap;
 
@@ -84,7 +83,6 @@ pub struct MemberFilter {
     pub labels: BTreeMap<String, String>,
     /// Required role (profile name).
     pub role: Option<ProfileName>,
-    /// Required compatibility state, evaluated against the canonical
-    /// machine-projected member status.
-    pub state: Option<MemberState>,
+    /// Required canonical machine-projected member status.
+    pub status: Option<crate::runtime::handle::MobMemberStatus>,
 }

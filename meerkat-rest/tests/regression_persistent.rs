@@ -24,8 +24,14 @@ use tempfile::TempDir;
 use tokio::time::{Duration, timeout};
 use tower::ServiceExt;
 
-/// Build an `AppState` backed by the given `MemoryStore`, with optional overrides
-/// for `default_model` and `max_tokens` on the `AppState` itself.
+/// Build an `AppState` backed by the given `MemoryStore`, with an optional
+/// `max_tokens` override on the `AppState` itself.
+///
+/// There is deliberately NO default-model override knob: the create-session
+/// default model is not an `AppState` fact — it is resolved per request from
+/// the state's config store through the canonical
+/// `meerkat::resolve_create_session_default_model` ladder. Tests that need a
+/// divergent server default express it as a config fact (`config.agent.model`).
 ///
 /// The `enable_builtins` / `enable_shell` flags default to `true` unless
 /// overridden by the caller through the returned struct.
@@ -35,7 +41,6 @@ fn build_state(
     store_path: &std::path::Path,
     project_root: &std::path::Path,
     config: &Config,
-    default_model: Option<&str>,
     max_tokens: Option<u32>,
 ) -> AppState {
     let factory = AgentFactory::new(store_path.to_path_buf())
@@ -77,10 +82,6 @@ fn build_state(
 
     AppState {
         store_path: store_path.to_path_buf(),
-        default_model: default_model
-            .unwrap_or(&config.agent.model)
-            .to_string()
-            .into(),
         max_tokens: max_tokens.unwrap_or(config.agent.max_tokens_per_turn),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
@@ -174,23 +175,33 @@ impl Scaffold {
             &self.project_root,
             &self.config,
             None,
+        )
+    }
+
+    /// State for a "reconstructed" server whose CONFIG carries a different
+    /// global default model — the only place a server default exists; it is
+    /// resolved per request via the canonical ladder, never cached on state.
+    fn state_with_config_default_model(&self, default_model: &str) -> AppState {
+        let mut config = self.config.clone();
+        config.agent.model = default_model.to_string();
+        build_state(
+            self.store.clone(),
+            self.runtime_store.clone(),
+            &self.store_path,
+            &self.project_root,
+            &config,
             None,
         )
     }
 
-    fn state_with_overrides(
-        &self,
-        default_model: Option<&str>,
-        max_tokens: Option<u32>,
-    ) -> AppState {
+    fn state_with_max_tokens(&self, max_tokens: u32) -> AppState {
         build_state(
             self.store.clone(),
             self.runtime_store.clone(),
             &self.store_path,
             &self.project_root,
             &self.config,
-            default_model,
-            max_tokens,
+            Some(max_tokens),
         )
     }
 }
@@ -290,8 +301,9 @@ async fn resume_preserves_model_metadata() {
     )
     .await;
 
-    // Reconstruct service with a DIFFERENT default model — resume must preserve original.
-    let state2 = s.state_with_overrides(Some("gpt-5.2"), None);
+    // Reconstruct service with a DIFFERENT configured default model — resume
+    // must preserve the original session model.
+    let state2 = s.state_with_config_default_model("gpt-5.2");
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -324,7 +336,7 @@ async fn resume_preserves_max_tokens() {
     .await;
 
     // Reconstruct with wildly different max_tokens on the server.
-    let state2 = s.state_with_overrides(None, Some(9999));
+    let state2 = s.state_with_max_tokens(9999);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -407,8 +419,9 @@ async fn resume_preserves_provider() {
         .expect("session exists");
     let original_provider = session.session_metadata().expect("metadata").provider;
 
-    // Reconstruct with a different default model (which implies a different provider).
-    let state2 = s.state_with_overrides(Some("gpt-5.2"), None);
+    // Reconstruct with a different configured default model (which implies a
+    // different provider).
+    let state2 = s.state_with_config_default_model("gpt-5.2");
     let (status, _) = resume_session(
         state2,
         &sid,

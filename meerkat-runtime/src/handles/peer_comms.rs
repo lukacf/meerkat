@@ -63,17 +63,25 @@ impl RuntimePeerCommsHandle {
 
 fn lifecycle_to_dsl(
     kind: meerkat_core::comms::PeerLifecycleKind,
-) -> mm_dsl::PeerIngressLifecycleClass {
+) -> Result<mm_dsl::PeerIngressLifecycleClass, DslTransitionError> {
     match kind {
         meerkat_core::comms::PeerLifecycleKind::PeerAdded => {
-            mm_dsl::PeerIngressLifecycleClass::PeerAdded
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerAdded)
         }
         meerkat_core::comms::PeerLifecycleKind::PeerRetired => {
-            mm_dsl::PeerIngressLifecycleClass::PeerRetired
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerRetired)
         }
         meerkat_core::comms::PeerLifecycleKind::PeerUnwired => {
-            mm_dsl::PeerIngressLifecycleClass::PeerUnwired
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerUnwired)
         }
+        // Dismissal is a supervisor/runtime drain-lifecycle terminal, not an
+        // ingress-classifiable topology notice. It has no peer-ingress
+        // classification route, so reject it fail-closed here rather than
+        // laundering it into a topology class.
+        meerkat_core::comms::PeerLifecycleKind::Dismiss => Err(DslTransitionError::guard_rejected(
+            "PeerCommsHandle::classify_external_envelope",
+            "mob.dismiss is a drain-lifecycle terminal and is not classifiable as peer ingress",
+        )),
     }
 }
 
@@ -103,11 +111,37 @@ fn response_status_to_dsl(
     }
 }
 
-fn lifecycle_peer_param(params: &serde_json::Value) -> Option<String> {
-    params
-        .get("peer")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+/// Parse the typed peer lifecycle subject fail-closed at machine ingress
+/// (K15).
+///
+/// The wire owner is `meerkat_contracts::CommsPeerLifecycleParams`:
+/// `peer_spec` is the canonical typed peer identity when the sender has it;
+/// `peer` is the required presentation subject otherwise. Malformed params,
+/// a missing subject, or an empty subject are rejected here with a typed
+/// error — a lifecycle notice is never silently attributed to the sender
+/// name.
+fn lifecycle_subject(
+    params: &serde_json::Value,
+    context: &'static str,
+) -> Result<String, DslTransitionError> {
+    let parsed: meerkat_contracts::CommsPeerLifecycleParams =
+        serde_json::from_value(params.clone()).map_err(|error| {
+            DslTransitionError::guard_rejected(
+                context,
+                format!("malformed peer lifecycle params: {error}"),
+            )
+        })?;
+    let subject = match parsed.peer_spec {
+        Some(spec) => spec.name,
+        None => parsed.peer,
+    };
+    if subject.is_empty() {
+        return Err(DslTransitionError::guard_rejected(
+            context,
+            "peer lifecycle params carry an empty peer subject",
+        ));
+    }
+    Ok(subject)
 }
 
 fn terminality_from_dsl(
@@ -155,7 +189,25 @@ fn auth_to_dsl(auth: meerkat_core::PeerIngressAuthDecision) -> mm_dsl::PeerIngre
     }
 }
 
-fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
+/// Classify a peer-ingress request intent into the closed routing class the
+/// machine guards on. Intents outside the closed set (including the empty
+/// intent carried by non-request envelopes) map to `Other`; the raw intent
+/// string is still threaded through the signal for the open-set
+/// `silent_intent_overrides` membership check inside the machine.
+fn request_intent_class_for(intent: &str) -> mm_dsl::PeerIngressRequestClass {
+    match intent {
+        "mob.peer_added" => mm_dsl::PeerIngressRequestClass::MobPeerAdded,
+        "mob.peer_retired" => mm_dsl::PeerIngressRequestClass::MobPeerRetired,
+        "mob.peer_unwired" => mm_dsl::PeerIngressRequestClass::MobPeerUnwired,
+        "supervisor.bridge" => mm_dsl::PeerIngressRequestClass::SupervisorBridge,
+        _ => mm_dsl::PeerIngressRequestClass::Other,
+    }
+}
+
+fn external_envelope_signal(
+    facts: &PeerIngressEnvelopeFacts,
+) -> Result<mm_dsl::MeerkatMachineSignal, DslTransitionError> {
+    const CONTEXT: &str = "PeerCommsHandle::classify_external_envelope";
     let (
         envelope_kind,
         request_intent,
@@ -172,19 +224,34 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
-        meerkat_core::PeerIngressEnvelopeKind::Request { intent, params } => (
-            mm_dsl::PeerIngressEnvelopeClass::Request,
-            intent.clone(),
-            mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            lifecycle_peer_param(params),
-            mm_dsl::PeerIngressResponseStatus::Accepted,
-            String::new(),
-        ),
+        meerkat_core::PeerIngressEnvelopeKind::Request { intent, params } => {
+            // K15: lifecycle-classed requests must carry a typed peer
+            // subject; the subject is parsed fail-closed here at ingress
+            // (never defaulted from the sender name). Non-lifecycle request
+            // params remain opaque payload.
+            let lifecycle_peer_param = match request_intent_class_for(intent) {
+                mm_dsl::PeerIngressRequestClass::MobPeerAdded
+                | mm_dsl::PeerIngressRequestClass::MobPeerRetired
+                | mm_dsl::PeerIngressRequestClass::MobPeerUnwired => {
+                    Some(lifecycle_subject(params, CONTEXT)?)
+                }
+                mm_dsl::PeerIngressRequestClass::SupervisorBridge
+                | mm_dsl::PeerIngressRequestClass::Other => None,
+            };
+            (
+                mm_dsl::PeerIngressEnvelopeClass::Request,
+                intent.clone(),
+                mm_dsl::PeerIngressLifecycleClass::PeerAdded,
+                lifecycle_peer_param,
+                mm_dsl::PeerIngressResponseStatus::Accepted,
+                String::new(),
+            )
+        }
         meerkat_core::PeerIngressEnvelopeKind::Lifecycle { kind, params } => (
             mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
             String::new(),
-            lifecycle_to_dsl(*kind),
-            lifecycle_peer_param(params),
+            lifecycle_to_dsl(*kind)?,
+            Some(lifecycle_subject(params, CONTEXT)?),
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -212,16 +279,19 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         ),
     };
 
-    mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
+    let request_intent_class = request_intent_class_for(&request_intent);
+
+    Ok(mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
         item_id: facts.item_id.clone(),
         from_peer: facts.from_peer.clone(),
         envelope_kind,
         request_intent,
+        request_intent_class,
         lifecycle_kind,
         lifecycle_peer_param,
         response_status,
         in_reply_to,
-    }
+    })
 }
 
 struct PeerIngressClassifiedEffect {
@@ -384,12 +454,16 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         let context = "PeerCommsHandle::classify_external_envelope";
         let effects = self
             .dsl
-            .apply_signal_with_effects(external_envelope_signal(&facts), context)?;
+            .apply_signal_with_effects(external_envelope_signal(&facts)?, context)?;
         let effect = classified_effect(effects, context)?;
         let classification = classification_from_effect(&effect);
         Ok(PeerIngressAdmission {
             rendered_text: meerkat_core::render_peer_ingress_admitted_text(&facts, &classification),
             classification,
+            // #96/#106: the machine owns the typed `Option<PeerId>` lifecycle
+            // subject; project it to the display-string carried by the core
+            // admission fact at this single boundary (the downstream comms layer
+            // keeps the name-shaped `Option<String>` contract).
             lifecycle_peer: effect.lifecycle_peer,
             request_id: effect.request_id,
         })
@@ -854,7 +928,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_peer_comms_handle_lifecycle_subject_is_selected_by_machine() {
+    fn runtime_peer_comms_handle_lifecycle_subject_is_parsed_typed_at_ingress() {
+        // K15: the lifecycle subject is parsed fail-closed from the typed
+        // `CommsPeerLifecycleParams` wire contract at machine ingress.
+        // `peer_spec` is the canonical identity when present; a missing or
+        // empty subject is a typed rejection — never a sender-name default.
         let state = mm_dsl::MeerkatMachineState {
             lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
             session_id: Some(mm_dsl::SessionId("session-1".to_string())),
@@ -880,34 +958,67 @@ mod tests {
             .expect("machine should classify lifecycle request");
         assert_eq!(with_param.lifecycle_peer.as_deref(), Some("worker-1"));
 
-        let without_param = handle
+        // `peer_spec` is the canonical typed identity and wins over the
+        // presentation `peer` field.
+        let with_spec = handle
             .classify_external_envelope(PeerIngressEnvelopeFacts {
-                item_id: "request-fallback".to_string(),
+                item_id: "request-spec".to_string(),
                 from_peer: "orchestrator".to_string(),
                 from_peer_id: meerkat_core::comms::PeerId::new(),
                 kind: meerkat_core::PeerIngressEnvelopeKind::Request {
-                    intent: "mob.peer_retired".to_string(),
-                    params: serde_json::json!({}),
+                    intent: "mob.peer_added".to_string(),
+                    params: serde_json::json!({
+                        "peer": "worker-1",
+                        "peer_spec": {
+                            "name": "mob/worker-1",
+                            "peer_id": "pid-worker-1",
+                            "address": "inproc://mob/worker-1"
+                        }
+                    }),
                 },
             })
-            .expect("machine should classify lifecycle request fallback");
-        assert_eq!(
-            without_param.lifecycle_peer.as_deref(),
-            Some("orchestrator")
-        );
+            .expect("machine should classify lifecycle request with peer_spec");
+        assert_eq!(with_spec.lifecycle_peer.as_deref(), Some("mob/worker-1"));
 
-        let empty_param = handle
-            .classify_external_envelope(PeerIngressEnvelopeFacts {
-                item_id: "lifecycle-empty".to_string(),
-                from_peer: "orchestrator".to_string(),
-                from_peer_id: meerkat_core::comms::PeerId::new(),
-                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
-                    kind: meerkat_core::comms::PeerLifecycleKind::PeerUnwired,
-                    params: serde_json::json!({ "peer": "" }),
-                },
-            })
-            .expect("machine should classify lifecycle event fallback");
-        assert_eq!(empty_param.lifecycle_peer.as_deref(), Some("orchestrator"));
+        // Missing subject: typed rejection at ingress, not sender attribution.
+        let without_param = handle.classify_external_envelope(PeerIngressEnvelopeFacts {
+            item_id: "request-missing-subject".to_string(),
+            from_peer: "orchestrator".to_string(),
+            from_peer_id: meerkat_core::comms::PeerId::new(),
+            kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                intent: "mob.peer_retired".to_string(),
+                params: serde_json::json!({}),
+            },
+        });
+        let error = without_param
+            .expect_err("lifecycle request without a peer subject must be rejected at ingress");
+        assert_eq!(error.context, "PeerCommsHandle::classify_external_envelope");
+
+        // Empty subject: typed rejection at ingress, not sender attribution.
+        let empty_param = handle.classify_external_envelope(PeerIngressEnvelopeFacts {
+            item_id: "lifecycle-empty".to_string(),
+            from_peer: "orchestrator".to_string(),
+            from_peer_id: meerkat_core::comms::PeerId::new(),
+            kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                kind: meerkat_core::comms::PeerLifecycleKind::PeerUnwired,
+                params: serde_json::json!({ "peer": "" }),
+            },
+        });
+        let error = empty_param
+            .expect_err("lifecycle event with an empty peer subject must be rejected at ingress");
+        assert_eq!(error.context, "PeerCommsHandle::classify_external_envelope");
+
+        // Malformed params (unknown field / wrong shape): typed rejection.
+        let malformed = handle.classify_external_envelope(PeerIngressEnvelopeFacts {
+            item_id: "lifecycle-malformed".to_string(),
+            from_peer: "orchestrator".to_string(),
+            from_peer_id: meerkat_core::comms::PeerId::new(),
+            kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                params: serde_json::json!({ "peer": "worker-1", "unexpected": true }),
+            },
+        });
+        malformed.expect_err("malformed lifecycle params must be rejected at ingress");
     }
 
     #[test]

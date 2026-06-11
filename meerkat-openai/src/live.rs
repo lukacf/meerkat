@@ -9,9 +9,10 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
+use meerkat_core::realtime_transcript::{AppendRealtimeTranscript, TranscriptLane};
 use meerkat_core::{
     Message, PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeTranscriptRole,
-    ToolDef, ToolResult,
+    ToolCallId, ToolDef, ToolName, ToolResult,
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
@@ -35,6 +36,10 @@ use tokio::sync::mpsc;
 
 pub use oai_rt_rs::ClientEvent as OpenAiLiveClientEvent;
 pub use oai_rt_rs::ServerEvent as OpenAiLiveServerEvent;
+/// Re-export of the realtime output voice type so external callers of
+/// [`openai_live_function_call_success_events`] can name the typed voice
+/// argument without depending on `oai-rt-rs` directly.
+pub use oai_rt_rs::protocol::models::Voice as OpenAiLiveVoice;
 
 /// Provider-owned attachment target for an OpenAI Realtime sideband session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,12 +276,6 @@ fn openai_realtime_history_context(seed_messages: &[Message]) -> Option<String> 
                     dialogue_lines.push(format!("User: {text}"));
                 }
             }
-            Message::Assistant(assistant) => {
-                let text = compact_projection_text(&assistant.content);
-                if !text.is_empty() {
-                    dialogue_lines.push(format!("Assistant: {text}"));
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let text = compact_projection_text(
                     &assistant.text_blocks().collect::<Vec<_>>().join("\n"),
@@ -327,7 +326,7 @@ fn openai_realtime_runtime_system_context_text(append: &PendingSystemContextAppe
         text.push_str(source);
     }
     text.push_str("\n\n");
-    text.push_str(&append.text);
+    text.push_str(&append.content.render_text());
     text
 }
 
@@ -340,9 +339,8 @@ fn openai_realtime_authoritative_system_context(
         .collect::<Vec<_>>();
     let raw_lines = runtime_system_context
         .iter()
-        .map(|append| append.text.trim())
+        .map(|append| append.content.render_text().trim().to_owned())
         .filter(|text| !text.is_empty())
-        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     if summaries.is_empty() && raw_lines.is_empty() {
         return None;
@@ -416,20 +414,6 @@ fn openai_realtime_history_events(
                         phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText {
-                            text: text.to_string(),
-                        }],
-                    })
-                })
-            }
-            Message::Assistant(assistant) => {
-                let text = assistant.content.trim();
-                (!text.is_empty()).then(|| {
-                    ProjectionHistoryItem::Dialogue(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::Assistant,
-                        content: vec![ContentPart::OutputText {
                             text: text.to_string(),
                         }],
                     })
@@ -551,10 +535,11 @@ async fn configure_openai_live_session(
 ) -> Result<(), LlmError> {
     wait_for_openai_session_created(session).await?;
 
+    let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
     session
         .send_raw(ClientEvent::SessionUpdate {
             event_id: None,
-            session: Box::new(openai_session_update(open_config)),
+            session: Box::new(openai_session_update(open_config, &policy)),
         })
         .await?;
 
@@ -607,7 +592,10 @@ fn session_update_with_audio_text_modality(
     }
 }
 
-fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpdate {
+fn openai_session_update(
+    open_config: &RealtimeSessionOpenConfig,
+    policy: &OpenAiRealtimePolicy,
+) -> SessionUpdate {
     let turn_detection = match open_config.turning_mode {
         RealtimeTurningMode::ProviderManaged => Some(Nullable::Value(TurnDetection::ServerVad {
             threshold: None,
@@ -634,21 +622,22 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
             openai_realtime_instructions(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                policy.output_language_instruction.clone(),
             ),
             Some(AudioConfig {
                 input: Some(InputAudioConfig {
                     format: Some(AudioFormat::pcm_24khz()),
                     turn_detection,
                     transcription: Some(Nullable::Value(InputAudioTranscription {
-                        model: Some(openai_realtime_transcription_model()),
-                        language: openai_realtime_input_language(),
+                        model: Some(policy.transcription_model.clone()),
+                        language: policy.input_language.clone(),
                         prompt: None,
                     })),
                     noise_reduction: None,
                 }),
                 output: Some(OutputAudioConfig {
                     format: Some(AudioFormat::pcm_24khz()),
-                    voice: Some(openai_realtime_voice()),
+                    voice: Some(policy.voice.clone()),
                     speed: None,
                     language: None,
                 }),
@@ -658,7 +647,10 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
     }
 }
 
-fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpdate {
+fn openai_projection_session_update(
+    open_config: &RealtimeSessionOpenConfig,
+    policy: &OpenAiRealtimePolicy,
+) -> SessionUpdate {
     SessionUpdate {
         // R5-2 follow-up: even the projection refresh path must pin
         // `Audio`. OpenAI's session-merge semantics preserve unset
@@ -670,6 +662,7 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
             openai_realtime_instructions(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                policy.output_language_instruction.clone(),
             ),
             None,
             Some(openai_realtime_tools(&open_config.visible_tools)),
@@ -702,10 +695,12 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
 /// audio config it was opened with.
 fn openai_refresh_session_update_from_snapshot(
     snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
+    policy: &OpenAiRealtimePolicy,
 ) -> SessionUpdate {
     let instructions = openai_refresh_instructions_from_snapshot(
         snapshot.system_prompt.as_deref(),
         &snapshot.runtime_system_context,
+        policy.output_language_instruction.clone(),
     );
 
     // OpenAI Realtime only supports `audio/pcm` at 24 kHz today
@@ -770,8 +765,8 @@ fn openai_refresh_session_update_from_snapshot(
 fn openai_refresh_instructions_from_snapshot(
     system_prompt: Option<&str>,
     runtime_system_context: &[PendingSystemContextAppend],
+    language_pin: Option<String>,
 ) -> Option<String> {
-    let language_pin = openai_realtime_output_language_instruction();
     let authoritative_context =
         openai_realtime_authoritative_system_context(runtime_system_context);
     let trimmed_prompt = system_prompt
@@ -796,109 +791,105 @@ fn openai_refresh_instructions_from_snapshot(
     }
 }
 
-fn openai_realtime_voice() -> Voice {
-    Voice::from(
-        std::env::var("RKAT_REALTIME_OPENAI_VOICE")
-            .ok()
-            .or_else(|| std::env::var("OPENAI_REALTIME_VOICE").ok())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "marin".to_string()),
-    )
-}
+/// Default realtime output voice. Provider-owned operational default for
+/// the OpenAI realtime adapter; carried as a typed value on
+/// [`OpenAiRealtimePolicy`] rather than re-read from process env at every
+/// `session.update` / `response.create` build site.
+const OPENAI_REALTIME_DEFAULT_VOICE: &str = "marin";
 
 /// Default ISO-639 language code for realtime input transcription.
 ///
 /// OpenAI's realtime transcription model auto-detects input language when
 /// unset, which lets short or noisy English audio drift into other
 /// languages (s71/s72 observed Japanese/Chinese drift). Pin the
-/// transcription language up front; callers who run multilingual
-/// deployments can opt out via `RKAT_REALTIME_INPUT_LANGUAGE` (set to a
-/// different ISO code) or `RKAT_REALTIME_INPUT_LANGUAGE=auto` to restore
-/// auto-detection.
+/// transcription language up front via the typed policy default.
 const OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE: &str = "en";
-/// Default ISO-639 language code for realtime output (text + audio
-/// transcript). Shares the default with input so the two modalities
-/// stay coherent under drift. `RKAT_REALTIME_OUTPUT_LANGUAGE=none`
-/// skips the instruction entirely.
-const OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE: &str = "en";
 
-fn openai_realtime_input_language() -> Option<String> {
-    let raw = std::env::var("RKAT_REALTIME_INPUT_LANGUAGE")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_REALTIME_INPUT_LANGUAGE").ok());
-    resolve_realtime_input_language(raw.as_deref())
+/// Typed, model-keyed operational policy for an OpenAI realtime session.
+///
+/// #69 / #149: the realtime voice, input transcription language, output
+/// language pin, and input transcription model are provider-owned
+/// operational defaults — not process-environment policy. This struct is
+/// the single typed owner of those facts. It is resolved once at
+/// session-open time from the session's [`SessionLlmIdentity`] (the
+/// realtime model) and then carried on [`OpenAiRealtimeSession`] /
+/// threaded into every `session.update` + `response.create` build site.
+///
+/// No `std::env::var` reads: the defaults are compile-time typed values,
+/// and the transcription model is keyed off the active realtime model so
+/// it follows model identity rather than a hardcoded literal scattered
+/// across the wire-build helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenAiRealtimePolicy {
+    /// Output voice for spoken audio responses.
+    voice: Voice,
+    /// Pinned input transcription language (ISO-639). `None` restores the
+    /// provider's native auto-detection.
+    input_language: Option<String>,
+    /// Rendered output-language instruction block. `None` skips the pin.
+    output_language_instruction: Option<String>,
+    /// Input audio transcription model, keyed off the active realtime
+    /// model identity.
+    transcription_model: String,
 }
 
-/// Pure-function core of [`openai_realtime_input_language`] — takes the
-/// raw env value (or `None` when unset) and applies the "blank →
-/// default, `auto` → None, otherwise pass through" policy. Split so
-/// unit tests can exercise the policy without touching process env.
-fn resolve_realtime_input_language(raw: Option<&str>) -> Option<String> {
-    let value = raw
-        .map(str::trim)
-        .filter(|trimmed| !trimmed.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE.to_string());
-    if value.eq_ignore_ascii_case("auto") {
-        None
-    } else {
-        Some(value)
+impl OpenAiRealtimePolicy {
+    /// Resolve the typed realtime policy from the session's LLM identity.
+    ///
+    /// All values derive from typed defaults / the model identity; nothing
+    /// is read from process env. The transcription model follows the
+    /// active realtime model so a future realtime model keys its own
+    /// transcription companion here rather than through a bare literal at
+    /// the `session.update` build site.
+    fn resolve(identity: &meerkat_core::SessionLlmIdentity) -> Self {
+        Self {
+            voice: Voice::from(OPENAI_REALTIME_DEFAULT_VOICE.to_string()),
+            input_language: Some(OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE.to_string()),
+            output_language_instruction: Some(openai_realtime_output_language_instruction()),
+            transcription_model: openai_realtime_transcription_model_for(identity),
+        }
     }
 }
 
-/// Instruction block that pins the realtime model's output language.
+impl Default for OpenAiRealtimePolicy {
+    /// Adapter-default policy used by sessions opened without a stamped
+    /// identity (external attach / test doubles). Re-resolved against the
+    /// real identity by [`OpenAiRealtimeSession::set_current_identity`]
+    /// when the factory stamps the open-time model.
+    fn default() -> Self {
+        Self {
+            voice: Voice::from(OPENAI_REALTIME_DEFAULT_VOICE.to_string()),
+            input_language: Some(OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE.to_string()),
+            output_language_instruction: Some(openai_realtime_output_language_instruction()),
+            // Identity-free default: the canonical realtime model's
+            // catalog-owned transcription companion. Re-resolved against the
+            // real identity by `OpenAiRealtimeSession::set_current_identity`.
+            transcription_model: openai_canonical_realtime_transcription_companion()
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+}
+
+/// Render the realtime output-language directive (English, the typed
+/// policy default).
 ///
 /// Realtime models produce two parallel outputs (`output_text` and
 /// `output_audio_transcript`). Without an explicit directive they can
 /// drift to a different language if input transcription loses
 /// confidence. Pinning output language at session init keeps the two
-/// outputs coherent (both English by default). Callers who want a
-/// different default can set `RKAT_REALTIME_OUTPUT_LANGUAGE` to a
-/// different ISO code or `none` to skip the directive.
-fn openai_realtime_output_language_instruction() -> Option<String> {
-    let raw = std::env::var("RKAT_REALTIME_OUTPUT_LANGUAGE")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_REALTIME_OUTPUT_LANGUAGE").ok());
-    resolve_realtime_output_language_instruction(raw.as_deref())
-}
-
-/// Pure-function core of [`openai_realtime_output_language_instruction`] —
-/// takes the raw env value (or `None` when unset) and applies the
-/// "blank → default, `none` → None, otherwise render directive" policy.
-fn resolve_realtime_output_language_instruction(raw: Option<&str>) -> Option<String> {
-    let value = raw
-        .map(str::trim)
-        .filter(|trimmed| !trimmed.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE.to_string());
-    if value.eq_ignore_ascii_case("none") {
-        return None;
-    }
-    let label = openai_realtime_language_label(&value);
+/// outputs coherent. If per-session language policy ever becomes real it
+/// arrives as a typed field on [`OpenAiRealtimePolicy`] resolved from
+/// session identity/config — not by folding raw strings.
+fn openai_realtime_output_language_instruction() -> String {
     // Anchor the exception clause to *these* instructions rather than
     // to the user message: a seed instruction written in a different
     // language (e.g. Japanese system prompt) is what the model should
     // key off of, not whether the user inside a given turn asks
     // politely in English for a Japanese answer.
-    Some(format!(
-        "Respond in {label} for both the spoken audio and the written transcript \
-         unless explicitly instructed otherwise in these instructions."
-    ))
-}
-
-fn openai_realtime_language_label(code: &str) -> String {
-    match code.to_ascii_lowercase().as_str() {
-        "en" | "en-us" | "en-gb" => "English".to_string(),
-        "es" => "Spanish".to_string(),
-        "fr" => "French".to_string(),
-        "de" => "German".to_string(),
-        "it" => "Italian".to_string(),
-        "pt" | "pt-br" | "pt-pt" => "Portuguese".to_string(),
-        "ja" => "Japanese".to_string(),
-        "zh" | "zh-cn" | "zh-tw" => "Chinese".to_string(),
-        "ko" => "Korean".to_string(),
-        other => format!("ISO code '{other}'"),
-    }
+    "Respond in English for both the spoken audio and the written transcript \
+     unless explicitly instructed otherwise in these instructions."
+        .to_string()
 }
 
 /// G9: per-response config for a text-only `response.create`.
@@ -921,7 +912,7 @@ fn openai_text_only_response_config() -> ResponseConfig {
     }
 }
 
-fn openai_audio_response_config() -> ResponseConfig {
+fn openai_audio_response_config(voice: &Voice) -> ResponseConfig {
     // Text-first reconstruction still relies on OpenAI holding an in-memory
     // conversation cache between turns. When we have to reconstruct or nudge a
     // stalled provider response, asking the server to "respond somehow" is too
@@ -940,7 +931,7 @@ fn openai_audio_response_config() -> ResponseConfig {
             input: None,
             output: Some(OutputAudioConfig {
                 format: Some(AudioFormat::pcm_24khz()),
-                voice: Some(openai_realtime_voice()),
+                voice: Some(voice.clone()),
                 speed: None,
                 language: None,
             }),
@@ -954,19 +945,37 @@ fn openai_audio_response_config() -> ResponseConfig {
     }
 }
 
-fn openai_realtime_transcription_model() -> String {
-    [
-        "RKAT_OPENAI_REALTIME_TRANSCRIPTION_MODEL",
-        "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
-        "RKAT_REALTIME_OPENAI_TRANSCRIPTION_MODEL",
-        "OPENAI_REALTIME_TRANSCRIBE_MODEL",
-        "RKAT_REALTIME_OPENAI_TRANSCRIBE_MODEL",
-    ]
-    .into_iter()
-    .find_map(|key| std::env::var(key).ok())
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| "gpt-4o-mini-transcribe".to_string())
+/// Resolve the input audio transcription model for a realtime session,
+/// keyed off the active realtime model identity.
+///
+/// #149: previously a process-env ladder collapsing onto a bare literal at
+/// the `session.update` build site. The transcription model is a per-model
+/// operational fact owned by the catalog row
+/// (`ModelCapabilities::transcription_companion_model`), so it resolves from
+/// the typed model identity here rather than from an inline literal scattered
+/// across wire builders. A future realtime model with a different
+/// transcription companion changes only its catalog row, not this seam.
+///
+/// Falls closed for an uncatalogued model (or a model with no companion)
+/// onto the canonical realtime model's catalog companion rather than
+/// synthesizing a literal from a model-name prefix.
+fn openai_realtime_transcription_model_for(identity: &meerkat_core::SessionLlmIdentity) -> String {
+    meerkat_core::model_profile::capabilities::capabilities_for(identity.provider, &identity.model)
+        .and_then(|caps| caps.transcription_companion_model)
+        .or_else(openai_canonical_realtime_transcription_companion)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The canonical realtime model's catalog transcription companion, used by the
+/// identity-free policy default and as the fall-closed companion when a model
+/// has no row of its own.
+fn openai_canonical_realtime_transcription_companion() -> Option<&'static str> {
+    meerkat_core::model_profile::capabilities::capabilities_for(
+        Provider::OpenAI,
+        OPENAI_CANONICAL_REALTIME_MODEL,
+    )
+    .and_then(|caps| caps.transcription_companion_model)
 }
 
 fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
@@ -980,15 +989,44 @@ fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
         .collect()
 }
 
+/// Parse the JSON arguments of a realtime provider tool call, failing the
+/// tool-call boundary on malformed payloads instead of laundering invalid
+/// JSON into a `Value::String` blob. Mirrors the Anthropic streaming sibling
+/// (`parse_streamed_tool_args`) and the OpenAI completions sibling
+/// (`client::parse_tool_call_arguments`): empty args normalize to an empty
+/// object; anything that is not a JSON object surfaces a typed
+/// `LlmError::StreamParseError`.
+pub(crate) fn parse_tool_call_args(
+    arguments: &str,
+    call_id: &str,
+) -> Result<serde_json::Value, LlmError> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|error| LlmError::StreamParseError {
+            message: format!("invalid OpenAI tool call arguments JSON for {call_id}: {error}"),
+        })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(LlmError::StreamParseError {
+            message: format!("OpenAI tool call arguments for {call_id} must be a JSON object"),
+        })
+    }
+}
+
 fn openai_realtime_instructions(
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
+    language_pin: Option<String>,
 ) -> Option<String> {
     // Language pin goes first so output_text and output_audio_transcript
     // stay coherent with the caller's expected language even when
-    // transcription confidence on input dips. Callers opt out via
-    // `RKAT_REALTIME_OUTPUT_LANGUAGE=none`.
-    let language_pin = openai_realtime_output_language_instruction();
+    // transcription confidence on input dips. The pin is the typed
+    // `OpenAiRealtimePolicy.output_language_instruction` resolved at
+    // session-open (no per-build env read).
 
     if let Some(authoritative_context) =
         openai_realtime_authoritative_system_context(runtime_system_context)
@@ -1099,6 +1137,103 @@ pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
 const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
+/// R2/#52: typed lifecycle for the OpenAI realtime response-nudge machine.
+///
+/// Pre-#52 this was a tri-bit shadow of three independent booleans
+/// (`awaiting_provider_response_after_commit`,
+/// `provider_response_acknowledged_without_progress`,
+/// `provider_response_nudge_inflight`) plus a separate
+/// `provider_response_nudge_attempts: u8` counter. Those four fields could
+/// encode combinations that no transition ever intends — e.g. "awaiting the
+/// first `response.created` AND already acknowledged-without-progress", or
+/// "a recovery nudge is inflight but the provider has not acknowledged any
+/// response". The enum makes those combinations unrepresentable: the nudge
+/// attempt budget only exists on the states that actually own it, and the
+/// stalled terminality is an explicit `Stalled` transition rather than a
+/// `>= max_attempts` boolean read scattered across the wait loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeResponseState {
+    /// No turn is waiting on a provider-managed response: either no turn is
+    /// in flight, or the active response has already made real progress
+    /// (output / tool activity / a terminal response event).
+    Idle,
+    /// A provider-managed turn was committed and the adapter is waiting for
+    /// the provider to acknowledge a response (`response.created` or an
+    /// equivalent "active response in progress" error). No recovery nudge is
+    /// currently inflight; `nudge_attempts` carries the running budget
+    /// consumed by prior `response.create` recovery sends.
+    AwaitingProvider { nudge_attempts: u8 },
+    /// Like [`Self::AwaitingProvider`] (still waiting for the provider to
+    /// acknowledge a response) but a one-shot recovery `response.create` nudge
+    /// is inflight: the transport accepted it, yet the provider has not yet
+    /// surfaced an acknowledgement or progress. The wait loop keeps re-nudging
+    /// from this state (the same fact the pre-#52 booleans encoded as
+    /// `awaiting && nudge_inflight && !acknowledged`).
+    Nudged { nudge_attempts: u8 },
+    /// The provider acknowledged that a response exists (via `response.created`
+    /// or a tolerated "active response" error) but has not yet produced real
+    /// progress. From here the wait loop waits passively (no further nudges)
+    /// until progress arrives or the recovery budget is exhausted.
+    Acknowledged { nudge_attempts: u8 },
+    /// Terminal: the recovery budget is exhausted and the turn is treated as
+    /// stalled. The wait loop returns `LlmError::NetworkTimeout` on this
+    /// transition; the state is never persisted past the failing turn because
+    /// every commit / progress event resets the machine.
+    Stalled,
+}
+
+impl RealtimeResponseState {
+    /// True while the adapter is waiting on the provider to either acknowledge
+    /// or make progress on a response. The `next_event` loop arms the recovery
+    /// timeout while this holds.
+    fn is_waiting(self) -> bool {
+        matches!(
+            self,
+            Self::AwaitingProvider { .. } | Self::Acknowledged { .. } | Self::Nudged { .. }
+        )
+    }
+
+    /// True once the provider has acknowledged a response exists but it has
+    /// not yet progressed. Selects the passive recovery-wait branch in the
+    /// wait loop: in this state the adapter waits for real progress rather
+    /// than sending further `response.create` nudges.
+    fn acknowledged_without_progress(self) -> bool {
+        matches!(self, Self::Acknowledged { .. })
+    }
+
+    /// True only when a recovery `response.create` nudge is currently inflight.
+    fn nudge_inflight(self) -> bool {
+        matches!(self, Self::Nudged { .. })
+    }
+
+    /// True while the adapter is waiting on the provider to *acknowledge* the
+    /// first response after commit (pre-acknowledgement window), whether or
+    /// not a recovery nudge is currently inflight.
+    fn awaiting_after_commit(self) -> bool {
+        matches!(self, Self::AwaitingProvider { .. } | Self::Nudged { .. })
+    }
+
+    /// The recovery budget consumed so far for the active acknowledgement.
+    fn nudge_attempts(self) -> u8 {
+        match self {
+            Self::AwaitingProvider { nudge_attempts }
+            | Self::Acknowledged { nudge_attempts }
+            | Self::Nudged { nudge_attempts } => nudge_attempts,
+            Self::Idle | Self::Stalled => 0,
+        }
+    }
+
+    /// Transition taken when the provider acknowledges a response exists but
+    /// has not yet progressed (`response.created`, or a tolerated
+    /// "active response in progress" error). Preserves the recovery budget so
+    /// duplicate acknowledgements do not reset stalled-turn detection.
+    fn acknowledge(self) -> Self {
+        Self::Acknowledged {
+            nudge_attempts: self.nudge_attempts(),
+        }
+    }
+}
+
 fn openai_realtime_client_event_id(prefix: &str) -> String {
     let suffix: String = meerkat_core::time_compat::new_uuid_v7()
         .to_string()
@@ -1122,36 +1257,39 @@ fn openai_response_cancel_no_active_response_message(message: &str) -> bool {
 
 fn should_suppress_openai_active_response_error(
     message: &str,
-    provider_response_nudge_inflight: bool,
+    response_state: RealtimeResponseState,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
 ) -> bool {
     // R3-5 (P2): `response_output_active` is the OR of the audio + text
     // bits — the OpenAI realtime "active response in progress" guard is
     // about a server-side response of *any* modality being active, so the
     // suppression decision composes both bits at the call site.
+    //
+    // #52: the lifecycle facts (nudge inflight / awaiting acknowledgement /
+    // acknowledged-without-progress) now come from the typed
+    // `RealtimeResponseState` rather than three independent booleans. Any
+    // non-idle waiting state means the provider may already be servicing a
+    // response, so a fresh "active response in progress" error is a tolerated
+    // acknowledgement rather than a product failure.
     openai_response_already_active_message(message)
-        && (provider_response_nudge_inflight
-            || response_output_active
-            || awaiting_provider_response_after_commit
-            || provider_response_acknowledged_without_progress)
+        && (response_output_active || response_state.is_waiting())
 }
 
 fn trace_openai_active_response_error(
     source: &str,
     message: &str,
-    provider_response_nudge_inflight: bool,
+    response_state: RealtimeResponseState,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
     suppressed: bool,
 ) {
     if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE").is_none() {
         return;
     }
     eprintln!(
-        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={provider_response_nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_provider_response_after_commit} ack_without_progress={provider_response_acknowledged_without_progress} message={message}",
+        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={} output_active={response_output_active} awaiting_after_commit={} ack_without_progress={} message={message}",
+        response_state.nudge_inflight(),
+        response_state.awaiting_after_commit(),
+        response_state.acknowledged_without_progress(),
     );
 }
 
@@ -1162,18 +1300,70 @@ fn trace_openai_realtime_lifecycle(message: impl AsRef<str>) {
     eprintln!("[openai-realtime-lifecycle] {}", message.as_ref());
 }
 
-fn openai_realtime_capabilities() -> RealtimeCapabilities {
+/// Canonical OpenAI realtime model used to project the factory-level
+/// (identity-free) capability advertisement. The factory `capabilities()`
+/// seam has no per-session identity, so it advertises the current
+/// canonical realtime model's catalog-derived capabilities — keeping even
+/// that advertisement model-owned rather than a hand-written literal.
+const OPENAI_CANONICAL_REALTIME_MODEL: &str = "gpt-realtime-2";
+
+/// #68: project the realtime capability set from the typed model capability
+/// row keyed by the session's [`SessionLlmIdentity`].
+///
+/// Capabilities follow model identity: the per-model catalog row
+/// (`ModelCapabilities`) owns the realtime transport facts — the turning
+/// modes (`realtime_supports_provider_managed_turns` /
+/// `realtime_supports_explicit_commit`), interrupt
+/// (`realtime_interrupt_supported`), transcript
+/// (`realtime_transcript_supported`), and whether the model accepts inline
+/// video (`inline_video`, which drives the `Video` input/output kinds and
+/// `video_supported`). The core->wire mapping (core-side bools ->
+/// `RealtimeTurningMode` list, interrupt/transcript flags) lives HERE, at the
+/// provider boundary, because `meerkat-core` does not depend on
+/// `meerkat-contracts`. Text + audio and the 24 kHz PCM audio formats are
+/// invariants of the OpenAI realtime transport itself.
+///
+/// When the provider/model pair has no catalog row the projection falls
+/// closed to the transport-invariant base (no video, no turning modes, no
+/// interrupt/transcript) rather than synthesizing capability facts from a
+/// model-name prefix.
+fn openai_realtime_capabilities_for(
+    identity: &meerkat_core::SessionLlmIdentity,
+) -> RealtimeCapabilities {
+    let caps = meerkat_core::model_profile::capabilities::capabilities_for(
+        identity.provider,
+        &identity.model,
+    );
+
+    let video = caps.is_some_and(|c| c.inline_video);
+
+    let mut input_kinds = vec![RealtimeInputKind::Text, RealtimeInputKind::Audio];
+    let mut output_kinds = vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio];
+    if video {
+        input_kinds.push(RealtimeInputKind::Video);
+        output_kinds.push(RealtimeOutputKind::Video);
+    }
+
+    // Map the core-side turning-mode bools into the wire `RealtimeTurningMode`
+    // vocabulary. This is the boundary translation: core never names
+    // `RealtimeTurningMode` (no contracts dep), so the catalog stores the
+    // facts as bools and the provider reconstitutes the typed list here.
+    let mut turning_modes = Vec::new();
+    if caps.is_some_and(|c| c.realtime_supports_provider_managed_turns) {
+        turning_modes.push(RealtimeTurningMode::ProviderManaged);
+    }
+    if caps.is_some_and(|c| c.realtime_supports_explicit_commit) {
+        turning_modes.push(RealtimeTurningMode::ExplicitCommit);
+    }
+
     RealtimeCapabilities {
-        input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-        output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-        turning_modes: vec![
-            RealtimeTurningMode::ProviderManaged,
-            RealtimeTurningMode::ExplicitCommit,
-        ],
-        interrupt_supported: true,
-        transcript_supported: true,
+        input_kinds,
+        output_kinds,
+        turning_modes,
+        interrupt_supported: caps.is_some_and(|c| c.realtime_interrupt_supported),
+        transcript_supported: caps.is_some_and(|c| c.realtime_transcript_supported),
         tool_lifecycle_events_supported: true,
-        video_supported: false,
+        video_supported: video,
         audio_input_format: Some(RealtimeAudioFormat::pcm(
             OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
             OPENAI_REALTIME_AUDIO_CHANNELS,
@@ -1185,6 +1375,19 @@ fn openai_realtime_capabilities() -> RealtimeCapabilities {
     }
 }
 
+/// Identity-free capability advertisement for the factory seam, projected
+/// from the canonical realtime model's catalog row (see
+/// [`OPENAI_CANONICAL_REALTIME_MODEL`]).
+fn openai_realtime_capabilities_default() -> RealtimeCapabilities {
+    openai_realtime_capabilities_for(&meerkat_core::SessionLlmIdentity {
+        model: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+        provider: Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    })
+}
+
 /// Provider-neutral realtime session adapter backed by an OpenAI sideband session.
 pub struct OpenAiRealtimeSession {
     raw: Option<Box<dyn OpenAiLiveSession>>,
@@ -1192,19 +1395,23 @@ pub struct OpenAiRealtimeSession {
     turning_mode: RealtimeTurningMode,
     has_staged_input: bool,
     has_staged_audio: bool,
-    /// R4-1 (P1): text items staged via `send_input` while
+    /// R4-1 (P1) / #51: text items staged via `send_input` while
     /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-    /// Each entry is the `(synthetic_item_id, text)` pair sent to the
-    /// provider via `ConversationItemCreate`. On commit the canonical
-    /// user-turn synthesis path drains this and emits the same
-    /// `TurnStarted` / `InputTranscriptPartial` / `InputTranscriptFinalForItem`
-    /// / `TurnCommitted` sequence the `ProviderManaged` text-input path
-    /// emits inline — so explicit-commit text turns enter canonical
-    /// history, just like `ProviderManaged` text turns. The only
-    /// semantic difference between the two modes for text input is when
-    /// `response.create` fires (caller-driven vs server-driven), not
-    /// whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<(String, String)>,
+    /// Each entry is the machine-owned typed staging seam
+    /// [`AppendRealtimeTranscript`] (`item_id` + `text` + typed `role`/`lane`
+    /// classifiers) — the same fact the generated `MeerkatMachine` consumes to
+    /// emit `RealtimeTranscriptAppended`. The synthetic item id is the one sent
+    /// to the provider via `ConversationItemCreate`; `role`/`lane` are
+    /// [`RealtimeTranscriptRole::User`] / [`TranscriptLane::Display`] for an
+    /// explicit-commit text turn. On commit the canonical user-turn synthesis
+    /// path drains this and emits the same `TurnStarted` /
+    /// `InputTranscriptPartial` / `InputTranscriptFinalForItem` /
+    /// `TurnCommitted` sequence the `ProviderManaged` text-input path emits
+    /// inline — so explicit-commit text turns enter canonical history, just
+    /// like `ProviderManaged` text turns. The only semantic difference between
+    /// the two modes for text input is when `response.create` fires
+    /// (caller-driven vs server-driven), not whether the user turn is recorded.
+    pending_explicit_commit_text_items: Vec<AppendRealtimeTranscript>,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1235,10 +1442,14 @@ pub struct OpenAiRealtimeSession {
     text_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-    provider_response_nudge_attempts: u8,
-    provider_response_nudge_inflight: bool,
+    /// #52: typed lifecycle for the provider-managed response-nudge machine.
+    /// Replaces the prior tri-bit shadow (`awaiting_provider_response_after_commit`,
+    /// `provider_response_acknowledged_without_progress`,
+    /// `provider_response_nudge_inflight`) plus the separate
+    /// `provider_response_nudge_attempts` counter — illegal combinations of
+    /// those four facts are now unrepresentable and stalled-turn terminality
+    /// is the explicit [`RealtimeResponseState::Stalled`] transition.
+    response_state: RealtimeResponseState,
     /// Per-session override for the provider-nudge timeout (milliseconds).
     /// None falls back to `OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS`.
     response_nudge_timeout_ms: Option<u64>,
@@ -1264,6 +1475,13 @@ pub struct OpenAiRealtimeSession {
     /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
     /// done in place on a hosted realtime session either.
     current_provider_id: Option<Provider>,
+    /// #69 / #149: typed, model-keyed realtime operational policy (voice,
+    /// input/output language, input transcription model). Resolved from the
+    /// open-time `SessionLlmIdentity` in `set_current_identity` and consumed
+    /// by every `response.create` / refresh-`session.update` build site so
+    /// these facts are typed values that follow model identity, not process
+    /// env reads scattered across the adapter.
+    realtime_policy: OpenAiRealtimePolicy,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1278,7 +1496,12 @@ impl OpenAiRealtimeSession {
     pub fn new(raw: Box<dyn OpenAiLiveSession>, turning_mode: RealtimeTurningMode) -> Self {
         Self {
             raw: Some(raw),
-            capabilities: openai_realtime_capabilities(),
+            // #68: capabilities follow model identity. Sessions opened
+            // without a stamped identity (external attach / test doubles)
+            // start from the canonical realtime-model projection and are
+            // re-resolved against the real identity in
+            // `set_current_identity` when the factory stamps it.
+            capabilities: openai_realtime_capabilities_default(),
             turning_mode,
             has_staged_input: false,
             has_staged_audio: false,
@@ -1297,15 +1520,13 @@ impl OpenAiRealtimeSession {
             text_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
-            awaiting_provider_response_after_commit: false,
-            provider_response_acknowledged_without_progress: false,
-            provider_response_nudge_attempts: 0,
-            provider_response_nudge_inflight: false,
+            response_state: RealtimeResponseState::Idle,
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
             pending_truncations: BTreeMap::new(),
             current_model_id: None,
             current_provider_id: None,
+            realtime_policy: OpenAiRealtimePolicy::default(),
         }
     }
 
@@ -1323,9 +1544,16 @@ impl OpenAiRealtimeSession {
     /// detect mid-session model/provider swaps and reject them with a
     /// typed error (the OpenAI Realtime API has no mutable `model` field
     /// on `session.update`, so a model swap requires close + reopen).
-    pub fn set_current_identity(&mut self, model_id: impl Into<String>, provider: Provider) {
-        self.current_model_id = Some(model_id.into());
-        self.current_provider_id = Some(provider);
+    ///
+    /// #68 / #69 / #149: stamping the identity is also where the typed,
+    /// model-keyed realtime capabilities and operational policy are
+    /// resolved, so both follow the session's model identity rather than a
+    /// static literal / process env.
+    pub fn set_current_identity(&mut self, identity: &meerkat_core::SessionLlmIdentity) {
+        self.current_model_id = Some(identity.model.clone());
+        self.current_provider_id = Some(identity.provider);
+        self.capabilities = openai_realtime_capabilities_for(identity);
+        self.realtime_policy = OpenAiRealtimePolicy::resolve(identity);
     }
 
     fn effective_nudge_timeout_ms(&self) -> u64 {
@@ -1527,7 +1755,10 @@ impl OpenAiRealtimeSession {
             .or_default()
     }
 
-    fn capture_mcp_call_item(&mut self, item: &Item) -> Option<RealtimeSessionEvent> {
+    fn capture_mcp_call_item(
+        &mut self,
+        item: &Item,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let Item::McpCall {
             id: Some(item_id),
             call_id,
@@ -1536,7 +1767,7 @@ impl OpenAiRealtimeSession {
             ..
         } = item
         else {
-            return None;
+            return Ok(None);
         };
 
         let pending = self.pending_mcp_call_mut(item_id);
@@ -1560,7 +1791,7 @@ impl OpenAiRealtimeSession {
         &mut self,
         item_id: &str,
         arguments: String,
-    ) -> Option<RealtimeSessionEvent> {
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         if self.pending_text_suppressions.is_empty() {
             self.pending_text_suppressions.push_back(arguments.clone());
         }
@@ -1569,7 +1800,10 @@ impl OpenAiRealtimeSession {
         self.try_emit_mcp_tool_call(item_id)
     }
 
-    fn try_emit_mcp_tool_call(&mut self, item_id: &str) -> Option<RealtimeSessionEvent> {
+    fn try_emit_mcp_tool_call(
+        &mut self,
+        item_id: &str,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let ready = self.pending_mcp_calls.get(item_id).and_then(|pending| {
             Some((
                 pending.call_id.clone()?,
@@ -1577,17 +1811,21 @@ impl OpenAiRealtimeSession {
                 pending.final_arguments.clone()?,
             ))
         });
-        let (call_id, tool_name, arguments) = ready?;
+        let Some((call_id, tool_name, arguments)) = ready else {
+            return Ok(None);
+        };
 
-        let pending = self.pending_mcp_calls.remove(item_id)?;
+        let Some(pending) = self.pending_mcp_calls.remove(item_id) else {
+            return Ok(None);
+        };
         let arguments = pending.final_arguments.unwrap_or(arguments);
+        let parsed = parse_tool_call_args(&arguments, &call_id)?;
         self.response_tool_call_observed = true;
-        Some(RealtimeSessionEvent::ToolCallRequested {
+        Ok(Some(RealtimeSessionEvent::ToolCallRequested {
             call_id,
             tool_name,
-            arguments: serde_json::from_str(&arguments)
-                .unwrap_or(serde_json::Value::String(arguments)),
-        })
+            arguments: parsed,
+        }))
     }
 
     fn should_suppress_mcp_echoed_text(&mut self, delta: &str) -> bool {
@@ -1634,21 +1872,21 @@ impl OpenAiRealtimeSession {
     }
 
     fn waiting_for_provider_progress(&self) -> bool {
-        self.awaiting_provider_response_after_commit
-            || self.provider_response_acknowledged_without_progress
+        self.response_state.is_waiting()
     }
 
     fn note_provider_response_acknowledged(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = true;
-        self.provider_response_nudge_inflight = false;
+        // The provider acknowledged a response exists but has not yet
+        // progressed. Preserve the consumed recovery budget so duplicate
+        // acknowledgements cannot reset stalled-turn detection, and clear any
+        // inflight nudge guard (the acknowledgement subsumes it).
+        self.response_state = self.response_state.acknowledge();
     }
 
     fn note_provider_response_progressed(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        // Real progress (output / tool activity / a terminal response event)
+        // resets the whole nudge machine, including the recovery budget.
+        self.response_state = RealtimeResponseState::Idle;
     }
 
     fn note_output_audio_transcript_done(
@@ -1781,14 +2019,19 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_previous_for_item(&item_id, previous_item_id);
-                self.awaiting_provider_response_after_commit =
-                    self.turning_mode == RealtimeTurningMode::ProviderManaged;
-                self.provider_response_acknowledged_without_progress = false;
-                self.provider_response_nudge_attempts = 0;
-                self.provider_response_nudge_inflight = false;
+                // A fresh commit resets the nudge machine: provider-managed
+                // turns wait for the next acknowledgement (with a fresh
+                // recovery budget); explicit-commit turns drive
+                // `response.create` themselves, so they are not in the
+                // server-managed wait state.
+                self.response_state = if self.turning_mode == RealtimeTurningMode::ProviderManaged {
+                    RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+                } else {
+                    RealtimeResponseState::Idle
+                };
                 trace_openai_realtime_lifecycle(format!(
                     "input_audio_buffer.committed awaiting_after_commit={}",
-                    self.awaiting_provider_response_after_commit
+                    self.response_state.awaiting_after_commit()
                 ));
                 if self.audio_output_active && !self.response_interrupt_emitted {
                     let response_id = self.active_response_id.clone();
@@ -1828,7 +2071,7 @@ impl OpenAiRealtimeSession {
                 None
             }
             ServerEvent::ResponseDone { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_state.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle(format!(
                         "response.done suppressed_while_awaiting status={:?}",
                         response.status
@@ -1887,7 +2130,7 @@ impl OpenAiRealtimeSession {
                 }
             }
             ServerEvent::ResponseCancelled { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_state.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
                     self.clear_response_output_active();
                     self.response_tool_call_observed = false;
@@ -1932,7 +2175,7 @@ impl OpenAiRealtimeSession {
                         Some(response_id),
                     )));
                 }
-                self.capture_mcp_call_item(&item)
+                self.capture_mcp_call_item(&item)?
             }
             ServerEvent::ResponseMcpCallArgumentsDelta {
                 response_id,
@@ -1953,7 +2196,7 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
-                self.note_mcp_argument_done(&item_id, arguments)
+                self.note_mcp_argument_done(&item_id, arguments)?
             }
             ServerEvent::ResponseOutputTextDelta {
                 event_id,
@@ -2093,12 +2336,12 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
+                let parsed = parse_tool_call_args(&arguments, &call_id)?;
                 self.response_tool_call_observed = true;
                 Some(RealtimeSessionEvent::ToolCallRequested {
                     call_id,
                     tool_name: name,
-                    arguments: serde_json::from_str(&arguments)
-                        .unwrap_or(serde_json::Value::String(arguments)),
+                    arguments: parsed,
                 })
             }
             ServerEvent::ConversationItemTruncated {
@@ -2151,18 +2394,14 @@ impl OpenAiRealtimeSession {
                 }
                 let suppress = should_suppress_openai_active_response_error(
                     &error.message,
-                    self.provider_response_nudge_inflight,
+                    self.response_state,
                     self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
                 );
                 trace_openai_active_response_error(
                     "server_event",
                     &error.message,
-                    self.provider_response_nudge_inflight,
+                    self.response_state,
                     self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
                     suppress,
                 );
                 if suppress {
@@ -2198,10 +2437,11 @@ impl OpenAiRealtimeSession {
         &mut self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<(), LlmError> {
+        let session_update = openai_projection_session_update(open_config, &self.realtime_policy);
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
-                session: Box::new(openai_projection_session_update(open_config)),
+                session: Box::new(session_update),
             })
             .await?;
 
@@ -2223,10 +2463,12 @@ impl OpenAiRealtimeSession {
         &mut self,
         snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
     ) -> Result<(), LlmError> {
+        let session_update =
+            openai_refresh_session_update_from_snapshot(snapshot, &self.realtime_policy);
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
-                session: Box::new(openai_refresh_session_update_from_snapshot(snapshot)),
+                session: Box::new(session_update),
             })
             .await?;
 
@@ -2296,15 +2538,21 @@ impl OpenAiRealtimeSession {
         // drives the TurnCommitted observation through the normal mapping
         // path (see `map_server_event`).
         let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
-        for (item_id, text) in &pending_text_items {
-            Self::synthesize_text_turn_observations(&mut self.pending_events, item_id, text);
+        for staged in &pending_text_items {
+            Self::synthesize_text_turn_observations(
+                &mut self.pending_events,
+                &staged.item_id,
+                &staged.text,
+            );
         }
         // `LiveResponseModality` is `#[non_exhaustive]`; future variants
         // the OpenAI realtime adapter does not yet honor must surface a
         // typed `InvalidRequest` rejection rather than silently dropping
         // the override.
         let response_config = match response_modality {
-            None | Some(LiveResponseModality::Audio) => openai_audio_response_config(),
+            None | Some(LiveResponseModality::Audio) => {
+                openai_audio_response_config(&self.realtime_policy.voice)
+            }
             Some(LiveResponseModality::Text) => openai_text_only_response_config(),
             Some(_) => {
                 return Err(LlmError::InvalidRequest {
@@ -2422,26 +2670,39 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             &synthetic_item_id,
                             &text,
                         );
+                        let response_config =
+                            openai_audio_response_config(&self.realtime_policy.voice);
                         self.raw_mut()?
                             .send_raw(ClientEvent::ResponseCreate {
                                 event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
+                                response: Some(Box::new(response_config)),
                             })
                             .await?;
                         self.has_staged_input = false;
-                        self.awaiting_provider_response_after_commit = true;
+                        self.response_state =
+                            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
                     }
                     RealtimeTurningMode::ExplicitCommit => {
-                        // R4-1 (P1): defer canonical-history synthesis until
-                        // commit. The provider has accepted the
+                        // R4-1 (P1) / #51: defer canonical-history synthesis
+                        // until commit. The provider has accepted the
                         // `conversation.item.create` for this text item and
                         // assigned it `synthetic_item_id`; on
                         // `commit_turn_with_modality` we drain the staged
                         // queue and emit the same observation sequence
                         // ProviderManaged emits inline so explicit-commit
-                        // text turns reach canonical history.
+                        // text turns reach canonical history. The staged turn
+                        // is held as the machine-owned typed staging seam
+                        // `AppendRealtimeTranscript` (the exact fact the
+                        // generated `MeerkatMachine` consumes to emit
+                        // `RealtimeTranscriptAppended`): an explicit-commit
+                        // text turn is a `User` item on the `Display` lane.
                         self.pending_explicit_commit_text_items
-                            .push((synthetic_item_id, text));
+                            .push(AppendRealtimeTranscript {
+                                item_id: synthetic_item_id,
+                                text,
+                                role: RealtimeTranscriptRole::User,
+                                lane: TranscriptLane::Display,
+                            });
                     }
                 }
                 Ok(())
@@ -2515,7 +2776,11 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 ))
                 .await?;
         } else {
-            let events = openai_live_function_call_success_events(call_id, &output);
+            let events = openai_live_function_call_success_events(
+                call_id,
+                &output,
+                &self.realtime_policy.voice,
+            );
             for event in events {
                 self.raw_mut()?.send_raw(event).await?;
             }
@@ -2558,18 +2823,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             if {
                                 let suppress = should_suppress_openai_active_response_error(
                                     &message,
-                                    self.provider_response_nudge_inflight,
+                                    self.response_state,
                                     self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
                                 );
                                 trace_openai_active_response_error(
                                     "raw_timeout_branch",
                                     &message,
-                                    self.provider_response_nudge_inflight,
+                                    self.response_state,
                                     self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
                                     suppress,
                                 );
                                 suppress
@@ -2581,28 +2842,35 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         Err(error) => return Err(error),
                     },
                     Err(_) => {
-                        if self.provider_response_acknowledged_without_progress {
-                            if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        let nudge_attempts = self.response_state.nudge_attempts();
+                        if self.response_state.acknowledged_without_progress() {
+                            if nudge_attempts >= nudge_max_attempts {
                                 trace_openai_realtime_lifecycle(format!(
-                                    "provider response acknowledged but stalled after {} wait windows",
-                                    self.provider_response_nudge_attempts
+                                    "provider response acknowledged but stalled after {nudge_attempts} wait windows"
                                 ));
+                                // #52: stalled-turn terminality is an explicit
+                                // state transition, not a bare boolean read.
+                                self.response_state = RealtimeResponseState::Stalled;
                                 return Err(LlmError::NetworkTimeout {
                                     duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                                 });
                             }
-                            self.provider_response_nudge_attempts += 1;
+                            self.response_state = RealtimeResponseState::Acknowledged {
+                                nudge_attempts: nudge_attempts + 1,
+                            };
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response acknowledged without progress; waiting again attempt={}",
-                                self.provider_response_nudge_attempts
+                                nudge_attempts + 1
                             ));
                             continue;
                         }
-                        if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        if nudge_attempts >= nudge_max_attempts {
                             trace_openai_realtime_lifecycle(format!(
-                                "provider response nudge budget exhausted after {} attempts",
-                                self.provider_response_nudge_attempts
+                                "provider response nudge budget exhausted after {nudge_attempts} attempts"
                             ));
+                            // #52: stalled-turn terminality is an explicit
+                            // state transition, not a bare boolean read.
+                            self.response_state = RealtimeResponseState::Stalled;
                             return Err(LlmError::NetworkTimeout {
                                 duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                             });
@@ -2610,38 +2878,37 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         trace_openai_realtime_lifecycle(
                             "provider response nudge timeout expired; sending response.create",
                         );
+                        let nudge_response_config =
+                            openai_audio_response_config(&self.realtime_policy.voice);
                         match self
                             .raw_mut()?
                             .send_raw(ClientEvent::ResponseCreate {
                                 event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
+                                response: Some(Box::new(nudge_response_config)),
                             })
                             .await
                         {
                             Ok(()) => {
-                                self.provider_response_nudge_attempts += 1;
-                                self.provider_response_nudge_inflight = true;
+                                self.response_state = RealtimeResponseState::Nudged {
+                                    nudge_attempts: nudge_attempts + 1,
+                                };
                                 trace_openai_realtime_lifecycle(format!(
                                     "response.create nudge accepted by transport attempt={}",
-                                    self.provider_response_nudge_attempts
+                                    nudge_attempts + 1
                                 ));
                             }
                             Err(LlmError::InvalidRequest { message })
                                 if {
                                     let suppress = should_suppress_openai_active_response_error(
                                         &message,
-                                        self.provider_response_nudge_inflight,
+                                        self.response_state,
                                         self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
                                     );
                                     trace_openai_active_response_error(
                                         "response_create",
                                         &message,
-                                        self.provider_response_nudge_inflight,
+                                        self.response_state,
                                         self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
                                         suppress,
                                     );
                                     suppress
@@ -2665,18 +2932,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         if {
                             let suppress = should_suppress_openai_active_response_error(
                                 &message,
-                                self.provider_response_nudge_inflight,
+                                self.response_state,
                                 self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
                             );
                             trace_openai_active_response_error(
                                 "raw_next_event",
                                 &message,
-                                self.provider_response_nudge_inflight,
+                                self.response_state,
                                 self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
                                 suppress,
                             );
                             suppress
@@ -2714,10 +2977,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.clear_response_output_active();
         self.response_interrupt_emitted = false;
         self.response_tool_call_observed = false;
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_state = RealtimeResponseState::Idle;
         Ok(())
     }
 }
@@ -2782,7 +3042,7 @@ impl OpenAiRealtimeSessionFactory {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
     fn capabilities(&self) -> RealtimeCapabilities {
-        openai_realtime_capabilities()
+        openai_realtime_capabilities_default()
     }
 
     async fn open_session(
@@ -2799,10 +3059,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider,
-        );
+        session.set_current_identity(&open_config.llm_identity);
         session
             .seed_history_projection(
                 &open_config.seed_messages,
@@ -2842,10 +3099,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider,
-        );
+        session.set_current_identity(&open_config.llm_identity);
         // E25 + A9: seed canonical history at session-open time. The
         // `LiveAdapterCommand::Open { snapshot }` arm in
         // `execute_openai_live_command` re-runs the same path against any
@@ -2881,9 +3135,15 @@ where
 
 /// Build the raw client events needed to submit a function-call output and
 /// continue the provider response.
+///
+/// `voice` is the typed realtime output voice for the continuation
+/// `response.create`; callers pass the session's resolved
+/// [`OpenAiRealtimePolicy`] voice so spoken output stays consistent with
+/// the rest of the channel rather than re-reading a process-env default.
 pub fn openai_live_function_call_success_events(
     call_id: impl Into<String>,
     output: impl Into<String>,
+    voice: &Voice,
 ) -> Vec<ClientEvent> {
     vec![
         ClientEvent::ConversationItemCreate {
@@ -2898,7 +3158,7 @@ pub fn openai_live_function_call_success_events(
         },
         ClientEvent::ResponseCreate {
             event_id: None,
-            response: Some(Box::new(openai_audio_response_config())),
+            response: Some(Box::new(openai_audio_response_config(voice))),
         },
     ]
 }
@@ -2963,13 +3223,52 @@ fn map_openai_live_error(error: OpenAiLiveError) -> LlmError {
         OpenAiLiveError::Serialization(error) => LlmError::StreamParseError {
             message: error.to_string(),
         },
-        OpenAiLiveError::WebSocket(error) => LlmError::NetworkTimeout {
-            duration_ms: u64::from(error.to_string().contains("timed out")) * 30_000,
-        },
+        OpenAiLiveError::WebSocket(error) => map_openai_websocket_error(error),
         OpenAiLiveError::Http(error) => LlmError::ServerError {
             status: error.status().map_or(500, |status| status.as_u16()),
             message: error.to_string(),
         },
+        other => LlmError::Unknown {
+            message: other.to_string(),
+        },
+    }
+}
+
+/// Classify a realtime websocket fault from the TYPED `tungstenite::Error`
+/// discriminants — never from `to_string()` substring folklore.
+fn map_openai_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> LlmError {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match error {
+        WsError::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            // The websocket transport surfaced an OS-level timeout; no
+            // configured duration is observable at this seam.
+            LlmError::NetworkTimeout { duration_ms: 0 }
+        }
+        WsError::Io(io) if io.kind() == std::io::ErrorKind::ConnectionReset => {
+            LlmError::ConnectionReset
+        }
+        WsError::ConnectionClosed | WsError::AlreadyClosed => LlmError::ConnectionReset,
+        WsError::Http(response) => {
+            let status = response.status();
+            match status.as_u16() {
+                401 | 403 => LlmError::AuthenticationFailed {
+                    message: format!("websocket upgrade rejected with status {status}"),
+                },
+                429 => LlmError::RateLimited {
+                    retry_after_ms: None,
+                },
+                503 => LlmError::ServerOverloaded,
+                code => LlmError::ServerError {
+                    status: code,
+                    message: format!("websocket upgrade rejected with status {status}"),
+                },
+            }
+        }
         other => LlmError::Unknown {
             message: other.to_string(),
         },
@@ -3941,7 +4240,7 @@ async fn execute_openai_live_command(
         }
         LiveAdapterCommand::SubmitToolResult { result } => {
             let tool_result = CoreToolResult {
-                tool_use_id: result.call_id,
+                tool_use_id: result.call_id.0,
                 content: result.content,
                 is_error: result.is_error,
             };
@@ -3949,7 +4248,7 @@ async fn execute_openai_live_command(
             Ok(())
         }
         LiveAdapterCommand::SubmitToolError { call_id, error } => {
-            session.submit_tool_error(call_id, error).await?;
+            session.submit_tool_error(call_id.0, error).await?;
             Ok(())
         }
         LiveAdapterCommand::Close => Ok(()),
@@ -4081,8 +4380,11 @@ fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservati
             tool_name,
             arguments,
         } => LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: call_id,
-            tool_name,
+            // #270: parse the provider-native strings into typed newtypes
+            // once, here at the provider boundary, so the raw string is
+            // never the identity owner past this seam.
+            provider_call_id: ToolCallId::new(call_id),
+            tool_name: ToolName::new(tool_name),
             arguments,
         },
         RealtimeSessionEvent::AssistantTranscriptTruncated {
@@ -4378,16 +4680,20 @@ mod tests {
         }
     }
 
+    fn sample_realtime_identity() -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
     fn sample_open_config(turning_mode: RealtimeTurningMode) -> RealtimeSessionOpenConfig {
         RealtimeSessionOpenConfig::new(
             turning_mode,
-            SessionLlmIdentity {
-                model: "gpt-realtime-2".to_string(),
-                provider: Provider::OpenAI,
-                self_hosted_server_id: None,
-                provider_params: None,
-                auth_binding: None,
-            },
+            sample_realtime_identity(),
             vec![ToolDef {
                 name: "send_request".into(),
                 description: "Send a request to another mob member.".to_string(),
@@ -4410,17 +4716,20 @@ mod tests {
                 Message::User(meerkat_core::UserMessage::text(
                     "Earlier turn context should survive reconnect.",
                 )),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "Remembering amber lantern.".to_string(),
-                    tool_calls: Vec::new(),
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: "Remembering amber lantern.".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: meerkat_core::StopReason::EndTurn,
-                    usage: meerkat_core::Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         )
         .with_runtime_system_context(vec![PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string()
+            ),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4469,45 +4778,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_realtime_input_language_defaults_to_english_when_env_unset() {
-        // Unset or blank env falls through to the s71/s72-gate default
-        // (pin English to prevent Whisper drift into CJK).
-        assert_eq!(resolve_realtime_input_language(None).as_deref(), Some("en"));
+    fn realtime_policy_defaults_pin_english_input_language() {
+        // s71/s72-gate default: pin English to prevent Whisper drift into
+        // CJK. The typed policy default is the single owner of this fact.
         assert_eq!(
-            resolve_realtime_input_language(Some("")).as_deref(),
-            Some("en")
-        );
-        assert_eq!(
-            resolve_realtime_input_language(Some("   ")).as_deref(),
+            OpenAiRealtimePolicy::default().input_language.as_deref(),
             Some("en")
         );
     }
 
     #[test]
-    fn resolve_realtime_input_language_honors_explicit_override() {
-        assert_eq!(
-            resolve_realtime_input_language(Some("ja")).as_deref(),
-            Some("ja")
-        );
-        assert_eq!(
-            resolve_realtime_input_language(Some("  fr  ")).as_deref(),
-            Some("fr")
-        );
-    }
-
-    #[test]
-    fn resolve_realtime_input_language_auto_opts_out() {
-        // `auto` restores OpenAI's native language auto-detection for
-        // callers who intentionally run multilingual sessions.
-        assert_eq!(resolve_realtime_input_language(Some("auto")), None);
-        assert_eq!(resolve_realtime_input_language(Some("AUTO")), None);
-        assert_eq!(resolve_realtime_input_language(Some("  Auto  ")), None);
-    }
-
-    #[test]
-    fn resolve_realtime_output_language_instruction_defaults_pin_english() {
-        let instruction = resolve_realtime_output_language_instruction(None)
-            .expect("default must emit an English pin");
+    fn realtime_output_language_instruction_pins_english() {
+        let instruction = openai_realtime_output_language_instruction();
         assert!(
             instruction.contains("English"),
             "default instruction must name English: {instruction}"
@@ -4518,36 +4800,135 @@ mod tests {
         );
     }
 
+    /// #68: advertised realtime capabilities follow the model's catalog
+    /// row. The canonical realtime model (`gpt-realtime-2`) carries
+    /// `inline_video = false` today, so video must NOT be advertised — and
+    /// the projection must read that from the catalog, not a static literal.
     #[test]
-    fn resolve_realtime_output_language_instruction_honors_other_codes() {
-        let fr = resolve_realtime_output_language_instruction(Some("fr"))
-            .expect("fr override must emit a pin");
-        assert!(fr.contains("French"), "fr must map to French: {fr}");
-        let ja = resolve_realtime_output_language_instruction(Some("ja"))
-            .expect("ja override must emit a pin");
-        assert!(ja.contains("Japanese"), "ja must map to Japanese: {ja}");
-        let unknown = resolve_realtime_output_language_instruction(Some("xx"))
-            .expect("unknown codes still emit an instruction");
+    fn realtime_capabilities_follow_catalog_model_row() {
+        let realtime = sample_realtime_identity();
+        let caps = openai_realtime_capabilities_for(&realtime);
+
+        // Text + audio are realtime-transport invariants for OpenAI.
+        assert!(caps.input_kinds.contains(&RealtimeInputKind::Text));
+        assert!(caps.input_kinds.contains(&RealtimeInputKind::Audio));
+        assert!(caps.output_kinds.contains(&RealtimeOutputKind::Text));
+        assert!(caps.output_kinds.contains(&RealtimeOutputKind::Audio));
+
+        // Video tracks the catalog row's `inline_video`. The capability is
+        // projected from the typed capability row, so it must agree with the
+        // catalog rather than a hand-written literal.
+        let row = meerkat_core::model_profile::capabilities::capabilities_for(
+            realtime.provider,
+            &realtime.model,
+        )
+        .expect("gpt-realtime-2 must be catalogued");
+        assert_eq!(
+            caps.video_supported, row.inline_video,
+            "video_supported must project the catalog inline_video, not a static literal"
+        );
+        assert_eq!(
+            caps.input_kinds.contains(&RealtimeInputKind::Video),
+            row.inline_video,
+            "Video input kind must follow the catalog inline_video flag"
+        );
+
+        // #68: the realtime transport facts (turning modes, interrupt,
+        // transcript) project from the catalog row's core-side bools, not from
+        // hand-written literals at the provider boundary.
+        assert_eq!(
+            caps.turning_modes
+                .contains(&RealtimeTurningMode::ProviderManaged),
+            row.realtime_supports_provider_managed_turns,
+            "ProviderManaged turning mode must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.turning_modes
+                .contains(&RealtimeTurningMode::ExplicitCommit),
+            row.realtime_supports_explicit_commit,
+            "ExplicitCommit turning mode must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.interrupt_supported, row.realtime_interrupt_supported,
+            "interrupt_supported must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.transcript_supported, row.realtime_transcript_supported,
+            "transcript_supported must follow the catalog bool"
+        );
+
+        // The factory-level (identity-free) advertisement projects the same
+        // canonical-model capabilities.
+        assert_eq!(openai_realtime_capabilities_default(), caps);
+    }
+
+    /// #68: capabilities are model-keyed, so an uncatalogued model still
+    /// gets the transport-invariant base (no synthesized video) rather than
+    /// a name-prefix heuristic.
+    #[test]
+    fn realtime_capabilities_fail_closed_on_uncatalogued_model() {
+        let identity = SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let caps = openai_realtime_capabilities_for(&identity);
         assert!(
-            unknown.contains("ISO code 'xx'"),
-            "unknown codes must fall back to the ISO label: {unknown}"
+            !caps.video_supported,
+            "uncatalogued model must not synthesize video capability"
+        );
+        assert!(!caps.input_kinds.contains(&RealtimeInputKind::Video));
+    }
+
+    /// #69 / #149: the realtime voice, input/output language, and input
+    /// transcription model resolve from the typed, model-keyed policy — no
+    /// process-env reads. This is the typed-owner contract for those facts.
+    #[test]
+    fn realtime_policy_resolves_typed_defaults_from_identity() {
+        let policy = OpenAiRealtimePolicy::resolve(&sample_realtime_identity());
+
+        // Voice is the typed provider default, not an env read.
+        assert_eq!(policy.voice, Voice::from(OPENAI_REALTIME_DEFAULT_VOICE));
+
+        // Input language is the s71/s72 English pin by default.
+        assert_eq!(policy.input_language.as_deref(), Some("en"));
+
+        // Output language pin renders the English directive by default.
+        let pin = policy
+            .output_language_instruction
+            .as_deref()
+            .expect("default output policy pins a language");
+        assert!(
+            pin.contains("English"),
+            "default pin must name English: {pin}"
+        );
+
+        // #149: transcription model is sourced model-keyed from the typed
+        // resolver, never a process-env ladder.
+        assert_eq!(
+            policy.transcription_model,
+            openai_realtime_transcription_model_for(&sample_realtime_identity())
         );
     }
 
+    /// #149: the transcription model is keyed off the active realtime model
+    /// identity (typed owner), not a bare literal scattered across the
+    /// `session.update` build site or a process-env ladder.
     #[test]
-    fn resolve_realtime_output_language_instruction_none_skips_pin() {
-        // `none` lets multilingual callers fully opt out of the pin.
+    fn realtime_transcription_model_is_model_keyed() {
+        let realtime = sample_realtime_identity();
+        // Catalog-sourced: gpt-realtime-2's `transcription_companion_model`.
+        let companion = meerkat_core::model_profile::capabilities::capabilities_for(
+            realtime.provider,
+            &realtime.model,
+        )
+        .and_then(|caps| caps.transcription_companion_model)
+        .expect("gpt-realtime-2 must declare a transcription companion model");
         assert_eq!(
-            resolve_realtime_output_language_instruction(Some("none")),
-            None
-        );
-        assert_eq!(
-            resolve_realtime_output_language_instruction(Some("NONE")),
-            None
-        );
-        assert_eq!(
-            resolve_realtime_output_language_instruction(Some("  None  ")),
-            None
+            openai_realtime_transcription_model_for(&realtime),
+            companion
         );
     }
 
@@ -4557,14 +4938,17 @@ mod tests {
             "You are a helpful realtime operator.".to_string(),
         ))];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("system seed must yield instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("system seed must yield instructions");
 
         // Language pin surfaces ahead of the system prompt so the
         // realtime model's two output streams (text + audio) share a
         // single language bias even under transcription drift. The
-        // default is English unless RKAT_REALTIME_OUTPUT_LANGUAGE
-        // opts out; tests run without that env set on CI.
+        // pin is the typed `OpenAiRealtimePolicy` default (English).
         let language_pin_idx = instructions.find("Respond in English");
         let system_prompt_idx = instructions.find("You are a helpful realtime operator");
         match (language_pin_idx, system_prompt_idx) {
@@ -4585,8 +4969,12 @@ mod tests {
             meerkat_core::SYSTEM_CONTEXT_SEPARATOR
         )))];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("system prompt should still produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("system prompt should still produce instructions");
 
         assert!(
             instructions.contains("You are the realtime operator."),
@@ -4608,7 +4996,9 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Authoritative peer token is birch seventeen.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Authoritative peer token is birch seventeen.".to_string(),
+            ),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4616,8 +5006,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("typed runtime context should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("typed runtime context should produce instructions");
 
         assert!(
             instructions.contains("Authoritative Meerkat runtime facts"),
@@ -4635,12 +5029,14 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {
   \"request_intent\": \"checksum_token\",
   \"request_subject\": \"alpha beta gamma\",
   \"token\": \"birch seventeen\"
 }"
-            .to_string(),
+            .to_string()
+            ),
             source: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                     .to_string(),
@@ -4662,8 +5058,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("terminal peer response should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("terminal peer response should produce instructions");
 
         assert!(
             instructions.contains("Resolved terminal peer-response facts"),
@@ -4697,16 +5097,19 @@ mod tests {
             Message::System(meerkat_core::SystemMessage::new(
                 "You are the realtime operator.".to_string(),
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Waiting for analyst token.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Waiting for analyst token.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string()
+            ),
             source: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                     .to_string(),
@@ -4726,8 +5129,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("terminal peer response should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("terminal peer response should produce instructions");
 
         let runtime_index = instructions
             .find("Resolved terminal peer-response facts")
@@ -4754,17 +5161,22 @@ mod tests {
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("reconstruction instructions should exist");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            Some(openai_realtime_output_language_instruction()),
+        )
+        .expect("reconstruction instructions should exist");
 
         assert!(
             instructions.contains("You are the realtime operator."),
@@ -4802,6 +5214,42 @@ mod tests {
     }
 
     #[test]
+    fn websocket_error_mapping_classifies_typed_discriminants_not_strings() {
+        use tokio_tungstenite::tungstenite::Error as WsError;
+
+        // An OS-level timed-out IO error classifies as NetworkTimeout from
+        // its TYPED ErrorKind — not from a "timed out" substring.
+        let timeout = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "anything"),
+        )));
+        assert!(matches!(timeout, LlmError::NetworkTimeout { .. }));
+
+        // Regression: a NON-timeout websocket fault whose display text happens
+        // to contain "timed out" must NOT be classified as a timeout.
+        let reset = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Io(
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer said: your request timed out",
+            ),
+        )));
+        assert!(
+            matches!(reset, LlmError::ConnectionReset),
+            "connection reset must classify from the typed kind, got {reset:?}"
+        );
+
+        // Closed-connection discriminants classify as ConnectionReset.
+        let closed = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::ConnectionClosed));
+        assert!(matches!(closed, LlmError::ConnectionReset));
+
+        // Other websocket faults are NOT laundered into NetworkTimeout{0}.
+        let other = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Utf8));
+        assert!(
+            !matches!(other, LlmError::NetworkTimeout { .. }),
+            "non-timeout websocket faults must not fabricate a timeout, got {other:?}"
+        );
+    }
+
+    #[test]
     fn realtime_reconstruction_replays_authoritative_runtime_context_and_recent_dialogue() {
         let seed_messages = [
             Message::System(meerkat_core::SystemMessage::new(
@@ -4811,11 +5259,12 @@ mod tests {
                 "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\nPeer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}",
             )),
             Message::User(meerkat_core::UserMessage::text("hello")),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "world".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "world".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
@@ -4838,7 +5287,9 @@ mod tests {
             },
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string()
+            ),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4919,21 +5370,23 @@ mod tests {
                 "You are the realtime operator.".to_string(),
             )),
             Message::User(meerkat_core::UserMessage::text("old setup line")),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "old setup ack".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "old setup ack".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
@@ -4996,11 +5449,12 @@ mod tests {
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5008,13 +5462,16 @@ mod tests {
             seed_messages.push(Message::User(meerkat_core::UserMessage::text(format!(
                 "Later dialogue turn {index}"
             ))));
-            seed_messages.push(Message::Assistant(meerkat_core::AssistantMessage {
-                content: format!("Later assistant turn {index}"),
-                tool_calls: Vec::new(),
-                stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            }));
+            seed_messages.push(Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: format!("Later assistant turn {index}"),
+                        meta: None,
+                    }],
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ));
         }
 
         let events = openai_realtime_history_events(&seed_messages, &[]);
@@ -5408,6 +5865,85 @@ mod tests {
             seen.iter()
                 .any(|event| matches!(event, ClientEvent::ResponseCreate { .. })),
             "commit must still fire response.create after canonical synthesis"
+        );
+    }
+
+    /// Gate (#51): explicit-commit text turns are staged as the machine-owned
+    /// typed [`AppendRealtimeTranscript`] seam (named `item_id` + `text` +
+    /// typed `role`/`lane` classifiers) — the exact fact the generated
+    /// `MeerkatMachine` consumes to emit `RealtimeTranscriptAppended` — and the
+    /// staged item id is exactly the synthetic id sent to the provider, so a
+    /// committed turn proves a real staged turn keyed by the same identity that
+    /// reaches canonical history. (The cross-crate emit/consume of the staged
+    /// fact into machine-owned realtime-transcript state — so it survives a
+    /// crash/cancel between stage and commit — is wired runtime-side; see the
+    /// crate-level note on the `pending_explicit_commit_text_items` field.)
+    #[tokio::test]
+    async fn explicit_commit_text_turns_stage_as_typed_fact_keyed_by_provider_item_id() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+
+        for text in ["first staged turn", "second staged turn"] {
+            session
+                .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                    text: text.to_string(),
+                }))
+                .await
+                .expect("text chunk should stage");
+        }
+
+        // Each staged turn is the machine-owned typed `AppendRealtimeTranscript`
+        // seam, preserved in order, carrying the staged text under a named
+        // field with the typed `User`/`Display` classifiers the generated
+        // transcript authority dispatches on.
+        assert_eq!(session.pending_explicit_commit_text_items.len(), 2);
+        assert_eq!(
+            session.pending_explicit_commit_text_items[0].text,
+            "first staged turn"
+        );
+        assert_eq!(
+            session.pending_explicit_commit_text_items[1].text,
+            "second staged turn"
+        );
+        for staged in &session.pending_explicit_commit_text_items {
+            assert_eq!(staged.role, RealtimeTranscriptRole::User);
+            assert_eq!(staged.lane, TranscriptLane::Display);
+        }
+
+        // The staged item ids are exactly the synthetic ids sent to the
+        // provider via `conversation.item.create` — the staging fact is keyed
+        // by the same identity that reaches canonical history on commit, so a
+        // committed turn cannot be keyed to a phantom item.
+        let provider_item_ids: Vec<String> = {
+            let seen = seen.lock().await;
+            seen.iter()
+                .filter_map(|event| match event {
+                    ClientEvent::ConversationItemCreate { item, .. } => match item.as_ref() {
+                        Item::Message {
+                            id: Some(id),
+                            role: Role::User,
+                            ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let staged_item_ids: Vec<String> = session
+            .pending_explicit_commit_text_items
+            .iter()
+            .map(|staged| staged.item_id.clone())
+            .collect();
+        assert_eq!(
+            staged_item_ids, provider_item_ids,
+            "staged item ids must match the synthetic ids sent to the provider, in order"
         );
     }
 
@@ -5899,8 +6435,9 @@ mod tests {
             committed,
             Some(RealtimeSessionEvent::TurnCommitted)
         ));
-        assert!(
-            session.awaiting_provider_response_after_commit,
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 },
             "provider-managed commit should wait for provider response start"
         );
 
@@ -5914,17 +6451,11 @@ mod tests {
             created.is_none(),
             "response.created is an internal lifecycle acknowledgement, not a public event"
         );
-        assert!(
-            !session.awaiting_provider_response_after_commit,
-            "response.created proves a response exists, so the pre-ack wait window should close"
-        );
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "response.created should keep the adapter waiting for real provider progress"
-        );
-        assert!(
-            session.provider_response_nudge_attempts == 0,
-            "response.created should preserve the existing recovery budget when no nudge has fired yet"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 },
+            "response.created should close the pre-ack window, keep the adapter waiting for \
+             real provider progress, and preserve the recovery budget"
         );
     }
 
@@ -5937,9 +6468,10 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        // A recovery nudge was sent (transport accepted) while awaiting the
+        // provider's first response; the budget has already consumed one
+        // attempt.
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let mapped = session
             .map_server_event(ServerEvent::Error {
@@ -5958,21 +6490,12 @@ mod tests {
             mapped.is_none(),
             "provider acknowledgement errors should stay internal to the adapter"
         );
-        assert!(
-            !session.awaiting_provider_response_after_commit,
-            "the adapter should treat the provider error as proof that a response already exists"
-        );
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "active-response acknowledgements should keep the adapter waiting for actual provider progress"
-        );
-        assert!(
-            session.provider_response_nudge_attempts == 1,
-            "the recovery budget should stay consumed until real provider progress arrives"
-        );
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "once the provider acknowledges the active response, the outstanding nudge itself is no longer inflight"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 1 },
+            "the provider error proves a response already exists: the adapter should keep \
+             waiting for actual progress, preserve the consumed recovery budget, and clear the \
+             inflight nudge guard"
         );
     }
 
@@ -5985,9 +6508,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6025,9 +6546,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 0;
-        session.provider_response_nudge_inflight = false;
+        session.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6065,9 +6584,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let first = session
             .map_server_event(ServerEvent::Error {
@@ -6103,13 +6620,11 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::InProgress),
             })
             .expect("response.created should map");
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "response.created should leave the adapter waiting for actual provider progress"
-        );
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "response.created should close the outstanding nudge transport guard once the provider has acknowledged the response"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 1 },
+            "response.created should leave the adapter waiting for actual provider progress and \
+             close the outstanding nudge transport guard, preserving the consumed budget"
         );
 
         let _ = session
@@ -6118,13 +6633,124 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::Completed),
             })
             .expect("response.done should map");
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "the terminal provider boundary should close the nudge guard"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Idle,
+            "the terminal provider boundary should reset the whole nudge machine, clearing the \
+             acknowledgement-only waiting state and the nudge guard"
         );
+    }
+
+    /// Gate (#52, part 1): the typed `RealtimeResponseState` makes the illegal
+    /// combinations the prior tri-bit boolean shadow allowed unrepresentable.
+    ///
+    /// Pre-#52 four independent fields
+    /// (`awaiting_provider_response_after_commit`,
+    /// `provider_response_acknowledged_without_progress`,
+    /// `provider_response_nudge_inflight`, `provider_response_nudge_attempts`)
+    /// could encode contradictions no transition ever intends:
+    ///   - "awaiting the first acknowledgement" AND "already acknowledged
+    ///     without progress" at the same time, and
+    ///   - "a recovery nudge is inflight" while not waiting on the provider at
+    ///     all (e.g. an inflight bit left set after the turn went idle).
+    ///
+    /// The enum cannot represent either: every state answers
+    /// `awaiting_after_commit` and `acknowledged_without_progress` mutually
+    /// exclusively, and `nudge_inflight` is only ever true on a state that is
+    /// also `is_waiting`.
+    #[test]
+    fn response_state_enum_forbids_illegal_boolean_combinations() {
+        let states = [
+            RealtimeResponseState::Idle,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 },
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 2 },
+            RealtimeResponseState::Nudged { nudge_attempts: 1 },
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 },
+            RealtimeResponseState::Acknowledged { nudge_attempts: 3 },
+            RealtimeResponseState::Stalled,
+        ];
+        for state in states {
+            // The "awaiting first acknowledgement" and "acknowledged without
+            // progress" facts are mutually exclusive — the old booleans could
+            // both be true at once; the enum cannot.
+            assert!(
+                !(state.awaiting_after_commit() && state.acknowledged_without_progress()),
+                "{state:?} must not claim both awaiting-after-commit and acknowledged-without-progress"
+            );
+            // A nudge can only be inflight while the adapter is actually
+            // waiting on the provider: the old `provider_response_nudge_inflight`
+            // bit had no such guard and could survive into a non-waiting state.
+            assert!(
+                !state.nudge_inflight() || state.is_waiting(),
+                "{state:?} must not report an inflight nudge while not waiting on the provider"
+            );
+            // A terminal/idle state never reports any in-flight waiting fact.
+            if !state.is_waiting() {
+                assert!(
+                    !state.awaiting_after_commit()
+                        && !state.acknowledged_without_progress()
+                        && !state.nudge_inflight(),
+                    "{state:?} is non-waiting and must report no waiting sub-facts"
+                );
+            }
+            // Any waiting state composes exactly the awaiting/acknowledged
+            // facts; non-waiting states (Idle/Stalled) report neither.
+            assert_eq!(
+                state.is_waiting(),
+                state.awaiting_after_commit() || state.acknowledged_without_progress(),
+                "{state:?} waiting flag must equal the disjunction of its sub-facts"
+            );
+        }
+
+        // Non-waiting terminal/idle states carry a zero recovery budget.
+        assert_eq!(RealtimeResponseState::Idle.nudge_attempts(), 0);
+        assert_eq!(RealtimeResponseState::Stalled.nudge_attempts(), 0);
+        // Acknowledgement preserves the consumed recovery budget regardless of
+        // which waiting state it came from.
+        assert_eq!(
+            RealtimeResponseState::Nudged { nudge_attempts: 2 }.acknowledge(),
+            RealtimeResponseState::Acknowledged { nudge_attempts: 2 }
+        );
+        assert_eq!(
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }.acknowledge(),
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 }
+        );
+    }
+
+    /// Gate (#52, part 2): a stalled provider turn terminalizes via the
+    /// explicit `RealtimeResponseState::Stalled` transition and surfaces a
+    /// typed `LlmError::NetworkTimeout`, rather than a bare `>= max_attempts`
+    /// boolean read scattered across the wait loop.
+    ///
+    /// The session is placed in the post-acknowledgement waiting state with
+    /// the recovery budget exhausted; the parking transport never advances, so
+    /// the bounded recovery wait elapses (paused tokio time) and the adapter
+    /// must transition to `Stalled` and fail closed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stalled_provider_turn_terminalizes_via_explicit_state_transition() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(ParkingOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        // One wait window, no recovery sends, so the very first elapsed window
+        // on an acknowledged-without-progress turn is terminal.
+        session.set_response_nudge_config(Some(5), Some(1));
+        // Provider acknowledged a response but produced no progress, and the
+        // recovery budget is already consumed.
+        session.response_state = RealtimeResponseState::Acknowledged { nudge_attempts: 1 };
+
+        let result = session.next_event().await;
         assert!(
-            !session.provider_response_acknowledged_without_progress,
-            "terminal provider progress should clear the acknowledgement-only waiting state"
+            matches!(result, Err(LlmError::NetworkTimeout { .. })),
+            "an exhausted stalled turn must fail closed with NetworkTimeout, got {result:?}"
+        );
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Stalled,
+            "stalled terminality must be an explicit state transition, not an implicit boolean read"
         );
     }
 
@@ -6375,6 +7001,8 @@ mod tests {
                     openai_realtime_instructions(
                         &open_config.seed_messages,
                         &open_config.runtime_system_context,
+                        OpenAiRealtimePolicy::resolve(&open_config.llm_identity)
+                            .output_language_instruction,
                     )
                     .as_deref()
                 );
@@ -7102,7 +7730,8 @@ mod tests {
                                 ..
                             }),
                             ..
-                        }) if model == &openai_realtime_transcription_model()
+                        }) if model
+                            == &openai_realtime_transcription_model_for(&open_config.llm_identity)
                     )
             )
         }));
@@ -7313,6 +7942,7 @@ mod tests {
         let events = openai_live_function_call_success_events(
             "call_1",
             serde_json::json!({ "hello": "world" }).to_string(),
+            &OpenAiRealtimePolicy::default().voice,
         );
 
         assert_eq!(events.len(), 2);
@@ -7574,7 +8204,9 @@ mod tests {
     async fn open_command_seeds_provider_with_snapshot_messages() {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
         use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
+        use meerkat_core::{
+            AssistantBlock, BlockAssistantMessage, Provider, StopReason, UserMessage, types,
+        };
 
         // Build seed messages: a user turn followed by an assistant turn.
         // Use the same constructors the existing live.rs tests use so the
@@ -7582,11 +8214,12 @@ mod tests {
         // produces in production.
         let seed_messages = vec![
             Message::User(UserMessage::text("what's the weather")),
-            Message::Assistant(AssistantMessage {
-                content: "looks rainy".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "looks rainy".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];
@@ -7730,7 +8363,9 @@ mod tests {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
         use meerkat_core::session::PendingSystemContextAppend;
         use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
+        use meerkat_core::{
+            AssistantBlock, BlockAssistantMessage, Provider, StopReason, UserMessage, types,
+        };
         use std::time::SystemTime;
 
         // Non-empty seed: if the Refresh arm regressed and re-seeded,
@@ -7739,11 +8374,12 @@ mod tests {
         // would catch the bug immediately.
         let seed_messages = vec![
             Message::User(UserMessage::text("first turn")),
-            Message::Assistant(AssistantMessage {
-                content: "second turn".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "second turn".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];
@@ -7757,7 +8393,9 @@ mod tests {
         );
 
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "peer terminal: pty=42".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "peer terminal: pty=42".to_string(),
+            ),
             source: Some("peer_terminal".to_string()),
             idempotency_key: Some("k1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -7779,7 +8417,7 @@ mod tests {
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin.
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -7897,7 +8535,7 @@ mod tests {
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin
         // and proceeds (matching model + provider).
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -8019,7 +8657,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain Ready.
@@ -8133,7 +8771,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8205,7 +8843,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8280,7 +8918,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8421,7 +9059,6 @@ mod tests {
     /// surface" from a real provider outage.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_image_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8431,7 +9068,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8492,7 +9129,6 @@ mod tests {
     /// `"video_frame_input_not_implemented"` reason.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_video_frame_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8502,7 +9138,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8571,7 +9207,6 @@ mod tests {
     /// returning "sent" success to the caller.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_rejects_mismatched_sample_rate_with_typed_format_mismatch() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8581,7 +9216,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8660,7 +9295,6 @@ mod tests {
     /// with the typed `AudioInputFormatMismatch` variant.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_rejects_mismatched_channels_with_typed_format_mismatch() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8670,7 +9304,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8743,7 +9377,6 @@ mod tests {
     /// happy path.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_accepts_pcm_24k_mono_unchanged() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8753,7 +9386,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -9478,5 +10111,101 @@ mod tests {
             eof.is_none(),
             "R6-1: next_observation must return None after pump EOF, got {eof:?}"
         );
+    }
+
+    // Row #81: the shared tool-call argument parser must fail the tool-call
+    // boundary on malformed provider JSON with a typed `StreamParseError`
+    // rather than laundering it into a `Value::String` blob.
+    #[test]
+    fn parse_tool_call_args_rejects_malformed_json() {
+        let err = parse_tool_call_args("{not valid json", "call_42")
+            .expect_err("malformed JSON must be a typed fault, not a Value::String blob");
+        assert!(
+            matches!(err, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_call_args_rejects_non_object_json() {
+        let err = parse_tool_call_args("\"just a string\"", "call_43")
+            .expect_err("a non-object JSON value must be a typed fault");
+        assert!(matches!(err, LlmError::StreamParseError { .. }));
+    }
+
+    #[test]
+    fn parse_tool_call_args_accepts_object_and_normalizes_empty() {
+        let empty = parse_tool_call_args("   ", "call_44").expect("empty args normalize to {}");
+        assert!(empty.is_object() && empty.as_object().is_some_and(|m| m.is_empty()));
+        let parsed =
+            parse_tool_call_args("{\"q\":\"hi\"}", "call_45").expect("object args parse cleanly");
+        assert_eq!(parsed["q"], serde_json::json!("hi"));
+    }
+
+    // Row #81: a function-call done event carrying malformed JSON must fail
+    // the realtime tool-call boundary, not emit a `ToolCallRequested` whose
+    // `arguments` is a `Value::String` blob.
+    #[tokio::test]
+    async fn function_call_with_malformed_args_fails_tool_call_boundary() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        let result = session.map_server_event(ServerEvent::ResponseFunctionCallArgumentsDone {
+            event_id: "evt_fn".to_string(),
+            response_id: "resp_fn".to_string(),
+            item_id: "item_fn".to_string(),
+            output_index: 0,
+            call_id: "call_malformed".to_string(),
+            name: "search".to_string(),
+            arguments: "{not json".to_string(),
+        });
+
+        let err = result.expect_err(
+            "malformed function-call args must fail the tool-call boundary, not emit \
+             a ToolCallRequested carrying Value::String",
+        );
+        assert!(
+            matches!(err, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got {err:?}"
+        );
+        assert!(
+            !session.response_tool_call_observed,
+            "a malformed tool call must not be marked observed"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_call_with_valid_args_emits_tool_call_requested() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        let mapped = session
+            .map_server_event(ServerEvent::ResponseFunctionCallArgumentsDone {
+                event_id: "evt_fn".to_string(),
+                response_id: "resp_fn".to_string(),
+                item_id: "item_fn".to_string(),
+                output_index: 0,
+                call_id: "call_ok".to_string(),
+                name: "search".to_string(),
+                arguments: "{\"q\":\"meerkat\"}".to_string(),
+            })
+            .expect("valid args must map cleanly");
+
+        match mapped {
+            Some(RealtimeSessionEvent::ToolCallRequested { arguments, .. }) => {
+                assert_eq!(arguments["q"], serde_json::json!("meerkat"));
+            }
+            other => panic!("expected ToolCallRequested, got {other:?}"),
+        }
     }
 }

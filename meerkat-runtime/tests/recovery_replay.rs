@@ -40,8 +40,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -69,7 +68,6 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     stamp_runtime_metadata(&mut state, input);
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
     // by seeding the DSL-owned phase + run association alongside the shell.
-    state.attempt_count = 1;
     StoredInputState {
         state,
         seed: InputStateSeed {

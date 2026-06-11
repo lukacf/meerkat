@@ -57,17 +57,17 @@ fn load_oauth_snapshot_for_release(
         return Ok(None);
     };
     let store = store.upgrade().ok_or_else(|| {
-        DslTransitionError::new(operation, "runtime store is no longer available")
+        DslTransitionError::no_matching(operation, "runtime store is no longer available")
     })?;
     let Some(bytes) = store
         .load_auth_oauth_flow_snapshot()
-        .map_err(|err| DslTransitionError::new(operation, err.to_string()))?
+        .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))?
     else {
         return Ok(None);
     };
     serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes)
         .map(Some)
-        .map_err(|err| DslTransitionError::new(operation, err.to_string()))
+        .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))
 }
 
 #[derive(Debug)]
@@ -209,7 +209,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             SnapshotPersistPolicy::merge(),
         )
         .map_err(|err| {
-            DslTransitionError::new(
+            DslTransitionError::no_matching(
                 "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
                 err.to_string(),
             )
@@ -686,11 +686,9 @@ impl RuntimeOAuthFlowHandle {
             .iter()
             .filter(|flow| !durable_browser.contains(&persisted_browser_snapshot_key(flow)))
         {
-            if let Some(provider) = OAuthProviderIdentity::from_alias(&flow.provider) {
-                let _ =
-                    self.registry
-                        .consume(&flow.state, &flow.target, provider, &flow.redirect_uri);
-            }
+            let _ =
+                self.registry
+                    .consume(&flow.state, &flow.target, flow.provider, &flow.redirect_uri);
             let _ = self.expire_browser(&flow.target, &flow.state);
         }
         for flow in current
@@ -698,11 +696,9 @@ impl RuntimeOAuthFlowHandle {
             .iter()
             .filter(|flow| !durable_device.contains(&persisted_device_snapshot_key(flow)))
         {
-            if let Some(provider) = OAuthProviderIdentity::from_alias(&flow.provider) {
-                let _ = self
-                    .registry
-                    .expire_device_code(&flow.device_code, &flow.target, provider);
-            }
+            let _ =
+                self.registry
+                    .expire_device_code(&flow.device_code, &flow.target, flow.provider);
             let _ = self
                 .lifecycle
                 .expire_device_flow(&flow.target, &flow.device_code);
@@ -752,9 +748,7 @@ impl RuntimeOAuthFlowHandle {
         if persisted.expires_at_millis <= now_millis {
             return;
         }
-        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
-            return;
-        };
+        let provider = persisted.provider;
         let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
         let elapsed = self.registry.ttl().saturating_sub(remaining);
         let created_at = now_instant.checked_sub(elapsed).unwrap_or(now_instant);
@@ -795,9 +789,7 @@ impl RuntimeOAuthFlowHandle {
         if persisted.expires_at_millis <= now_millis {
             return;
         }
-        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
-            return;
-        };
+        let provider = persisted.provider;
         let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
         let expires_at = now_instant.checked_add(remaining).unwrap_or(now_instant);
         let elapsed = Duration::from_millis(now_millis.saturating_sub(persisted.created_at_millis));

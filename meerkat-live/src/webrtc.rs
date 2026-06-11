@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::Router;
 use bytes::Bytes;
-use meerkat_contracts::WireLiveAdapterObservation;
+use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
 use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
 use opus::{Application, Channels, Decoder, Encoder};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -39,6 +39,7 @@ use crate::transport::{
     LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString, LiveWsState,
     live_ws_router,
 };
+use crate::wire_input::live_input_chunk_from_wire;
 
 /// Canonical JSON-RPC signaling method for browser-offer WebRTC.
 pub const LIVE_WEBRTC_ANSWER_METHOD: &str = "live/webrtc/answer";
@@ -67,6 +68,13 @@ struct OutgoingAudioPacket {
 struct OutgoingAudioControl {
     generation: AtomicU64,
     queued_packets: AtomicUsize,
+    /// D223/K16: count of output-audio packets dropped because the RTP pacing
+    /// queue was full or closed. The cumulative count is lowered into the
+    /// live-host signal seam (`LiveAdapterHost::signal_output_audio_degraded`)
+    /// once per degraded chunk, so the session observes delivery degradation
+    /// as a typed fact — this counter is the running total feeding that
+    /// signal, not a transport-local truth with no live reader.
+    dropped_packets: AtomicU64,
 }
 
 impl OutgoingAudioControl {
@@ -94,21 +102,78 @@ impl OutgoingAudioControl {
         self.queued_packets.store(0, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Relaxed) + 1
     }
+
+    /// D223: record a dropped output-audio packet (RTP pacing queue full or
+    /// closed) and return the new cumulative drop count.
+    fn note_dropped(&self) -> u64 {
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[cfg(test)]
+    fn dropped_packets(&self) -> u64 {
+        self.dropped_packets.load(Ordering::Relaxed)
+    }
 }
 
 /// Errors returned by the WebRTC transport/signaling layer.
+///
+/// D124: the signaling/audio failure classes are typed per phase so transports
+/// and the RPC answer-admission path route on a typed variant rather than
+/// reparsing a single `Webrtc(String)` / `Audio(String)` blob. Each variant
+/// carries the underlying webrtc-crate / opus / resampler prose in a `detail`
+/// field — that detail is a leaf string we do not own — but the *phase* (which
+/// signaling or audio step failed) is the typed discriminant. `ChannelNotFound`
+/// / `MissingLocalDescription` / `Json` are the existing typed precedents this
+/// extends.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LiveWebrtcError {
     #[error("channel not found: {0}")]
     ChannelNotFound(String),
-    #[error("WebRTC error: {0}")]
-    Webrtc(String),
-    #[error("audio bridge error: {0}")]
-    Audio(String),
+    /// Default-codec registration on the media engine failed.
+    #[error("WebRTC codec registration failed: {detail}")]
+    CodecRegistration { detail: String },
+    /// Creating the peer connection (or adding its output track) failed.
+    #[error("WebRTC peer creation failed: {detail}")]
+    PeerCreation { detail: String },
+    /// Parsing or applying the remote (browser) SDP offer failed.
+    #[error("WebRTC set-remote-description failed: {detail}")]
+    SetRemoteDescription { detail: String },
+    /// Creating or applying the local SDP answer failed.
+    #[error("WebRTC create-answer failed: {detail}")]
+    CreateAnswer { detail: String },
+    /// Sending an observation frame over the data channel failed.
+    #[error("WebRTC data-channel send failed: {detail}")]
+    DataChannelSend { detail: String },
+    /// An Opus encode/decode or PCM resampling step failed.
+    #[error("audio bridge error: {detail}")]
+    Audio { detail: String },
     #[error("JSON frame error: {0}")]
     Json(serde_json::Error),
     #[error("missing local WebRTC description after answer")]
     MissingLocalDescription,
+}
+
+impl LiveWebrtcError {
+    /// Stable typed reason code for this WebRTC error (D124).
+    ///
+    /// The RPC answer-admission path maps each code to a distinct generated
+    /// rejection reason. Exhaustive over the `#[non_exhaustive]` enum from
+    /// inside the crate so a new variant must add its code here.
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ChannelNotFound(_) => "channel_not_found",
+            Self::CodecRegistration { .. } => "codec_registration",
+            Self::PeerCreation { .. } => "peer_creation",
+            Self::SetRemoteDescription { .. } => "set_remote_description",
+            Self::CreateAnswer { .. } => "create_answer",
+            Self::DataChannelSend { .. } => "data_channel_send",
+            Self::Audio { .. } => "audio",
+            Self::Json(_) => "json_frame",
+            Self::MissingLocalDescription => "missing_local_description",
+        }
+    }
 }
 
 impl From<serde_json::Error> for LiveWebrtcError {
@@ -239,14 +304,18 @@ impl LiveWebrtcState {
             .map_err(|_| LiveWebrtcError::ChannelNotFound(channel_id.to_string()))?;
 
         let mut media_engine = MediaEngine::default();
-        media_engine
-            .register_default_codecs()
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
+        media_engine.register_default_codecs().map_err(|err| {
+            LiveWebrtcError::CodecRegistration {
+                detail: err.to_string(),
+            }
+        })?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
         let peer = Arc::new(
             api.new_peer_connection(RTCConfiguration::default())
                 .await
-                .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?,
+                .map_err(|err| LiveWebrtcError::PeerCreation {
+                    detail: err.to_string(),
+                })?,
         );
 
         let outgoing_audio = Arc::new(TrackLocalStaticSample::new(
@@ -260,9 +329,11 @@ impl LiveWebrtcState {
             "meerkat-live".to_owned(),
         ));
         let outgoing_audio_track: Arc<dyn TrackLocal + Send + Sync> = outgoing_audio.clone();
-        peer.add_track(outgoing_audio_track)
-            .await
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
+        peer.add_track(outgoing_audio_track).await.map_err(|err| {
+            LiveWebrtcError::PeerCreation {
+                detail: err.to_string(),
+            }
+        })?;
         let outgoing_audio_control = Arc::new(OutgoingAudioControl::default());
         let (outgoing_audio_tx, outgoing_audio_rx) =
             mpsc::channel::<OutgoingAudioPacket>(WEBRTC_AUDIO_QUEUE_CAPACITY);
@@ -290,19 +361,28 @@ impl LiveWebrtcState {
             Arc::clone(&outgoing_audio_control),
         );
 
-        let offer = RTCSessionDescription::offer(offer_sdp)
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
-        peer.set_remote_description(offer)
-            .await
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
-        let answer = peer
-            .create_answer(None)
-            .await
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
+        let offer = RTCSessionDescription::offer(offer_sdp).map_err(|err| {
+            LiveWebrtcError::SetRemoteDescription {
+                detail: err.to_string(),
+            }
+        })?;
+        peer.set_remote_description(offer).await.map_err(|err| {
+            LiveWebrtcError::SetRemoteDescription {
+                detail: err.to_string(),
+            }
+        })?;
+        let answer =
+            peer.create_answer(None)
+                .await
+                .map_err(|err| LiveWebrtcError::CreateAnswer {
+                    detail: err.to_string(),
+                })?;
         let mut gathering_complete = peer.gathering_complete_promise().await;
         peer.set_local_description(answer)
             .await
-            .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))?;
+            .map_err(|err| LiveWebrtcError::CreateAnswer {
+                detail: err.to_string(),
+            })?;
         let _ = gathering_complete.recv().await;
         let answer_sdp = peer
             .local_description()
@@ -385,14 +465,64 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
             outgoing_audio_control: Arc::clone(&context.outgoing_audio_control),
         };
 
+        // D329: capture the close machinery + peer handles into the message
+        // handler so an invalid input frame on the WebRTC data channel
+        // terminalizes the channel identically to the WS path
+        // (`transport.rs`), instead of `tracing::warn`-and-keep-alive. Both
+        // transports now route malformed frames through
+        // `reject_invalid_live_frame` for uniform generated close feedback.
+        let close_feedback_for_messages = Arc::clone(&observation_context.close_feedback);
+        let peer_registry_for_messages = Arc::clone(&observation_context.peer_registry);
+        let peer_for_messages = Arc::clone(&observation_context.peer);
+        let channel_for_messages_handle = Arc::clone(&channel);
         Box::pin(async move {
             channel.on_message(Box::new(move |message: DataChannelMessage| {
                 let host = Arc::clone(&host_for_messages);
                 let channel_id = channel_for_messages.clone();
+                let close_feedback = Arc::clone(&close_feedback_for_messages);
+                let peer_registry = Arc::clone(&peer_registry_for_messages);
+                let peer = Arc::clone(&peer_for_messages);
+                let data_channel = Arc::clone(&channel_for_messages_handle);
                 Box::pin(async move {
                     if message.is_string {
-                        match serde_json::from_slice::<LiveInputChunk>(&message.data) {
-                            Ok(chunk) => {
+                        // D243: the parse boundary is the generated
+                        // `LiveInputChunkWire` + the shared
+                        // `live_input_chunk_from_wire` conversion owner
+                        // (`crate::wire_input`) that the RPC `live/send_input`
+                        // path also routes through, so the WebRTC data channel
+                        // runs identical wire validation. A payload that fails
+                        // wire validation (malformed envelope OR malformed
+                        // base64) is rejected here exactly as on the RPC path.
+                        //
+                        // D329: any invalid frame — failed wire parse or failed
+                        // wire->core conversion — terminalizes the channel
+                        // (uniform with the WS path) rather than only logging
+                        // and keeping the peer alive.
+                        let chunk = match serde_json::from_slice::<LiveInputChunkWire>(
+                            &message.data,
+                        ) {
+                            Ok(wire) => match live_input_chunk_from_wire(wire) {
+                                Ok(chunk) => Some(chunk),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        channel = %channel_id,
+                                        error = %err,
+                                        "WebRTC data-channel input chunk failed wire validation; closing"
+                                    );
+                                    None
+                                }
+                            },
+                            Err(err) => {
+                                tracing::warn!(
+                                    channel = %channel_id,
+                                    error = %err,
+                                    "invalid WebRTC data-channel input frame; closing"
+                                );
+                                None
+                            }
+                        };
+                        match chunk {
+                            Some(chunk) => {
                                 if let Err(err) = host.send_input(&channel_id, chunk).await {
                                     tracing::warn!(
                                         channel = %channel_id,
@@ -401,12 +531,16 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                                     );
                                 }
                             }
-                            Err(err) => {
-                                tracing::warn!(
-                                    channel = %channel_id,
-                                    error = %err,
-                                    "invalid WebRTC data-channel JSON frame"
-                                );
+                            None => {
+                                reject_invalid_live_frame(
+                                    host.as_ref(),
+                                    close_feedback.as_ref(),
+                                    &peer_registry,
+                                    &channel_id,
+                                    &data_channel,
+                                    &peer,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -469,6 +603,18 @@ fn install_incoming_audio_handler(
                         generation,
                         "discarding queued WebRTC output audio after local speech barge-in"
                     );
+                    // D223: lower the transport-local barge-in into the
+                    // canonical interrupt seam (the same `signal_turn_interrupt`
+                    // path adapter-observed barge-ins use) so the discarded
+                    // output audio is a typed truncation/interrupt fact the
+                    // session observes, not just a discarded queue + log line.
+                    if let Err(err) = host.signal_transport_barge_in(&channel_id).await {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            error = %err,
+                            "failed to lower WebRTC barge-in into the interrupt seam"
+                        );
+                    }
                 }
                 let chunk = LiveInputChunk::Audio {
                     data: pcm_24k,
@@ -578,6 +724,7 @@ async fn pump_observations_to_data_channel(
             match bridge.encode_provider_pcm24k_chunk(data) {
                 Ok(packets) => {
                     let generation = outgoing_audio_control.generation();
+                    let mut chunk_cumulative_dropped = None;
                     for packet in packets {
                         match outgoing_audio_tx.try_send(OutgoingAudioPacket {
                             generation,
@@ -585,13 +732,38 @@ async fn pump_observations_to_data_channel(
                         }) {
                             Ok(()) => outgoing_audio_control.note_queued(),
                             Err(err) => {
+                                // D223: surface the drop as a typed
+                                // delivery-degraded fact (cumulative drop
+                                // count), not just a log line, so the
+                                // transport/session knows output audio was not
+                                // fully delivered.
+                                let dropped = outgoing_audio_control.note_dropped();
+                                chunk_cumulative_dropped = Some(dropped);
                                 tracing::warn!(
                                     channel = %channel_id,
                                     error = %err,
+                                    dropped_output_audio_packets = dropped,
                                     "dropping WebRTC output audio packet because RTP pacing queue is full or closed"
                                 );
                             }
                         }
+                    }
+                    // K16: lower the delivery degradation into the canonical
+                    // host signal seam (the same `LiveProjectionSink` path
+                    // `signal_transport_barge_in` uses) so the dropped output
+                    // audio is a typed fact the session observes — not a
+                    // transport-local counter with no live reader. One signal
+                    // per degraded chunk, carrying the cumulative drop count.
+                    if let Some(dropped) = chunk_cumulative_dropped
+                        && let Err(err) = host
+                            .signal_output_audio_degraded(&channel_id, dropped)
+                            .await
+                    {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            error = %err,
+                            "failed to lower WebRTC output-audio degradation into the host signal seam"
+                        );
                     }
                 }
                 Err(err) => {
@@ -775,6 +947,28 @@ async fn close_and_deregister_peer(
     }
 }
 
+/// D329: terminalize a live channel after an invalid input frame, uniformly
+/// across transports.
+///
+/// The WS path (`transport.rs`) closes the channel through generated close
+/// feedback when an input frame fails to parse; the WebRTC data channel
+/// previously only `tracing::warn`-ed and kept the peer alive, so the same
+/// malformed condition terminalized differently by transport. This helper
+/// routes the WebRTC reject through the same generated close authority and then
+/// tears down the peer/data-channel so the outcome matches WS: invalid frame =>
+/// generated close.
+async fn reject_invalid_live_frame(
+    host: &LiveAdapterHost,
+    close_feedback: &dyn LiveChannelCloseFeedback,
+    peer_registry: &LiveWebrtcPeerRegistry,
+    channel_id: &LiveChannelId,
+    data_channel: &RTCDataChannel,
+    peer: &RTCPeerConnection,
+) {
+    let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
+    close_and_deregister_peer(peer_registry, channel_id, data_channel, peer).await;
+}
+
 fn spawn_outgoing_audio_track_pump(
     channel_id: LiveChannelId,
     outgoing_audio: Arc<TrackLocalStaticSample>,
@@ -813,7 +1007,9 @@ async fn forward_observation_json(
         .send_text(json)
         .await
         .map(|_| ())
-        .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))
+        .map_err(|err| LiveWebrtcError::DataChannelSend {
+            detail: err.to_string(),
+        })
 }
 
 /// Stateful Opus/resampling bridge for browser WebRTC audio and provider PCM.
@@ -826,14 +1022,19 @@ pub struct WebrtcAudioBridge {
 impl WebrtcAudioBridge {
     pub fn new() -> Result<Self, LiveWebrtcError> {
         Ok(Self {
-            opus_decoder: Decoder::new(BROWSER_OPUS_SAMPLE_RATE, Channels::Mono)
-                .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?,
+            opus_decoder: Decoder::new(BROWSER_OPUS_SAMPLE_RATE, Channels::Mono).map_err(
+                |err| LiveWebrtcError::Audio {
+                    detail: err.to_string(),
+                },
+            )?,
             opus_encoder: Encoder::new(
                 BROWSER_OPUS_SAMPLE_RATE,
                 Channels::Mono,
                 Application::Audio,
             )
-            .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?,
+            .map_err(|err| LiveWebrtcError::Audio {
+                detail: err.to_string(),
+            })?,
             pending_output_48k: Vec::new(),
         })
     }
@@ -847,7 +1048,9 @@ impl WebrtcAudioBridge {
         let frames = self
             .opus_decoder
             .decode(payload, &mut decoded, false)
-            .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+            .map_err(|err| LiveWebrtcError::Audio {
+                detail: err.to_string(),
+            })?;
         decoded.truncate(frames);
         let pcm_24k = resample_i16_mono(
             &decoded,
@@ -880,7 +1083,9 @@ impl WebrtcAudioBridge {
             let len = self
                 .opus_encoder
                 .encode(&frame, &mut packet)
-                .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+                .map_err(|err| LiveWebrtcError::Audio {
+                    detail: err.to_string(),
+                })?;
             packet.truncate(len);
             packets.push(packet);
         }
@@ -910,17 +1115,27 @@ fn resample_i16_mono(
         .iter()
         .map(|sample| f64::from(*sample) / f64::from(i16::MAX))
         .collect::<Vec<_>>();
-    let input_adapter = InterleavedSlice::new(&input_f64, 1, frames)
-        .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+    let input_adapter =
+        InterleavedSlice::new(&input_f64, 1, frames).map_err(|err| LiveWebrtcError::Audio {
+            detail: err.to_string(),
+        })?;
     let output_capacity = ((frames * output_rate).div_ceil(input_rate)).saturating_add(1024);
     let mut output = vec![0.0_f64; output_capacity];
-    let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, output_capacity)
-        .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+    let mut output_adapter =
+        InterleavedSlice::new_mut(&mut output, 1, output_capacity).map_err(|err| {
+            LiveWebrtcError::Audio {
+                detail: err.to_string(),
+            }
+        })?;
     let mut resampler = Fft::<f64>::new(input_rate, output_rate, frames, 1, 1, FixedSync::Input)
-        .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+        .map_err(|err| LiveWebrtcError::Audio {
+            detail: err.to_string(),
+        })?;
     let (_input_frames, output_frames) = resampler
         .process_all_into_buffer(&input_adapter, &mut output_adapter, frames, None)
-        .map_err(|err| LiveWebrtcError::Audio(err.to_string()))?;
+        .map_err(|err| LiveWebrtcError::Audio {
+            detail: err.to_string(),
+        })?;
     Ok(output
         .into_iter()
         .take(output_frames)
@@ -966,9 +1181,9 @@ fn i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
 
 fn le_bytes_to_i16(bytes: &[u8]) -> Result<Vec<i16>, LiveWebrtcError> {
     if !bytes.len().is_multiple_of(2) {
-        return Err(LiveWebrtcError::Audio(
-            "PCM payload length must be an even number of bytes".to_string(),
-        ));
+        return Err(LiveWebrtcError::Audio {
+            detail: "PCM payload length must be an even number of bytes".to_string(),
+        });
     }
     Ok(bytes
         .chunks_exact(2)
@@ -1119,6 +1334,134 @@ mod tests {
         let next_generation = control.discard_queued();
         assert!(next_generation > generation);
         assert_eq!(control.queued_packets(), 0);
+    }
+
+    #[test]
+    fn outgoing_audio_control_tracks_dropped_packets_as_typed_signal() {
+        // D223: an RTP-queue-full drop is a typed delivery-degraded fact
+        // (cumulative count), not just a log line. (Fails-old: there was no
+        // drop counter — the drop was `tracing::warn`-and-forget.)
+        let control = OutgoingAudioControl::default();
+        assert_eq!(control.dropped_packets(), 0);
+        assert_eq!(control.note_dropped(), 1);
+        assert_eq!(control.note_dropped(), 2);
+        assert_eq!(control.dropped_packets(), 2);
+        // Discarding the queue (barge-in) does not erase the delivery-degraded
+        // record — the two facts are independent.
+        let _ = control.discard_queued();
+        assert_eq!(control.dropped_packets(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // D124: WebRTC signaling errors are typed per phase
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webrtc_error_reason_codes_are_distinct_per_phase() {
+        // Each typed signaling/audio variant exposes a distinct stable reason
+        // code so the RPC answer-admission path routes on the typed class, not
+        // a single `Webrtc(String)` blob. (Fails-old: `Webrtc`/`Audio` tuple
+        // variants no longer exist.)
+        let cases = [
+            (
+                LiveWebrtcError::CodecRegistration { detail: "x".into() },
+                "codec_registration",
+            ),
+            (
+                LiveWebrtcError::PeerCreation { detail: "x".into() },
+                "peer_creation",
+            ),
+            (
+                LiveWebrtcError::SetRemoteDescription { detail: "x".into() },
+                "set_remote_description",
+            ),
+            (
+                LiveWebrtcError::CreateAnswer { detail: "x".into() },
+                "create_answer",
+            ),
+            (
+                LiveWebrtcError::DataChannelSend { detail: "x".into() },
+                "data_channel_send",
+            ),
+            (LiveWebrtcError::Audio { detail: "x".into() }, "audio"),
+            (
+                LiveWebrtcError::ChannelNotFound("c".into()),
+                "channel_not_found",
+            ),
+            (
+                LiveWebrtcError::MissingLocalDescription,
+                "missing_local_description",
+            ),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (err, expected) in cases {
+            assert_eq!(err.reason_code(), expected, "reason_code for {err:?}");
+            assert!(
+                seen.insert(err.reason_code()),
+                "reason codes must be distinct: {expected}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // D346: a generated answer-result rejection after answer_offer leaves
+    // zero entries in the peer registry (fail-closed cleanup).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn answer_result_rejection_after_answer_offer_leaves_no_orphaned_peer() {
+        ensure_test_crypto_provider();
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let (adapter, _command_rx, _observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
+        let browser_peer = new_browser_peer().await;
+        // A WebRTC offer needs at least one m-line to carry ICE credentials;
+        // an offer with no data channel / track yields an SDP with no
+        // ice-ufrag, which the answer side's set_remote_description rejects.
+        // Open the canonical "meerkat.live" data channel before offering,
+        // mirroring the other webrtc tests in this module.
+        let _dc = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
+        let offer = browser_peer.create_offer(None).await.unwrap();
+        let mut gathering_complete = browser_peer.gathering_complete_promise().await;
+        browser_peer.set_local_description(offer).await.unwrap();
+        let _ = gathering_complete.recv().await;
+        let offer_sdp = browser_peer.local_description().await.unwrap().sdp;
+
+        // answer_offer materializes the transport peer into the registry.
+        let _answer = state
+            .answer_offer(channel_id.clone(), offer_sdp)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.peer_count().await,
+            1,
+            "answer_offer must install the peer"
+        );
+
+        // Simulate the RPC reject branch after generated answer-result
+        // authority rejects: the fail-closed cleanup primitive (`close_peer`)
+        // must remove the orphaned peer so no entry survives the rejected open.
+        state.close_peer(&channel_id).await;
+        assert_eq!(
+            state.peer_count().await,
+            0,
+            "a rejected answer-result must leave zero peers in the registry"
+        );
     }
 
     #[tokio::test]

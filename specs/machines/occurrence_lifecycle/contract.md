@@ -11,8 +11,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `schedule_id`: `ScheduleId`
 - `schedule_revision`: `u64`
 - `occurrence_ordinal`: `u64`
-- `trigger_key`: `String`
-- `target_binding_key`: `String`
+- `trigger_key`: `TriggerKey`
+- `target_binding_key`: `TargetBindingId`
 - `misfire_policy`: `MisfirePolicy`
 - `misfire_policy_key`: `String`
 - `overlap_policy`: `OverlapPolicy`
@@ -21,11 +21,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `missing_target_policy_key`: `String`
 - `due_at_utc_ms`: `u64`
 - `misfire_deadline_utc_ms`: `u64`
-- `claimed_by`: `Option<String>`
+- `claimed_by`: `Option<ClaimOwner>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
 - `claimed_at_utc_ms`: `Option<u64>`
 - `claim_token`: `Option<ClaimToken>`
-- `delivery_correlation_id`: `Option<String>`
+- `delivery_correlation_id`: `Option<CorrelationId>`
 - `target_materialized_session_id`: `Option<SessionId>`
 - `receipt_recorded_at_utc_ms`: `Option<u64>`
 - `last_receipt_recorded_at_utc_ms`: `Option<u64>`
@@ -33,9 +33,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `last_receipt_stage`: `Option<DeliveryReceiptStage>`
 - `last_receipt_failure_class`: `Option<OccurrenceFailureClass>`
 - `last_receipt_detail`: `Option<String>`
-- `last_receipt_correlation_id`: `Option<String>`
+- `last_receipt_correlation_id`: `Option<CorrelationId>`
 - `last_receipt_materialized_session_id`: `Option<SessionId>`
-- `runtime_outcome_key`: `Option<String>`
+- `runtime_outcome_key`: `Option<RuntimeOutcomeKey>`
 - `receipt_stage`: `Option<DeliveryReceiptStage>`
 - `receipt_failure_class`: `Option<OccurrenceFailureClass>`
 - `receipt_detail`: `Option<String>`
@@ -47,15 +47,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
-- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, target_materialized_session_id: Option<SessionId>, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
-- `SyncTargetSnapshot`(target_binding_key: String, target_materialized_session_id: Option<SessionId>)
-- `RecordReceipt`(correlation_id: Option<String>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
+- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, target_materialized_session_id: Option<SessionId>, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
+- `SyncTargetSnapshot`(target_binding_key: TargetBindingId, target_materialized_session_id: Option<SessionId>)
+- `RecordReceipt`(correlation_id: Option<CorrelationId>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<RuntimeOutcomeKey>)
 - `ClassifyDue`(now_utc_ms: u64)
 - `ClassifyOccurrenceTerminality`
 - `ClassifyClaimedDispatchDisposition`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `ClassifyCompletionSupersession`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
-- `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
-- `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
+- `Claim`(owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
+- `DispatchStarted`(correlation_id: Option<CorrelationId>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
 - `Complete`(at_utc_ms: u64)
 - `ResolveRuntimeCompletion`(outcome: RuntimeCompletionOutcome, detail: Option<String>, at_utc_ms: u64)
@@ -1416,7 +1416,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `occurrence_lifecycle` (machine `OccurrenceLifecycleMachine`): `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states

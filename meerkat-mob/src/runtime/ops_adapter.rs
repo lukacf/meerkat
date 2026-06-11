@@ -1063,7 +1063,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-a".into(),
             address: "inproc://peer-a".into(),
-            pubkey: None,
+            pubkey: [7u8; 32],
             bootstrap_token: None,
             session_id: None,
         };
@@ -1096,7 +1096,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: peer_id.to_string(),
             address: address.to_string(),
-            pubkey: None,
+            pubkey: [7u8; 32],
             bootstrap_token: None,
             session_id: None,
         };

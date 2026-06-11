@@ -6,6 +6,7 @@
 
 import type {
   CommsChecksumTokenParams as WireCommsChecksumTokenParams,
+  CustomModelConfig,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
   MobFlowSpecInput,
@@ -22,17 +23,14 @@ import type {
   WireAuthBindingRef,
   WireContentInput,
   WireMemberLaunchMode,
+  Provider,
   WireMobBackendKind,
   WireMobProfile,
+  WireMobResumeOverrideField,
   WireMobRuntimeMode,
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
-  AttentionDelegatedAuthority,
-  AttentionProjectionPolicy,
-  WorkAttentionMode,
-  WorkAttentionStatus,
-  WorkCompletionPolicy,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
@@ -43,6 +41,8 @@ export type {
   WorkAttentionMode,
   WorkAttentionStatus,
   WorkCompletionPolicy,
+  WorkGraphStatus,
+  WorkGraphPriority,
 } from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
@@ -204,12 +204,6 @@ export interface SessionInfo {
   readonly labels: Readonly<Record<string, string>>;
 }
 
-export interface SessionToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly args: unknown;
-}
-
 export interface SessionToolResult {
   readonly toolUseId: string;
   readonly content: ContentInput;
@@ -252,7 +246,6 @@ export interface SessionMessage {
   readonly kind?: string;
   readonly body?: string;
   readonly content?: ContentInput;
-  readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
@@ -360,13 +353,6 @@ export type TranscriptRewriteMessage =
       readonly created_at?: string;
     }
   | {
-      readonly role: "assistant";
-      readonly content: string;
-      readonly tool_calls?: readonly SessionToolCall[];
-      readonly stop_reason?: string;
-      readonly created_at?: string;
-    }
-  | {
       readonly role: "block_assistant";
       readonly blocks: readonly Record<string, unknown>[];
       readonly stop_reason?: string;
@@ -441,7 +427,6 @@ export type EventSourceIdentity =
 export interface EventEnvelope<T = unknown> {
   readonly timestamp_ms: number;
   readonly source: EventSourceIdentity;
-  readonly source_id: string;
   readonly seq: number;
   readonly event_id: string;
   readonly payload: T;
@@ -459,6 +444,11 @@ export type MobToolConfig = MobToolConfigInput;
 
 export interface MobProfile {
   readonly model: string;
+  readonly provider?: Provider;
+  readonly self_hosted_server_id?: string;
+  readonly image_generation_provider?: Provider;
+  readonly auto_compact_threshold?: number;
+  readonly resume_overrides?: readonly WireMobResumeOverrideField[];
   readonly skills?: readonly string[];
   readonly tools?: MobToolConfig;
   readonly peer_description?: string;
@@ -476,6 +466,8 @@ export interface MobDefinition {
   readonly id: string;
   readonly orchestrator?: MobOrchestratorInput;
   readonly profiles: Readonly<Record<string, MobProfileBinding>>;
+  readonly models?: Readonly<Record<string, CustomModelConfig>>;
+  readonly image_generation_provider?: Provider;
   readonly wiring?: MobWiringRulesInput;
   readonly flows?: Readonly<Record<string, MobFlowSpecInput>>;
   readonly skills?: Readonly<Record<string, MobSkillSourceInput>>;
@@ -538,7 +530,6 @@ export interface MobMember {
   readonly peerId?: string;
   readonly externalPeerSpecs?: Readonly<Record<string, Record<string, unknown>>>;
   readonly runtimeMode?: string;
-  readonly state?: string;
   readonly wiredTo?: readonly string[];
   readonly labels?: Record<string, string>;
   readonly status?: string;
@@ -588,27 +579,19 @@ export interface MobTurnStartOptions {
   readonly outputSchema?: MobTurnStartWireOptions["output_schema"];
   readonly structuredOutputRetries?: MobTurnStartWireOptions["structured_output_retries"];
   /**
-   * Provider params to set for this turn. Lowered to the canonical tagged
-   * tri-state `{ action: "set", value }` when building the wire payload.
+   * Provider-params override for this turn, carried exactly as the wire's
+   * canonical Inherit/Set/Clear tri-state: pass `{ action: "set", value }`
+   * (or an untagged value, which the server admits as Set),
+   * `{ action: "clear" }`, or omit the option to inherit.
    */
   readonly providerParams?: Record<string, unknown>;
   /**
-   * Clear the inherited provider params for this turn. Lowered to the
-   * canonical tagged tri-state `{ action: "clear" }`. Combining this with
-   * `providerParams` is rejected, mirroring the wire serde boundary.
-   */
-  readonly clearProviderParams?: boolean;
-  /**
-   * Auth binding to set for this turn. Lowered to the canonical tagged
-   * tri-state `{ action: "set", value }` when building the wire payload.
+   * Auth-binding override for this turn, carried exactly as the wire's
+   * canonical Inherit/Set/Clear tri-state: pass `{ action: "set", value }`
+   * (or an untagged binding ref, which the server admits as Set),
+   * `{ action: "clear" }`, or omit the option to inherit.
    */
   readonly authBinding?: Record<string, unknown>;
-  /**
-   * Clear the inherited auth binding for this turn. Lowered to the canonical
-   * tagged tri-state `{ action: "clear" }`. Combining this with `authBinding`
-   * is rejected, mirroring the wire serde boundary.
-   */
-  readonly clearAuthBinding?: boolean;
 }
 
 export interface MobEventsOptions {
@@ -648,14 +631,9 @@ export interface Capability {
   readonly status: string;
 }
 
-export interface ConfigEnvelope {
-  readonly config: Record<string, unknown>;
-  readonly generation: number;
-  readonly realmId?: string;
-  readonly instanceId?: string;
-  readonly backend?: string;
-  readonly resolvedPaths?: Readonly<Record<string, string>>;
-}
+// K20: the config envelope is the generated wire contract — the SDK no
+// longer owns a camelCase projection of it.
+export type { ConfigEnvelope, ConfigWriteResult } from "./generated/types.js";
 
 export interface CommsSendReceipt extends Record<string, unknown> {
   readonly kind?: string;
@@ -990,194 +968,66 @@ export interface ScheduleToolCallRequest {
   readonly arguments?: unknown;
 }
 
-export type WorkGraphStatus =
-  | "open"
-  | "in_progress"
-  | "blocked"
-  | "completed"
-  | "cancelled"
-  | "failed";
+// `WorkGraphStatus` and `WorkGraphPriority` are generated from the WorkItem
+// schema's closed enums and re-exported above (see the `./generated/types.js`
+// import). They are no longer hand-declared here (dogma row #256).
 
-export type WorkGraphPriority = "low" | "medium" | "high";
+// Generated wire types for the workgraph read APIs — the signature-parity
+// gate enforces that client wrappers consume these generated shapes
+// (re-exported verbatim), not hand-rolled mirrors.
+export type {
+  ReadyWorkFilter,
+  WorkEdge,
+  WorkEdgeKind,
+  WorkGraphEvent,
+  WorkGraphEventFilter,
+  WorkGraphEventKind,
+  WorkGraphEventsResponse,
+  WorkGraphIdParams,
+  WorkGraphItemsResponse,
+  WorkGraphSnapshot,
+  WorkGraphSnapshotFilter,
+  WorkItemFilter,
+} from "./generated/types.js";
 
-export type WorkGraphEdgeKind =
-  | "blocks"
-  | "parent"
-  | "related"
-  | "supersedes"
-  | "derived_from";
+// K21: the workgraph read shapes are fully generated (including the promoted
+// inline-object types `WorkItemOwner` / `WorkItemClaim` /
+// `WorkItemExternalRef`) and carry fail-closed `parseX` wire parsers. The
+// hand camelCase twins (`WorkGraphOwner*`, `WorkGraphClaim`,
+// `ExternalWorkRef`, hand `WorkEvidenceRef`/`WorkItem`/`WorkAttentionBinding`
+// and the goal/attention request/result mirrors) are deleted.
+export type {
+  AttentionListRequest,
+  AttentionListResult,
+  GoalStatusRequest,
+  GoalStatusResult,
+  WorkAttentionBinding,
+  WorkEvidenceKind,
+  WorkEvidenceRef,
+  WorkItem,
+  WorkItemClaim,
+  WorkItemExternalRef,
+  WorkItemOwner,
+  WorkItemRef,
+  WorkOwnerKey,
+  WorkOwnerKind,
+} from "./generated/types.js";
 
-export type WorkGraphEventKind =
-  | "created"
-  | "updated"
-  | "claimed"
-  | "released"
-  | "blocked"
-  | "closed"
-  | "linked"
-  | "evidence_added"
-  | "attention_created"
-  | "attention_updated";
-
-export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
-
-export interface WorkGraphOwnerKey {
-  readonly kind: WorkGraphOwnerKind;
-  readonly id: string;
-}
-
-export interface WorkItemRef {
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly itemId: string;
-}
-
-export interface WorkGraphOwner {
-  readonly key: WorkGraphOwnerKey;
-  readonly displayName?: string;
-}
-
-export interface WorkGraphClaim {
-  readonly owner: WorkGraphOwner;
-  readonly claimedAt: string;
-  readonly leaseExpiresAt?: string;
-}
-
-export interface ExternalWorkRef {
-  readonly kind: string;
-  readonly id: string;
-  readonly url?: string;
-}
-
-export interface WorkEvidenceRef {
-  readonly kind: string;
-  readonly id: string;
-  readonly label?: string;
-  readonly summary?: string;
-}
-
-export interface WorkItem {
-  readonly id: string;
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly title: string;
-  readonly description?: string;
-  readonly status: WorkGraphStatus;
-  readonly priority: WorkGraphPriority;
-  readonly completionPolicy: WorkCompletionPolicy;
-  readonly labels: readonly string[];
-  readonly owner?: WorkGraphOwner;
-  readonly claim?: WorkGraphClaim;
-  readonly machineState: Record<string, unknown>;
-  readonly revision: number;
-  readonly dueAt?: string;
-  readonly notBefore?: string;
-  readonly snoozedUntil?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-  readonly terminalAt?: string;
-  readonly externalRefs: readonly ExternalWorkRef[];
-  readonly evidenceRefs: readonly WorkEvidenceRef[];
-}
-
-export interface WorkGraphEdge {
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly kind: WorkGraphEdgeKind;
-  readonly fromId: string;
-  readonly toId: string;
-  readonly createdAt: string;
-}
-
-export interface WorkGraphEvent {
-  readonly seq?: number;
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly itemId?: string;
-  readonly kind: WorkGraphEventKind;
-  readonly at: string;
-  readonly payload?: unknown;
-}
-
-export interface WorkItemListResult {
-  readonly items: readonly WorkItem[];
-}
-
-export interface WorkGraphGoalResult {
-  readonly item: WorkItem;
-  readonly attention: WorkAttentionBinding;
-}
-
-export interface WorkGraphGoalStatusRequest extends WorkGraphItemLookupOptions {
-  readonly bindingId: string;
-}
-
-export type WorkGraphAttentionTarget =
-  | { readonly kind: "session"; readonly sessionId: string }
-  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkGraphOwnerKey };
-
-export interface WorkAttentionBinding {
-  readonly bindingId: string;
-  readonly createdAt: string;
-  readonly delegatedAuthority: AttentionDelegatedAuthority;
-  readonly machineState?: Record<string, unknown>;
-  readonly mode: WorkAttentionMode;
-  readonly projectionPolicy?: AttentionProjectionPolicy;
-  readonly status: WorkAttentionStatus;
-  readonly target: WorkGraphAttentionTarget;
-  readonly updatedAt: string;
-  readonly workRef: WorkItemRef;
-}
-
-export interface WorkGraphAttentionListRequest extends WorkGraphItemLookupOptions {
-  readonly status?: WorkAttentionStatus;
-  readonly target?: WorkGraphAttentionTarget;
-}
-
-export interface WorkGraphAttentionListResult {
-  readonly attention: readonly WorkAttentionBinding[];
-}
-
-export interface WorkGraphEventsResult {
-  readonly events: readonly WorkGraphEvent[];
-}
-
-export interface WorkGraphSnapshot {
-  readonly realmId: string;
-  readonly namespace?: string;
-  readonly allNamespaces: boolean;
-  readonly capturedAt: string;
-  readonly eventHighWaterMark?: number;
-  readonly items: readonly WorkItem[];
-  readonly edges: readonly WorkGraphEdge[];
-  readonly attention: readonly WorkAttentionBinding[];
-  readonly readyItemIds: readonly string[];
-}
+export {
+  parseAttentionListResult,
+  parseGoalStatusResult,
+  parseWorkAttentionBinding,
+  parseWorkEdge,
+  parseWorkGraphEvent,
+  parseWorkGraphEventsResponse,
+  parseWorkGraphItemsResponse,
+  parseWorkGraphSnapshot,
+  parseWorkItem,
+} from "./generated/types.js";
 
 export interface WorkGraphItemLookupOptions {
   readonly realmId?: string;
   readonly namespace?: string;
-}
-
-export interface WorkGraphItemFilter extends WorkGraphItemLookupOptions {
-  readonly allNamespaces?: boolean;
-  readonly statuses?: readonly WorkGraphStatus[];
-  readonly labels?: readonly string[];
-  readonly includeTerminal?: boolean;
-  readonly limit?: number;
-}
-
-export interface WorkGraphReadyFilter extends WorkGraphItemLookupOptions {
-  readonly labels?: readonly string[];
-  readonly limit?: number;
-}
-
-export interface WorkGraphSnapshotFilter extends WorkGraphItemFilter {}
-
-export interface WorkGraphEventFilter extends WorkGraphItemLookupOptions {
-  readonly allNamespaces?: boolean;
-  readonly afterSeq?: number;
-  readonly limit?: number;
 }
 
 /** Options for creating a new session. */
@@ -1216,7 +1066,6 @@ export interface SessionOptions {
 export interface AgentEventEnvelope {
   readonly eventId?: string;
   readonly source?: EventSourceIdentity;
-  readonly sourceId?: string;
   readonly seq?: number;
   readonly timestampMs?: number;
   readonly payload?: import("./events.js").AgentEvent;

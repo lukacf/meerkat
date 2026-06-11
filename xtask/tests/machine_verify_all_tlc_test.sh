@@ -19,9 +19,24 @@ if [[ -n "${RUSTFMT:-}" && "${RUSTFMT}" != /* ]]; then
   export RUSTFMT
 fi
 
+# Fail closed: this lane advertises TLC-backed verification (it is named
+# `machine_verify_all_tlc_test` and blessed by buildbuddy-doctor as
+# "machine-verify/TLC"). Silently degrading to a drift-only `machine-check-drift`
+# pass when `tlc` is absent would launder a weaker check as TLC verification.
+#
+# If `tlc` is missing, the lane MUST fail unless a caller has explicitly opted
+# into a drift-only run by exporting MACHINE_VERIFY_TLC_DRIFT_ONLY=1. That
+# opt-in is deliberately off by default so the absence of `tlc` on a lane that
+# claims TLC is treated as a hard failure, not a quiet downgrade.
 if ! command -v tlc >/dev/null 2>&1; then
-  echo "warning: tlc not on PATH; running hermetic machine-check-drift fallback"
-  exec "${xtask_bin}" machine-check-drift --all
+  if [[ "${MACHINE_VERIFY_TLC_DRIFT_ONLY:-0}" == "1" ]]; then
+    echo "MACHINE_VERIFY_TLC_DRIFT_ONLY=1: tlc absent, running drift-only machine-check-drift (NOT TLC verification)"
+    exec "${xtask_bin}" machine-check-drift --all
+  fi
+  echo "error: tlc not on PATH but this lane advertises TLC-backed verification." >&2
+  echo "       Provision tlc on the lane, or set MACHINE_VERIFY_TLC_DRIFT_ONLY=1 to" >&2
+  echo "       explicitly run the weaker drift-only check (which is NOT TLC)." >&2
+  exit 1
 fi
 
 # `meerkat_mob_seam` composition TLC is skipped for a CI-time/memory-budget

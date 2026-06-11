@@ -7,14 +7,12 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::lifecycle::run_primitive::{ConversationAppend, RuntimeTurnMetadata};
+use crate::lifecycle::run_primitive::{ConversationAppend, CoreRenderable, RuntimeTurnMetadata};
 use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{
-    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage,
-};
+use crate::types::{ContentInput, HandlingMode, Message, RunResult, SessionId, ToolDef, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
     SessionLlmIdentity, ToolCategoryOverride,
@@ -165,22 +163,25 @@ impl SystemContextStageError {
 }
 
 /// Request to create a new session and run the first turn.
+///
+/// Initial-turn runtime semantics (render metadata, skill references,
+/// handling mode, tool overlays, …) have exactly ONE carrier:
+/// `SessionBuildOptions::initial_turn_metadata` (a
+/// [`crate::lifecycle::run_primitive::RuntimeTurnMetadata`]). The former
+/// request-level `render_metadata` / `skill_references` duplicates are gone
+/// (dogma K10) — callers populate the typed carrier in `build`.
 #[derive(Debug)]
 pub struct CreateSessionRequest {
     /// Model name (e.g. "claude-opus-4-8").
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
-    /// Optional normalized rendering metadata for the initial prompt.
-    pub render_metadata: Option<RenderMetadata>,
-    /// Optional system prompt override.
-    pub system_prompt: Option<String>,
+    /// Typed per-request system-prompt policy (Inherit/Set/Disable).
+    pub system_prompt: crate::config::SystemPromptOverride,
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Canonical SkillKeys to resolve and inject for the first turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
     pub initial_turn: InitialTurnPolicy,
     /// How to treat `prompt` when `initial_turn == Defer`.
@@ -210,6 +211,23 @@ impl CreateSessionRequest {
 pub struct SessionBuildOptions {
     pub provider: Option<Provider>,
     pub self_hosted_server_id: Option<String>,
+    /// Caller-scoped custom model registry entries (e.g. mob-definition
+    /// `[models.<id>]` tables), merged into the effective `ModelRegistry`
+    /// for this build via `ModelRegistry::from_config_with_models`.
+    pub custom_models: BTreeMap<String, crate::config::CustomModelConfig>,
+    /// Configured default provider for `Auto` image-generation targets.
+    ///
+    /// When set, the image-generation planner resolves
+    /// `ImageGenerationTargetPreference::Auto` against this provider instead
+    /// of inferring a provider from the session's effective text model.
+    pub image_generation_provider: Option<Provider>,
+    /// Per-build auto-compaction threshold override (tokens).
+    ///
+    /// `NonZeroU64` is the typed fail-closed carrier: a zero threshold is
+    /// rejected at ingress instead of disabling compaction by accident. When
+    /// set, this wins over both the global config knob and model-aware
+    /// context-window scaling.
+    pub auto_compact_threshold_override: Option<std::num::NonZeroU64>,
     pub output_schema: Option<OutputSchema>,
     /// Structured-output retry budget *intent*. `None` inherits the canonical
     /// default ([`crate::config::default_structured_output_retries`]); the
@@ -220,7 +238,9 @@ pub struct SessionBuildOptions {
     pub peer_meta: Option<PeerMeta>,
     pub resume_session: Option<Session>,
     pub budget_limits: Option<BudgetLimits>,
-    pub provider_params: Option<serde_json::Value>,
+    /// Typed explicit provider parameter overrides for this build (K2:
+    /// the JSON bag is retired; surfaces parse fail-closed at their ingress).
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Serializable tool definitions used to reconstruct recoverable
     /// surface-owned dispatchers during session resume/rebuild.
@@ -241,6 +261,8 @@ pub struct SessionBuildOptions {
     // Use runtime_build_mode instead.
     pub override_builtins: ToolCategoryOverride,
     pub override_shell: ToolCategoryOverride,
+    /// Per-build override for the factory-level comms tooling capability.
+    pub override_comms: ToolCategoryOverride,
     pub override_memory: ToolCategoryOverride,
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
@@ -267,7 +289,13 @@ pub struct SessionBuildOptions {
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
-    pub backend: Option<String>,
+    /// Typed realm-pinned session-store backend for this build.
+    ///
+    /// Carries the single typed owner ([`RecoveryBackendKind`]) rather than a
+    /// bare `"sqlite"`/`"jsonl"` string, so a recovery-environment hint cannot
+    /// silently become durable identity: any raw backend string is parsed
+    /// fail-closed at its ingress boundary before it reaches this field.
+    pub backend: Option<crate::session_recovery::RecoveryBackendKind>,
     pub config_generation: Option<u64>,
     /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     /// Flows into `AgentBuildConfig.auth_binding` via `FactoryAgentBuilder`.
@@ -297,7 +325,6 @@ pub struct SessionBuildOptions {
     ///
     /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
     /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
-    /// Same tradeoff as `provider_params`.
     pub app_context: Option<serde_json::Value>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
@@ -307,6 +334,12 @@ pub struct SessionBuildOptions {
     /// Used for surface-supplied runtime state such as session-local tool
     /// visibility. The factory validates special keys before applying them.
     pub initial_metadata_entries: BTreeMap<String, serde_json::Value>,
+    /// Session-local initial tool-visibility filter applied at agent build.
+    ///
+    /// A typed carrier (not a metadata-string side channel) that rides the
+    /// build options so it survives deferred-session materialization, where the
+    /// `AgentBuildConfig` is reconstructed from these options.
+    pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -916,6 +949,7 @@ pub struct ResumeOverrideMask {
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
+    pub override_comms: bool,
     pub override_memory: bool,
     pub override_schedule: bool,
     pub override_workgraph: bool,
@@ -977,6 +1011,9 @@ impl Default for SessionBuildOptions {
         Self {
             provider: None,
             self_hosted_server_id: None,
+            custom_models: BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             output_schema: None,
             structured_output_retries: None,
             hooks_override: HookRunOverrides::default(),
@@ -994,6 +1031,7 @@ impl Default for SessionBuildOptions {
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -1016,6 +1054,7 @@ impl Default for SessionBuildOptions {
             app_context: None,
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
@@ -1031,6 +1070,12 @@ impl std::fmt::Debug for SessionBuildOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionBuildOptions")
             .field("provider", &self.provider)
+            .field("custom_models", &self.custom_models.keys())
+            .field("image_generation_provider", &self.image_generation_provider)
+            .field(
+                "auto_compact_threshold_override",
+                &self.auto_compact_threshold_override,
+            )
             .field("output_schema", &self.output_schema.is_some())
             .field("structured_output_retries", &self.structured_output_retries)
             .field("hooks_override", &self.hooks_override)
@@ -1049,6 +1094,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
@@ -1070,6 +1116,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
+            .field("initial_tool_filter", &self.initial_tool_filter.is_some())
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())
@@ -1094,8 +1141,6 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// metadata back into service-level request fields.
 #[derive(Debug)]
 pub struct StartTurnRuntimeSemantics {
-    /// Optional normalized rendering metadata for this turn prompt.
-    pub render_metadata: Option<RenderMetadata>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -1103,8 +1148,6 @@ pub struct StartTurnRuntimeSemantics {
     /// to the `SessionAgent` but does not act on it. Non-Queue handling
     /// only works correctly on runtime-backed surfaces.
     pub handling_mode: HandlingMode,
-    /// Canonical SkillKeys to resolve and inject for this turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
     /// Runtime-owned system-context appends that must be applied at this
@@ -1120,16 +1163,16 @@ pub struct StartTurnRuntimeSemantics {
     ///
     /// Runtime-backed callers populate this once at the machine boundary and
     /// the session layer derives per-turn policy from this typed carrier
-    /// instead of re-inferring or dropping fields.
+    /// instead of re-inferring or dropping fields. Render metadata and skill
+    /// references for the turn live ONLY here — there are no flat duplicates
+    /// on this request shape.
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
 impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
-            render_metadata: None,
             handling_mode: HandlingMode::Queue,
-            skill_references: None,
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             typed_turn_appends: Vec::new(),
@@ -1141,17 +1184,13 @@ impl Default for StartTurnRuntimeSemantics {
 impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn new(
-        render_metadata: Option<RenderMetadata>,
         handling_mode: HandlingMode,
-        skill_references: Option<Vec<crate::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
         pre_turn_context_appends: Vec<PendingSystemContextAppend>,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
-            render_metadata,
             handling_mode,
-            skill_references,
             flow_tool_overlay,
             pre_turn_context_appends,
             typed_turn_appends: Vec::new(),
@@ -1195,7 +1234,14 @@ pub struct StartTurnRequest {
 // `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendSystemContextRequest {
-    pub text: String,
+    /// Typed renderable content to append.
+    ///
+    /// This is the single owner of the append body. Surfaces parse their
+    /// inbound payload into a [`CoreRenderable`] at the ingress boundary; the
+    /// stringly `text` field that previously flattened the body here is gone.
+    /// Consumers that need the plain-text projection call
+    /// [`CoreRenderable::render_text`].
+    pub content: CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1217,6 +1263,30 @@ pub struct AppendSystemContextRequest {
     /// instead of re-parsing the flattened prompt `text`/`source` string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
+}
+
+impl AppendSystemContextRequest {
+    /// Build a plain-text system-context append.
+    ///
+    /// Text-only convenience for the common surface case (CLI/REST/RPC inject
+    /// a bare string). Richer producers construct the request directly with a
+    /// multimodal / system-notice [`CoreRenderable`].
+    #[must_use]
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            content: CoreRenderable::text(text),
+            source: None,
+            idempotency_key: None,
+            source_kind: crate::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
+        }
+    }
+
+    /// Plain-text projection of the typed append content.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.content.render_text()
+    }
 }
 
 /// Result of appending runtime system context to a session.
@@ -1253,10 +1323,10 @@ pub enum AppendSystemContextStatus {
 pub struct TurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]
-    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_tools: Option<Vec<crate::types::ToolName>>,
     /// Optional deny-list for this turn.
     #[serde(default)]
-    pub blocked_tools: Option<Vec<String>>,
+    pub blocked_tools: Option<Vec<crate::types::ToolName>>,
     /// Tool-dispatch metadata visible only to dispatchers for this turn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     #[cfg_attr(feature = "schema", schemars(skip))]
@@ -1277,10 +1347,10 @@ impl TurnToolOverlay {
 pub struct PublicTurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]
-    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_tools: Option<Vec<crate::types::ToolName>>,
     /// Optional deny-list for this turn.
     #[serde(default)]
-    pub blocked_tools: Option<Vec<String>>,
+    pub blocked_tools: Option<Vec<crate::types::ToolName>>,
 }
 
 impl From<PublicTurnToolOverlay> for TurnToolOverlay {
@@ -1680,6 +1750,49 @@ pub trait SessionService: Send + Sync {
     /// Services that do not support this capability return `StreamError::NotFound`.
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
         Err(StreamError::NotFound(format!("session {id}")))
+    }
+
+    /// Record a typed live-adapter terminal error against a session.
+    ///
+    /// A live (realtime) channel can terminalize for reasons that are not
+    /// themselves Meerkat run outcomes (connection lost, provider error, auth
+    /// failure, local config rejection). The live projection surface must route
+    /// the typed [`LiveAdapterErrorCode`] cause here instead of laundering it
+    /// into a warning log and an `Ok(())` — the fault is then observable on the
+    /// session's owned event stream rather than only in tracing.
+    ///
+    /// Returns `Unsupported` by default; runtime-backed services that own a
+    /// live session event stream override this. Non-runtime impls inherit the
+    /// graceful default.
+    async fn record_live_terminal_error(
+        &self,
+        _id: &SessionId,
+        _cause: crate::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "record_live_terminal_error".to_string(),
+        ))
+    }
+
+    /// Record a live transport output-audio delivery degradation against a
+    /// session.
+    ///
+    /// K16: when a live transport drops queued output-audio packets (e.g.
+    /// WebRTC RTP pacing-queue backpressure), the dropped-delivery fact must
+    /// be observable on the session's owned event stream — not a
+    /// transport-local counter with no live reader. `dropped` carries the
+    /// cumulative drop count for the channel.
+    ///
+    /// Returns `Unsupported` by default; runtime-backed services that own a
+    /// live session event stream override this.
+    async fn record_live_output_audio_degraded(
+        &self,
+        _id: &SessionId,
+        _dropped: u64,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "record_live_output_audio_degraded".to_string(),
+        ))
     }
 }
 

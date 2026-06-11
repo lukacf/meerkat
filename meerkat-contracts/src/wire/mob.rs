@@ -1,9 +1,7 @@
 //! Mob RPC wire contracts.
 
 use super::connection::WireAuthBindingRef;
-use super::runtime::{
-    WireTurnMetadataOverride, legacy_wire_override_from_split_fields, take_legacy_clear_bool,
-};
+use super::runtime::WireTurnMetadataOverride;
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -64,7 +62,6 @@ pub enum WireMobRuntimeMode {
 pub enum WireMemberLaunchMode {
     Fresh,
     Resume {
-        #[serde(alias = "session_id")]
         bridge_session_id: String,
     },
     Fork {
@@ -144,12 +141,41 @@ pub struct WireMobToolConfig {
     pub mcp: Vec<String>,
 }
 
+/// Profile fields that win over durable session metadata on resume.
+///
+/// Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
+/// vocabulary, parsed fail-closed at the wire boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobResumeOverrideField {
+    Model,
+    Provider,
+    ProviderParams,
+}
+
 /// Profile override for `mob/spawn`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireMobProfile {
     pub model: String,
+    /// Explicit typed provider for the profile model (closed vocabulary,
+    /// fail-closed at the wire boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<meerkat_core::Provider>,
+    /// Durable self-hosted server binding for configured self-hosted aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    /// Configured default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
+    /// Per-profile auto-compaction threshold override (tokens, non-zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold: Option<std::num::NonZeroU64>,
+    /// Profile fields that win over durable session metadata on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_overrides: Vec<WireMobResumeOverrideField>,
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -167,7 +193,7 @@ pub struct WireMobProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +277,22 @@ pub enum MobProfileBindingInput {
 #[serde(deny_unknown_fields)]
 pub struct MobProfileInput {
     pub model: String,
+    /// Explicit typed provider for the profile model (closed vocabulary,
+    /// fail-closed at the wire boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<meerkat_core::Provider>,
+    /// Durable self-hosted server binding for configured self-hosted aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    /// Configured default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
+    /// Per-profile auto-compaction threshold override (tokens, non-zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold: Option<std::num::NonZeroU64>,
+    /// Profile fields that win over durable session metadata on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_overrides: Vec<WireMobResumeOverrideField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -472,6 +514,10 @@ pub struct MobTopologySpecInput {
 pub struct MobSupervisorSpecInput {
     pub role: String,
     pub escalation_threshold: u32,
+    /// Declared escalation turn timeout in milliseconds. Absent means the
+    /// runtime default applies (mirrors the domain `SupervisorSpec` owner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_turn_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -536,6 +582,14 @@ pub struct MobDefinitionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<MobOrchestratorInput>,
     pub profiles: BTreeMap<String, MobProfileBindingInput>,
+    /// Mob-scoped custom model registry entries (`[models.<id>]`). Reuses the
+    /// typed config owner so one definition feeds provider inference,
+    /// compaction scaling, capability gates, and call timeouts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    /// Mob-level default provider for `Auto` image-generation targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
     #[serde(default)]
     pub wiring: MobWiringRulesInput,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1464,7 +1518,6 @@ pub struct MobMemberListEntryWire {
     pub member_ref: WireMemberRef,
     pub role: String,
     pub runtime_mode: WireMobRuntimeMode,
-    pub state: WireMemberState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wired_to: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1528,14 +1581,25 @@ pub struct MobReconcileParams {
     pub options: MobReconcileOptionsWire,
 }
 
+/// Typed mob error projection for wire surfaces. Carries the closed failure
+/// class alongside the human-readable message so consumers branch on the typed
+/// `code` rather than parsing the free-form `message`. Reuses
+/// [`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobError {
+    pub code: MobSpawnManyFailureCause,
+    pub message: String,
+}
+
 /// Per-identity failure in a `mob/reconcile` pass.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobReconcileFailureWire {
     pub agent_identity: String,
     pub stage: WireMobReconcileStage,
-    /// Stringified mob error.
-    pub error: String,
+    /// Typed mob error: closed failure `code` plus human-readable `message`.
+    pub error: WireMobError,
 }
 
 /// Summary produced by a `mob/reconcile` pass.
@@ -1689,11 +1753,48 @@ pub struct MobFlowStatusParams {
     pub run_id: String,
 }
 
+/// Lifecycle status of a flow run on the wire. Mirrors
+/// `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
+/// re-deriving meaning from a free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRunStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Typed public projection of a single flow run for `mob/flow_status`.
+///
+/// The canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,
+/// `status`) are typed; the remaining kernel-owned step/loop projection rides
+/// along as the `kernel` map. Producers project a domain `MobRun` into this
+/// shape so consumers never re-derive run identity or lifecycle from a free
+/// `serde_json::Value`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobRun {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub status: WireMobRunStatus,
+    /// Remaining kernel-owned run projection (step ledger, frame/loop outputs,
+    /// flow state) after the typed identity/lifecycle fields are lifted out.
+    #[serde(flatten)]
+    pub kernel: serde_json::Map<String, Value>,
+}
+
 /// Response payload for `mob/flow_status`.
+///
+/// `run` is `None` when the requested run id has no persisted run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobFlowStatusResult {
-    pub run: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<WireMobRun>,
 }
 
 /// Request payload for `mob/flow_cancel`.
@@ -1770,14 +1871,11 @@ pub struct MobForceCancelResult {
 /// Request payload for `mob/turn_start`.
 ///
 /// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-/// tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
-/// (`provider_params` + `clear_provider_params: bool`) is still accepted at the
-/// serde boundary and folded into the tri-state, rejecting a `set + clear`
-/// payload there.
-// `deny_unknown_fields` keeps the emitted JSON Schema's `additionalProperties:
-// false` aligned with the custom `Deserialize` (which fails closed on unknown
-// fields via its shadow struct). Serde's derived `Serialize` ignores it.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// tri-state via [`WireTurnMetadataOverride`]; unknown fields (including the
+/// retired `clear_*` split wire form) fail closed at the serde boundary via
+/// `deny_unknown_fields`, which also keeps the emitted JSON Schema's
+/// `additionalProperties: false` aligned with the deserializer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobTurnStartParams {
@@ -1805,91 +1903,53 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<WireTurnMetadataOverride<Value>>,
+    pub provider_params:
+        Option<WireTurnMetadataOverride<crate::wire::runtime::WireProviderParamsOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MobTurnStartParamsFields {
-    mob_id: String,
-    agent_identity: String,
-    prompt: WireContentInput,
-    #[serde(default)]
-    skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    #[serde(default)]
-    flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
-    #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
-    #[serde(default)]
-    keep_alive: Option<bool>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    max_tokens: Option<u32>,
-    #[serde(default)]
-    system_prompt: Option<String>,
-    #[serde(default)]
-    output_schema: Option<Value>,
-    #[serde(default)]
-    structured_output_retries: Option<u32>,
-    #[serde(default)]
-    provider_params: Option<WireTurnMetadataOverride<Value>>,
-    #[serde(default)]
-    auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+/// One currently wired peer that is known to be unreachable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireUnreachablePeer {
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for MobTurnStartParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let mut raw = Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: MobTurnStartParamsFields =
-            serde_json::from_value(raw).map_err(D::Error::custom)?;
-        let provider_params = legacy_wire_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_wire_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-        Ok(Self {
-            mob_id: fields.mob_id,
-            agent_identity: fields.agent_identity,
-            prompt: fields.prompt,
-            skill_refs: fields.skill_refs,
-            flow_tool_overlay: fields.flow_tool_overlay,
-            additional_instructions: fields.additional_instructions,
-            keep_alive: fields.keep_alive,
-            model: fields.model,
-            provider: fields.provider,
-            max_tokens: fields.max_tokens,
-            system_prompt: fields.system_prompt,
-            output_schema: fields.output_schema,
-            structured_output_retries: fields.structured_output_retries,
-            provider_params,
-            auth_binding,
-        })
-    }
+/// Live connectivity summary for a member's currently wired peers. Mirrors
+/// `meerkat_mob::MobPeerConnectivitySnapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WirePeerConnectivitySnapshot {
+    pub reachable_peer_count: usize,
+    pub unknown_peer_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreachable_peers: Vec<WireUnreachablePeer>,
+}
+
+/// Tri-state peer-connectivity projection for `mob/member_status`.
+///
+/// Distinguishes "connectivity is not applicable to this member" (no bridge
+/// session backs the member) from "the live probe timed out" (the answer is
+/// transiently unknown) from a resolved connectivity snapshot. The legacy
+/// `Option<MobPeerConnectivitySnapshot>` projection collapsed both the
+/// not-applicable and timed-out cases into `None`, laundering a transient
+/// probe fault into the same shape as a structurally-absent binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WirePeerConnectivity {
+    /// The member has no bridge session, so live peer connectivity is not a
+    /// resolvable fact for it.
+    NotApplicable,
+    /// A live connectivity probe was attempted but did not resolve in time.
+    ProbeTimedOut,
+    /// A resolved connectivity snapshot.
+    Known {
+        snapshot: WirePeerConnectivitySnapshot,
+    },
 }
 
 /// Response payload for `mob/member_status`.
@@ -1897,6 +1957,8 @@ impl<'de> Deserialize<'de> for MobTurnStartParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberStatusResult {
     pub status: WireMobMemberStatus,
+    /// Server-resolved opaque handle for subsequent member-targeted calls.
+    pub member_ref: WireMemberRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1906,7 +1968,7 @@ pub struct MobMemberStatusResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_connectivity: Option<Value>,
+    pub peer_connectivity: Option<WirePeerConnectivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1941,12 +2003,19 @@ mod member_status_capability_tests {
         };
         let result = MobMemberStatusResult {
             status: WireMobMemberStatus::Active,
+            member_ref: WireMemberRef::encode("mob-1", "worker-1"),
             output_preview: None,
             error: None,
             tokens_used: 0,
             is_final: false,
             current_session_id: Some("session-1".to_string()),
-            peer_connectivity: None,
+            peer_connectivity: Some(WirePeerConnectivity::Known {
+                snapshot: WirePeerConnectivitySnapshot {
+                    reachable_peer_count: 1,
+                    unknown_peer_count: 0,
+                    unreachable_peers: Vec::new(),
+                },
+            }),
             kickoff: None,
             external_member: None,
             resolved_capabilities: Some(capabilities.clone()),
@@ -1985,6 +2054,60 @@ pub struct SupervisorRotationReportWire {
     pub previous_epoch: u64,
     pub current_epoch: u64,
     pub public_peer_id: String,
+}
+
+/// Discriminator kind for the supervisor-rotation-incomplete error details.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationIncompleteKind {
+    SupervisorRotationIncomplete,
+}
+
+/// Which authority a supervisor-rotation retry validates against.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationRetryAuthority {
+    PendingRotation,
+    PreRotation,
+}
+
+/// Durability scope of a supervisor-rotation retry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationRetryScope {
+    Durable,
+    PreRotation,
+}
+
+/// Typed details of `MobError::SupervisorRotationIncomplete` on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SupervisorRotationIncompleteDetailsWire {
+    pub kind: SupervisorRotationIncompleteKind,
+    pub previous_epoch: u64,
+    pub attempted_epoch: u64,
+    pub attempted_public_peer_id: String,
+    pub rotated_peer_count: usize,
+    pub rollback_succeeded: bool,
+    pub pending_authority_recorded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_error: Option<String>,
+    pub retry_authority: SupervisorRotationRetryAuthority,
+    pub retry_scope: SupervisorRotationRetryScope,
+}
+
+/// JSON-RPC `error.data` payload for an incomplete supervisor rotation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SupervisorRotationIncompleteDataWire {
+    pub code: String,
+    pub message: String,
+    pub details: SupervisorRotationIncompleteDetailsWire,
 }
 
 /// Shared request payload for mob readiness waits.
@@ -2066,7 +2189,7 @@ pub struct MobProfileLookupResult {
     pub not_found: bool,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<Value>,
+    pub profile: Option<WireMobProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2181,15 +2304,6 @@ pub struct MobCancelAllWorkParams {
     pub member_ref: WireMemberRef,
 }
 
-/// Roster member lifecycle state for `MobMemberFilterWire`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireMemberState {
-    Active,
-    Retiring,
-}
-
 /// Filter for `mob/list_members_matching`. Non-empty / `Some` fields are
 /// combined conjunctively; an empty filter matches every member.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2202,9 +2316,9 @@ pub struct MobMemberFilterWire {
     /// Required profile name (role).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// Required roster state.
+    /// Required canonical machine-projected member status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<WireMemberState>,
+    pub status: Option<WireMobMemberStatus>,
 }
 
 /// Request payload for `mob/list_members_matching`.
@@ -2230,6 +2344,88 @@ pub struct MobListMembersMatchingResult {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_mob_profile_parses_provider_fields_fail_closed() {
+        // Minimal legacy payload (no new fields) still parses.
+        let legacy: WireMobProfile =
+            serde_json::from_str(r#"{"model":"claude-opus-4-8"}"#).expect("legacy profile parses");
+        assert_eq!(legacy.provider, None);
+        assert!(legacy.resume_overrides.is_empty());
+
+        // Typed provider + resume override vocabulary parse into closed enums.
+        let full: WireMobProfile = serde_json::from_str(
+            r#"{
+                "model": "claude-internal-preview",
+                "provider": "anthropic",
+                "image_generation_provider": "gemini",
+                "auto_compact_threshold": 60000,
+                "resume_overrides": ["model", "provider"]
+            }"#,
+        )
+        .expect("typed profile parses");
+        assert_eq!(full.provider, Some(meerkat_core::Provider::Anthropic));
+        assert_eq!(
+            full.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+        assert_eq!(
+            full.resume_overrides,
+            vec![
+                WireMobResumeOverrideField::Model,
+                WireMobResumeOverrideField::Provider
+            ]
+        );
+
+        // Fail-closed: unknown provider names and zero thresholds reject.
+        assert!(
+            serde_json::from_str::<WireMobProfile>(r#"{"model":"m","provider":"not-a-provider"}"#)
+                .is_err(),
+            "unknown provider names must fail closed at the wire boundary"
+        );
+        assert!(
+            serde_json::from_str::<WireMobProfile>(r#"{"model":"m","auto_compact_threshold":0}"#)
+                .is_err(),
+            "zero auto_compact_threshold must fail closed at the wire boundary"
+        );
+        assert!(
+            serde_json::from_str::<WireMobProfile>(
+                r#"{"model":"m","resume_overrides":["everything"]}"#
+            )
+            .is_err(),
+            "resume_overrides vocabulary is closed"
+        );
+    }
+
+    #[test]
+    fn mob_definition_input_parses_custom_models() {
+        let input: MobDefinitionInput = serde_json::from_str(
+            r#"{
+                "id": "m",
+                "profiles": {"worker": {"model": "claude-internal-preview"}},
+                "models": {
+                    "claude-internal-preview": {
+                        "provider": "anthropic",
+                        "context_window": 500000,
+                        "vision": true
+                    }
+                },
+                "image_generation_provider": "openai"
+            }"#,
+        )
+        .expect("definition with custom models parses");
+        let model = input
+            .models
+            .get("claude-internal-preview")
+            .expect("custom model present");
+        assert_eq!(model.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(model.context_window, Some(500_000));
+        assert_eq!(model.vision, Some(true));
+        assert_eq!(
+            input.image_generation_provider,
+            Some(meerkat_core::Provider::OpenAI)
+        );
+    }
 
     #[test]
     fn wire_member_ref_round_trips_through_encode_decode() {
@@ -2296,20 +2492,29 @@ mod tests {
         let failure = MobReconcileFailureWire {
             agent_identity: "worker-1".into(),
             stage: WireMobReconcileStage::Spawn,
-            error: "spawn failed".into(),
+            error: WireMobError {
+                code: MobSpawnManyFailureCause::ProfileNotFound,
+                message: "spawn failed".into(),
+            },
         };
 
         let json = serde_json::to_value(&failure).expect("serialize failure");
         assert_eq!(json["stage"], "spawn");
+        assert_eq!(json["error"]["code"], "profile_not_found");
+        assert_eq!(json["error"]["message"], "spawn failed");
 
         let round_trip: MobReconcileFailureWire =
             serde_json::from_value(json).expect("deserialize failure");
         assert_eq!(round_trip.stage, WireMobReconcileStage::Spawn);
+        assert_eq!(
+            round_trip.error.code,
+            MobSpawnManyFailureCause::ProfileNotFound
+        );
 
         let err = serde_json::from_value::<MobReconcileFailureWire>(serde_json::json!({
             "agent_identity": "worker-1",
             "stage": "restart",
-            "error": "bad stage"
+            "error": { "code": "profile_not_found", "message": "bad stage" }
         }))
         .expect_err("unknown reconcile stage must be rejected");
         assert!(err.to_string().contains("unknown variant"));

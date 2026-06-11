@@ -52,7 +52,8 @@ fn tool_filter_unit_domain(operator: &str) -> String {
 
 #[test]
 fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
-    let rendered = render_machine_semantic_model(&meerkat_machine());
+    let rendered =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
 
     assert!(rendered.contains("SessionIdValues"));
     assert!(rendered.contains(
@@ -148,7 +149,8 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
         tool_filter_override_line(&rendered),
         "ToolFilterValues <- ToolFilterValuesCi"
     );
-    let model = render_machine_semantic_model(&meerkat_machine());
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
     assert_eq!(
         tool_filter_operator_line(&model, "ToolFilterValuesCi"),
         tool_filter_unit_domain("ToolFilterValuesCi"),
@@ -168,12 +170,17 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
         tool_filter_override_line(&rendered),
         "ToolFilterValues <- ToolFilterValuesDeep"
     );
-    let model = render_machine_semantic_model(&meerkat_machine());
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
     assert_eq!(
         tool_filter_operator_line(&model, "ToolFilterValuesDeep"),
         tool_filter_domain(
             "ToolFilterValuesDeep",
-            &[r"{}", r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]
+            &[
+                r"{}",
+                r#"{"view_image"}"#,
+                r#"{"view_image", "toolname_1"}"#
+            ]
         ),
         "deep ToolFilterValues must cover differing same-variant structural payloads"
     );
@@ -186,7 +193,8 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
 #[test]
 fn meerkat_cfg_uses_model_operators_for_record_valued_domains() {
     let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
-    let model = render_machine_semantic_model(&meerkat_machine());
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
 
     assert!(
         rendered.contains("PeerEndpointValues <- PeerEndpointValuesCi"),
@@ -324,7 +332,8 @@ fn meerkat_ci_cfg_fails_closed_when_tool_provenance_binding_changes_shape() {
 
 #[test]
 fn meerkat_semantic_model_renders_content_shape_wire_labels() {
-    let rendered = render_machine_semantic_model(&meerkat_machine());
+    let rendered =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
 
     assert!(
         rendered.contains("admitted_content_shape' = Some(\"immediate_append\")"),
@@ -342,7 +351,8 @@ fn meerkat_semantic_model_renders_content_shape_wire_labels() {
 
 #[test]
 fn mob_semantic_model_is_identity_and_runtime_native() {
-    let rendered = render_machine_semantic_model(&mob_machine());
+    let rendered =
+        render_machine_semantic_model(&mob_machine()).expect("render machine semantic model");
 
     assert!(rendered.contains("AgentIdentityValues"));
     assert!(rendered.contains("AgentRuntimeIdValues"));
@@ -359,7 +369,8 @@ fn mob_semantic_model_is_identity_and_runtime_native() {
 
 #[test]
 fn machine_semantic_model_binds_expected_revision_to_current_revision() {
-    let rendered = render_machine_semantic_model(&work_attention_machine());
+    let rendered = render_machine_semantic_model(&work_attention_machine())
+        .expect("render machine semantic model");
 
     assert!(
         rendered.contains(r"\E expected_revision \in {revision} : \E until_utc_ms"),
@@ -373,7 +384,8 @@ fn machine_semantic_model_binds_expected_revision_to_current_revision() {
 
 #[test]
 fn composition_route_owner_expected_revision_uses_target_revision() {
-    let rendered = render_composition_semantic_model(&workgraph_attention_bundle_composition());
+    let rendered = render_composition_semantic_model(&workgraph_attention_bundle_composition())
+        .expect("render composition semantic model");
 
     assert!(
         rendered.contains(

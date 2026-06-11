@@ -41,16 +41,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_core::RealtimeTranscriptEvent;
+use meerkat_core::ToolCallId;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
-use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolResult, Usage};
-use serde_json::value::RawValue;
+use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult, Usage};
 use tokio::sync::Mutex;
 
 /// Opaque channel identifier for a live adapter session.
@@ -291,7 +290,6 @@ impl LiveChannelCloseCommitAuthority {
                 effect,
                 meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineEffect::LiveCloseResultResolved {
                     channel_id: effect_channel_id,
-                    closed: true,
                     close_observation_sequence,
                     ..
                 } if *effect_channel_id == channel_id_string && *close_observation_sequence == close_sequence
@@ -458,6 +456,45 @@ pub enum ToolDispatchSkipReason {
     InvalidArguments,
 }
 
+/// Typed terminal fact for a live tool dispatch that exceeded the configured
+/// per-call timeout (D281).
+///
+/// The host already returns the typed [`ObservationOutcome::ToolCallTimedOut`]
+/// to its own callers; this newtype is the *adapter-facing* counterpart. The
+/// previous code fabricated an ad-hoc parseable string
+/// (`format!("tool dispatch timeout after {timeout:?}")`) and submitted it as
+/// the [`LiveAdapterCommand::SubmitToolError`] payload, asking the adapter /
+/// downstream to recover the fact by parsing prose. Instead the host now mints
+/// this typed fact; the only point a string is produced is its [`Display`]
+/// projection at the meerkat-core `SubmitToolError { error: String }` seam
+/// edge (that wire field is owned by `meerkat-core::live_adapter`, so the
+/// adapter command itself cannot be made fully typed from this crate). The
+/// `Display` rendering is a deterministic projection of the typed fields, not
+/// a source of truth: callers in this crate route on the typed value, never on
+/// the rendered string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveToolDispatchTimeout {
+    timeout: Duration,
+}
+
+impl LiveToolDispatchTimeout {
+    #[must_use]
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl std::fmt::Display for LiveToolDispatchTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tool dispatch timeout after {:?}", self.timeout)
+    }
+}
+
 /// Runtime-side projection sink consumed by [`LiveAdapterHost`].
 ///
 /// This is the seam through which adapter observations become canonical
@@ -542,6 +579,65 @@ impl<'a> LiveTranscriptIdentity<'a> {
             delta_id: None,
         }
     }
+
+    /// Resolve the required identity triple for an assistant **delta** event
+    /// (D199): `response_id`, `delta_id`, and `item_id` (provider item id).
+    ///
+    /// The sink previously coalesced each missing id to an empty string via
+    /// `unwrap_or_default()`, emitting an [`RealtimeTranscriptEvent`] whose
+    /// identity was empty-string truth — a delta that cannot be bound back to
+    /// any response/item. This accessor fails closed: a missing required id
+    /// yields a typed [`LiveTranscriptIdentityError`] naming the absent field,
+    /// so the projection rejects the malformed delta rather than fabricating
+    /// empty identity.
+    pub fn require_delta_identity(&self) -> Result<DeltaIdentity<'a>, LiveTranscriptIdentityError> {
+        let response_id = self
+            .response_id
+            .ok_or(LiveTranscriptIdentityError::MissingResponseId)?;
+        let delta_id = self
+            .delta_id
+            .ok_or(LiveTranscriptIdentityError::MissingDeltaId)?;
+        let item_id = self
+            .provider_item_id
+            .ok_or(LiveTranscriptIdentityError::MissingItemId)?;
+        Ok(DeltaIdentity {
+            response_id,
+            delta_id,
+            item_id,
+            previous_item_id: self.previous_item_id,
+            content_index: self.content_index,
+        })
+    }
+}
+
+/// The required identity triple resolved for an assistant **delta** event
+/// (D199). Produced by [`LiveTranscriptIdentity::require_delta_identity`];
+/// guarantees `response_id` / `delta_id` / `item_id` are present (non-empty
+/// fail-closed), so the realtime-transcript layer can key per-response staging
+/// without empty-string identity truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaIdentity<'a> {
+    pub response_id: &'a str,
+    pub delta_id: &'a str,
+    pub item_id: &'a str,
+    pub previous_item_id: Option<&'a str>,
+    pub content_index: Option<u32>,
+}
+
+/// Typed failure when a transcript identity is missing a required id (D199).
+///
+/// Replaces the prior `unwrap_or_default()` empty-string coalescing in the
+/// projection sink: a delta lacking `response_id` / `delta_id` / `item_id`
+/// fails closed with a named field rather than emitting empty-string identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LiveTranscriptIdentityError {
+    #[error("transcript delta is missing a required response_id")]
+    MissingResponseId,
+    #[error("transcript delta is missing a required delta_id")]
+    MissingDeltaId,
+    #[error("transcript delta is missing a required item_id")]
+    MissingItemId,
 }
 
 #[async_trait::async_trait]
@@ -652,6 +748,20 @@ pub trait LiveProjectionSink: Send + Sync {
         response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
+    /// Project a transport-level output-audio delivery degradation.
+    ///
+    /// K16: when a transport drops queued output-audio packets (e.g. the
+    /// WebRTC RTP pacing queue is full or closed), the dropped-delivery fact
+    /// must reach the session through the same typed host-signal seam that
+    /// transport barge-ins use — not a transport-local counter with no live
+    /// reader. `dropped` is the cumulative count of output-audio packets the
+    /// transport failed to deliver on this channel's session.
+    async fn signal_output_audio_degraded(
+        &self,
+        session_id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), LiveProjectionError>;
+
     /// Mark the live turn complete in canonical session state.
     ///
     /// R6: `response_id` carries the provider's response identifier from
@@ -697,15 +807,80 @@ pub trait LiveProjectionSink: Send + Sync {
 }
 
 /// Errors returned by [`LiveProjectionSink`] implementations.
+///
+/// D301: failure semantics are typed, not prose-parsed. Each underlying
+/// [`meerkat_core::SessionError`] that a sink encounters lands in a *distinct*
+/// variant via [`LiveProjectionError::from_session_error`], carrying the
+/// session error's stable `error_code` so downstream callers route on a typed
+/// class rather than reparsing `SessionError::to_string()`. The previous sink
+/// mapper collapsed every non-`NotFound`/`Unsupported` variant into
+/// `Internal(other.to_string())`, erasing the typed cause.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum LiveProjectionError {
     #[error("session {0} not found")]
     SessionNotFound(SessionId),
+    /// The session service refused the projection (typed
+    /// `SessionError::Unsupported`).
     #[error("projection rejected: {0}")]
     Rejected(String),
-    #[error("projection sink internal error: {0}")]
-    Internal(String),
+    /// A turn is already in progress on the target session
+    /// (`SessionError::Busy`).
+    #[error("session busy: {0}")]
+    SessionBusy(SessionId),
+    /// No turn is currently running on the target session
+    /// (`SessionError::NotRunning`).
+    #[error("session not running: {0}")]
+    SessionNotRunning(SessionId),
+    /// A required session capability (persistence / compaction) is disabled.
+    /// Carries the disabled capability's stable session error code.
+    #[error("session capability disabled ({code}): {message}")]
+    CapabilityDisabled { code: &'static str, message: String },
+    /// A session-level failure whose typed cause is identified by the stable
+    /// `SessionError::code` (store error, agent error, structured failure).
+    /// Carries the code so callers route on the typed class, not the message.
+    #[error("session error [{code}]: {message}")]
+    Session { code: &'static str, message: String },
+}
+
+impl LiveProjectionError {
+    /// Classify a [`meerkat_core::SessionError`] into a typed
+    /// [`LiveProjectionError`] variant (D301).
+    ///
+    /// `session_id` is the projection target, used to populate identity-bearing
+    /// variants. Every `SessionError` lands in a distinct typed variant
+    /// carrying the session error's stable `code()` — no variant is collapsed
+    /// into a prose-only `Internal(to_string())`. This is the single
+    /// classification owner; surfaces route through it instead of re-deriving
+    /// the mapping per call site.
+    #[must_use]
+    pub fn from_session_error(session_id: &SessionId, err: meerkat_core::SessionError) -> Self {
+        use meerkat_core::SessionError;
+        // Compute the stable code + human-readable message before the match
+        // consumes `err`. `code()` returns a `&'static str` and `to_string()`
+        // borrows `err` via `Display`, so both are available before the move.
+        let code = err.code();
+        let message = err.to_string();
+        match err {
+            SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
+            SessionError::Unsupported(reason) => Self::Rejected(reason),
+            SessionError::Busy { id } => Self::SessionBusy(id),
+            SessionError::NotRunning { id } => Self::SessionNotRunning(id),
+            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
+                Self::CapabilityDisabled { code, message }
+            }
+            // Exhaustive over the remaining `SessionError` kinds (no `_`
+            // catch-all): a store error, an agent-level failure, or a
+            // structured `FailedWithData` all carry the stable typed `code`
+            // into `Session { code, message }` rather than a prose-only
+            // `Internal(to_string())`. Spelling these out means a future
+            // `SessionError` variant forces a compile error here instead of
+            // silently folding into a catch-all.
+            SessionError::Store(_)
+            | SessionError::Agent(_)
+            | SessionError::FailedWithData { .. } => Self::Session { code, message },
+        }
+    }
 }
 
 /// No-op projection sink for tests and degraded configurations that
@@ -795,6 +970,14 @@ impl LiveProjectionSink for NoOpProjectionSink {
         &self,
         _session_id: &SessionId,
         _response_id: Option<&str>,
+    ) -> Result<(), LiveProjectionError> {
+        Ok(())
+    }
+
+    async fn signal_output_audio_degraded(
+        &self,
+        _session_id: &SessionId,
+        _dropped: u64,
     ) -> Result<(), LiveProjectionError> {
         Ok(())
     }
@@ -1176,6 +1359,35 @@ pub enum LiveAdapterHostError {
     ProjectionError(#[from] LiveProjectionError),
 }
 
+impl LiveAdapterHostError {
+    /// Stable typed reason code for this host error (D153).
+    ///
+    /// Transports surface this as the `WsErrorFrame.reason` so clients route
+    /// on a typed class rather than reparsing the human-readable `error`
+    /// message. The codes are stable wire strings; adding a variant must add
+    /// its code here (the match is exhaustive over the `#[non_exhaustive]`
+    /// enum from inside the crate).
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ChannelNotFound(_) => "channel_not_found",
+            Self::SessionNotFound(_) => "session_not_found",
+            Self::ChannelNotReady(..) => "channel_not_ready",
+            Self::SessionAlreadyBound(_) => "session_already_bound",
+            Self::OpenNotAuthorized => "open_not_authorized",
+            Self::OpenAuthorityAlreadyConsumed => "open_authority_already_consumed",
+            Self::CloseNotAuthorized => "close_not_authorized",
+            Self::CloseAuthorityAlreadyConsumed => "close_authority_already_consumed",
+            Self::StatusNotAuthorized => "status_not_authorized",
+            Self::StatusAuthorityAlreadyConsumed => "status_authority_already_consumed",
+            Self::NoAdapter(_) => "no_adapter",
+            Self::UnsupportedCommand(_) => "unsupported_command",
+            Self::AdapterError(_) => "adapter_error",
+            Self::ProjectionError(_) => "projection_error",
+        }
+    }
+}
+
 /// Observation routing decision — what the host does with an adapter
 /// observation.
 ///
@@ -1211,9 +1423,8 @@ pub enum ObservationRouting {
 ///
 /// The provider only reports a tool call and a live channel id. The host
 /// resolves that channel back to the owning [`SessionId`] and hands the call to
-/// this trait. Production surfaces should implement it by delegating to the
-/// canonical session service / runtime tool dispatcher; tests and compatibility
-/// adapters may wrap a plain [`AgentToolDispatcher`].
+/// this trait. Production surfaces implement it by delegating to the
+/// canonical session service / runtime tool dispatcher.
 #[async_trait::async_trait]
 pub trait LiveToolDispatcher: Send + Sync {
     async fn dispatch_live_tool_call(
@@ -1224,50 +1435,86 @@ pub trait LiveToolDispatcher: Send + Sync {
 }
 
 /// Error returned by a [`LiveToolDispatcher`].
+///
+/// D113: failure semantics are typed, not prose-parsed. A
+/// [`LiveToolDispatcher`] backed by the canonical session runtime resolves a
+/// live tool call through the session service and therefore fails with a typed
+/// [`meerkat_core::SessionError`]. The seam classifies that error into a
+/// *distinct* variant via [`LiveToolDispatchError::from_session_error`],
+/// carrying the session error's stable `error_code` so the terminal class
+/// survives back through the live adapter rather than being flattened into a
+/// prose-only string. This mirrors the
+/// [`LiveProjectionError::from_session_error`] classification owner.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum LiveToolDispatchError {
     #[error(transparent)]
     Tool(#[from] ToolError),
+    /// The target session does not exist (`SessionError::NotFound`).
+    #[error("live tool dispatch target session {0} not found")]
+    SessionNotFound(SessionId),
+    /// A turn is already in progress on the target session
+    /// (`SessionError::Busy`).
+    #[error("live tool dispatch target session {0} is busy")]
+    SessionBusy(SessionId),
+    /// No turn is currently running on the target session
+    /// (`SessionError::NotRunning`).
+    #[error("live tool dispatch target session {0} is not running")]
+    SessionNotRunning(SessionId),
+    /// A required session capability (persistence / compaction) is disabled.
+    /// Carries the disabled capability's stable session error code.
+    #[error("live tool dispatch capability disabled ({code}): {message}")]
+    CapabilityDisabled { code: &'static str, message: String },
+    /// The session service refused the dispatch (typed
+    /// `SessionError::Unsupported`).
     #[error("live tool dispatch rejected: {0}")]
     Rejected(String),
-    #[error("live tool dispatch internal error: {0}")]
-    Internal(String),
+    /// A session-level failure whose typed cause is identified by the stable
+    /// `SessionError::code` (store error, agent error, structured failure).
+    /// Carries the code so callers route on the typed class, not the message.
+    #[error("live tool dispatch session error [{code}]: {message}")]
+    Session { code: &'static str, message: String },
 }
 
-struct AgentLiveToolDispatcher {
-    inner: Arc<dyn AgentToolDispatcher>,
-}
-
-impl AgentLiveToolDispatcher {
-    fn new(inner: Arc<dyn AgentToolDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl LiveToolDispatcher for AgentLiveToolDispatcher {
-    async fn dispatch_live_tool_call(
-        &self,
-        _session_id: &SessionId,
-        call: ToolCall,
-    ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
-        let args_string = serde_json::to_string(&call.args).map_err(|err| {
-            LiveToolDispatchError::Internal(format!(
-                "failed to serialize live tool-call arguments: {err}"
-            ))
-        })?;
-        let raw = RawValue::from_string(args_string).map_err(|err| {
-            LiveToolDispatchError::Internal(format!(
-                "failed to create live tool-call argument payload: {err}"
-            ))
-        })?;
-        let view = meerkat_core::types::ToolCallView {
-            id: &call.id,
-            name: &call.name,
-            args: raw.as_ref(),
-        };
-        self.inner.dispatch(view).await.map_err(Into::into)
+impl LiveToolDispatchError {
+    /// Classify a [`meerkat_core::SessionError`] into a typed
+    /// [`LiveToolDispatchError`] variant (D113).
+    ///
+    /// `session_id` is the dispatch target, used to populate identity-bearing
+    /// variants. Every `SessionError` lands in a distinct typed variant
+    /// carrying the session error's stable `code()` — no variant is collapsed
+    /// into a prose-only string. This is the single classification owner; the
+    /// RPC dispatch seam routes through it instead of re-deriving the mapping
+    /// inline, so the terminal class (not found / busy / not running /
+    /// capability disabled / rejected / session) survives back through the
+    /// live adapter.
+    #[must_use]
+    pub fn from_session_error(session_id: &SessionId, err: meerkat_core::SessionError) -> Self {
+        use meerkat_core::SessionError;
+        // Compute the stable code + human-readable message before the match
+        // consumes `err`. `code()` returns a `&'static str` and `to_string()`
+        // borrows `err` via `Display`, so both are available before the move.
+        let code = err.code();
+        let message = err.to_string();
+        match err {
+            SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
+            SessionError::Unsupported(reason) => Self::Rejected(reason),
+            SessionError::Busy { id } => Self::SessionBusy(id),
+            SessionError::NotRunning { id } => Self::SessionNotRunning(id),
+            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
+                Self::CapabilityDisabled { code, message }
+            }
+            // Exhaustive over the remaining `SessionError` kinds (no `_`
+            // catch-all): a store error, an agent-level failure, or a
+            // structured `FailedWithData` all carry the stable typed `code`
+            // into `Session { code, message }` rather than a prose-only
+            // string. Spelling these out means a future `SessionError`
+            // variant forces a compile error here instead of silently
+            // folding into a catch-all.
+            SessionError::Store(_)
+            | SessionError::Agent(_)
+            | SessionError::FailedWithData { .. } => Self::Session { code, message },
+        }
     }
 }
 
@@ -1304,8 +1551,8 @@ pub struct LiveAdapterHost {
     /// that point, so we expose [`set_live_tool_dispatcher`] as a late setter.
     /// Reads are short and fully sync — never held across an `.await`.
     tool_dispatcher: std::sync::Mutex<Option<Arc<dyn LiveToolDispatcher>>>,
-    /// Optional per-tool-call dispatch timeout. When set, `dispatch_tool_call`
-    /// races the dispatcher future against
+    /// Per-tool-call dispatch timeout. `dispatch_tool_call` races the
+    /// dispatcher future against
     /// [`tokio::time::timeout`](tokio::time::timeout); on elapse, the host
     /// submits a typed `LiveAdapterCommand::SubmitToolError` to the adapter
     /// and returns [`ObservationOutcome::ToolCallTimedOut`] instead of
@@ -1313,10 +1560,11 @@ pub struct LiveAdapterHost {
     /// dispatcher that holds a tool call forever (dogma: the adapter cannot
     /// stall canonical session lifecycle).
     ///
-    /// `None` (the default) preserves legacy unbounded-await behavior. Surfaces
-    /// that want a deadline budget explicitly opt in via
-    /// [`Self::with_tool_timeout`].
-    tool_timeout: Option<Duration>,
+    /// Initialized to [`DEFAULT_LIVE_TOOL_TIMEOUT`] by [`Self::new`]; surfaces
+    /// that need a different deadline budget override it via
+    /// [`Self::with_tool_timeout`]. There is no unbounded-await mode — the
+    /// deadline is type-enforced.
+    tool_timeout: Duration,
 }
 
 /// Default tool-call dispatch timeout used by surfaces that opt into a
@@ -1352,14 +1600,14 @@ impl LiveAdapterHost {
             }),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
-            tool_timeout: None,
+            tool_timeout: DEFAULT_LIVE_TOOL_TIMEOUT,
         }
     }
 
-    /// Builder: install a per-tool-call dispatch timeout.
+    /// Builder: override the per-tool-call dispatch timeout.
     ///
-    /// When set, every `ToolCallRequested` observation triggers a dispatcher
-    /// call wrapped in [`tokio::time::timeout`]; if the dispatcher does not
+    /// Every `ToolCallRequested` observation triggers a dispatcher call
+    /// wrapped in [`tokio::time::timeout`]; if the dispatcher does not
     /// produce a result before the deadline, the host:
     ///
     /// 1. Sends a typed `LiveAdapterCommand::SubmitToolError` to the adapter
@@ -1367,36 +1615,18 @@ impl LiveAdapterHost {
     /// 2. Returns [`ObservationOutcome::ToolCallTimedOut`] (not
     ///    `ToolCallDispatched`) so the projection layer can audit the miss.
     ///
-    /// Surfaces that omit this builder retain the prior unbounded-await
-    /// behavior. [`DEFAULT_LIVE_TOOL_TIMEOUT`] is the recommended default.
+    /// [`Self::new`] initializes the deadline to
+    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`]; this builder overrides it.
     #[must_use]
     pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
-        self.tool_timeout = Some(timeout);
+        self.tool_timeout = timeout;
         self
     }
 
     /// Read the configured per-tool-call dispatch timeout.
-    ///
-    /// `None` indicates the host runs with unbounded await behavior. Surfaces
-    /// (notably `rkat-rpc`) MUST install [`DEFAULT_LIVE_TOOL_TIMEOUT`] at
-    /// startup; this accessor is the test seam that pins that contract.
     #[must_use]
-    pub fn tool_timeout(&self) -> Option<Duration> {
+    pub fn tool_timeout(&self) -> Duration {
         self.tool_timeout
-    }
-
-    /// Builder: install a legacy agent tool dispatcher.
-    ///
-    /// Without a dispatcher, observed tool calls return
-    /// `ObservationOutcome::ToolCallSkipped { reason: NoDispatcher, .. }`.
-    /// This compatibility helper wraps the dispatcher in a
-    /// [`LiveToolDispatcher`] that ignores the session id. Production surfaces
-    /// should prefer [`Self::with_live_tool_dispatcher`] so tool execution can
-    /// flow through the session-owned dispatcher.
-    #[must_use]
-    pub fn with_tool_dispatcher(self, dispatcher: Arc<dyn AgentToolDispatcher>) -> Self {
-        self.set_tool_dispatcher(dispatcher);
-        self
     }
 
     /// Builder: install the session-scoped live tool dispatcher.
@@ -1404,14 +1634,6 @@ impl LiveAdapterHost {
     pub fn with_live_tool_dispatcher(self, dispatcher: Arc<dyn LiveToolDispatcher>) -> Self {
         self.set_live_tool_dispatcher(dispatcher);
         self
-    }
-
-    /// Late setter for a legacy agent tool dispatcher.
-    ///
-    /// Kept for tests and compatibility. Runtime surfaces should install a
-    /// session-scoped dispatcher with [`Self::set_live_tool_dispatcher`].
-    pub fn set_tool_dispatcher(&self, dispatcher: Arc<dyn AgentToolDispatcher>) {
-        self.set_live_tool_dispatcher(Arc::new(AgentLiveToolDispatcher::new(dispatcher)));
     }
 
     /// Late setter for the session-scoped live tool dispatcher.
@@ -1515,7 +1737,7 @@ impl LiveAdapterHost {
     ///
     /// F32: the channel does NOT become `Ready` here. Status remains
     /// `Opening` until the adapter emits `LiveAdapterObservation::Ready`,
-    /// which is observed via `apply_observation`/`next_observation`.
+    /// which is observed via `next_observation_raw`/`apply_observation`.
     pub async fn attach_adapter(
         &self,
         channel_id: &LiveChannelId,
@@ -1682,8 +1904,9 @@ impl LiveAdapterHost {
 
     /// Submit a tool result back to the adapter on a channel.
     ///
-    /// Used by the projection contract after [`AgentToolDispatcher::dispatch`]
-    /// produces a result for a `ToolCallRequested` observation (A5).
+    /// Used by the projection contract after
+    /// [`LiveToolDispatcher::dispatch_live_tool_call`] produces a result for
+    /// a `ToolCallRequested` observation (A5).
     pub async fn submit_tool_result(
         &self,
         channel_id: &LiveChannelId,
@@ -1694,10 +1917,15 @@ impl LiveAdapterHost {
     }
 
     /// Submit a tool error back to the adapter on a channel.
+    ///
+    /// #270: takes the typed [`ToolCallId`] and renders it to the
+    /// provider-native string only at the meerkat-core
+    /// [`LiveAdapterCommand::SubmitToolError`] seam edge, where the wire
+    /// field is owned by core and remains a bare `String`.
     pub async fn submit_tool_error(
         &self,
         channel_id: &LiveChannelId,
-        call_id: String,
+        call_id: ToolCallId,
         error: String,
     ) -> Result<(), LiveAdapterHostError> {
         self.send_command(
@@ -1707,36 +1935,21 @@ impl LiveAdapterHost {
         .await
     }
 
-    /// Poll the next observation from the adapter on a channel and project it.
+    /// Submit a typed tool-dispatch-timeout fact back to the adapter (D281).
     ///
-    /// Convenience wrapper around `next_observation_raw` + `apply_observation`.
-    /// This wrapper fails closed on non-terminal status observations because
-    /// the host has no generated status feedback handle here. Surfaces that
-    /// need status, terminality, or typed [`ObservationOutcome`] values must
-    /// call `next_observation_raw`, route status/close evidence through
-    /// generated authority, then call `apply_observation`.
-    pub async fn next_observation(
+    /// The caller passes the typed [`LiveToolDispatchTimeout`] fact; the only
+    /// stringification happens here, at the meerkat-core
+    /// [`LiveAdapterCommand::SubmitToolError`] seam edge, via the fact's
+    /// [`Display`] projection. No call site fabricates a parseable prose
+    /// string; the typed value is the truth.
+    pub async fn submit_tool_dispatch_timeout(
         &self,
         channel_id: &LiveChannelId,
-    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
-        let obs = self.next_observation_raw(channel_id).await?;
-        if let Some(ref obs) = obs {
-            if let ObservationRouting::UpdateStatus(status) = Self::classify_observation(obs)
-                && !status.is_terminal()
-            {
-                return Err(LiveAdapterHostError::StatusNotAuthorized);
-            }
-            if Self::observation_requires_generated_close(obs)
-                && !self.generated_close_has_committed(channel_id).await?
-            {
-                return Err(LiveAdapterHostError::CloseNotAuthorized);
-            }
-            // Best-effort projection. Errors are surfaced by `apply_observation`
-            // for callers that want to react; here we discard so the read API
-            // stays compatible with existing handlers.
-            let _ = self.apply_observation(channel_id, obs).await?;
-        }
-        Ok(obs)
+        call_id: ToolCallId,
+        timeout: LiveToolDispatchTimeout,
+    ) -> Result<(), LiveAdapterHostError> {
+        self.submit_tool_error(channel_id, call_id, timeout.to_string())
+            .await
     }
 
     /// Read the next adapter observation without applying it to canonical state.
@@ -2057,8 +2270,8 @@ impl LiveAdapterHost {
     async fn dispatch_tool_call(
         &self,
         channel_id: &LiveChannelId,
-        provider_call_id: &str,
-        tool_name: &str,
+        provider_call_id: &ToolCallId,
+        tool_name: &ToolName,
         arguments: serde_json::Value,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
         let dispatcher = match self.load_dispatcher() {
@@ -2079,12 +2292,12 @@ impl LiveAdapterHost {
                 let _ = self
                     .submit_tool_error(
                         channel_id,
-                        provider_call_id.to_string(),
+                        provider_call_id.clone(),
                         "live tool dispatcher not configured".to_string(),
                     )
                     .await;
                 return Ok(ObservationOutcome::ToolCallSkipped {
-                    provider_call_id: provider_call_id.to_string(),
+                    provider_call_id: provider_call_id.0.clone(),
                     tool_name: tool_name.to_string(),
                     reason: ToolDispatchSkipReason::NoDispatcher,
                 });
@@ -2092,51 +2305,53 @@ impl LiveAdapterHost {
         };
 
         let session_id = self.channel_session(channel_id).await?;
-        let call = ToolCall::new(
-            provider_call_id.to_string(),
-            tool_name.to_string(),
-            arguments,
-        );
+        let call = ToolCall::new(provider_call_id.0.clone(), tool_name.to_string(), arguments);
 
-        // Race the dispatcher future against the configured timeout (if any).
-        // Without a timeout, fall through to the legacy unbounded await so
-        // existing surfaces (and tests that don't pause the clock) keep their
-        // behavior.
+        // Race the dispatcher future against the configured timeout. The
+        // deadline is mandatory — `LiveAdapterHost::new` initializes it to
+        // `DEFAULT_LIVE_TOOL_TIMEOUT` — so a stuck dispatcher can never hold
+        // a live provider's turn unboundedly.
         let dispatch_call = dispatcher.dispatch_live_tool_call(&session_id, call);
-        let dispatch_result = match self.tool_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, dispatch_call).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    // Notify the adapter so the provider can unblock its turn.
-                    // The error string is a stable, parseable shape: "tool
-                    // dispatch timeout after Ns" so downstream surfaces can
-                    // route on it without parsing the dispatcher's error.
-                    let error_text = format!("tool dispatch timeout after {timeout:?}");
-                    self.submit_tool_error(channel_id, provider_call_id.to_string(), error_text)
-                        .await?;
-                    return Ok(ObservationOutcome::ToolCallTimedOut {
-                        provider_call_id: provider_call_id.to_string(),
-                        tool_name: tool_name.to_string(),
-                        timeout,
-                    });
-                }
-            },
-            None => dispatch_call.await,
+        let timeout = self.tool_timeout;
+        let dispatch_result = match tokio::time::timeout(timeout, dispatch_call).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // D281: notify the adapter so the provider can unblock its
+                // turn — but carry the typed `LiveToolDispatchTimeout` fact
+                // rather than fabricating a parseable prose string. The
+                // typed `ObservationOutcome::ToolCallTimedOut` is returned
+                // to the host's own callers; the adapter-facing submission
+                // renders the typed fact only at the meerkat-core
+                // `SubmitToolError { error: String }` seam edge (that wire
+                // field is owned by meerkat-core and cannot be made fully
+                // typed from this crate).
+                self.submit_tool_dispatch_timeout(
+                    channel_id,
+                    provider_call_id.clone(),
+                    LiveToolDispatchTimeout::new(timeout),
+                )
+                .await?;
+                return Ok(ObservationOutcome::ToolCallTimedOut {
+                    provider_call_id: provider_call_id.0.clone(),
+                    tool_name: tool_name.to_string(),
+                    timeout,
+                });
+            }
         };
         match dispatch_result {
             Ok(outcome) => {
                 let live_result =
-                    tool_result_from_dispatch(provider_call_id.to_string(), outcome.result);
+                    tool_result_from_dispatch(provider_call_id.clone(), outcome.result);
                 self.submit_tool_result(channel_id, live_result).await?;
             }
             Err(err) => {
-                self.submit_tool_error(channel_id, provider_call_id.to_string(), err.to_string())
+                self.submit_tool_error(channel_id, provider_call_id.clone(), err.to_string())
                     .await?;
             }
         }
 
         Ok(ObservationOutcome::ToolCallDispatched {
-            provider_call_id: provider_call_id.to_string(),
+            provider_call_id: provider_call_id.0.clone(),
             tool_name: tool_name.to_string(),
         })
     }
@@ -2548,6 +2763,49 @@ impl LiveAdapterHost {
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
+    /// Lower a transport-local barge-in (e.g. local VAD detecting user speech
+    /// while output audio is still queued) into the canonical interrupt seam
+    /// (D223).
+    ///
+    /// This routes through the *same* [`LiveProjectionSink::signal_turn_interrupt`]
+    /// path that adapter-observed [`LiveAdapterObservation::TurnInterrupted`]
+    /// barge-ins use, so a transport-discarded output-audio queue is a typed
+    /// interrupt fact the session observes — not a silent
+    /// `tracing`-and-discard. The transport has no provider response id for a
+    /// locally-detected barge-in, so `response_id` is `None` (the same shape
+    /// the user-facing `live/interrupt` RPC uses).
+    pub async fn signal_transport_barge_in(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveAdapterHostError> {
+        let session_id = self.channel_session(channel_id).await?;
+        self.projection_sink
+            .signal_turn_interrupt(&session_id, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Lower a transport-local output-audio delivery degradation into the
+    /// canonical host signal seam (K16).
+    ///
+    /// This routes through the *same* [`LiveProjectionSink`] signal path that
+    /// [`Self::signal_transport_barge_in`] uses, so dropped output-audio
+    /// packets (e.g. RTP pacing-queue backpressure) are a typed,
+    /// session-observable delivery fact — not a transport-local counter whose
+    /// only reader is a test. `dropped` carries the cumulative drop count for
+    /// the channel.
+    pub async fn signal_output_audio_degraded(
+        &self,
+        channel_id: &LiveChannelId,
+        dropped: u64,
+    ) -> Result<(), LiveAdapterHostError> {
+        let session_id = self.channel_session(channel_id).await?;
+        self.projection_sink
+            .signal_output_audio_degraded(&session_id, dropped)
+            .await?;
+        Ok(())
+    }
+
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
             LiveAdapterObservation::Ready => {
@@ -2586,8 +2844,10 @@ impl LiveAdapterHost {
                 tool_name,
                 ..
             } => ObservationRouting::DispatchToolCall {
-                provider_call_id: provider_call_id.clone(),
-                tool_name: tool_name.clone(),
+                // `ObservationRouting::DispatchToolCall` carries `String`
+                // routing keys; project the typed ids to their wire strings.
+                provider_call_id: provider_call_id.0.clone(),
+                tool_name: tool_name.to_string(),
             },
             LiveAdapterObservation::TurnInterrupted { .. } => ObservationRouting::SignalInterrupt,
             LiveAdapterObservation::TurnCompleted { .. } => ObservationRouting::AppendTranscript,
@@ -2693,8 +2953,10 @@ impl LiveAdapterHost {
 /// the seam-owned [`LiveToolResult`]. The two carry the same structured
 /// content shape (`Vec<ContentBlock>`) so tool-result fidelity (text, image,
 /// video) is preserved across the seam (closes E30 at this layer).
-fn tool_result_from_dispatch(call_id: String, result: ToolResult) -> LiveToolResult {
+fn tool_result_from_dispatch(call_id: ToolCallId, result: ToolResult) -> LiveToolResult {
     LiveToolResult {
+        // `LiveToolResult.call_id` is the meerkat-core seam edge and remains
+        // a bare `String`; project the typed id to the wire string here.
         call_id,
         content: result.content,
         is_error: result.is_error,
@@ -2710,31 +2972,28 @@ mod tests {
         LiveAdapterError, LiveAdapterErrorCode, LiveAdapterObservation, LiveDegradationReason,
     };
     use meerkat_core::ops::ToolDispatchOutcome;
-    use meerkat_core::types::{StopReason, ToolDef, Usage};
-    use meerkat_core::{DispatcherCapabilities, ToolCatalogCapabilities, ToolCatalogEntry};
+    use meerkat_core::types::{StopReason, Usage};
     use std::sync::Mutex as StdMutex;
 
     fn test_session_id() -> SessionId {
         SessionId::new()
     }
 
-    // -- Tool timeout accessor (G6 regression) --
+    // -- Tool timeout default (G6 regression, type-enforced) --
 
-    /// G6 (P2): production rkat-rpc startup MUST install
-    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`] on the live host. The binary's
-    /// build pattern is not directly testable, so the host exposes
-    /// [`LiveAdapterHost::tool_timeout`] as a stable accessor; this test
-    /// pins both the default-`None` behavior and the builder wiring so
-    /// the production callsite (meerkat-rpc/src/main.rs) can be
-    /// asserted to produce a host with the timeout populated.
+    /// G6 (P2): the per-tool-call dispatch deadline is mandatory and
+    /// type-enforced — [`LiveAdapterHost::new`] initializes it to
+    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`], so no surface can construct a host
+    /// with an unbounded await. The builder is an override, not an opt-in.
     #[test]
-    fn tool_timeout_defaults_to_none_and_builder_sets_it() {
+    fn tool_timeout_defaults_to_canonical_value_and_builder_overrides_it() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        assert_eq!(host.tool_timeout(), None);
+        assert_eq!(host.tool_timeout(), DEFAULT_LIVE_TOOL_TIMEOUT);
 
-        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink))
-            .with_tool_timeout(DEFAULT_LIVE_TOOL_TIMEOUT);
-        assert_eq!(host.tool_timeout(), Some(DEFAULT_LIVE_TOOL_TIMEOUT));
+        let override_timeout = Duration::from_secs(7);
+        let host =
+            LiveAdapterHost::new(Arc::new(NoOpProjectionSink)).with_tool_timeout(override_timeout);
+        assert_eq!(host.tool_timeout(), override_timeout);
         // Pin the canonical default value so accidental constant drift
         // is caught here rather than at integration time.
         assert_eq!(DEFAULT_LIVE_TOOL_TIMEOUT, Duration::from_secs(30));
@@ -3295,8 +3554,8 @@ mod tests {
     #[test]
     fn tool_call_observation_routes_to_dispatch() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_1".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_1"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({"x": 1}),
         };
         let routing = LiveAdapterHost::classify_observation(&obs);
@@ -4163,7 +4422,7 @@ mod tests {
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4175,8 +4434,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_42".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_42"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({"a": 2, "b": 3}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4198,7 +4457,7 @@ mod tests {
         // Adapter saw the SubmitToolResult command.
         let submitted = adapter.submitted_results.lock().unwrap();
         assert_eq!(submitted.len(), 1);
-        assert_eq!(submitted[0].call_id, "call_42");
+        assert_eq!(submitted[0].call_id.0, "call_42");
     }
 
     #[tokio::test]
@@ -4210,8 +4469,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_99".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_99"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4258,8 +4517,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_unwired".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_unwired"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4298,10 +4557,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_tool_dispatcher_late_binds_after_construction() {
+    async fn set_live_tool_dispatcher_late_binds_after_construction() {
         // Wave-3 follow-up: rkat-rpc constructs the host before the
         // callback channel that backs the dispatcher exists. Pre-set, a
-        // ToolCallRequested must skip; post-`set_tool_dispatcher`, the same
+        // ToolCallRequested must skip; post-`set_live_tool_dispatcher`, the same
         // observation must dispatch through the newly-installed dispatcher.
         let sink = Arc::new(RecordingProjectionSink::default());
         let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -4319,8 +4578,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_pre".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_pre"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({}),
         };
         // Phase 1: no dispatcher → skipped.
@@ -4334,10 +4593,10 @@ mod tests {
         assert_eq!(dispatcher.calls.lock().unwrap().len(), 0);
 
         // Phase 2: late install → dispatch flows through.
-        host.set_tool_dispatcher(Arc::clone(&dispatcher) as _);
+        host.set_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let obs2 = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_post".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_post"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({"x": 1}),
         };
         match host.apply_observation(&ch, &obs2).await.unwrap() {
@@ -4354,7 +4613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_tool_dispatcher_replaces_previously_installed_dispatcher() {
+    async fn set_live_tool_dispatcher_replaces_previously_installed_dispatcher() {
         // The setter is idempotent on repeated installs and the most recent
         // install wins. (In-flight dispatches that already cloned an Arc to
         // the prior value are unaffected — that's the documented contract.)
@@ -4363,7 +4622,7 @@ mod tests {
         let second = Arc::new(RecordingDispatcher::default());
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&first) as _);
+            .with_live_tool_dispatcher(Arc::clone(&first) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4375,10 +4634,10 @@ mod tests {
             .await
             .unwrap();
 
-        host.set_tool_dispatcher(Arc::clone(&second) as _);
+        host.set_live_tool_dispatcher(Arc::clone(&second) as _);
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_swap".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_swap"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({}),
         };
         host.apply_observation(&ch, &obs).await.unwrap();
@@ -4393,7 +4652,7 @@ mod tests {
         let dispatcher = Arc::new(FailingDispatcher);
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4405,8 +4664,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_err".into(),
-            tool_name: "failing".into(),
+            provider_call_id: ToolCallId::new("call_err"),
+            tool_name: ToolName::new("failing"),
             arguments: serde_json::json!({}),
         };
         host.apply_observation(&ch, &obs).await.unwrap();
@@ -4450,37 +4709,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for SlowDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for SlowDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             *self.calls.lock().unwrap() += 1;
             tokio::time::sleep(self.sleep_for).await;
             // Echo result so a non-timed-out dispatch still produces a sane outcome.
-            let tool_result =
-                meerkat_core::types::ToolResult::new(call.id.to_string(), "ok".into(), false);
+            let tool_result = meerkat_core::types::ToolResult::new(call.id, "ok".into(), false);
             Ok(ToolDispatchOutcome::from(tool_result))
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
         }
     }
 
@@ -4495,7 +4734,7 @@ mod tests {
         let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
@@ -4509,8 +4748,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_slow".into(),
-            tool_name: "slow_tool".into(),
+            provider_call_id: ToolCallId::new("call_slow"),
+            tool_name: ToolName::new("slow_tool"),
             arguments: serde_json::json!({"q": 1}),
         };
 
@@ -4547,9 +4786,16 @@ mod tests {
         let errors = adapter.submitted_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "call_slow");
-        assert!(
-            errors[0].1.contains("timeout"),
-            "tool error message should mention timeout: {}",
+        // D281 gate: the adapter-facing payload is exactly the typed
+        // `LiveToolDispatchTimeout` fact's `Display` projection — not an
+        // ad-hoc fabricated string. This pins that the typed fact owns the
+        // truth and the only stringification is the deterministic seam-edge
+        // render.
+        assert_eq!(
+            errors[0].1,
+            LiveToolDispatchTimeout::new(timeout).to_string(),
+            "tool dispatch timeout must submit the typed fact's Display projection, \
+             not a fabricated string: {}",
             errors[0].1
         );
         let results = adapter.submitted_results.lock().unwrap();
@@ -4576,7 +4822,7 @@ mod tests {
         let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
@@ -4590,8 +4836,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_fast".into(),
-            tool_name: "fast_tool".into(),
+            provider_call_id: ToolCallId::new("call_fast"),
+            tool_name: ToolName::new("fast_tool"),
             arguments: serde_json::json!({}),
         };
         let host_call = async { host.apply_observation(&ch, &obs).await.unwrap() };
@@ -4610,41 +4856,8 @@ mod tests {
         }
         let results = adapter.submitted_results.lock().unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].call_id, "call_fast");
+        assert_eq!(results[0].call_id.0, "call_fast");
         assert!(adapter.submitted_errors.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn tool_call_dispatch_without_timeout_preserves_unbounded_await() {
-        // K61 companion: a host without `with_tool_timeout` must still
-        // produce `ToolCallDispatched` for a fast dispatcher (the legacy
-        // unbounded-await branch). Smoke-tests the `None` arm of
-        // `tool_timeout`.
-        let sink = Arc::new(RecordingProjectionSink::default());
-        let dispatcher = Arc::new(RecordingDispatcher::default());
-        let adapter = Arc::new(RecordingAdapter::default());
-        let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
-        let ch = host
-            .open_channel_with_generated_test_machine_authority(test_session_id())
-            .await
-            .unwrap();
-        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
-            .await
-            .unwrap();
-        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
-            .await
-            .unwrap();
-        let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_legacy".into(),
-            tool_name: "calc".into(),
-            arguments: serde_json::json!({}),
-        };
-        match host.apply_observation(&ch, &obs).await.unwrap() {
-            ObservationOutcome::ToolCallDispatched { .. } => {}
-            other => panic!("expected ToolCallDispatched on no-timeout host, got {other:?}"),
-        }
-        assert_eq!(adapter.submitted_results.lock().unwrap().len(), 1);
     }
 
     // -- A6: barge-in projection --
@@ -4675,6 +4888,77 @@ mod tests {
         // so the truncation can be scoped to the specific response even when
         // the barge-in lands before any transcript delta has been staged.
         assert_eq!(interrupts[0].1.as_deref(), Some("resp_42"));
+    }
+
+    // -- D223: transport-local barge-in lowers into the interrupt seam --
+
+    #[tokio::test]
+    async fn transport_barge_in_emits_typed_interrupt_via_sink() {
+        // A transport-discarded output-audio queue (local VAD barge-in) must
+        // become a typed interrupt fact the session observes — routed through
+        // the same `signal_turn_interrupt` seam adapter-observed barge-ins use,
+        // not a silent discard. (Fails-old: there was no host seam for a
+        // transport-local barge-in, so the discard was log-only.)
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let session_id = test_session_id();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+
+        host.signal_transport_barge_in(&ch).await.unwrap();
+
+        let interrupts = sink.interrupts.lock().unwrap();
+        assert_eq!(
+            interrupts.len(),
+            1,
+            "barge-in must signal exactly one interrupt"
+        );
+        assert_eq!(interrupts[0].0, session_id);
+        // Transport-local barge-in carries no provider response id (same shape
+        // as the user-facing `live/interrupt` RPC).
+        assert_eq!(interrupts[0].1, None);
+    }
+
+    // -- K16: transport output-audio delivery degradation lowers into the
+    //    same host signal seam barge-in uses --
+
+    #[tokio::test]
+    async fn transport_output_audio_degradation_emits_typed_signal_via_sink() {
+        // Dropped RTP output-audio packets must become a typed, session-
+        // observable delivery-degraded fact through the projection-sink seam —
+        // not a transport-local AtomicU64 whose only reader is a test.
+        // (Fails-old: `LiveProjectionSink` had no degradation signal and the
+        // host had no lowering path, so the drop count never left the
+        // transport.)
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let session_id = test_session_id();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+
+        host.signal_output_audio_degraded(&ch, 3).await.unwrap();
+
+        {
+            let degraded = sink.output_audio_degraded.lock().unwrap();
+            assert_eq!(
+                degraded.as_slice(),
+                &[(session_id, 3)],
+                "degradation must surface exactly once with the cumulative drop count"
+            );
+        }
+
+        // An unknown channel is a typed rejection, not a silent no-op.
+        let missing = host
+            .signal_output_audio_degraded(&LiveChannelId::new("no-such-channel"), 1)
+            .await;
+        assert!(matches!(
+            missing,
+            Err(LiveAdapterHostError::ChannelNotFound(_))
+        ));
     }
 
     // -- A10: terminal error projection --
@@ -4866,7 +5150,10 @@ mod tests {
                     self.submitted_results.lock().unwrap().push(result);
                 }
                 LiveAdapterCommand::SubmitToolError { call_id, error } => {
-                    self.submitted_errors.lock().unwrap().push((call_id, error));
+                    self.submitted_errors
+                        .lock()
+                        .unwrap()
+                        .push((call_id.0, error));
                 }
                 _ => {}
             }
@@ -4897,39 +5184,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for RecordingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for RecordingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             self.calls.lock().unwrap().push((
-                call.id.to_string(),
-                call.name.to_string(),
-                call.args.get().to_string(),
+                call.id.clone(),
+                call.name.clone(),
+                call.args.to_string(),
             ));
-            let tool_result =
-                meerkat_core::types::ToolResult::new(call.id.to_string(), "ok".into(), false);
+            let tool_result = meerkat_core::types::ToolResult::new(call.id, "ok".into(), false);
             Ok(ToolDispatchOutcome::from(tool_result))
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
         }
     }
 
@@ -4937,34 +5204,17 @@ mod tests {
     struct FailingDispatcher;
 
     #[async_trait]
-    impl AgentToolDispatcher for FailingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for FailingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            _call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
-            Err(meerkat_core::error::ToolError::ExecutionFailed {
-                message: "bang".into(),
-            })
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
+            _session_id: &SessionId,
+            _call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+            Err(LiveToolDispatchError::Tool(
+                meerkat_core::error::ToolError::ExecutionFailed {
+                    message: "bang".into(),
+                },
+            ))
         }
     }
 
@@ -5033,6 +5283,7 @@ mod tests {
             )>,
         >,
         interrupts: StdMutex<Vec<(SessionId, Option<String>)>>,
+        output_audio_degraded: StdMutex<Vec<(SessionId, u64)>>,
         turn_completed: StdMutex<Vec<(SessionId, StopReason, Usage, Option<String>)>>,
         terminal_errors: StdMutex<Vec<(SessionId, LiveAdapterErrorCode, String)>>,
         realtime_events: StdMutex<Vec<(SessionId, RealtimeTranscriptEvent)>>,
@@ -5154,6 +5405,18 @@ mod tests {
             Ok(())
         }
 
+        async fn signal_output_audio_degraded(
+            &self,
+            session_id: &SessionId,
+            dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            self.output_audio_degraded
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), dropped));
+            Ok(())
+        }
+
         async fn signal_turn_completed(
             &self,
             session_id: &SessionId,
@@ -5195,5 +5458,224 @@ mod tests {
                 .push((session_id.clone(), event.clone()));
             Ok(())
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // D301: typed SessionError -> LiveProjectionError classification
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn session_error_classification_lands_in_distinct_typed_variants() {
+        use meerkat_core::SessionError;
+
+        let sid = test_session_id();
+
+        // NotFound -> SessionNotFound (identity-bearing).
+        assert!(matches!(
+            LiveProjectionError::from_session_error(
+                &sid,
+                SessionError::NotFound { id: sid.clone() }
+            ),
+            LiveProjectionError::SessionNotFound(_)
+        ));
+
+        // Unsupported -> Rejected, preserving the typed reason payload.
+        match LiveProjectionError::from_session_error(
+            &sid,
+            SessionError::Unsupported("nope".into()),
+        ) {
+            LiveProjectionError::Rejected(reason) => assert_eq!(reason, "nope"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // Busy -> SessionBusy (distinct from Internal/Session).
+        assert!(matches!(
+            LiveProjectionError::from_session_error(&sid, SessionError::Busy { id: sid.clone() }),
+            LiveProjectionError::SessionBusy(_)
+        ));
+
+        // NotRunning -> SessionNotRunning.
+        assert!(matches!(
+            LiveProjectionError::from_session_error(
+                &sid,
+                SessionError::NotRunning { id: sid.clone() }
+            ),
+            LiveProjectionError::SessionNotRunning(_)
+        ));
+
+        // PersistenceDisabled / CompactionDisabled -> CapabilityDisabled,
+        // carrying the stable code (no prose-only Internal collapse).
+        match LiveProjectionError::from_session_error(&sid, SessionError::PersistenceDisabled) {
+            LiveProjectionError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_PERSISTENCE_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+        match LiveProjectionError::from_session_error(&sid, SessionError::CompactionDisabled) {
+            LiveProjectionError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_COMPACTION_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+
+        // Store error -> typed Session { code } carrying the stable code,
+        // NOT a prose-only Internal(to_string()).
+        let store_err: Box<dyn std::error::Error + Send + Sync> = "disk gone".into();
+        match LiveProjectionError::from_session_error(&sid, SessionError::Store(store_err)) {
+            LiveProjectionError::Session { code, .. } => {
+                assert_eq!(code, "SESSION_STORE_ERROR");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+
+        // FailedWithData -> typed Session { code } (still carries the stable
+        // code; the prose lives only in `message`).
+        match LiveProjectionError::from_session_error(
+            &sid,
+            SessionError::FailedWithData {
+                message: "boom".into(),
+                data: serde_json::json!({"k": "v"}),
+            },
+        ) {
+            LiveProjectionError::Session { code, message } => {
+                assert_eq!(code, "SESSION_ERROR");
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // D113: typed SessionError -> LiveToolDispatchError classification.
+    // A NotFound / busy / not-running / capability-disabled / unsupported /
+    // store SessionError maps to the matching typed LiveToolDispatchError
+    // variant, never a generic Internal(to_string()) string, so the terminal
+    // class survives back through the live adapter.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn live_tool_dispatch_session_error_classification_lands_in_distinct_typed_variants() {
+        use meerkat_core::SessionError;
+
+        let sid = test_session_id();
+
+        // NotFound -> SessionNotFound (identity-bearing), NOT a string.
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(
+                &sid,
+                SessionError::NotFound { id: sid.clone() }
+            ),
+            LiveToolDispatchError::SessionNotFound(_)
+        ));
+
+        // Unsupported (no-dispatcher / refusal) -> Rejected, preserving the
+        // typed reason payload.
+        match LiveToolDispatchError::from_session_error(
+            &sid,
+            SessionError::Unsupported("no live tool dispatcher".into()),
+        ) {
+            LiveToolDispatchError::Rejected(reason) => {
+                assert_eq!(reason, "no live tool dispatcher");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // Busy -> SessionBusy (distinct from Internal/Session).
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(&sid, SessionError::Busy { id: sid.clone() }),
+            LiveToolDispatchError::SessionBusy(_)
+        ));
+
+        // NotRunning -> SessionNotRunning.
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(
+                &sid,
+                SessionError::NotRunning { id: sid.clone() }
+            ),
+            LiveToolDispatchError::SessionNotRunning(_)
+        ));
+
+        // PersistenceDisabled / CompactionDisabled -> CapabilityDisabled,
+        // carrying the stable code (no prose-only Internal collapse).
+        match LiveToolDispatchError::from_session_error(&sid, SessionError::PersistenceDisabled) {
+            LiveToolDispatchError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_PERSISTENCE_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+
+        // Store error -> typed Session { code } carrying the stable code,
+        // NOT a prose-only Internal(to_string()).
+        let store_err: Box<dyn std::error::Error + Send + Sync> = "disk gone".into();
+        match LiveToolDispatchError::from_session_error(&sid, SessionError::Store(store_err)) {
+            LiveToolDispatchError::Session { code, .. } => {
+                assert_eq!(code, "SESSION_STORE_ERROR");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // D199: transcript delta identity fails closed on missing required ids
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn delta_identity_requires_response_delta_and_item_ids() {
+        // Full identity resolves to a typed triple.
+        let full = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            Some("prev-0"),
+            Some(2),
+            Some("resp-9"),
+            Some("delta-3"),
+        );
+        let resolved = full
+            .require_delta_identity()
+            .expect("full identity resolves");
+        assert_eq!(resolved.response_id, "resp-9");
+        assert_eq!(resolved.delta_id, "delta-3");
+        assert_eq!(resolved.item_id, "item-1");
+        assert_eq!(resolved.previous_item_id, Some("prev-0"));
+        assert_eq!(resolved.content_index, Some(2));
+
+        // Missing response_id fails closed with a typed error (NOT an
+        // empty-string-coalesced identity).
+        let no_resp = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            None,
+            Some(0),
+            None,
+            Some("delta-3"),
+        );
+        assert_eq!(
+            no_resp.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingResponseId)
+        );
+
+        // Missing delta_id fails closed.
+        let no_delta = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            None,
+            Some(0),
+            Some("resp-9"),
+            None,
+        );
+        assert_eq!(
+            no_delta.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingDeltaId)
+        );
+
+        // Missing item_id fails closed.
+        let no_item = LiveTranscriptIdentity::assistant_delta(
+            None,
+            None,
+            Some(0),
+            Some("resp-9"),
+            Some("delta-3"),
+        );
+        assert_eq!(
+            no_item.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingItemId)
+        );
     }
 }

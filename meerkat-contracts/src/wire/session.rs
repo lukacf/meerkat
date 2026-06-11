@@ -26,12 +26,11 @@ where
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, AssistantMessage, BlobId, BlockAssistantMessage, ContentBlock, ContentInput,
-    ImageData, Message, ProviderMeta, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
+    AssistantBlock, BlobId, BlockAssistantMessage, ContentBlock, ContentInput, ImageData, Message,
+    ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
     SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
-    SystemNoticeMessage, ToolCall, ToolResult, TranscriptEditRunningBehavior,
-    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
-    Usage, UserMessage, VideoData,
+    SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior, TranscriptReplacement,
+    TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource, UserMessage, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -81,14 +80,18 @@ pub struct ForkSessionAtParams {
 }
 
 /// Request payload for `session/fork_replace`.
+///
+/// `replacement` rides as the typed [`WireTranscriptReplacement`] mirror so
+/// the emitted JSON schema is the closed replacement enum rather than a bare
+/// `serde_json::Value`. The consuming surface lowers it into the core
+/// [`TranscriptReplacement`] via [`WireTranscriptReplacement::into_core`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkSessionReplaceParams {
     pub session_id: String,
     pub message_index: usize,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub replacement: TranscriptReplacement,
+    pub replacement: WireTranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
 }
@@ -114,15 +117,6 @@ pub enum TranscriptRewriteMessage {
     },
     User {
         content: WireContentInput,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        created_at: Option<String>,
-    },
-    Assistant {
-        content: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<WireToolCall>,
-        #[serde(default)]
-        stop_reason: WireStopReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
     },
@@ -380,6 +374,58 @@ impl From<ProviderMeta> for WireProviderMeta {
     }
 }
 
+/// Wire projection of `meerkat_core::ServerToolKind`.
+///
+/// Mirrors the typed semantic owner of a provider-executed tool. The core enum
+/// is `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in
+/// the forward `From` surfaces as `Unknown { debug }` rather than silently
+/// collapsing into a plausible-but-wrong kind. SDK consumers route on the
+/// `kind` discriminator and treat `unknown` as unrecognized.
+///
+/// **When a new core variant is added, add an explicit arm in the forward
+/// `From` impl above the wildcard — `Unknown` is the floor, not the
+/// destination.**
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireServerToolKind {
+    WebSearch,
+    GoogleSearch,
+    ProviderNative { name: String },
+    Unknown { debug: String },
+}
+
+impl From<ServerToolKind> for WireServerToolKind {
+    fn from(value: ServerToolKind) -> Self {
+        match value {
+            ServerToolKind::WebSearch => Self::WebSearch,
+            ServerToolKind::GoogleSearch => Self::GoogleSearch,
+            ServerToolKind::ProviderNative { name } => Self::ProviderNative { name },
+            // Core enum is `#[non_exhaustive]`. Surface unknown semantic kinds
+            // explicitly rather than coercing to a plausible-but-wrong kind.
+            // **When a new core variant is added, add an explicit arm above.**
+            other => Self::Unknown {
+                debug: format!("{other:?}"),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireServerToolKind> for ServerToolKind {
+    type Error = crate::wire::error::WireConversionError;
+
+    fn try_from(value: WireServerToolKind) -> Result<Self, Self::Error> {
+        match value {
+            WireServerToolKind::WebSearch => Ok(Self::WebSearch),
+            WireServerToolKind::GoogleSearch => Ok(Self::GoogleSearch),
+            WireServerToolKind::ProviderNative { name } => Ok(Self::ProviderNative { name }),
+            WireServerToolKind::Unknown { debug } => {
+                Err(crate::wire::error::WireConversionError::AssistantBlock { debug })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -447,6 +493,11 @@ pub enum WireContentBlock {
         #[serde(flatten)]
         data: WireVideoData,
     },
+    /// Structured JSON tool output, materialized as inline JSON for SDK
+    /// consumers (the core side keeps it as opaque `Box<RawValue>`).
+    Structured {
+        data: serde_json::Value,
+    },
     /// Forward-compatibility for unknown block types.
     #[serde(other)]
     Unknown,
@@ -473,6 +524,14 @@ impl From<ContentBlock> for WireContentBlock {
                 data: match data {
                     VideoData::Inline { data } => WireVideoData::Inline { data },
                 },
+            },
+            ContentBlock::Structured { data } => WireContentBlock::Structured {
+                // Materialize the opaque `Box<RawValue>` into a wire JSON value.
+                // The payload is valid JSON by construction; preserve the raw
+                // bytes losslessly on the unreachable parse-failure path rather
+                // than fabricating a success-shaped null.
+                data: serde_json::from_str(data.get())
+                    .unwrap_or_else(|_| serde_json::Value::String(data.get().to_owned())),
             },
             _ => WireContentBlock::Unknown,
         }
@@ -502,6 +561,10 @@ impl TryFrom<WireContentBlock> for ContentBlock {
                 data: match data {
                     WireVideoData::Inline { data } => VideoData::Inline { data },
                 },
+            }),
+            WireContentBlock::Structured { data } => Ok(ContentBlock::Structured {
+                data: serde_json::value::to_raw_value(&data)
+                    .map_err(|_| "structured content block is not serializable JSON")?,
             }),
             WireContentBlock::Unknown => Err("unknown content block type"),
         }
@@ -540,6 +603,71 @@ impl TryFrom<WireContentInput> for ContentInput {
                     .map(ContentBlock::try_from)
                     .collect::<Result<Vec<_>, _>>()?,
             )),
+        }
+    }
+}
+
+/// Discriminated (externally tagged) prompt-input wire shape.
+///
+/// Unlike [`WireContentInput`] (untagged, for transcripts that already know
+/// their shape), this is the ingress contract for content-bearing surface
+/// exports: `{"text": "..."}` or `{"blocks": [...]}`. The tag is the
+/// discriminator — a plain-text prompt whose body happens to be valid
+/// block-array JSON can never be misread as structured blocks (K19).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WirePromptInput {
+    Text(String),
+    Blocks(Vec<WireContentBlock>),
+}
+
+impl TryFrom<WirePromptInput> for ContentInput {
+    type Error = &'static str;
+
+    fn try_from(input: WirePromptInput) -> Result<Self, Self::Error> {
+        match input {
+            WirePromptInput::Text(text) => Ok(ContentInput::Text(text)),
+            WirePromptInput::Blocks(blocks) => Ok(ContentInput::Blocks(
+                blocks
+                    .into_iter()
+                    .map(ContentBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+        }
+    }
+}
+
+/// Non-error outcome of a user interrupt request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInterruptOutcome {
+    /// A live in-flight turn was cancelled.
+    Interrupted,
+    /// The session was staged with no live run — the interrupt is a typed
+    /// no-op terminal, not a fabricated live cancellation.
+    StagedNoop,
+}
+
+/// Shared interrupt result wire contract (REST and RPC).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InterruptResult {
+    pub session_id: String,
+    /// `true` only when a live turn was actually cancelled.
+    pub interrupted: bool,
+    pub result: WireInterruptOutcome,
+}
+
+impl InterruptResult {
+    /// Project the typed interrupt outcome into the wire result.
+    #[must_use]
+    pub fn from_outcome(session_id: String, outcome: WireInterruptOutcome) -> Self {
+        Self {
+            session_id,
+            interrupted: matches!(outcome, WireInterruptOutcome::Interrupted),
+            result: outcome,
         }
     }
 }
@@ -602,7 +730,7 @@ pub enum WireAssistantBlock {
     ServerToolContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        kind: WireServerToolKind,
         content: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
@@ -715,12 +843,12 @@ impl From<AssistantBlock> for WireAssistantBlock {
             },
             AssistantBlock::ServerToolContent {
                 id,
-                name,
+                kind,
                 content,
                 meta,
             } => Self::ServerToolContent {
                 id,
-                name,
+                kind: kind.into(),
                 content,
                 meta: meta.map(|m| (*m).into()),
             },
@@ -831,12 +959,12 @@ impl TryFrom<WireAssistantBlock> for AssistantBlock {
             },
             WireAssistantBlock::ServerToolContent {
                 id,
-                name,
+                kind,
                 content,
                 meta,
             } => Self::ServerToolContent {
                 id,
-                name,
+                kind: ServerToolKind::try_from(kind)?,
                 content,
                 meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
             },
@@ -906,25 +1034,6 @@ impl From<WireStopReason> for StopReason {
     }
 }
 
-/// Legacy assistant tool call payload.
-///
-/// Not `PartialEq`: `args` rides as `Box<RawValue>` for pass-through
-/// fidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —
-/// opaque from provider to dispatcher, never re-parsed on the wire.
-/// Equivalence checks should round-trip through serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireToolCall {
-    pub id: String,
-    pub name: String,
-    #[serde(
-        serialize_with = "serialize_raw_json_box",
-        deserialize_with = "deserialize_raw_json_box"
-    )]
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub args: Box<serde_json::value::RawValue>,
-}
-
 /// Tool result payload in a transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -990,36 +1099,6 @@ impl TranscriptRewriteMessage {
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
-            Self::Assistant {
-                content,
-                tool_calls,
-                stop_reason,
-                created_at,
-            } => {
-                let tool_calls = tool_calls
-                    .into_iter()
-                    .map(|tool_call| {
-                        serde_json::from_str(tool_call.args.get())
-                            .map(|args| ToolCall {
-                                id: tool_call.id,
-                                name: tool_call.name,
-                                args,
-                            })
-                            .map_err(|err| {
-                                crate::wire::error::WireConversionError::TranscriptMessage {
-                                    debug: format!("invalid assistant tool call args: {err}"),
-                                }
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Message::Assistant(AssistantMessage {
-                    content,
-                    tool_calls,
-                    stop_reason: stop_reason.into(),
-                    usage: Usage::default(),
-                    created_at: transcript_message_timestamp(created_at)?,
-                }))
-            }
             Self::BlockAssistant {
                 blocks,
                 stop_reason,
@@ -1070,6 +1149,103 @@ impl TranscriptRewriteMessage {
     }
 }
 
+/// Typed wire mirror of [`meerkat_core::TranscriptReplacement`].
+///
+/// R-#87 (P3 dogma): `ForkSessionReplaceParams.replacement` previously carried
+/// the core `TranscriptReplacement` directly with a
+/// `#[schemars(with = "serde_json::Value")]` override, so the emitted JSON
+/// schema collapsed to a bare `Value` (artifacts/schemas/params.json) and the
+/// SDK codegen saw an untyped bag. The core enum cannot derive `JsonSchema`
+/// directly: it embeds `Message` and `AssistantBlock`, neither of which has a
+/// `JsonSchema` impl in `meerkat-core` (and `Message::BlockAssistant` carries
+/// `Box<RawValue>` tool-call args).
+///
+/// This wire mirror is schema-emittable because it is built entirely from
+/// types that already carry `JsonSchema` derives in this module:
+/// [`TranscriptRewriteMessage`] (the public message shape, with its own
+/// `into_core`), [`WireContentBlock`], and [`WireAssistantBlock`]. Conversion
+/// into the core enum is fallible — every inner conversion already returns a
+/// typed [`WireConversionError`](crate::wire::error::WireConversionError), so
+/// malformed payloads surface a typed parse fault at the boundary rather than
+/// being smuggled through as an opaque `Value`.
+///
+/// The serde tag/rename mirror the core enum (`#[serde(tag = "type",
+/// rename_all = "snake_case")]`) so the wire bytes are unchanged: the only
+/// observable delta is that the schema is now the closed enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireTranscriptReplacement {
+    /// Replace the addressed message with a full canonical message.
+    Message { message: TranscriptRewriteMessage },
+    /// Replace one user-message content block.
+    UserContentBlock {
+        block_index: usize,
+        block: WireContentBlock,
+    },
+    /// Replace one block in a block-assistant message.
+    AssistantBlock {
+        block_index: usize,
+        block: WireAssistantBlock,
+    },
+    /// Replace one content block inside one tool-result payload.
+    ToolResultContentBlock {
+        result_index: usize,
+        block_index: usize,
+        block: WireContentBlock,
+    },
+}
+
+impl WireTranscriptReplacement {
+    /// Lower the typed wire replacement into the core
+    /// [`TranscriptReplacement`].
+    ///
+    /// Each inner conversion is fallible and surfaces a typed
+    /// [`WireConversionError`](crate::wire::error::WireConversionError):
+    /// `Message` delegates to [`TranscriptRewriteMessage::into_core`];
+    /// `ContentBlock`/`AssistantBlock` conversions wrap their `&'static str` /
+    /// typed failures into [`WireConversionError::TranscriptMessage`] so the
+    /// surface sees one closed error type.
+    pub fn into_core(
+        self,
+    ) -> Result<TranscriptReplacement, crate::wire::error::WireConversionError> {
+        match self {
+            Self::Message { message } => Ok(TranscriptReplacement::Message {
+                message: message.into_core()?,
+            }),
+            Self::UserContentBlock { block_index, block } => {
+                Ok(TranscriptReplacement::UserContentBlock {
+                    block_index,
+                    block: ContentBlock::try_from(block).map_err(|err| {
+                        crate::wire::error::WireConversionError::TranscriptMessage {
+                            debug: format!("invalid user content block: {err}"),
+                        }
+                    })?,
+                })
+            }
+            Self::AssistantBlock { block_index, block } => {
+                Ok(TranscriptReplacement::AssistantBlock {
+                    block_index,
+                    block: AssistantBlock::try_from(block)?,
+                })
+            }
+            Self::ToolResultContentBlock {
+                result_index,
+                block_index,
+                block,
+            } => Ok(TranscriptReplacement::ToolResultContentBlock {
+                result_index,
+                block_index,
+                block: ContentBlock::try_from(block).map_err(|err| {
+                    crate::wire::error::WireConversionError::TranscriptMessage {
+                        debug: format!("invalid tool-result content block: {err}"),
+                    }
+                })?,
+            }),
+        }
+    }
+}
+
 /// Canonical transcript message for public wire surfaces.
 ///
 /// Not `PartialEq`: the `BlockAssistant.blocks` variant carries
@@ -1095,13 +1271,6 @@ pub enum WireSessionMessage {
         content: WireContentInput,
         created_at: String,
     },
-    Assistant {
-        content: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<WireToolCall>,
-        stop_reason: WireStopReason,
-        created_at: String,
-    },
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
@@ -1116,7 +1285,6 @@ pub enum WireSessionMessage {
 }
 
 impl From<Message> for WireSessionMessage {
-    #[allow(clippy::expect_used)]
     fn from(value: Message) -> Self {
         match value {
             Message::System(message) => Self::System {
@@ -1143,26 +1311,6 @@ impl From<Message> for WireSessionMessage {
                     created_at,
                 }
             }
-            Message::Assistant(message) => Self::Assistant {
-                content: message.content,
-                tool_calls: message
-                    .tool_calls
-                    .into_iter()
-                    .map(|tool_call| WireToolCall {
-                        id: tool_call.id,
-                        name: tool_call.name,
-                        // Core's legacy `ToolCall.args: Value` → opaque
-                        // `Box<RawValue>` for the wire. `to_string` on a
-                        // `Value` produces canonical JSON bytes; the
-                        // RawValue constructor only fails on invalid
-                        // JSON, which `Value::to_string` cannot emit.
-                        args: serde_json::value::RawValue::from_string(tool_call.args.to_string())
-                            .expect("serde_json::Value serializes to valid JSON"),
-                    })
-                    .collect(),
-                stop_reason: message.stop_reason.into(),
-                created_at: message.created_at.to_rfc3339(),
-            },
             Message::BlockAssistant(message) => Self::BlockAssistant {
                 blocks: message.blocks.into_iter().map(Into::into).collect(),
                 stop_reason: message.stop_reason.into(),
@@ -1270,9 +1418,7 @@ impl From<SessionTranscriptRevisionPage> for WireSessionTranscriptRevision {
 mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
-    use meerkat_core::{
-        AssistantMessage, BlockAssistantMessage, Message, SystemMessage, ToolCall, UserMessage,
-    };
+    use meerkat_core::{BlockAssistantMessage, Message, SystemMessage, UserMessage};
 
     #[test]
     fn test_fork_session_params_roundtrip_typed_replacement() {
@@ -1301,8 +1447,24 @@ mod tests {
             }
         }))
         .unwrap();
+        // The wire field is now the typed `WireTranscriptReplacement` mirror
+        // (so the schema is the closed enum, not a bare Value).
         assert!(matches!(
             &fork_replace.replacement,
+            WireTranscriptReplacement::Message {
+                message: TranscriptRewriteMessage::User { content, .. },
+            } if matches!(content, WireContentInput::Text(text) if text == "edited follow up")
+        ));
+
+        // Lowering into the core enum is typed and fallible; the user
+        // message round-trips into a core `Message::User`.
+        let core = fork_replace
+            .replacement
+            .clone()
+            .into_core()
+            .expect("typed wire replacement lowers into core");
+        assert!(matches!(
+            core,
             TranscriptReplacement::Message {
                 message: Message::User(user),
             } if user.text_content() == "edited follow up"
@@ -1360,8 +1522,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_session_transcript_accepts_public_assistant_shorthand() {
-        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+    fn test_rewrite_session_transcript_rejects_legacy_assistant_role() {
+        // The text-shaped `role: "assistant"` rewrite message was folded into
+        // `block_assistant`; the legacy wire form must fail closed at parse.
+        let err = serde_json::from_value::<RewriteSessionTranscriptParams>(serde_json::json!({
             "session_id": "session_123",
             "selection": {
                 "type": "message_range",
@@ -1378,23 +1542,11 @@ mod tests {
                 "kind": "compaction"
             }
         }))
-        .unwrap();
-
-        let message = params
-            .replacement
-            .into_iter()
-            .next()
-            .expect("replacement exists")
-            .into_core()
-            .expect("public assistant shorthand converts");
-        assert!(matches!(
-            message,
-            Message::Assistant(AssistantMessage {
-                content,
-                stop_reason: StopReason::EndTurn,
-                ..
-            }) if content == "Compacted assistant trace"
-        ));
+        .expect_err("legacy assistant rewrite role must be rejected");
+        assert!(
+            err.to_string().contains("assistant"),
+            "rejection should name the unknown role: {err}"
+        );
     }
 
     #[test]
@@ -1666,9 +1818,9 @@ mod tests {
         let history = WireSessionHistory {
             session_id: SessionId::new(),
             session_ref: Some("session://example".to_string()),
-            message_count: 5,
+            message_count: 4,
             offset: 0,
-            limit: Some(5),
+            limit: Some(4),
             has_more: false,
             messages: vec![
                 WireSessionMessage::System {
@@ -1679,23 +1831,19 @@ mod tests {
                     content: WireContentInput::Text("hello".to_string()),
                     created_at: "2026-04-27T00:00:01Z".to_string(),
                 },
-                WireSessionMessage::Assistant {
-                    content: "hi".to_string(),
-                    tool_calls: vec![WireToolCall {
-                        id: "tool-1".to_string(),
-                        name: "search".to_string(),
-                        args: serde_json::value::RawValue::from_string(
-                            r#"{"q":"rust"}"#.to_string(),
-                        )
-                        .expect("fixture args literal is valid JSON"),
-                    }],
-                    stop_reason: WireStopReason::ToolUse,
-                    created_at: "2026-04-27T00:00:02Z".to_string(),
-                },
                 WireSessionMessage::BlockAssistant {
                     blocks: vec![
                         WireAssistantBlock::Reasoning {
                             text: "thinking".to_string(),
+                            meta: None,
+                        },
+                        WireAssistantBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "search".to_string(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"q":"rust"}"#.to_string(),
+                            )
+                            .expect("fixture args literal is valid JSON"),
                             meta: None,
                         },
                         WireAssistantBlock::Text {
@@ -1746,17 +1894,24 @@ mod tests {
                     meerkat_core::SystemNoticeKind::BackgroundJob,
                     "still running",
                 )),
-                Message::Assistant(AssistantMessage {
-                    content: "hello".to_string(),
-                    tool_calls: vec![ToolCall::new(
-                        "call-1".to_string(),
-                        "search".to_string(),
-                        serde_json::json!({"q":"meerkat"}),
-                    )],
-                    stop_reason: StopReason::ToolUse,
-                    usage: meerkat_core::Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                }),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![
+                        AssistantBlock::Text {
+                            text: "hello".to_string(),
+                            meta: None,
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call-1".to_string(),
+                            name: "search".to_string(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"q":"meerkat"}"#.to_string(),
+                            )
+                            .expect("fixture args literal is valid JSON"),
+                            meta: None,
+                        },
+                    ],
+                    StopReason::ToolUse,
+                )),
             ],
         };
         let wire: WireSessionHistory = page.into();
@@ -1771,7 +1926,7 @@ mod tests {
         ));
         assert!(matches!(
             wire.messages[2],
-            WireSessionMessage::Assistant { .. }
+            WireSessionMessage::BlockAssistant { .. }
         ));
     }
 
@@ -2108,7 +2263,7 @@ mod tests {
             },
             AssistantBlock::ServerToolContent {
                 id: Some("st-1".to_string()),
-                name: "web_search".to_string(),
+                kind: ServerToolKind::WebSearch,
                 content: serde_json::json!({"hits": 3}),
                 meta: None,
             },

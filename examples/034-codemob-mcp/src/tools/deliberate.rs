@@ -764,11 +764,7 @@ mod tests {
                 output_format: StepOutputFormat::Text,
             },
         );
-        FlowSpec {
-            description: Some("sample".into()),
-            steps,
-            root: None,
-        }
+        FlowSpec::new(Some("sample".into()), steps, None)
     }
 
     #[test]

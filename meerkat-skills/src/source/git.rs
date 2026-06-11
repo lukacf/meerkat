@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey, SkillName,
-    SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
+    QuarantinedSkillIdentity, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey,
+    SkillName, SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
     SourceHealthThresholds, SourceUuid, apply_filter,
 };
 
@@ -103,11 +103,21 @@ impl GitSkillSource {
     }
 
     fn refresh_if_needed(&self) -> Result<(), SkillError> {
-        if self
-            .cache
-            .read()
-            .map(|cache| cache.is_fresh(self.config.refresh_interval))
-            .unwrap_or(false)
+        // Authority gate: an Unhealthy source (refresh failing past the
+        // unhealthy threshold) is no longer authoritative. It must NOT serve
+        // interval-fresh-but-stale cache. We still attempt a refresh so the
+        // source can recover, but skip the is_fresh fast-path.
+        let unhealthy = {
+            let streak = self.failure_streak.read().map(|f| *f).unwrap_or_default();
+            streak >= self.config.health_thresholds.unhealthy_failure_streak
+        };
+
+        if !unhealthy
+            && self
+                .cache
+                .read()
+                .map(|cache| cache.is_fresh(self.config.refresh_interval))
+                .unwrap_or(false)
         {
             return Ok(());
         }
@@ -123,8 +133,18 @@ impl GitSkillSource {
                 Ok(())
             }
             Err(err) => {
-                if let Ok(mut failures) = self.failure_streak.write() {
+                let streak = if let Ok(mut failures) = self.failure_streak.write() {
                     *failures = failures.saturating_add(1);
+                    *failures
+                } else {
+                    self.failure_streak.read().map(|f| *f).unwrap_or_default()
+                };
+                if streak >= self.config.health_thresholds.unhealthy_failure_streak {
+                    return Err(stale_source_error(
+                        &redact_url(&self.config.repo_url),
+                        streak,
+                        &err,
+                    ));
                 }
                 if self
                     .cache
@@ -197,22 +217,24 @@ impl GitSkillSource {
             let skill_name = match SkillName::parse(file_name) {
                 Ok(skill_name) => skill_name,
                 Err(err) => {
-                    if let Some(key) = invalid_skill_key(&self.config.source_uuid) {
-                        quarantined.push(quarantine(
-                            key,
-                            skill_dir.display().to_string(),
-                            err.to_string(),
-                        ));
-                    }
+                    quarantined.push(quarantine(
+                        QuarantinedSkillIdentity::new(self.config.source_uuid.clone(), file_name),
+                        skill_dir.display().to_string(),
+                        err.to_string(),
+                    ));
                     continue;
                 }
             };
             let key = SkillKey::new(self.config.source_uuid.clone(), skill_name);
+            let identity = QuarantinedSkillIdentity::new(
+                key.source_uuid.clone(),
+                key.skill_name.as_str().to_string(),
+            );
             let content = match std::fs::read_to_string(skill_dir.join("SKILL.md")) {
                 Ok(content) => content,
                 Err(err) => {
                     quarantined.push(quarantine(
-                        key,
+                        identity,
                         skill_dir.display().to_string(),
                         err.to_string(),
                     ));
@@ -230,7 +252,7 @@ impl GitSkillSource {
                     documents.insert(doc.descriptor.key.clone(), doc);
                 }
                 Err(err) => quarantined.push(quarantine(
-                    key,
+                    identity,
                     skill_dir.display().to_string(),
                     err.to_string(),
                 )),
@@ -373,19 +395,29 @@ fn stable_hash(input: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn invalid_skill_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
-    SkillName::parse("invalid-skill")
-        .ok()
-        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
+/// Typed refusal for an Unhealthy git skill source: refuse to serve stale
+/// (but interval-fresh) cache once refresh has failed past the threshold.
+fn stale_source_error(location: &str, failure_streak: u32, cause: &SkillError) -> SkillError {
+    SkillError::Load(
+        format!(
+            "stale source: git skill source {location} is unhealthy \
+             (failure_streak={failure_streak}); refusing to serve stale cache: {cause}"
+        )
+        .into(),
+    )
 }
 
-fn quarantine(key: SkillKey, location: String, message: String) -> SkillQuarantineDiagnostic {
+fn quarantine(
+    identity: QuarantinedSkillIdentity,
+    location: String,
+    message: String,
+) -> SkillQuarantineDiagnostic {
     let now = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     SkillQuarantineDiagnostic {
-        key,
+        identity,
         location,
         error_code: "invalid_git_skill".to_string(),
         error_class: "parse".to_string(),

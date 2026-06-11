@@ -61,15 +61,17 @@ impl CommandCredentialRunner {
         &self.spec
     }
 
-    /// Resolve a token. Uses cached value if within `refresh_interval_ms`.
-    pub async fn resolve(&self) -> Result<PersistedTokens, CommandCredentialError> {
-        if let Some(interval_ms) = self.spec.refresh_interval_ms
-            && let Some((cached, at)) = self.cache.lock().as_ref()
-            && at.elapsed() < Duration::from_millis(interval_ms)
-        {
-            return Ok(cached.clone());
-        }
+    /// The currently cached token and the [`Instant`] it was produced, if any.
+    /// Exposed so the resolver can hand the cache age to the AuthMachine lease
+    /// as a freshness input instead of deciding reuse internally.
+    pub fn cached(&self) -> Option<(PersistedTokens, Instant)> {
+        self.cache.lock().clone()
+    }
 
+    /// Run the subprocess and record the resulting token in the cache. The
+    /// subprocess execution always lives here; only the freshness verdict can
+    /// be delegated to the AuthMachine lease.
+    pub async fn run_and_cache(&self) -> Result<PersistedTokens, CommandCredentialError> {
         let tokens = self.run_once().await?;
         *self.cache.lock() = Some((tokens.clone(), Instant::now()));
         Ok(tokens)
@@ -143,19 +145,9 @@ mod tests {
     #[tokio::test]
     async fn command_runner_captures_stdout_as_token() {
         let runner = CommandCredentialRunner::new(spec_echo("tok-abc"));
-        let tokens = runner.resolve().await.unwrap();
+        let tokens = runner.run_and_cache().await.unwrap();
         assert_eq!(tokens.primary_secret.as_deref(), Some("tok-abc"));
         assert_eq!(tokens.auth_mode, PersistedAuthMode::Command);
-    }
-
-    #[tokio::test]
-    async fn command_runner_caches_within_interval() {
-        let mut spec = spec_echo("first");
-        spec.refresh_interval_ms = Some(60_000);
-        let runner = CommandCredentialRunner::new(spec);
-        let a = runner.resolve().await.unwrap();
-        let b = runner.resolve().await.unwrap();
-        assert_eq!(a.primary_secret, b.primary_secret);
     }
 
     #[tokio::test]
@@ -169,7 +161,7 @@ mod tests {
             refresh_interval_ms: None,
         };
         let runner = CommandCredentialRunner::new(spec);
-        match runner.resolve().await {
+        match runner.run_and_cache().await {
             Err(CommandCredentialError::NonZeroExit { code, stderr }) => {
                 assert_eq!(code, 2);
                 assert!(stderr.contains("fail"));
@@ -190,7 +182,7 @@ mod tests {
         };
         let runner = CommandCredentialRunner::new(spec);
         assert!(matches!(
-            runner.resolve().await,
+            runner.run_and_cache().await,
             Err(CommandCredentialError::EmptyOutput)
         ));
     }

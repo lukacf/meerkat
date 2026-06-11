@@ -28,8 +28,10 @@ pub struct ConfigSnapshot {
 }
 
 /// Wire envelope returned by config APIs across surfaces.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigEnvelope {
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     pub config: Config,
     pub generation: u64,
     pub realm_id: Option<String>,

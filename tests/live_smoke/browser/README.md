@@ -46,4 +46,19 @@ npm run smoke:headed
   browser client stays browser-safe while still exercising the real live provider.
 - `ANTHROPIC_API_KEY` is required for the current browser matrix.
 - The browser-safe mobpack fixture is built at runtime from files under
-  `fixtures/browser_safe_mobpack/`.
+  `fixtures/browser_safe_mobpack/`. The committed `signature.toml` signs the
+  pack (signer id `browser-smoke`, repo dev key hex `'09' * 32`) so the
+  runtime's default strict trust policy admits it once the runner registers
+  the signer via `mobpack_trust.trusted_signers`. After changing any fixture
+  file, re-sign and refresh the committed signature:
+
+  ```bash
+  rm tests/live_smoke/browser/fixtures/browser_safe_mobpack/signature.toml
+  printf '09%.0s' {1..32} > /tmp/browser-smoke-signing.key
+  ./scripts/repo-cargo run -p rkat --features mob -- mob pack \
+    tests/live_smoke/browser/fixtures/browser_safe_mobpack \
+    --output /tmp/browser-safe-signed.mobpack \
+    --sign /tmp/browser-smoke-signing.key --signer-id browser-smoke
+  tar -xzf /tmp/browser-safe-signed.mobpack -C /tmp signature.toml
+  mv /tmp/signature.toml tests/live_smoke/browser/fixtures/browser_safe_mobpack/
+  ```

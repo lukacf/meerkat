@@ -9,35 +9,15 @@ use indexmap::IndexSet;
 use std::collections::BTreeMap;
 use std::fmt;
 
-macro_rules! define_metadata_string {
-    ($(#[$attr:meta])* $name:ident) => {
-        $(#[$attr])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-        pub struct $name(String);
-
+macro_rules! define_metadata_string_common {
+    ($name:ident) => {
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
             pub fn is_empty(&self) -> bool {
                 self.0.is_empty()
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
             }
         }
 
@@ -63,9 +43,72 @@ macro_rules! define_metadata_string {
     };
 }
 
+macro_rules! define_metadata_string {
+    // Validated kinds: EVERY ingress (`new`, `From<String>`, `From<&str>`)
+    // routes through the fail-closed `new_validated` constructor defined for
+    // the type below. These values are compile-time-authored catalog data, so
+    // a malformed value is an authoring bug surfaced at catalog construction
+    // — never an unvalidated string reaching codegen emission. There is no
+    // `Default`: an empty value is invalid by construction.
+    ($(#[$attr:meta])* validated $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Validating constructor for compile-time-authored catalog
+            /// values; a malformed value is a catalog authoring bug.
+            #[allow(clippy::expect_used)]
+            pub fn new(value: impl Into<String>) -> Self {
+                Self::new_validated(value)
+                    .expect("compile-time-authored Rust emission metadata must be valid")
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self::new(value.to_owned())
+            }
+        }
+
+        define_metadata_string_common!($name);
+    };
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        define_metadata_string_common!($name);
+    };
+}
+
 define_metadata_string!(
     /// Repository-relative Rust module path consumed by composition codegen.
-    RustModulePath
+    validated RustModulePath
 );
 
 impl AsRef<std::path::Path> for RustModulePath {
@@ -86,11 +129,11 @@ define_metadata_string!(
 );
 define_metadata_string!(
     /// Rust item identifier emitted into generated driver/helper modules.
-    RustItemIdent
+    validated RustItemIdent
 );
 define_metadata_string!(
     /// Rust method identifier emitted by HandleBridge helpers.
-    RustMethodName
+    validated RustMethodName
 );
 define_metadata_string!(
     /// Complete Rust `use ...;` import line inserted into generated code.
@@ -104,6 +147,120 @@ define_metadata_string!(
     /// Rust module qualifier for kernel-codegen payload structs.
     RustPayloadModulePath
 );
+
+/// Fail-closed construction error for Rust-metadata newtypes that are emitted
+/// verbatim into generated source (identifiers, module paths). These values are
+/// authored by composition catalog code today; the validating constructors below
+/// reject malformed values at construction rather than letting an invalid
+/// identifier or a traversal-bearing path reach `protocol_codegen` emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustMetadataValidationError {
+    /// The value is empty.
+    Empty { kind: &'static str },
+    /// The value is not a valid Rust identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+    NotIdentifier { kind: &'static str, value: String },
+    /// A module path component is absolute, contains a `..` traversal, a
+    /// backslash, or whitespace.
+    UnsafeModulePath { value: String, reason: &'static str },
+}
+
+impl fmt::Display for RustMetadataValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { kind } => write!(f, "{kind} must not be empty"),
+            Self::NotIdentifier { kind, value } => {
+                write!(f, "{kind} `{value}` is not a valid Rust identifier")
+            }
+            Self::UnsafeModulePath { value, reason } => {
+                write!(f, "module path `{value}` is not repo-relative: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RustMetadataValidationError {}
+
+/// Returns true iff `value` is a valid Rust identifier: a non-empty string whose
+/// first character is an ASCII letter or `_` and whose remaining characters are
+/// ASCII alphanumeric or `_`. (Raw identifiers / unicode idents are out of scope
+/// for generated helper names.)
+fn is_rust_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+impl RustItemIdent {
+    /// Fail-closed constructor: the item identifier must be a valid Rust
+    /// identifier (it is emitted directly into generated item names).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustItemIdent",
+            });
+        }
+        if !is_rust_identifier(&value) {
+            return Err(RustMetadataValidationError::NotIdentifier {
+                kind: "RustItemIdent",
+                value,
+            });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl RustMethodName {
+    /// Fail-closed constructor: the method name must be a valid Rust identifier
+    /// (it is emitted directly into generated `fn` names / call sites).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustMethodName",
+            });
+        }
+        if !is_rust_identifier(&value) {
+            return Err(RustMetadataValidationError::NotIdentifier {
+                kind: "RustMethodName",
+                value,
+            });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl RustModulePath {
+    /// Fail-closed constructor: the module path must be a non-empty,
+    /// repo-relative path with no absolute prefix, no `..` traversal, no
+    /// backslash, and no whitespace (it is written into a generated file path).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustModulePath",
+            });
+        }
+        let reason = if value.starts_with('/') {
+            Some("absolute path")
+        } else if value.contains('\\') {
+            Some("backslash separator")
+        } else if value.split('/').any(|component| component == "..") {
+            Some("`..` traversal component")
+        } else if value.chars().any(char::is_whitespace) {
+            Some("whitespace")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(RustMetadataValidationError::UnsafeModulePath { value, reason });
+        }
+        Ok(Self(value))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
@@ -177,6 +334,12 @@ pub struct EffectHandoffProtocol {
     /// marker generator derives schema/provenance fields from this protocol
     /// instead of carrying a separate handwritten contract.
     pub durable_marker: Option<DurableMarkerProtocol>,
+    /// Typed teardown role of this protocol. A protocol declaring
+    /// [`TeardownObligationClass::DetachBeforeDestroy`] is the detach-ack
+    /// obligation a paired [`EffectTeardownClass::DestroyRequest`] route
+    /// names via `detach_obligation`. Consumed by the `xtask seam-inventory`
+    /// destroy-obligation audit instead of protocol-name substring matching.
+    pub teardown: Option<TeardownObligationClass>,
     /// Explicit Rust code generation metadata for the checked-in helper module.
     pub rust: ProtocolRustBinding,
 }
@@ -1326,9 +1489,34 @@ impl CompositionSchema {
                         }
                     }
                     RouteBindingSource::OwnerProvided => {
-                        // Owner-provided bindings skip type checking — the
-                        // realizing owner actor supplies the value at runtime.
-                        // The handoff protocol enforces the contract instead.
+                        // Owner-provided bindings carry no producer-side value,
+                        // so there is nothing to type-check against the target
+                        // field. The contract is instead enforced by the
+                        // realizing owner under a declared governance bundle:
+                        // either an async effect handoff protocol, or a
+                        // synchronous transaction plan whose store primitive
+                        // realizes the route atomically (the legitimate home for
+                        // an owner-supplied optimistic-concurrency token). Fail
+                        // closed: require one of those rather than silently
+                        // trusting an unconstrained owner binding.
+                        let covered = self.handoff_protocols.iter().any(|protocol| {
+                            protocol.producer_instance == route.from_machine
+                                && protocol.effect_variant == route.effect_variant
+                        }) || self.transaction_plans.iter().any(|plan| {
+                            plan.route_names
+                                .iter()
+                                .any(|covered_route| covered_route.as_str() == route.name.as_str())
+                        });
+                        if !covered {
+                            return Err(CompositionSchemaError::OwnerProvidedTypeMismatch {
+                                route: route.name.as_str().to_owned(),
+                                from_machine: route.from_machine.as_str().to_owned(),
+                                effect_variant: route.effect_variant.as_str().to_owned(),
+                                to_machine: route.to.machine.as_str().to_owned(),
+                                to_field: binding.to_field.as_str().to_owned(),
+                                to_ty: to_field.ty.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -1907,6 +2095,45 @@ pub struct Route {
     pub to: RouteTarget,
     pub bindings: Vec<RouteFieldBinding>,
     pub delivery: RouteDelivery,
+    /// Typed teardown classification for this route. `None` means the route
+    /// carries no teardown semantics. Declared in the catalog, consumed by
+    /// the `xtask seam-inventory` destroy-obligation audit — name folklore
+    /// (`contains("Destroy")`) is not a recognized classification channel.
+    pub teardown: Option<EffectTeardownClass>,
+}
+
+/// Typed teardown classification of a composition route.
+///
+/// The C-F3 destroy-obligation audit used to discover destroy routes by
+/// variant-name substring matching. The classification is now a declared,
+/// typed fact on the route itself; the audit derives the destroy inventory
+/// purely from these declarations and enforces cross-route coherence (every
+/// route carrying the same producer effect must agree on its teardown class),
+/// so an undeclared sibling of a declared destroy route fails the gate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EffectTeardownClass {
+    /// Request-side teardown: the producer asks the consumer to destroy
+    /// state it still references. Such a route must be paired with the named
+    /// detach-obligation protocol (an [`EffectHandoffProtocol`] declaring
+    /// [`TeardownObligationClass::DetachBeforeDestroy`]) whose feedback acks
+    /// the detach before the destroy request is routed.
+    DestroyRequest {
+        /// Protocol that closes the paired detach obligation.
+        detach_obligation: ProtocolId,
+    },
+    /// Observation of an already-completed teardown (a reply signal such as
+    /// `RuntimeDestroyed`). The destroy is done by the time it fires, so no
+    /// paired detach obligation is required.
+    TeardownObservation,
+}
+
+/// Typed teardown role of an [`EffectHandoffProtocol`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TeardownObligationClass {
+    /// The protocol's feedback inputs acknowledge detaching consumer-held
+    /// references before a paired [`EffectTeardownClass::DestroyRequest`]
+    /// route may proceed.
+    DetachBeforeDestroy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2301,6 +2528,19 @@ pub enum CompositionSchemaError {
         to_field: String,
         to_ty: TypeRef,
     },
+    /// An `OwnerProvided` route binding is not covered by a declared effect
+    /// handoff protocol. Owner-provided values carry no producer-side type to
+    /// check, so the contract must be anchored by a protocol whose
+    /// `producer_instance`/`effect_variant` match the route. Fail closed
+    /// rather than silently trusting an unconstrained owner binding.
+    OwnerProvidedTypeMismatch {
+        route: String,
+        from_machine: String,
+        effect_variant: String,
+        to_machine: String,
+        to_field: String,
+        to_ty: TypeRef,
+    },
     ConflictingNamedTypeBinding {
         name: String,
         first_machine: String,
@@ -2619,6 +2859,17 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
+            ),
+            Self::OwnerProvidedTypeMismatch {
+                route,
+                from_machine,
+                effect_variant,
+                to_machine,
+                to_field,
+                to_ty,
+            } => write!(
+                f,
+                "route `{route}` owner-provided binding {to_machine}.{to_field}:{to_ty:?} is not covered by any declared effect handoff protocol for {from_machine}.{effect_variant}; owner-provided values carry no producer-side type and must be anchored by a protocol contract"
             ),
             Self::ConflictingNamedTypeBinding {
                 name,
@@ -3066,4 +3317,102 @@ fn validate_witness_transition_ref(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod rust_metadata_validation_tests {
+    use super::{RustItemIdent, RustMethodName, RustModulePath};
+
+    #[test]
+    fn rust_item_ident_rejects_non_identifier() {
+        assert!(RustItemIdent::new_validated("valid_ident0").is_ok());
+        assert!(RustItemIdent::new_validated("_leading").is_ok());
+        assert!(
+            RustItemIdent::new_validated("invalid name").is_err(),
+            "whitespace must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("0starts_digit").is_err(),
+            "leading digit must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("has-dash").is_err(),
+            "dash must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("").is_err(),
+            "empty must be rejected"
+        );
+    }
+
+    #[test]
+    fn rust_method_name_rejects_non_identifier() {
+        assert!(RustMethodName::new_validated("handle_request").is_ok());
+        assert!(RustMethodName::new_validated("foo bar").is_err());
+        assert!(RustMethodName::new_validated("foo::bar").is_err());
+    }
+
+    #[test]
+    fn rust_module_path_rejects_traversal_and_absolute() {
+        assert!(RustModulePath::new_validated("meerkat/foo/bar.rs").is_ok());
+        assert!(
+            RustModulePath::new_validated("../escape").is_err(),
+            "`..` traversal must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("a/../b").is_err(),
+            "embedded `..` component must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("/absolute/path").is_err(),
+            "absolute path must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("has space/x.rs").is_err(),
+            "whitespace must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("win\\style").is_err(),
+            "backslash must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("").is_err(),
+            "empty must be rejected"
+        );
+    }
+
+    // Ingress gate: the convenience `From` constructors used by the catalog
+    // route through `new_validated` and fail closed on malformed values, so
+    // the validating ctors are live at every construction site rather than
+    // dead test-only code.
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_module_path_from_rejects_traversal_at_ingress() {
+        let _ = RustModulePath::from("../escape.rs");
+    }
+
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_item_ident_from_rejects_non_identifier_at_ingress() {
+        let _ = RustItemIdent::from("has-dash");
+    }
+
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_method_name_from_rejects_non_identifier_at_ingress() {
+        let _ = RustMethodName::from("foo::bar");
+    }
+
+    #[test]
+    fn metadata_from_impls_accept_valid_values_at_ingress() {
+        assert_eq!(
+            RustModulePath::from("meerkat-runtime/src/generated/x.rs").as_str(),
+            "meerkat-runtime/src/generated/x.rs"
+        );
+        assert_eq!(RustItemIdent::from("ValidIdent").as_str(), "ValidIdent");
+        assert_eq!(
+            RustMethodName::from("handle_request").as_str(),
+            "handle_request"
+        );
+    }
 }

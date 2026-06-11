@@ -4,8 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use meerkat_comms::{
     AdmissionOutcome, CommsConfig, CommsRuntime, DropReason, Envelope, Inbox, InprocRegistry,
-    Keypair, MessageKind, PeerMeta, PubKey, Router, SendError, Signature, TrustedPeer,
-    TrustedPeers,
+    Keypair, MessageKind, PeerMeta, PubKey, Router, SendError, Signature,
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::CommsTrustMutation;
@@ -23,15 +22,6 @@ fn message(body: &str) -> MessageKind {
 
 fn zero_pubkey() -> PubKey {
     PubKey::new([0u8; 32])
-}
-
-fn raw_zero_trusted_peer(name: &str) -> TrustedPeer {
-    TrustedPeer {
-        name: name.to_string(),
-        pubkey: zero_pubkey(),
-        addr: format!("inproc://{name}"),
-        meta: PeerMeta::default(),
-    }
 }
 
 fn trusted_descriptor_for(
@@ -188,18 +178,17 @@ fn register_zero_pubkey_inproc_target(registry: &InprocRegistry, name: &str) -> 
 }
 
 #[tokio::test]
-async fn router_new_raw_zero_pubkey_trust_is_not_sendable() {
+async fn zero_pubkey_identity_is_never_sendable() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_name = format!("raw-zero-router-new-{suffix}");
-    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let target_name = format!("raw-zero-router-{suffix}");
+    let _target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
@@ -210,112 +199,7 @@ async fn router_new_raw_zero_pubkey_trust_is_not_sendable() {
 
     assert!(
         matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "raw Router::new zero-pubkey trust must not be sendable: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive from raw Router::new trust"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_with_shared_peers_raw_zero_pubkey_trust_is_not_sendable() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_name = format!("raw-zero-router-shared-{suffix}");
-    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    );
-
-    let dest = zero_pubkey().to_peer_id();
-    let result = router.send(dest, message("raw zero should not send")).await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "raw Router::with_shared_peers zero-pubkey trust must not be sendable: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive from raw shared trust"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_send_filters_late_shared_raw_zero_pubkey_trust_mutation() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_name = format!("raw-zero-router-late-shared-{suffix}");
-    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    );
-
-    let dest = zero_pubkey().to_peer_id();
-    let result = router
-        .send(dest, message("late raw zero should not send"))
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "late shared zero-pubkey trust mutation must not become sendable: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive from late shared trust mutation"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn shared_trust_upsert_raw_zero_pubkey_trust_is_not_sendable() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_name = format!("raw-zero-router-add-{suffix}");
-    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    );
-
-    let dest = zero_pubkey().to_peer_id();
-    let result = router.send(dest, message("raw zero should not send")).await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "raw trusted-peer upsert zero-pubkey trust must not be sendable: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive from raw trusted-peer upsert"
+        "zero-pubkey identity must never be sendable: {result:?}"
     );
 
     registry.clear();
@@ -329,11 +213,10 @@ async fn router_auth_disabled_inproc_fallback_rejects_zero_pubkey_registry_ident
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let target_name = format!("auth-disabled-zero-fallback-{suffix}");
-    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let _target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers::new(),
         CommsConfig::default(),
         router_inbox_sender,
         false,
@@ -350,10 +233,6 @@ async fn router_auth_disabled_inproc_fallback_rejects_zero_pubkey_registry_ident
     assert!(
         matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
         "auth-disabled inproc fallback must not synthesize a zero-pubkey sendable peer: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive through auth-disabled fallback"
     );
 
     registry.clear();
@@ -446,238 +325,6 @@ async fn ingress_rejects_late_shared_zero_pubkey_trust_mutation() {
 }
 
 #[tokio::test]
-async fn router_rejects_duplicate_trusted_canonical_peer_identity() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let target_name = format!("duplicate-canonical-target-{suffix}");
-    let stale_name = format!("duplicate-canonical-stale-{suffix}");
-    let (mut target_inbox, target_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "",
-        &target_name,
-        target_pubkey,
-        target_sender,
-        PeerMeta::default(),
-    );
-
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![
-            TrustedPeer {
-                name: stale_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{stale_name}"),
-                meta: PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: target_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{target_name}"),
-                meta: PeerMeta::default(),
-            },
-        ]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    );
-
-    let dest = target_pubkey.to_peer_id();
-    let result = router
-        .send(dest, message("duplicate canonical trust must not route"))
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "duplicate trusted canonical identity must fail closed: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "duplicate trusted canonical identity must not deliver by whichever entry wins"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_auth_disabled_fallback_rejects_duplicate_trusted_canonical_peer_identity() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let target_name = format!("auth-disabled-duplicate-target-{suffix}");
-    let stale_name = format!("auth-disabled-duplicate-stale-{suffix}");
-    let (mut target_inbox, target_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "",
-        &target_name,
-        target_pubkey,
-        target_sender,
-        PeerMeta::default(),
-    );
-
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![
-            TrustedPeer {
-                name: stale_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{stale_name}"),
-                meta: PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: target_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{target_name}"),
-                meta: PeerMeta::default(),
-            },
-        ]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        false,
-    );
-
-    let dest = target_pubkey.to_peer_id();
-    let result = router
-        .send(
-            dest,
-            message("auth-disabled duplicate canonical trust must not fallback"),
-        )
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "auth-disabled duplicate trusted canonical identity must fail closed before fallback: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "auth-disabled fallback must not deliver to an ambiguous trusted canonical identity"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_auth_disabled_fallback_rejects_late_shared_duplicate_trust() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let target_name = format!("late-auth-disabled-duplicate-target-{suffix}");
-    let stale_name = format!("late-auth-disabled-duplicate-stale-{suffix}");
-    let (mut target_inbox, target_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "",
-        &target_name,
-        target_pubkey,
-        target_sender,
-        PeerMeta::default(),
-    );
-
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::from_peers(vec![
-            TrustedPeer {
-                name: stale_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{stale_name}"),
-                meta: PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: target_name.clone(),
-                pubkey: target_pubkey,
-                addr: format!("inproc://{target_name}"),
-                meta: PeerMeta::default(),
-            },
-        ]),
-        CommsConfig::default(),
-        router_inbox_sender,
-        false,
-    );
-
-    let dest = target_pubkey.to_peer_id();
-    let result = router
-        .send(
-            dest,
-            message("late shared duplicate canonical trust must not fallback"),
-        )
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "late shared duplicate trusted canonical identity must fail closed before fallback: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "auth-disabled fallback must not deliver after late shared duplicate trust mutation"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_without_trust_after_duplicate_removal_does_not_route() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let target_name = format!("remove-duplicate-target-{suffix}");
-    let (mut target_inbox, target_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "",
-        &target_name,
-        target_pubkey,
-        target_sender,
-        PeerMeta::default(),
-    );
-
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        Keypair::generate(),
-        TrustedPeers::new(),
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    );
-
-    let dest = target_pubkey.to_peer_id();
-    let result = router
-        .send(dest, message("removed duplicate trust must not route"))
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "removing duplicate trust must not leave one duplicate sendable: {result:?}"
-    );
-    assert!(
-        target_inbox.try_drain().is_empty(),
-        "removed duplicate canonical identity must not deliver through the remaining entry"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
 async fn runtime_peer_directory_skips_duplicate_trusted_canonical_peer_identity() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let runtime = CommsRuntime::inproc_only(&format!("duplicate-directory-runtime-{suffix}"))
@@ -710,7 +357,7 @@ async fn runtime_peer_directory_skips_duplicate_trusted_canonical_peer_identity(
         "unexpected duplicate descriptor error: {duplicate_error}"
     );
     assert_eq!(
-        runtime.trusted_peers_shared().peers().len(),
+        runtime.trusted_peers_shared().len(),
         1,
         "generated trust projection must not add duplicates after machine rejection"
     );
@@ -777,7 +424,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
         "unexpected duplicate descriptor error: {duplicate_error}"
     );
     assert_eq!(
-        runtime.trusted_peers_shared().peers().len(),
+        runtime.trusted_peers_shared().len(),
         1,
         "generated trust projection must not add duplicates after machine rejection"
     );
@@ -864,7 +511,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_live_ca
 }
 
 #[tokio::test]
-async fn router_new_raw_trust_does_not_create_canonical_inproc_route() {
+async fn untrusted_sender_has_no_canonical_inproc_route() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
@@ -875,7 +522,7 @@ async fn router_new_raw_trust_does_not_create_canonical_inproc_route() {
     let shadow_keypair = Keypair::generate();
     let shadow_pubkey = shadow_keypair.public_key();
 
-    let (mut shadow_inbox, shadow_sender) = Inbox::new();
+    let (_shadow_inbox, shadow_sender) = Inbox::new();
 
     registry.register_with_meta_in_namespace(
         "",
@@ -893,16 +540,9 @@ async fn router_new_raw_trust_does_not_create_canonical_inproc_route() {
         trusted_descriptor_for("sender", sender_pubkey),
     )
     .await;
-    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-        name: "shared-display-name".to_string(),
-        pubkey: target_pubkey,
-        addr: "inproc://canonical-target".to_string(),
-        meta: PeerMeta::default(),
-    }]);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         sender_keypair,
-        trusted_peers,
         CommsConfig::default(),
         router_inbox_sender,
         true,
@@ -914,148 +554,13 @@ async fn router_new_raw_trust_does_not_create_canonical_inproc_route() {
         .await;
     assert!(
         matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == target_peer_id),
-        "raw Router::new trust must not become send authority: {result:?}"
+        "only generated trust mutations create send authority: {result:?}"
     );
 
     let target_items = CoreCommsRuntime::drain_inbox_interactions(&target_runtime).await;
-    let shadow_items = shadow_inbox.try_drain();
-
-    assert_eq!(
-        shadow_items.len(),
-        0,
-        "display-name shadow must not receive"
-    );
     assert!(
         target_items.is_empty(),
-        "raw Router::new trust must not deliver to canonical target"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_inproc_same_namespace_rejects_duplicate_live_canonical_peer_identity() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let (mut local_inbox, local_sender) = Inbox::new();
-    let (mut remote_inbox, remote_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "realm-local",
-        "local-target",
-        target_pubkey,
-        local_sender,
-        PeerMeta::default(),
-    );
-    registry.register_with_meta_in_namespace(
-        "realm-remote",
-        "remote-target",
-        target_pubkey,
-        remote_sender,
-        PeerMeta::default(),
-    );
-
-    let sender_keypair = Keypair::generate();
-    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-        name: "local-target".to_string(),
-        pubkey: target_pubkey,
-        addr: "inproc://local-target".to_string(),
-        meta: PeerMeta::default(),
-    }]);
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        sender_keypair,
-        trusted_peers,
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    )
-    .with_inproc_namespace(Some("realm-local".to_string()));
-
-    let dest = meerkat_comms::router::peer_id_from_pubkey(&target_pubkey);
-    let result = router
-        .send(dest, message("same-namespace duplicate canonical route"))
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "same-namespace inproc delivery must fail closed when the canonical identity is live in another namespace: {result:?}"
-    );
-    assert!(
-        local_inbox.try_drain().is_empty(),
-        "must not deliver to the namespace-local registration before checking canonical ambiguity"
-    );
-    assert!(
-        remote_inbox.try_drain().is_empty(),
-        "must not choose the duplicate registration in another namespace"
-    );
-
-    registry.clear();
-}
-
-#[tokio::test]
-async fn router_inproc_cross_namespace_rejects_ambiguous_peer_identity() {
-    let _lock = INPROC_REGISTRY_LOCK.lock().await;
-    let registry = InprocRegistry::global();
-    registry.clear();
-
-    let target_keypair = Keypair::generate();
-    let target_pubkey = target_keypair.public_key();
-    let (mut alpha_inbox, alpha_sender) = Inbox::new();
-    let (mut beta_inbox, beta_sender) = Inbox::new();
-
-    registry.register_with_meta_in_namespace(
-        "realm-alpha",
-        "alpha-target",
-        target_pubkey,
-        alpha_sender,
-        PeerMeta::default(),
-    );
-    registry.register_with_meta_in_namespace(
-        "realm-beta",
-        "beta-target",
-        target_pubkey,
-        beta_sender,
-        PeerMeta::default(),
-    );
-
-    let sender_keypair = Keypair::generate();
-    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-        name: "alpha-target".to_string(),
-        pubkey: target_pubkey,
-        addr: "inproc://alpha-target".to_string(),
-        meta: PeerMeta::default(),
-    }]);
-    let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::new(
-        sender_keypair,
-        trusted_peers,
-        CommsConfig::default(),
-        router_inbox_sender,
-        true,
-    )
-    .with_inproc_namespace(Some("realm-sender".to_string()));
-
-    let dest = meerkat_comms::router::peer_id_from_pubkey(&target_pubkey);
-    let result = router
-        .send(dest, message("ambiguous cross-namespace route"))
-        .await;
-
-    assert!(
-        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "ambiguous cross-namespace pubkey registrations must fail closed: {result:?}"
-    );
-    assert!(
-        alpha_inbox.try_drain().is_empty(),
-        "must not fall back to display-name scoped delivery"
-    );
-    assert!(
-        beta_inbox.try_drain().is_empty(),
-        "must not pick an arbitrary namespace for a reused identity"
+        "an untrusted sender must not deliver to the canonical target"
     );
 
     registry.clear();

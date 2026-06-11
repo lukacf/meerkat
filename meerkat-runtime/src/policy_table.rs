@@ -50,41 +50,6 @@ pub(crate) struct GeneratedAdmissionProjection {
     pub runtime_semantics: RuntimeInputSemantics,
 }
 
-/// Idle-steer execution-handling-mode normalization (origin/main behavior).
-///
-/// A peer-initiated Steer/Immediate input that arrives while the runtime is IDLE
-/// has no active turn to steer into, so its fresh turn must run on the
-/// queue-compatible session-service path. Inputs that carry explicit runtime
-/// hints — external events, operator prompts, flow steps — keep their requested
-/// handling mode (the Steer there is an authored runtime hint, not an admission
-/// lane to normalize). Derived from the machine-supplied input kind, runtime-idle
-/// fact, and routing disposition; shared by every admission-projection site so
-/// the normalization is single-sourced.
-pub(crate) fn idle_steer_execution_handling_mode(
-    input_kind: InputKind,
-    runtime_idle: bool,
-    routing_disposition: crate::policy::RoutingDisposition,
-) -> Option<meerkat_core::types::HandlingMode> {
-    let peer_initiated = matches!(
-        input_kind,
-        InputKind::PeerMessage
-            | InputKind::PeerRequest
-            | InputKind::PeerResponseProgress
-            | InputKind::PeerResponseTerminal
-    );
-    if peer_initiated
-        && runtime_idle
-        && matches!(
-            routing_disposition,
-            crate::policy::RoutingDisposition::Steer | crate::policy::RoutingDisposition::Immediate
-        )
-    {
-        Some(meerkat_core::types::HandlingMode::Queue)
-    } else {
-        None
-    }
-}
-
 pub(crate) fn generated_admission_projection_for_input(
     input: &Input,
     runtime_idle: bool,
@@ -158,6 +123,8 @@ fn generated_admission_projection(
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 record_transcript,
+                execution_handling_mode,
+                live_interrupt_required,
                 ..
             } if effect_input_id == input_id => {
                 let apply_mode: crate::policy::ApplyMode = policy_apply_mode.into();
@@ -165,11 +132,13 @@ fn generated_admission_projection(
                     runtime_boundary.into();
                 let routing_disposition: crate::policy::RoutingDisposition =
                     policy_routing_disposition.into();
-                let execution_handling_mode = idle_steer_execution_handling_mode(
-                    input_kind,
-                    runtime_idle,
-                    routing_disposition,
-                );
+                // #24: read the machine-emitted idle-steer normalization directly
+                // (`Option<InputLane>` -> `HandlingMode`); the shell normalizer
+                // `idle_steer_execution_handling_mode` is deleted.
+                let execution_handling_mode = execution_handling_mode.map(|lane| match lane {
+                    mm_dsl::InputLane::Queue => meerkat_core::types::HandlingMode::Queue,
+                    mm_dsl::InputLane::Steer => meerkat_core::types::HandlingMode::Steer,
+                });
                 Some(GeneratedAdmissionProjection {
                     policy: PolicyDecision {
                         apply_mode,
@@ -188,6 +157,7 @@ fn generated_admission_projection(
                         execution_handling_mode,
                         peer_response_terminal_apply_intent:
                             runtime_peer_response_terminal_apply_intent.map(Into::into),
+                        live_interrupt_required,
                     },
                 })
             }
@@ -237,63 +207,5 @@ mod tests {
         assert_eq!(running.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(running.wake_mode, WakeMode::InterruptYielding);
         assert_eq!(generated_default_policy_version(), idle.policy_version);
-    }
-
-    #[test]
-    fn idle_steer_handling_mode_only_normalizes_idle_peer_steers() {
-        use crate::policy::RoutingDisposition;
-        use meerkat_core::types::HandlingMode;
-
-        // A peer-initiated Steer/Immediate while the runtime is IDLE normalizes
-        // to the queue-compatible session path (Queue).
-        assert_eq!(
-            idle_steer_execution_handling_mode(
-                InputKind::PeerRequest,
-                true,
-                RoutingDisposition::Steer
-            ),
-            Some(HandlingMode::Queue)
-        );
-        assert_eq!(
-            idle_steer_execution_handling_mode(
-                InputKind::PeerMessage,
-                true,
-                RoutingDisposition::Immediate
-            ),
-            Some(HandlingMode::Queue)
-        );
-
-        // CONC-2: the production `runtime_idle == false` (phase == Running)
-        // branch must PRESERVE the authored hint (None = no normalization). The
-        // post-merge admission reconcile introduced this branch but left it
-        // without a direct test; a regression here would silently re-queue
-        // peer steers that should interrupt a running turn.
-        assert_eq!(
-            idle_steer_execution_handling_mode(
-                InputKind::PeerRequest,
-                false,
-                RoutingDisposition::Steer
-            ),
-            None,
-            "a peer Steer while Running must preserve its hint, not queue"
-        );
-
-        // Non-peer inputs (prompts, external events, flow steps) keep their
-        // authored handling hint even when idle + Steer.
-        assert_eq!(
-            idle_steer_execution_handling_mode(InputKind::Prompt, true, RoutingDisposition::Steer),
-            None,
-            "non-peer inputs keep their authored handling hint"
-        );
-
-        // A peer input that is neither Steer nor Immediate is untouched.
-        assert_eq!(
-            idle_steer_execution_handling_mode(
-                InputKind::PeerRequest,
-                true,
-                RoutingDisposition::Drop
-            ),
-            None
-        );
     }
 }

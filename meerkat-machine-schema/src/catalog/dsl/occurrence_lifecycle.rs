@@ -12,8 +12,8 @@ machine! {
             schedule_id: ScheduleId,
             schedule_revision: u64,
             occurrence_ordinal: u64,
-            trigger_key: String,
-            target_binding_key: String,
+            trigger_key: TriggerKey,
+            target_binding_key: TargetBindingId,
             misfire_policy: Enum<MisfirePolicy>,
             misfire_policy_key: String,
             overlap_policy: Enum<OverlapPolicy>,
@@ -22,11 +22,11 @@ machine! {
             missing_target_policy_key: String,
             due_at_utc_ms: u64,
             misfire_deadline_utc_ms: u64,
-            claimed_by: Option<String>,
+            claimed_by: Option<ClaimOwner>,
             lease_expires_at_utc_ms: Option<u64>,
             claimed_at_utc_ms: Option<u64>,
             claim_token: Option<ClaimToken>,
-            delivery_correlation_id: Option<String>,
+            delivery_correlation_id: Option<CorrelationId>,
             target_materialized_session_id: Option<SessionId>,
             receipt_recorded_at_utc_ms: Option<u64>,
             last_receipt_recorded_at_utc_ms: Option<u64>,
@@ -34,9 +34,9 @@ machine! {
             last_receipt_stage: Option<Enum<DeliveryReceiptStage>>,
             last_receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
             last_receipt_detail: Option<String>,
-            last_receipt_correlation_id: Option<String>,
+            last_receipt_correlation_id: Option<CorrelationId>,
             last_receipt_materialized_session_id: Option<SessionId>,
-            runtime_outcome_key: Option<String>,
+            runtime_outcome_key: Option<RuntimeOutcomeKey>,
             receipt_stage: Option<Enum<DeliveryReceiptStage>>,
             receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
             receipt_detail: Option<String>,
@@ -109,8 +109,8 @@ machine! {
                 schedule_id: ScheduleId,
                 schedule_revision: u64,
                 occurrence_ordinal: u64,
-                trigger_key: String,
-                target_binding_key: String,
+                trigger_key: TriggerKey,
+                target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
                 misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
@@ -121,12 +121,12 @@ machine! {
                 due_at_utc_ms: u64,
                 misfire_deadline_utc_ms: u64,
             },
-            SyncTargetSnapshot { target_binding_key: String, target_materialized_session_id: Option<SessionId> },
+            SyncTargetSnapshot { target_binding_key: TargetBindingId, target_materialized_session_id: Option<SessionId> },
             RecordReceipt {
-                correlation_id: Option<String>,
+                correlation_id: Option<CorrelationId>,
                 detail: Option<String>,
                 materialized_session_id: Option<SessionId>,
-                runtime_outcome_key: Option<String>
+                runtime_outcome_key: Option<RuntimeOutcomeKey>
             },
             ClassifyDue { now_utc_ms: u64 },
             // Terminality classification. This machine owns the lifecycle_phase
@@ -166,8 +166,8 @@ machine! {
                 schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
                 current_schedule_revision: u64
             },
-            Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
-            DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
+            Claim { owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
+            DispatchStarted { correlation_id: Option<CorrelationId>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
             Complete { at_utc_ms: u64 },
             ResolveRuntimeCompletion {
@@ -271,24 +271,24 @@ machine! {
             self.misfire_deadline_utc_ms >= self.due_at_utc_ms
         }
 
-        disposition Claimed => external,
-        disposition DispatchStarted => external,
-        disposition AwaitingCompletion => external,
-        disposition Completed => external,
-        disposition Skipped => external,
-        disposition Misfired => external,
-        disposition Superseded => external,
-        disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine],
-        disposition DueNoAction => local,
-        disposition DueClaimEligible => local,
-        disposition DueMisfireRequired => local,
-        disposition DueLeaseExpired => local,
-        disposition OccurrenceTerminalityClassified => local,
-        disposition ClaimedDispatchDispositionClassified => local,
-        disposition CompletionSupersessionClassified => local,
-        disposition DeliveryFailed => external,
-        disposition LeaseExpired => external,
-        disposition TransitionFailureClassified => local,
+        disposition Claimed => external seam SurfaceResultAlignment,
+        disposition DispatchStarted => external seam SurfaceResultAlignment,
+        disposition AwaitingCompletion => external seam SurfaceResultAlignment,
+        disposition Completed => external seam SurfaceResultAlignment,
+        disposition Skipped => external seam SurfaceResultAlignment,
+        disposition Misfired => external seam SurfaceResultAlignment,
+        disposition Superseded => external seam SurfaceResultAlignment,
+        disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine] seam NoOwnerRealization,
+        disposition DueNoAction => local seam NoOwnerRealization,
+        disposition DueClaimEligible => local seam NoOwnerRealization,
+        disposition DueMisfireRequired => local seam NoOwnerRealization,
+        disposition DueLeaseExpired => local seam NoOwnerRealization,
+        disposition OccurrenceTerminalityClassified => local seam NoOwnerRealization,
+        disposition ClaimedDispatchDispositionClassified => local seam NoOwnerRealization,
+        disposition CompletionSupersessionClassified => local seam NoOwnerRealization,
+        disposition DeliveryFailed => external seam SurfaceResultAlignment,
+        disposition LeaseExpired => external seam SurfaceResultAlignment,
+        disposition TransitionFailureClassified => local seam SurfaceResultAlignment,
 
         // --- Transition failure classification ---
         //
@@ -1728,6 +1728,43 @@ machine! {
 // Stub types for compilation — in the real port these would come from meerkat-schedule
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OccurrenceId(pub String);
+
+/// Typed trigger identity an occurrence was planned from. String-backed
+/// newtype so the machine cannot confuse it with policy keys or binding ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerKey(pub String);
+impl<T: Into<String>> From<T> for TriggerKey {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed target-binding identity that determines delivery target resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetBindingId(pub String);
+impl<T: Into<String>> From<T> for TargetBindingId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed claim-owner identity that determines lease ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimOwner(pub String);
+impl<T: Into<String>> From<T> for ClaimOwner {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed delivery correlation identity that ties receipts to dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationId(pub String);
+impl<T: Into<String>> From<T> for CorrelationId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
 impl<T: Into<String>> From<T> for OccurrenceId {
     fn from(s: T) -> Self {
         Self(s.into())
@@ -1753,6 +1790,17 @@ impl<T: Into<String>> From<T> for ClaimToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionId(pub String);
 impl<T: Into<String>> From<T> for SessionId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed runtime-outcome receipt key (UUID-backed at the shell seam). Ties an
+/// occurrence's recorded receipt to the runtime completion outcome it
+/// projects; never a raw `String` the machine could confuse with detail text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOutcomeKey(pub String);
+impl<T: Into<String>> From<T> for RuntimeOutcomeKey {
     fn from(s: T) -> Self {
         Self(s.into())
     }

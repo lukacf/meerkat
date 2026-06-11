@@ -297,11 +297,14 @@ mod image_generation_substrate {
         let mut dispatcher = CompositeDispatcher::new(
             Arc::new(MemoryTaskStore::new()),
             &BuiltinToolConfig::default(),
+            // dogma #299: the composite fails closed without a concrete,
+            // caller-owned project root. Use the crate manifest dir (a stable
+            // real directory) rather than relying on the removed ambient-CWD
+            // fallback; this live image-gen path does not touch apply_patch.
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             None,
             None,
             None,
-            None,
-            true,
         )
         .expect("builtin dispatcher should construct");
         dispatcher.register_image_generation_tool(
@@ -442,11 +445,9 @@ mod image_generation_substrate {
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "make an image".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -533,12 +534,10 @@ mod scenario_22_session_service_lifecycle {
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
                 prompt: "I am EphBot. Remember this name.".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
 
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,

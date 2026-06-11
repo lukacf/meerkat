@@ -139,7 +139,7 @@ When both a `Compactor` and a `MemoryStore` are wired into the agent, discarded 
 
 For each discarded message:
 - The message's indexable text content is extracted via `message.as_indexable_text()`.
-- If non-empty, it is indexed with `MemoryMetadata` containing the session ID, current turn number, and a timestamp.
+- If non-empty, it is indexed with `MemoryMetadata` containing the session ID, the typed source handle (the offset range of the source message(s)), and a timestamp.
 
 This means previously discarded conversation content becomes searchable via the `memory_search` tool.
 
@@ -173,8 +173,7 @@ Returns a JSON array of result objects:
   {
     "content": "The text content of the memory entry",
     "score": 0.85,
-    "session_id": "019467d9-7e3a-7000-8000-000000000000",
-    "turn": 3
+    "source_range": { "start": 3, "end": 4 }
   }
 ]
 ```
@@ -187,12 +186,10 @@ Returns a JSON array of result objects:
   Similarity score from 0.0 (no match) to 1.0 (exact match). Typical useful matches are above 0.7.
 </ResponseField>
 
-<ResponseField name="session_id" type="string">
-  The session the memory originated from (enables cross-session recall).
-</ResponseField>
-
-<ResponseField name="turn" type="integer">
-  The turn number within the session when the memory was indexed.
+<ResponseField name="source_range" type="object">
+  The half-open `[start, end)` offset range of the source message(s) the entry
+  was indexed from. Memory is scoped to a single session; results do not carry a
+  `session_id`, and there is no cross-session recall.
 </ResponseField>
 
 ## Memory store implementations

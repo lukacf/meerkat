@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use meerkat_core::{
     HookRunOverrides, OutputSchema, PeerMeta, Provider, SurfaceMetadata, SurfaceMetadataError,
+    config::SystemPromptOverride,
     skills::{SkillKey, SkillRef},
 };
 
@@ -22,8 +23,11 @@ pub struct CoreCreateParams {
     pub provider: Option<Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    /// Typed per-request system-prompt policy: omit/`null` to inherit, a
+    /// string to set an explicit prompt, or `{"action": "disable"}` to
+    /// suppress every prompt source.
+    #[serde(default, skip_serializing_if = "SystemPromptOverride::is_inherit")]
+    pub system_prompt: SystemPromptOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,9 +37,10 @@ pub struct CoreCreateParams {
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Phase 4c — realm-scoped binding reference. When set, the session
-    /// is built through the realm connection set; when omitted, the
-    /// legacy flat `provider + api_key` path is used.
+    /// Realm-scoped binding reference. When set, the session is built through
+    /// the named realm connection set; when omitted, resolution falls back to
+    /// the realm default binding for the provider (including the synthesized
+    /// `env_default` realm).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<super::connection::WireAuthBindingRef>,
 }
@@ -221,7 +226,7 @@ mod tests {
             model: Some("claude-opus-4-8".to_string()),
             provider: Some(Provider::Anthropic),
             max_tokens: Some(1024),
-            system_prompt: Some("You are helpful.".to_string()),
+            system_prompt: SystemPromptOverride::Set("You are helpful.".to_string()),
             labels: Some(labels.clone()),
             additional_instructions: Some(vec![
                 "Be concise.".to_string(),
@@ -265,7 +270,7 @@ mod tests {
             model: None,
             provider: None,
             max_tokens: None,
-            system_prompt: None,
+            system_prompt: SystemPromptOverride::Inherit,
             labels: Some(std::collections::BTreeMap::from([(
                 "meerkat.runtime_id".to_string(),
                 "spoof".to_string(),
@@ -285,9 +290,34 @@ mod tests {
         let parsed: CoreCreateParams = serde_json::from_str(json)?;
         assert_eq!(parsed.prompt, "hello");
         assert!(parsed.model.is_none());
+        assert!(parsed.system_prompt.is_inherit());
         assert!(parsed.labels.is_none());
         assert!(parsed.additional_instructions.is_none());
         assert!(parsed.app_context.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_core_create_params_system_prompt_tri_state_wire_shapes() -> Result<(), serde_json::Error>
+    {
+        // String ⇔ Set (lossless with the retired Option<String> shape).
+        let parsed: CoreCreateParams =
+            serde_json::from_str(r#"{"prompt": "hi", "system_prompt": "You are terse."}"#)?;
+        assert_eq!(
+            parsed.system_prompt,
+            SystemPromptOverride::Set("You are terse.".to_string())
+        );
+        // null ⇔ Inherit.
+        let parsed: CoreCreateParams =
+            serde_json::from_str(r#"{"prompt": "hi", "system_prompt": null}"#)?;
+        assert!(parsed.system_prompt.is_inherit());
+        // {"action": "disable"} ⇔ Disable, and it round-trips losslessly.
+        let parsed: CoreCreateParams =
+            serde_json::from_str(r#"{"prompt": "hi", "system_prompt": {"action": "disable"}}"#)?;
+        assert_eq!(parsed.system_prompt, SystemPromptOverride::Disable);
+        let json = serde_json::to_string(&parsed)?;
+        let back: CoreCreateParams = serde_json::from_str(&json)?;
+        assert_eq!(back.system_prompt, SystemPromptOverride::Disable);
         Ok(())
     }
 
@@ -298,7 +328,7 @@ mod tests {
             model: None,
             provider: None,
             max_tokens: None,
-            system_prompt: None,
+            system_prompt: SystemPromptOverride::Inherit,
             labels: None,
             additional_instructions: None,
             app_context: None,
@@ -306,6 +336,7 @@ mod tests {
             auth_binding: None,
         };
         let json = serde_json::to_string(&params)?;
+        assert!(!json.contains("\"system_prompt\""));
         assert!(!json.contains("\"labels\""));
         assert!(!json.contains("\"additional_instructions\""));
         assert!(!json.contains("\"app_context\""));
@@ -322,7 +353,7 @@ mod tests {
             model: None,
             provider: None,
             max_tokens: None,
-            system_prompt: None,
+            system_prompt: SystemPromptOverride::Inherit,
             labels: None,
             additional_instructions: None,
             app_context: None,

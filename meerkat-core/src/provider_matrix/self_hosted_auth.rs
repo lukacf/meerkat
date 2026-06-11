@@ -8,6 +8,8 @@ pub enum SelfHostedAuthMethod {
 }
 
 impl SelfHostedAuthMethod {
+    pub const ALL: &'static [Self] = &[Self::ApiKey, Self::None, Self::StaticBearer];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
@@ -27,8 +29,7 @@ impl SelfHostedAuthMethod {
 
     /// The persisted credential mode this auth method stores in the
     /// `TokenStore`, or `None` for authless transports. Typed owner of the
-    /// auth-method -> persisted-mode mapping (replaces the string-keyed
-    /// `persisted_auth_mode_for_auth_method` decision table).
+    /// auth-method -> persisted-mode mapping.
     pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
         use crate::auth::token_store::PersistedAuthMode;
         match self {
@@ -46,11 +47,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            SelfHostedAuthMethod::ApiKey,
-            SelfHostedAuthMethod::None,
-            SelfHostedAuthMethod::StaticBearer,
-        ] {
+        for v in SelfHostedAuthMethod::ALL {
+            let v = *v;
             assert_eq!(SelfHostedAuthMethod::parse(v.as_str()), Some(v));
         }
     }
@@ -58,5 +56,19 @@ mod tests {
     #[test]
     fn parse_rejects_unknown() {
         assert_eq!(SelfHostedAuthMethod::parse("unknown"), None);
+    }
+
+    #[test]
+    fn persisted_auth_mode_mapping_is_typed_owner_truth() {
+        use crate::auth::token_store::PersistedAuthMode;
+        assert_eq!(
+            SelfHostedAuthMethod::ApiKey.persisted_auth_mode(),
+            Some(PersistedAuthMode::ApiKey)
+        );
+        assert_eq!(
+            SelfHostedAuthMethod::StaticBearer.persisted_auth_mode(),
+            Some(PersistedAuthMode::StaticBearer)
+        );
+        assert_eq!(SelfHostedAuthMethod::None.persisted_auth_mode(), None);
     }
 }

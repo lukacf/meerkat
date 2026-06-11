@@ -94,6 +94,22 @@ class TestStdoutDispatcher:
         await d.stop()
 
     @pytest.mark.asyncio
+    async def test_corrupted_frame_records_permanent_transport_fault(self):
+        reader = make_reader(["this is not json{"])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        pending = d.expect_response(1)
+        with pytest.raises(MeerkatError) as exc:
+            await asyncio.wait_for(pending, timeout=1.0)
+        assert exc.value.code == "PROTOCOL_ERROR"
+        # The fault is PERMANENT transport state: later callers must be able to
+        # fail closed on it instead of registering futures no read loop will
+        # ever resolve.
+        assert d.transport_fault is not None
+        assert d.transport_fault.code == "PROTOCOL_ERROR"
+        await d.stop()
+
+    @pytest.mark.asyncio
     async def test_large_response_line_within_rpc_stdout_limit(self):
         payload = "x" * (128 * 1024)
         reader = asyncio.StreamReader(limit=RPC_STDOUT_LIMIT_BYTES)
@@ -114,6 +130,44 @@ class TestStdoutDispatcher:
         future = d.expect_response(1)
         with pytest.raises(MeerkatError, match="bad request"):
             await asyncio.wait_for(future, timeout=1.0)
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_message_string_is_never_parsed_as_typed_error(self):
+        # `error.message` is presentation text. A JSON-looking message must
+        # NOT be recovered into typed code/message/details — only the typed
+        # `error.data` projection carries those.
+        embedded = json.dumps({"code": "FOLKLORE", "message": "from-message", "details": {"x": 1}})
+        reader = make_reader([error_response(1, -32600, embedded)])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        future = d.expect_response(1)
+        with pytest.raises(MeerkatError) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        assert exc_info.value.code == "-32600"
+        assert exc_info.value.message == embedded
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_typed_data_projection_is_used(self):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32600,
+                "message": "presentation text",
+                "data": {"code": "TYPED_CODE", "message": "typed message", "details": {"k": "v"}},
+            },
+        }
+        reader = make_reader([jline(payload)])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        future = d.expect_response(1)
+        with pytest.raises(MeerkatError) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        assert exc_info.value.code == "TYPED_CODE"
+        assert exc_info.value.message == "typed message"
+        assert exc_info.value.details == {"k": "v"}
         await d.stop()
 
     @pytest.mark.asyncio
@@ -231,6 +285,52 @@ class TestStdoutDispatcher:
         assert e["delta"] == "right"
         sentinel = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert sentinel is None
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pending_streams_bind_independently(self):
+        # Two streaming creates may be pending at once; each request's queue
+        # binds to exactly its own session_id. Admission is server-owned —
+        # there is no client-local singleton invariant.
+        reader = make_reader([
+            event_notification("sid-a", {"type": "text_delta", "delta": "A"}),
+            event_notification("sid-b", {"type": "text_delta", "delta": "B"}),
+            response(1, {"session_id": "sid-a", "text": "done-a"}),
+            response(2, {"session_id": "sid-b", "text": "done-b"}),
+        ])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        queue_a = d.subscribe_pending_stream(request_id=1)
+        queue_b = d.subscribe_pending_stream(request_id=2)
+        _ = d.expect_response(1)
+        _ = d.expect_response(2)
+        ea = await asyncio.wait_for(queue_a.get(), timeout=1.0)
+        assert ea["delta"] == "A"
+        eb = await asyncio.wait_for(queue_b.get(), timeout=1.0)
+        assert eb["delta"] == "B"
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_pending_stream_rejected_create_fails_closed(self):
+        # A server-rejected create tears down only that request's pending
+        # stream (None sentinel), leaving concurrent pending streams intact.
+        reader = make_reader([
+            error_response(1, -32000, "create rejected"),
+            event_notification("sid-b", {"type": "text_delta", "delta": "B"}),
+            response(2, {"session_id": "sid-b", "text": "done-b"}),
+        ])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        queue_a = d.subscribe_pending_stream(request_id=1)
+        queue_b = d.subscribe_pending_stream(request_id=2)
+        future_a = d.expect_response(1)
+        _ = d.expect_response(2)
+        sentinel = await asyncio.wait_for(queue_a.get(), timeout=1.0)
+        assert sentinel is None
+        with pytest.raises(MeerkatError):
+            await asyncio.wait_for(future_a, timeout=1.0)
+        eb = await asyncio.wait_for(queue_b.get(), timeout=1.0)
+        assert eb["delta"] == "B"
         await d.stop()
 
     @pytest.mark.asyncio
@@ -591,3 +691,48 @@ class TestStandaloneSubscriptions:
 
         assert seen == ["hi"]
         assert closed == ["stream-1"]
+
+    @pytest.mark.asyncio
+    async def test_event_subscription_close_awaits_server_authority(self):
+        # Stream-close authority is server-owned: a rejected close must
+        # propagate the typed error and leave the subscription open (no
+        # local closed state, no queue sentinel). Only an accepted close
+        # flips closed terminal state.
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        unsubscribed = []
+        dispatcher = type(
+            "Dispatcher",
+            (),
+            {"unsubscribe_stream": lambda self, sid: unsubscribed.append(sid)},
+        )()
+
+        async def rejecting_close(_stream_id: str):
+            raise MeerkatError("STREAM_CLOSE_REJECTED", "server said no")
+
+        from meerkat.streaming import EventSubscription
+
+        subscription = EventSubscription(
+            stream_id="stream-1",
+            event_queue=queue,
+            dispatcher=dispatcher,
+            close_remote=rejecting_close,
+            parse_event_fn=lambda raw: raw,
+        )
+        with pytest.raises(MeerkatError, match="server said no"):
+            await subscription.close()
+        assert subscription._closed is False  # noqa: SLF001
+        assert unsubscribed == []
+        assert queue.empty(), "rejected close must not end the local queue"
+
+        # An accepted close flips closed state and ends the queue.
+        accepted = []
+
+        async def accepting_close(stream_id: str):
+            accepted.append(stream_id)
+
+        subscription._close_remote = accepting_close  # noqa: SLF001
+        await subscription.close()
+        assert accepted == ["stream-1"]
+        assert subscription._closed is True  # noqa: SLF001
+        assert unsubscribed == ["stream-1"]
+        assert (await asyncio.wait_for(queue.get(), timeout=1.0)) is None

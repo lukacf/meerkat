@@ -126,7 +126,7 @@ impl ConsumerSurface for RecordingSurface {
         &self,
         variant: InputVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
         self.log.lock().await.push((variant, projected_fields));
         Ok(())
     }

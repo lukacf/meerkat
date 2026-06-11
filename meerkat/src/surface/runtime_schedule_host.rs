@@ -105,7 +105,10 @@ fn materialized_build_options(
         .transpose()
         .map_err(schedule_internal)?;
     build.instance_id = create.instance_id.clone();
-    build.backend = create.backend.clone();
+    build.backend = create
+        .backend
+        .as_deref()
+        .and_then(meerkat_core::RecoveryBackendKind::parse);
     build.config_generation = create.config_generation;
     build.keep_alive = create.keep_alive;
     build.app_context = create.app_context.clone();
@@ -239,7 +242,8 @@ impl RuntimeBackedScheduleSessionHost {
                 })?
                 .keep_alive;
             configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
-                .await;
+                .await
+                .map_err(schedule_internal)?;
         }
         #[cfg(not(feature = "comms"))]
         let _ = session_id;
@@ -271,13 +275,18 @@ impl RuntimeBackedScheduleSessionHost {
         Ok(CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
-            system_prompt: prompt_system_prompt
+            // Parse the schedule-spec prompt representation once at this
+            // ingest boundary: an occurrence-rendered prompt wins over the
+            // spec prompt; either becomes an explicit `Set`, absence inherits.
+            system_prompt: match prompt_system_prompt
                 .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
+                .or_else(|| create.system_prompt.clone())
+            {
+                Some(prompt) => crate::SystemPromptOverride::Set(prompt),
+                None => crate::SystemPromptOverride::Inherit,
+            },
             max_tokens: create.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -350,7 +359,8 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
             &result.session_id,
             keep_alive,
         )
-        .await;
+        .await
+        .map_err(schedule_internal)?;
         #[cfg(not(feature = "comms"))]
         let _ = keep_alive;
         Ok(result.session_id)

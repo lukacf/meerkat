@@ -37,7 +37,8 @@ use meerkat::{
     AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleService, ScheduleToolDispatcher,
     SqliteScheduleStore,
 };
-use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
+use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
+use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
@@ -47,7 +48,6 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
 use meerkat_core::mcp_config::McpConfig;
-use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest, StartTurnRuntimeSemantics,
@@ -310,13 +310,11 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                render_metadata: None,
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
                     .or_else(|| create.system_prompt.clone()),
                 max_tokens: create.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -441,12 +439,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(
-            occurrence,
-            outcome,
-            handle,
-            materialized_session_id,
-        )
+        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
     }
 }
 
@@ -807,12 +800,7 @@ async fn apply_target_control_effects(
                 let tux_pk = meerkat_comms::identity::PubKey::from_pubkey_string(tux_pubkey)
                     .context("parse adopted tux pubkey")?;
                 comms_trust
-                    .replace_named_trusted_peer(TrustedPeer {
-                        name: "tux".into(),
-                        pubkey: tux_pk,
-                        addr: tux_direct_addr.clone(),
-                        meta: PeerMeta::default(),
-                    })
+                    .replace_named_trusted_peer("tux", tux_pk, tux_direct_addr)
                     .await?;
             }
             TkcEffect::PersistAttachmentHint { tux_id, lease_id } => {
@@ -836,8 +824,7 @@ async fn apply_target_control_effects(
                 }) else {
                     return Ok((false, return_to_register_attached_tux_id));
                 };
-                let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok()
-                else {
+                let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok() else {
                     return Ok((false, return_to_register_attached_tux_id));
                 };
                 let attach_fut = router.send(tux_peer, kind);
@@ -850,8 +837,7 @@ async fn apply_target_control_effects(
             }
             TkcEffect::StartDirectHeartbeat { tux_id } => {
                 if heartbeat.is_none() {
-                    let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok()
-                    else {
+                    let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok() else {
                         return Ok((false, return_to_register_attached_tux_id));
                     };
                     *heartbeat = Some(spawn_heartbeat(
@@ -991,11 +977,9 @@ async fn setup_session(
     let req = CreateSessionRequest {
         model: model.to_string(),
         prompt: ContentInput::Text(String::new()),
-        render_metadata: None,
         system_prompt: Some(system_prompt.to_string()),
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_opts),
@@ -1147,7 +1131,9 @@ fn start_turn_request_from_primitive(
     }
     let metadata = primitive.turn_metadata();
     let pre_turn_context_appends = match primitive {
-        RunPrimitive::StagedInput(staged) if primitive.is_peer_response_terminal_context_and_run() => {
+        RunPrimitive::StagedInput(staged)
+            if primitive.is_peer_response_terminal_context_and_run() =>
+        {
             pending_system_context_appends(&staged.context_appends)
         }
         _ => Vec::new(),
@@ -1216,12 +1202,9 @@ impl CoreExecutor for TargetCoreExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
-        let discard_result = discard_live_session_with_mob_cleanup(
-            &self.service,
-            &self.mob_state,
-            &self.session_id,
-        )
-        .await;
+        let discard_result =
+            discard_live_session_with_mob_cleanup(&self.service, &self.mob_state, &self.session_id)
+                .await;
         runtime_adapter_unregister_noop();
         match discard_result {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
@@ -1508,7 +1491,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             eprintln!("[target] kennel register failed: {e} — retrying");
             kennel_session_state =
                 target_kennel_session::transition(kennel_session_state, TksEvent::ControlLost)
-                    .map_err(|e| anyhow::anyhow!("target kennel session register send failed: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("target kennel session register send failed: {e}")
+                    })?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
@@ -1531,14 +1516,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                     if let Ok(pk) =
                         meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str())
                     {
-                        comms_trust
-                            .add_trusted_peer(meerkat_comms::TrustedPeer {
-                                name: "hive".into(),
-                                pubkey: pk,
-                                addr: addr.clone(),
-                                meta: meerkat_comms::PeerMeta::default(),
-                            })
-                            .await?;
+                        comms_trust.add_trusted_peer("hive", pk, addr).await?;
                         eprintln!("[target] added hive as trusted peer at {addr}");
                     }
                 }
@@ -1748,14 +1726,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
                             if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
                                 if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
-                                    comms_trust
-                                        .add_trusted_peer(meerkat_comms::TrustedPeer {
-                                        name: "hive".into(),
-                                        pubkey: pk,
-                                        addr: addr.clone(),
-                                        meta: meerkat_comms::PeerMeta::default(),
-                                        })
-                                        .await?;
+                                    comms_trust.add_trusted_peer("hive", pk, addr).await?;
                                 }
                             }
                             kennel_session_state = target_kennel_session::transition(
@@ -1777,12 +1748,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         KennelPayload::PeerWire { peer_name, peer_id, peer_addr } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
                                 comms_trust
-                                    .add_trusted_peer(meerkat_comms::TrustedPeer {
-                                    name: peer_name.clone(),
-                                    pubkey: pk,
-                                    addr: peer_addr.clone(),
-                                    meta: meerkat_comms::PeerMeta::default(),
-                                    })
+                                    .add_trusted_peer(peer_name, pk, peer_addr)
                                     .await?;
                                 eprintln!("[target] peer wired: {peer_name} at {peer_addr}");
                             }
@@ -2169,11 +2135,11 @@ mod tests {
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, TestClient};
     use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
     use meerkat_core::Config;
+    use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
     use meerkat_core::ops_lifecycle::OperationKind;
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
-    use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
     use meerkat_core::types::{ContentInput, HandlingMode};
     use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
@@ -2396,7 +2362,9 @@ mod tests {
         assert_eq!(request.prompt.text_content(), "");
         assert_eq!(request.pre_turn_context_appends.len(), 1);
         assert_eq!(
-            request.pre_turn_context_appends[0].idempotency_key.as_deref(),
+            request.pre_turn_context_appends[0]
+                .idempotency_key
+                .as_deref(),
             Some("peer_response_terminal:analyst:req-1")
         );
         assert_eq!(
@@ -2463,11 +2431,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
-            render_metadata: None,
             system_prompt: Some("test target".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2610,11 +2576,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: Some("cleanup".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2828,11 +2792,9 @@ mod tests {
         let req2 = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            render_metadata: None,
             system_prompt: Some("test".into()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -2965,11 +2927,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            render_metadata: None,
             system_prompt: Some("test".into()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {

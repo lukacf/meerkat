@@ -158,10 +158,6 @@ impl CommsRuntime for AddFailingCommsRuntime {
         }
     }
 
-    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-        Ok(true)
-    }
-
     async fn peer_ingress_runtime_snapshot(
         &self,
     ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {

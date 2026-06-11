@@ -10,11 +10,10 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::{CommsConfig, Keypair, TrustedPeers};
+use crate::{CommsConfig, Keypair};
 use crate::{Router, TrustedPeersView};
 use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
@@ -24,8 +23,8 @@ use meerkat_core::BlobId;
 use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
+    CommsCommand, InputStreamMode, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource,
+    PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
@@ -41,7 +40,7 @@ const SEND_RESPONSE_CONTRACTS_DESCRIPTION: &str = "\n\nResponse result contracts
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
-    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+    let mut value = schema.to_value();
 
     if let Value::Object(ref mut obj) = value
         && obj.get("type").and_then(Value::as_str) == Some("object")
@@ -275,9 +274,17 @@ pub async fn handle_tools_call_with_context(
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let blocks = resolve_message_blocks(&input.body, input.blocks, dispatch_context)?;
+            // Single content authority: when blocks are present they own the
+            // content, and `body` is derived as a projection of their text
+            // blocks so the two cannot diverge. With no blocks, `body` is the
+            // sole content owner and stands alone.
+            let body = match &blocks {
+                Some(blocks) => project_body_from_blocks(blocks),
+                None => input.body,
+            };
             let command = CommsCommand::PeerMessage {
                 to,
-                body: input.body,
+                body,
                 blocks,
                 handling_mode: input.handling_mode,
             };
@@ -349,7 +356,17 @@ fn resolve_message_blocks(
         return Ok(None);
     };
     let body = body.trim();
-    if !body.is_empty() && !blocks_text_contains(&blocks, body) {
+    // Single content authority: when the caller supplies their own text
+    // block(s), those blocks own the message content and the convenience
+    // `body` field is ignored — the carried body is later projected from the
+    // blocks (`project_body_from_blocks`) so the two cannot diverge. The
+    // `body` is only lifted into a leading text block when the caller supplied
+    // no text of their own (e.g. body + image blocks), so its text is not
+    // silently dropped.
+    let has_text_block = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { .. }));
+    if !body.is_empty() && !has_text_block {
         blocks.insert(
             0,
             ContentBlock::Text {
@@ -360,23 +377,21 @@ fn resolve_message_blocks(
     Ok(Some(blocks))
 }
 
-fn blocks_text_contains(blocks: &[ContentBlock], expected: &str) -> bool {
-    if blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Text { text } if text.trim() == expected))
-    {
-        return true;
-    }
+/// Project a message body from the text content of resolved blocks.
+///
+/// When blocks are the single content authority, the body is a deterministic
+/// function of their text blocks: the text-block contents joined with newlines.
+/// Non-text blocks (images) contribute no body text. This guarantees that the
+/// carried `body` cannot diverge from the block content it is meant to mirror.
+fn project_body_from_blocks(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.trim()),
+            ContentBlock::Text { text } => Some(text.as_str()),
             _ => None,
         })
-        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
-        == expected
 }
 
 fn resolve_tool_block(
@@ -457,7 +472,9 @@ fn project_peer_request_command(
     };
     Ok(CommsCommand::PeerRequest {
         to,
-        intent,
+        // #101: downgrade the typed closed public-request intent to the domain
+        // envelope's wider open `String` intent vocabulary at this boundary.
+        intent: intent.as_str().to_string(),
         params,
         blocks,
         handling_mode: handling_mode.unwrap_or_default(),
@@ -618,14 +635,14 @@ fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
     })
 }
 
-/// Validate a canonical [`PeerId`] against the runtime-facing trust set.
+/// Validate a canonical [`PeerId`] against the runtime-facing trust store.
 fn ensure_peer_id_is_trusted(ctx: &ToolContext, peer_id: &PeerId) -> Result<(), String> {
-    let peers = ctx.trusted_peers.snapshot();
-    match peers.find_by_peer_id(peer_id) {
-        Some(_) => Ok(()),
-        None => Err(format!(
+    if ctx.trusted_peers.contains(peer_id) {
+        Ok(())
+    } else {
+        Err(format!(
             "peer_not_found_or_not_trusted: peer '{peer_id}' is not found or not trusted",
-        )),
+        ))
     }
 }
 
@@ -674,69 +691,22 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 
 fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
-    let peers = ctx.trusted_peers.snapshot();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
-    let peer_id_counts: HashMap<PeerId, usize> = peers
-        .iter()
-        .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
-        .fold(HashMap::new(), |mut counts, peer| {
-            *counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
-            counts
-        });
-    peers
-        .iter()
-        .filter(|p| p.pubkey != self_pubkey)
-        .filter_map(|p| {
-            if p.pubkey.is_zero() {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    "skipping zero-pubkey trusted peer in MCP peer directory"
-                );
-                return None;
-            }
-            let peer_id = p.pubkey.to_peer_id();
-            if peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    peer_id = %peer_id,
-                    "skipping duplicate trusted peer id in MCP peer directory"
-                );
-                return None;
-            }
-            let name = match PeerName::new(p.name.clone()) {
-                Ok(name) => name,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        error = %err,
-                        "skipping trusted peer with invalid name in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            let address = match PeerAddress::parse(&p.addr) {
-                Ok(address) => address,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        address = %p.addr,
-                        error = %err,
-                        "skipping trusted peer with invalid address in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            Some(PeerDirectoryEntry {
-                name,
-                peer_id,
-                address,
-                source: PeerDirectorySource::Trusted,
-                sendable_kinds: sendable_kinds.clone(),
-                capabilities: PeerCapabilitySet::default(),
-                meta: p.meta.clone(),
-            })
+    // The trust store is PeerId-keyed and every entry is validated typed
+    // material — duplicate identities, zero pubkeys, and invalid names or
+    // addresses are structurally impossible here.
+    ctx.trusted_peers
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.pubkey != self_pubkey)
+        .map(|entry| PeerDirectoryEntry {
+            name: entry.name,
+            peer_id: entry.peer_id,
+            address: entry.address,
+            source: PeerDirectorySource::Trusted,
+            sendable_kinds: sendable_kinds.clone(),
+            capabilities: PeerCapabilitySet::default(),
+            meta: entry.meta,
         })
         .collect()
 }
@@ -762,7 +732,7 @@ fn peer_sendability_tool_name(kind: PeerSendability) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{CommsRuntime, PubKey, TrustedPeer};
+    use crate::{CommsRuntime, PubKey};
     use meerkat_contracts::wire::supervisor_bridge::{
         BridgeAck, BridgeCommand, BridgePeerSpec, BridgeReply, BridgeSupervisorPayload,
         supervisor_bridge_current_protocol_version,
@@ -1504,6 +1474,53 @@ mod tests {
         ));
     }
 
+    /// ROW #94 gate: when a comms message carries blocks, blocks are the single
+    /// content authority and the carried `body` is provably a projection of the
+    /// text blocks — it cannot diverge from a contradicting `body` input.
+    #[tokio::test]
+    async fn send_message_body_is_projection_of_text_blocks_when_blocks_present() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                // A body that contradicts the block content.
+                "body": "TOTALLY DIFFERENT BODY",
+                "blocks": [
+                    {"type": "text", "text": "authoritative line one"},
+                    {"type": "text", "text": "authoritative line two"}
+                ],
+                "handling_mode": "queue"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_message should accept text blocks");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                body,
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        // Body is a function of the text blocks, NOT the contradicting input
+        // body. Helper synthesis and ingress classification read one owner.
+        let expected = super::project_body_from_blocks(blocks);
+        assert_eq!(body, &expected);
+        assert_eq!(body, "authoritative line one\nauthoritative line two");
+        assert_ne!(body, "TOTALLY DIFFERENT BODY");
+    }
+
     #[test]
     fn test_send_response_schema_does_not_require_handling_mode() {
         let schema = schema_for::<SendResponseInput>();
@@ -1750,53 +1767,6 @@ mod tests {
         assert!(peer["meta"].is_object());
     }
 
-    #[test]
-    fn test_runtime_less_peer_directory_skips_duplicate_canonical_peer_ids() {
-        let sender_keypair = Keypair::generate();
-        let peer_keypair = Keypair::generate();
-        let peer_pubkey = peer_keypair.public_key();
-        let peer_id = peer_pubkey.to_peer_id();
-        let trusted_peers = TrustedPeers::from_peers(vec![
-            TrustedPeer {
-                name: "runtime-less-primary".to_string(),
-                pubkey: peer_pubkey,
-                addr: "inproc://runtime-less-primary".to_string(),
-                meta: crate::PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: "runtime-less-shadow".to_string(),
-                pubkey: peer_pubkey,
-                addr: "inproc://runtime-less-shadow".to_string(),
-                meta: crate::PeerMeta::default(),
-            },
-        ]);
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::new(
-            sender_keypair,
-            trusted_peers,
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
-        let trusted_peers = router.trusted_peers_view();
-        let ctx = ToolContext {
-            router,
-            trusted_peers,
-            runtime: None,
-        };
-
-        assert!(
-            ensure_peer_id_is_trusted(&ctx, &peer_id).is_err(),
-            "duplicate canonical trust is not send-resolvable"
-        );
-
-        let peers = runtime_less_peer_directory(&ctx);
-        assert!(
-            peers.iter().all(|peer| peer.peer_id != peer_id),
-            "runtime-less peer directory must not advertise duplicate canonical ids: {peers:?}"
-        );
-    }
-
     #[tokio::test]
     async fn test_send_message_fails_when_recipient_is_not_trusted() {
         let sender_keypair = Keypair::generate();
@@ -1805,7 +1775,6 @@ mod tests {
         let (_, router_inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             sender_keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             router_inbox_sender,
             true,
@@ -1842,7 +1811,6 @@ mod tests {
         let (_, inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
@@ -1881,7 +1849,6 @@ mod tests {
         let (_, inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,

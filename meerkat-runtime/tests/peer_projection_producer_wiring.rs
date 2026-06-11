@@ -149,32 +149,6 @@ impl CommsRuntime for RecordingCommsRuntime {
         }
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        self.adds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer.clone());
-        self.trusted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer);
-        Ok(())
-    }
-
-    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        self.removes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer_id.to_string());
-        let mut trusted = self
-            .trusted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = trusted.len();
-        trusted.retain(|peer| peer.peer_id.as_str() != peer_id);
-        Ok(before != trusted.len())
-    }
-
     async fn peer_ingress_runtime_snapshot(
         &self,
     ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
@@ -252,7 +226,10 @@ impl RecordingCommsRuntime {
 }
 
 async fn register(machine: &Arc<MeerkatMachine>, sid: &SessionId) {
-    machine.register_session(sid.clone()).await;
+    machine
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 }
 
 #[tokio::test]

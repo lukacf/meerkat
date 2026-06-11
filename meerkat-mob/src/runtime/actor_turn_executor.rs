@@ -5,7 +5,8 @@ use super::turn_executor::{
 };
 use crate::error::MobError;
 use crate::event::MemberRef;
-use crate::ids::{AgentIdentity, MeerkatId, RunId, StepId};
+use crate::ids::{AgentIdentity, RunId, StepId};
+use crate::machines::mob_machine as mob_dsl;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -14,10 +15,8 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
 use meerkat_core::types::{ContentInput, SessionId};
-use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -25,80 +24,13 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 pub struct ActorFlowTurnExecutor {
     handle: MobHandle,
     provisioner: Arc<dyn MobProvisioner>,
-    orphan_budget: Arc<AtomicUsize>,
-    orphan_budget_max: usize,
-    per_run_orphan_limit: usize,
-    per_run_orphans: Arc<Mutex<BTreeMap<RunId, usize>>>,
 }
 
 impl ActorFlowTurnExecutor {
-    pub fn new(
-        handle: MobHandle,
-        provisioner: Arc<dyn MobProvisioner>,
-        orphan_budget: usize,
-    ) -> Self {
+    pub fn new(handle: MobHandle, provisioner: Arc<dyn MobProvisioner>) -> Self {
         Self {
             handle,
             provisioner,
-            orphan_budget: Arc::new(AtomicUsize::new(orphan_budget)),
-            orphan_budget_max: orphan_budget,
-            per_run_orphan_limit: orphan_budget.saturating_div(2).max(1),
-            per_run_orphans: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-
-    fn reserve_orphan_slot(&self) -> bool {
-        let mut observed = self.orphan_budget.load(Ordering::Acquire);
-        loop {
-            if observed == 0 {
-                tracing::warn!(
-                    budget_max = self.orphan_budget_max,
-                    "flow timeout orphan budget exhausted"
-                );
-                return false;
-            }
-            let next = observed - 1;
-            match self.orphan_budget.compare_exchange(
-                observed,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if next == 0 {
-                        tracing::warn!(
-                            budget_max = self.orphan_budget_max,
-                            "flow timeout orphan budget reached zero"
-                        );
-                    }
-                    return true;
-                }
-                Err(next) => observed = next,
-            }
-        }
-    }
-
-    fn release_orphan_slot(orphan_budget: &AtomicUsize, orphan_budget_max: usize) {
-        let mut observed = orphan_budget.load(Ordering::Acquire);
-        loop {
-            if observed >= orphan_budget_max {
-                tracing::warn!(
-                    observed,
-                    budget_max = orphan_budget_max,
-                    "orphan budget release attempted above configured maximum; ignoring"
-                );
-                return;
-            }
-            let next = observed + 1;
-            match orphan_budget.compare_exchange(
-                observed,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(current) => observed = current,
-            }
         }
     }
 
@@ -256,15 +188,19 @@ impl ActorFlowTurnExecutor {
                         }
                         return;
                     }
-                    AgentEvent::RunFailed { error, .. } => {
+                    AgentEvent::RunFailed { error_report, .. } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: error_report.message,
+                            });
                         }
                         return;
                     }
-                    AgentEvent::InteractionFailed { error, .. } => {
+                    AgentEvent::InteractionFailed { reason, .. } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: reason.to_string(),
+                            });
                         }
                         return;
                     }
@@ -280,61 +216,10 @@ impl ActorFlowTurnExecutor {
         })
     }
 
-    async fn reserve_orphan_slot_for_run(&self, run_id: &RunId) -> bool {
-        {
-            let mut usage = self.per_run_orphans.lock().await;
-            let used = *usage.get(run_id).unwrap_or(&0);
-            if used >= self.per_run_orphan_limit {
-                tracing::warn!(
-                    run_id = %run_id,
-                    per_run_orphan_limit = self.per_run_orphan_limit,
-                    "flow timeout orphan budget reached per-flow limit"
-                );
-                return false;
-            }
-            usage.insert(run_id.clone(), used + 1);
-        }
-
-        if self.reserve_orphan_slot() {
-            return true;
-        }
-
-        let mut usage = self.per_run_orphans.lock().await;
-        match usage.get(run_id).copied() {
-            Some(0) | None => {}
-            Some(1) => {
-                usage.remove(run_id);
-            }
-            Some(n) => {
-                usage.insert(run_id.clone(), n - 1);
-            }
-        }
-        false
-    }
-
-    async fn release_orphan_slot_for_run(
-        per_run_orphans: &Mutex<BTreeMap<RunId, usize>>,
-        run_id: &RunId,
-    ) {
-        let mut usage = per_run_orphans.lock().await;
-        match usage.get(run_id).copied() {
-            Some(0) | None => {}
-            Some(1) => {
-                usage.remove(run_id);
-            }
-            Some(n) => {
-                usage.insert(run_id.clone(), n - 1);
-            }
-        }
-    }
-
-    async fn reconcile_detached_turn(
-        bridge_handle: tokio::task::JoinHandle<()>,
-        orphan_budget: Arc<AtomicUsize>,
-        orphan_budget_max: usize,
-        per_run_orphans: Arc<Mutex<BTreeMap<RunId, usize>>>,
-        run_id: RunId,
-    ) {
+    /// Join a detached timed-out turn's subscription bridge. The orphan budget
+    /// is MobMachine-owned (decremented at `ClassifyTurnTimeoutDisposition`),
+    /// so this is now a pure bridge-join with no shell-side budget accounting.
+    async fn reconcile_detached_turn(bridge_handle: tokio::task::JoinHandle<()>, run_id: RunId) {
         let reconcile = async {
             match bridge_handle.await {
                 Ok(()) => {
@@ -348,17 +233,13 @@ impl ActorFlowTurnExecutor {
                     );
                 }
             }
-            Self::release_orphan_slot(orphan_budget.as_ref(), orphan_budget_max);
-            Self::release_orphan_slot_for_run(per_run_orphans.as_ref(), &run_id).await;
         };
 
         if AssertUnwindSafe(reconcile).catch_unwind().await.is_err() {
             tracing::error!(
                 run_id = %run_id,
-                "panic while reconciling detached timed-out turn; forcing orphan budget release"
+                "panic while joining detached timed-out turn"
             );
-            Self::release_orphan_slot(orphan_budget.as_ref(), orphan_budget_max);
-            Self::release_orphan_slot_for_run(per_run_orphans.as_ref(), &run_id).await;
         }
     }
 }
@@ -370,14 +251,14 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
             .handle
-            .get_member_by_meerkat_id(target)
-            .await
+            .get_member(target)
+            .await?
             .ok_or_else(|| MobError::MemberNotFound(target.clone()))?;
 
         let (completion_tx, completion_rx) = oneshot::channel::<FlowTurnOutcome>();
@@ -469,9 +350,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             system_prompt: None,
                             event_tx: Some(event_tx),
                             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                                None,
                                 meerkat_core::types::HandlingMode::Queue,
-                                None,
                                 flow_tool_overlay,
                                 Vec::new(),
                                 None,
@@ -533,24 +412,46 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         };
         let run_id = ticket.run_id.clone();
 
-        if self.reserve_orphan_slot_for_run(&run_id).await {
-            let orphan_budget = self.orphan_budget.clone();
-            let orphan_budget_max = self.orphan_budget_max;
-            let per_run_orphans = self.per_run_orphans.clone();
-            tokio::spawn(async move {
-                Self::reconcile_detached_turn(
-                    bridge_handle,
-                    orphan_budget,
-                    orphan_budget_max,
-                    per_run_orphans,
-                    run_id,
+        // Hard flow turn timeouts are never retryable; MobMachine owns the
+        // detach-vs-cancel decision (and the orphan budget) from here.
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition {
+                timed_out_run_id: mob_dsl::RunId::from(run_id.to_string()),
+                retryable: false,
+            })
+            .await?;
+        let disposition = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::TurnTimeoutDispositionClassified {
+                    disposition, ..
+                } => Some(disposition),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted turn-timeout observation but emitted no disposition"
+                        .into(),
                 )
-                .await;
-            });
-            Ok(TimeoutDisposition::Detached)
-        } else {
-            bridge_handle.abort();
-            Ok(TimeoutDisposition::Canceled)
+            })?;
+
+        match disposition {
+            mob_dsl::TurnTimeoutDisposition::Detached => {
+                tokio::spawn(async move {
+                    Self::reconcile_detached_turn(bridge_handle, run_id).await;
+                });
+                Ok(TimeoutDisposition::Detached)
+            }
+            // A non-retryable timeout without budget cancels. `Retryable` is
+            // unreachable here (retryable=false) but is a hard cancel for the
+            // shell's binary `TimeoutDisposition`: aborting the bridge is the
+            // only safe shell action for a non-detached hard timeout.
+            mob_dsl::TurnTimeoutDisposition::Canceled
+            | mob_dsl::TurnTimeoutDisposition::Retryable => {
+                bridge_handle.abort();
+                Ok(TimeoutDisposition::Canceled)
+            }
         }
     }
 }
@@ -563,60 +464,18 @@ mod tests {
     use meerkat_core::AgentEvent;
     use meerkat_core::event::{AgentErrorClass, AgentErrorReason, AgentErrorReport};
     use meerkat_core::interaction::InteractionId;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{Mutex, oneshot};
-
-    #[test]
-    fn test_release_orphan_slot_caps_at_max_budget() {
-        let budget = AtomicUsize::new(2);
-        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            2,
-            "release should be capped at configured max budget"
-        );
-    }
-
-    #[test]
-    fn test_release_orphan_slot_increments_when_below_max() {
-        let budget = AtomicUsize::new(1);
-        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            2,
-            "release should increment when a slot is available"
-        );
-    }
+    use tokio::sync::oneshot;
 
     #[tokio::test]
-    async fn test_reconcile_detached_turn_releases_budget_when_bridge_panics() {
+    async fn test_reconcile_detached_turn_joins_bridge_even_when_bridge_panics() {
+        // The orphan budget is now MobMachine-owned; detached-turn reconciliation
+        // is a pure bridge-join that must not itself panic when the bridge does.
         let run_id = RunId::new();
-        let budget = Arc::new(AtomicUsize::new(0));
-        let per_run_orphans = Arc::new(Mutex::new(BTreeMap::from([(run_id.clone(), 1usize)])));
         let bridge_handle = tokio::spawn(async move {
             panic!("detached bridge panic");
         });
 
-        ActorFlowTurnExecutor::reconcile_detached_turn(
-            bridge_handle,
-            budget.clone(),
-            1,
-            per_run_orphans.clone(),
-            run_id.clone(),
-        )
-        .await;
-
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            1,
-            "detached panic path should release one global orphan budget slot"
-        );
-        assert!(
-            !per_run_orphans.lock().await.contains_key(&run_id),
-            "detached panic path should release per-run orphan accounting"
-        );
+        ActorFlowTurnExecutor::reconcile_detached_turn(bridge_handle, run_id).await;
     }
 
     #[tokio::test]
@@ -699,10 +558,8 @@ mod tests {
         events_tx
             .send(AgentEvent::RunFailed {
                 session_id: meerkat_core::SessionId::new(),
-                error_class: AgentErrorClass::Terminal,
-                error: "LLM failure terminal turn".to_string(),
                 terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
-                error_report: Some(report.clone()),
+                error_report: report.clone(),
             })
             .await
             .expect("send event");

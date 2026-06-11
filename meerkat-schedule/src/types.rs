@@ -595,7 +595,9 @@ fn last_receipt_from_machine_projection(
         .transpose()?;
     let runtime_outcome_key = runtime_outcome
         .as_ref()
-        .map(|outcome| semantic_json_key("runtime_outcome", outcome))
+        .map(|outcome| {
+            semantic_json_key("runtime_outcome", outcome).map(occ_dsl::RuntimeOutcomeKey::from)
+        })
         .transpose()?;
     if runtime_outcome_key != machine.runtime_outcome_key {
         return Err(format!(
@@ -608,10 +610,16 @@ fn last_receipt_from_machine_projection(
         attempt,
         stage,
         recorded_at_utc_ms,
-        machine.last_receipt_correlation_id.as_deref(),
+        machine
+            .last_receipt_correlation_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
         machine.last_receipt_detail.as_deref(),
         failure_class,
-        machine.runtime_outcome_key.as_deref(),
+        machine
+            .runtime_outcome_key
+            .as_ref()
+            .map(|key| key.0.as_str()),
         materialized_session_id.as_ref(),
     )?;
     Ok(Some(DeliveryReceipt {
@@ -620,7 +628,7 @@ fn last_receipt_from_machine_projection(
         attempt,
         stage,
         recorded_at_utc,
-        correlation_id: machine.last_receipt_correlation_id.clone(),
+        correlation_id: machine.last_receipt_correlation_id.clone().map(|id| id.0),
         detail: machine.last_receipt_detail.clone(),
         failure_class,
         runtime_outcome,
@@ -649,29 +657,25 @@ pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Resul
             schedule.schedule_id
         ));
     }
-    if trigger_stable_key(&schedule.trigger)? != machine.trigger_key {
+    if trigger_stable_key(&schedule.trigger)? != machine.trigger_key.0 {
         return Err(format!(
             "schedule {} trigger projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule.target.stable_key()? != machine.target_binding_key {
+    if schedule.target.stable_key()? != machine.target_binding_key.0 {
         return Err(format!(
             "schedule {} target projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule_misfire_policy_to_machine(&schedule.misfire_policy) != machine.misfire_policy
-        || policy_key("misfire_policy", &schedule.misfire_policy)? != machine.misfire_policy_key
-    {
+    if schedule_misfire_policy_to_machine(&schedule.misfire_policy) != machine.misfire_policy {
         return Err(format!(
             "schedule {} misfire policy projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule_overlap_policy_to_machine(&schedule.overlap_policy) != machine.overlap_policy
-        || policy_key("overlap_policy", &schedule.overlap_policy)? != machine.overlap_policy_key
-    {
+    if schedule_overlap_policy_to_machine(&schedule.overlap_policy) != machine.overlap_policy {
         return Err(format!(
             "schedule {} overlap policy projection does not match machine_state",
             schedule.schedule_id
@@ -679,8 +683,6 @@ pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Resul
     }
     if schedule_missing_target_policy_to_machine(&schedule.missing_target_policy)
         != machine.missing_target_policy
-        || policy_key("missing_target_policy", &schedule.missing_target_policy)?
-            != machine.missing_target_policy_key
     {
         return Err(format!(
             "schedule {} missing-target policy projection does not match machine_state",
@@ -751,8 +753,8 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if trigger_stable_key(&occurrence.trigger_snapshot)? != machine.trigger_key
-        || occurrence.target_snapshot.stable_key()? != machine.target_binding_key
+    if trigger_stable_key(&occurrence.trigger_snapshot)? != machine.trigger_key.0
+        || occurrence.target_snapshot.stable_key()? != machine.target_binding_key.0
         || optional_session_id_to_machine(target_materialized_session_id(
             &occurrence.target_snapshot,
         )) != machine.target_materialized_session_id.clone()
@@ -800,7 +802,7 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if occurrence.claimed_by != machine.claimed_by
+    if occurrence.claimed_by.as_deref() != machine.claimed_by.as_ref().map(|owner| owner.0.as_str())
         || optional_datetime_to_machine_millis(
             occurrence.lease_expires_at_utc,
             "lease_expires_at_utc",
@@ -817,7 +819,11 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if occurrence.delivery_correlation_id != machine.delivery_correlation_id
+    if occurrence.delivery_correlation_id.as_deref()
+        != machine
+            .delivery_correlation_id
+            .as_ref()
+            .map(|id| id.0.as_str())
         || occurrence.last_receipt
             != last_receipt_from_machine_projection(machine, occurrence.runtime_outcome.clone())?
     {
@@ -1236,7 +1242,7 @@ pub struct SessionMaterializationSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1868,11 +1874,8 @@ struct ScheduleMachineStateWire {
     trigger_key: String,
     target_binding_key: String,
     misfire_policy: String,
-    misfire_policy_key: String,
     overlap_policy: String,
-    overlap_policy_key: String,
     missing_target_policy: String,
-    missing_target_policy_key: String,
     planning_horizon_days: u64,
     planning_horizon_occurrences: u64,
     planning_cursor_utc_ms: Option<u64>,
@@ -1890,17 +1893,14 @@ impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWir
             schedule_id: state.schedule_id.0.clone(),
             lifecycle_phase: schedule_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
             revision: state.revision,
-            trigger_key: state.trigger_key.clone(),
-            target_binding_key: state.target_binding_key.clone(),
+            trigger_key: state.trigger_key.0.clone(),
+            target_binding_key: state.target_binding_key.0.clone(),
             misfire_policy: schedule_misfire_policy_to_wire(state.misfire_policy).to_string(),
-            misfire_policy_key: state.misfire_policy_key.clone(),
             overlap_policy: schedule_overlap_policy_to_wire(state.overlap_policy).to_string(),
-            overlap_policy_key: state.overlap_policy_key.clone(),
             missing_target_policy: schedule_missing_target_policy_to_wire(
                 state.missing_target_policy,
             )
             .to_string(),
-            missing_target_policy_key: state.missing_target_policy_key.clone(),
             planning_horizon_days: state.planning_horizon_days,
             planning_horizon_occurrences: state.planning_horizon_occurrences,
             planning_cursor_utc_ms: state.planning_cursor_utc_ms,
@@ -1923,16 +1923,13 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
             schedule_id: sched_dsl::ScheduleId(wire.schedule_id),
             lifecycle_phase: schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
             revision: wire.revision,
-            trigger_key: wire.trigger_key,
-            target_binding_key: wire.target_binding_key,
+            trigger_key: wire.trigger_key.into(),
+            target_binding_key: wire.target_binding_key.into(),
             misfire_policy: schedule_misfire_policy_from_wire(&wire.misfire_policy)?,
-            misfire_policy_key: wire.misfire_policy_key,
             overlap_policy: schedule_overlap_policy_from_wire(&wire.overlap_policy)?,
-            overlap_policy_key: wire.overlap_policy_key,
             missing_target_policy: schedule_missing_target_policy_from_wire(
                 &wire.missing_target_policy,
             )?,
-            missing_target_policy_key: wire.missing_target_policy_key,
             planning_horizon_days: wire.planning_horizon_days,
             planning_horizon_occurrences: wire.planning_horizon_occurrences,
             planning_cursor_utc_ms: wire.planning_cursor_utc_ms,
@@ -2202,8 +2199,8 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             schedule_id: state.schedule_id.0.clone(),
             schedule_revision: state.schedule_revision,
             occurrence_ordinal: state.occurrence_ordinal,
-            trigger_key: state.trigger_key.clone(),
-            target_binding_key: state.target_binding_key.clone(),
+            trigger_key: state.trigger_key.0.clone(),
+            target_binding_key: state.target_binding_key.0.clone(),
             misfire_policy: occurrence_misfire_policy_to_wire(state.misfire_policy).to_string(),
             misfire_policy_key: state.misfire_policy_key.clone(),
             overlap_policy: occurrence_overlap_policy_to_wire(state.overlap_policy).to_string(),
@@ -2215,11 +2212,11 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             missing_target_policy_key: state.missing_target_policy_key.clone(),
             due_at_utc_ms: state.due_at_utc_ms,
             misfire_deadline_utc_ms: state.misfire_deadline_utc_ms,
-            claimed_by: state.claimed_by.clone(),
+            claimed_by: state.claimed_by.clone().map(|owner| owner.0),
             lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
             claimed_at_utc_ms: state.claimed_at_utc_ms,
             claim_token: state.claim_token.as_ref().map(|token| token.0.clone()),
-            delivery_correlation_id: state.delivery_correlation_id.clone(),
+            delivery_correlation_id: state.delivery_correlation_id.clone().map(|id| id.0),
             target_materialized_session_id: state
                 .target_materialized_session_id
                 .as_ref()
@@ -2236,12 +2233,12 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
                 .map(occurrence_failure_class_to_wire)
                 .map(str::to_string),
             last_receipt_detail: state.last_receipt_detail.clone(),
-            last_receipt_correlation_id: state.last_receipt_correlation_id.clone(),
+            last_receipt_correlation_id: state.last_receipt_correlation_id.clone().map(|id| id.0),
             last_receipt_materialized_session_id: state
                 .last_receipt_materialized_session_id
                 .as_ref()
                 .map(|session_id| session_id.0.clone()),
-            runtime_outcome_key: state.runtime_outcome_key.clone(),
+            runtime_outcome_key: state.runtime_outcome_key.as_ref().map(|key| key.0.clone()),
             receipt_stage: state
                 .receipt_stage
                 .map(occurrence_receipt_stage_to_wire)
@@ -2275,8 +2272,8 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             schedule_id: occ_dsl::ScheduleId(wire.schedule_id),
             schedule_revision: wire.schedule_revision,
             occurrence_ordinal: wire.occurrence_ordinal,
-            trigger_key: wire.trigger_key,
-            target_binding_key: wire.target_binding_key,
+            trigger_key: wire.trigger_key.into(),
+            target_binding_key: wire.target_binding_key.into(),
             misfire_policy: occurrence_misfire_policy_from_wire(&wire.misfire_policy)?,
             misfire_policy_key: wire.misfire_policy_key,
             overlap_policy: occurrence_overlap_policy_from_wire(&wire.overlap_policy)?,
@@ -2287,11 +2284,11 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             missing_target_policy_key: wire.missing_target_policy_key,
             due_at_utc_ms: wire.due_at_utc_ms,
             misfire_deadline_utc_ms: wire.misfire_deadline_utc_ms,
-            claimed_by: wire.claimed_by,
+            claimed_by: wire.claimed_by.map(Into::into),
             lease_expires_at_utc_ms: wire.lease_expires_at_utc_ms,
             claimed_at_utc_ms: wire.claimed_at_utc_ms,
             claim_token: wire.claim_token.map(occ_dsl::ClaimToken),
-            delivery_correlation_id: wire.delivery_correlation_id,
+            delivery_correlation_id: wire.delivery_correlation_id.map(Into::into),
             target_materialized_session_id: wire
                 .target_materialized_session_id
                 .map(occ_dsl::SessionId),
@@ -2309,11 +2306,13 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
                 .map(occurrence_failure_class_from_wire)
                 .transpose()?,
             last_receipt_detail: wire.last_receipt_detail,
-            last_receipt_correlation_id: wire.last_receipt_correlation_id,
+            last_receipt_correlation_id: wire.last_receipt_correlation_id.map(Into::into),
             last_receipt_materialized_session_id: wire
                 .last_receipt_materialized_session_id
                 .map(occ_dsl::SessionId),
-            runtime_outcome_key: wire.runtime_outcome_key,
+            runtime_outcome_key: wire
+                .runtime_outcome_key
+                .map(occ_dsl::RuntimeOutcomeKey::from),
             receipt_stage: wire
                 .receipt_stage
                 .as_deref()

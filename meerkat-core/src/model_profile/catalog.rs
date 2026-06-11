@@ -121,7 +121,12 @@ pub struct ImageGenerationProviderDefaults {
 // Static catalog data
 // ---------------------------------------------------------------------------
 
-/// Canonical provider names in alphabetical order.
+/// Typed catalog providers in alphabetical order. The typed selection owner;
+/// [`provider_names`] is its display projection.
+const CATALOG_PROVIDERS: &[Provider] = &[Provider::Anthropic, Provider::Gemini, Provider::OpenAI];
+
+/// Canonical provider names in alphabetical order (display projection of
+/// [`CATALOG_PROVIDERS`]).
 const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 
 /// Default model ID per provider. First recommended model wins.
@@ -227,18 +232,26 @@ pub fn catalog() -> &'static [CatalogEntry] {
     })
 }
 
-/// Return canonical provider names.
+/// Typed catalog providers (the typed selection owner).
+pub fn catalog_providers() -> &'static [Provider] {
+    CATALOG_PROVIDERS
+}
+
+/// Return canonical provider names (display projection of
+/// [`catalog_providers`]; not a selection key — semantic lookups go through
+/// the typed [`Provider`] boundary).
 pub fn provider_names() -> &'static [&'static str] {
     PROVIDER_NAMES
 }
 
-/// Return the default model ID for a provider, or `None` if the provider is unknown.
-pub fn default_model(provider: &str) -> Option<&'static str> {
+/// Return the default model ID for a typed provider, or `None` if the
+/// provider has no catalog defaults.
+pub fn default_model(provider: Provider) -> Option<&'static str> {
     match provider {
-        "anthropic" => Some(DEFAULT_ANTHROPIC),
-        "openai" => Some(DEFAULT_OPENAI),
-        "gemini" => Some(DEFAULT_GEMINI),
-        _ => None,
+        Provider::Anthropic => Some(DEFAULT_ANTHROPIC),
+        Provider::OpenAI => Some(DEFAULT_OPENAI),
+        Provider::Gemini => Some(DEFAULT_GEMINI),
+        Provider::SelfHosted | Provider::Other => None,
     }
 }
 
@@ -302,20 +315,19 @@ pub fn image_generation_provider_for_model(model_id: &str) -> Option<Provider> {
         })
 }
 
-/// Return an iterator over model IDs in the catalog for a given provider.
-pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 'static {
-    let provider = provider.to_string();
+/// Return an iterator over model IDs in the catalog for a typed provider.
+pub fn allowed_models(provider: Provider) -> impl Iterator<Item = &'static str> + 'static {
     catalog()
         .iter()
         .filter(move |e| e.provider == provider.as_str())
         .map(|e| e.id)
 }
 
-/// Look up a specific catalog entry by provider and model ID.
-pub fn entry_for(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
+/// Look up a specific catalog entry by typed provider and model ID.
+pub fn entry_for(provider: Provider, model_id: &str) -> Option<&'static CatalogEntry> {
     catalog()
         .iter()
-        .find(|e| e.provider == provider && e.id == model_id)
+        .find(|e| e.provider == provider.as_str() && e.id == model_id)
 }
 
 /// Return provider-grouped catalog data with default model IDs.
@@ -324,17 +336,17 @@ pub fn entry_for(provider: &str, model_id: &str) -> Option<&'static CatalogEntry
 pub fn provider_defaults() -> &'static [ProviderDefaults] {
     static DEFAULTS: OnceLock<Vec<ProviderDefaults>> = OnceLock::new();
     DEFAULTS.get_or_init(|| {
-        PROVIDER_NAMES
+        CATALOG_PROVIDERS
             .iter()
             .filter_map(|&provider| {
                 let default_id = default_model(provider)?;
                 let models: Vec<CatalogEntry> = catalog()
                     .iter()
-                    .filter(|e| e.provider == provider)
+                    .filter(|e| e.provider == provider.as_str())
                     .cloned()
                     .collect();
                 Some(ProviderDefaults {
-                    provider,
+                    provider: provider.as_str(),
                     default_model_id: default_id,
                     models,
                 })
@@ -405,31 +417,49 @@ mod tests {
 
     #[test]
     fn exactly_one_default_per_provider() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in CATALOG_PROVIDERS {
             let result = default_model(provider);
             assert!(
                 result.is_some(),
-                "provider '{provider}' must have a default model"
+                "provider '{provider:?}' must have a default model"
             );
         }
     }
 
     #[test]
+    fn provider_names_is_projection_of_typed_catalog_providers() {
+        let projected: Vec<&str> = CATALOG_PROVIDERS.iter().map(|p| p.as_str()).collect();
+        assert_eq!(
+            provider_names(),
+            projected.as_slice(),
+            "provider_names() must be a divergence-free projection of the typed providers"
+        );
+    }
+
+    #[test]
     fn defaults_exist_in_catalog() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in CATALOG_PROVIDERS {
             let default = default_model(provider);
             assert!(
                 default.is_some(),
-                "provider '{provider}' must have a default model"
+                "provider '{provider:?}' must have a default model"
             );
             if let Some(default) = default {
                 let entry = entry_for(provider, default);
                 assert!(
                     entry.is_some(),
-                    "default model '{default}' for provider '{provider}' must exist in catalog"
+                    "default model '{default}' for provider '{provider:?}' must exist in catalog"
                 );
             }
         }
+    }
+
+    #[test]
+    fn untyped_providers_fail_closed_at_typed_selection_boundary() {
+        assert!(default_model(Provider::Other).is_none());
+        assert!(default_model(Provider::SelfHosted).is_none());
+        assert!(entry_for(Provider::Other, DEFAULT_ANTHROPIC).is_none());
+        assert_eq!(allowed_models(Provider::Other).count(), 0);
     }
 
     #[test]
@@ -487,16 +517,16 @@ mod tests {
 
     #[test]
     fn allowed_models_matches_catalog() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in CATALOG_PROVIDERS {
             let allowed: Vec<&str> = allowed_models(provider).collect();
             let from_catalog: Vec<&str> = catalog()
                 .iter()
-                .filter(|e| e.provider == provider)
+                .filter(|e| e.provider == provider.as_str())
                 .map(|e| e.id)
                 .collect();
             assert_eq!(
                 allowed, from_catalog,
-                "allowed_models('{provider}') must match catalog entries"
+                "allowed_models({provider:?}) must match catalog entries"
             );
         }
     }
@@ -515,6 +545,25 @@ mod tests {
             assert_eq!(entry.context_window, Some(caps.context_window));
             assert_eq!(entry.max_output_tokens, Some(caps.max_output_tokens));
         }
+    }
+
+    #[test]
+    fn claude_fable_5_in_catalog_without_changing_default_ladder() {
+        let entry = entry_for(Provider::Anthropic, "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert_eq!(entry.provider, "anthropic");
+        assert_eq!(entry.display_name, "Claude Fable 5");
+        assert_eq!(entry.context_window, Some(1_000_000));
+        assert_eq!(entry.max_output_tokens, Some(128_000));
+        assert!(
+            allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5"),
+            "claude-fable-5 must be in the Anthropic allowlist"
+        );
+        // The default-model ladder is deliberately unchanged: Opus 4.8 remains
+        // the Anthropic and global default even though Fable 5 is the more
+        // capable (and more expensive) model.
+        assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-4-8"));
+        assert_eq!(global_default_model(), "claude-opus-4-8");
     }
 
     #[test]

@@ -179,6 +179,69 @@ pub enum OAuthError {
     ExpiredToken,
 }
 
+/// Typed permanence verdict for an OAuth token-endpoint / refresh failure,
+/// derived **structurally** from the HTTP status code and the typed
+/// [`OAuthError`] variant — never from free-text body inspection by callers.
+///
+/// This is the single typed owner of the permanence shape on `OAuthError`:
+/// a `400`/`401`/`403`/`422` token-endpoint failure (and the structurally
+/// terminal OAuth variants) resolve to [`ReauthRequired`](Self::ReauthRequired);
+/// `5xx`, network, timeout, and decode failures resolve to
+/// [`Transient`](Self::Transient). The catch-all credential-unusable terminal
+/// variants resolve to [`Permanent`](Self::Permanent). Callers that need the
+/// reauth-vs-retry boundary classification still route through
+/// [`oauth_refresh_observation`] + [`RefreshFailureObservation::requires_reauth`]
+/// (which the AuthMachine mirrors); this method gives a typed structural verdict
+/// so no caller has to re-parse `OAuthError::TokenEndpoint { body, .. }` text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthRefreshPermanence {
+    /// The credential is permanently unusable as observed at this boundary
+    /// (e.g. callback parse failure, state mismatch / CSRF, malformed expiry).
+    Permanent,
+    /// The failure is transient; a later retry of the same credential may
+    /// succeed (5xx, network, timeout, decode).
+    Transient,
+    /// Interactive user reauthorization is required (the authorization grant
+    /// or client is no longer valid: 400/401/403/422 at the token endpoint,
+    /// user-denied, expired authorization).
+    ReauthRequired,
+}
+
+impl OAuthError {
+    /// Classify this OAuth failure's permanence **structurally** from the typed
+    /// variant and HTTP status code, without inspecting any response body text.
+    ///
+    /// Token-endpoint statuses `400`/`401`/`403`/`422` and the structurally
+    /// terminal authorization variants (`UserDenied`, `AccessDenied`,
+    /// `ExpiredToken`) require reauth. `5xx` and the transient transport/decode
+    /// variants (`Network`, `Timeout`, `CallbackParse`, `TokenExpiryOutOfRange`,
+    /// `InvalidConfig`, device-flow pending/slow-down) are transient. A
+    /// `StateMismatch` (possible CSRF) is a permanently unusable local
+    /// credential.
+    pub fn refresh_permanence(&self) -> OAuthRefreshPermanence {
+        match self {
+            OAuthError::TokenEndpoint { status, .. } => match status {
+                400 | 401 | 403 | 422 => OAuthRefreshPermanence::ReauthRequired,
+                500..=599 => OAuthRefreshPermanence::Transient,
+                // Other 4xx (e.g. 429 rate-limit, 408 request timeout) are
+                // transient: the same credential may succeed on retry.
+                _ => OAuthRefreshPermanence::Transient,
+            },
+            OAuthError::UserDenied | OAuthError::AccessDenied | OAuthError::ExpiredToken => {
+                OAuthRefreshPermanence::ReauthRequired
+            }
+            OAuthError::StateMismatch => OAuthRefreshPermanence::Permanent,
+            OAuthError::CallbackParse(_)
+            | OAuthError::TokenExpiryOutOfRange { .. }
+            | OAuthError::Network(_)
+            | OAuthError::Timeout
+            | OAuthError::InvalidConfig(_)
+            | OAuthError::AuthorizationPending
+            | OAuthError::SlowDown => OAuthRefreshPermanence::Transient,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OAuthTokenEndpointErrorBody {
     error: Option<String>,
@@ -315,6 +378,56 @@ mod tests {
             expires_in_secs,
             scope: None,
         }
+    }
+
+    #[test]
+    fn refresh_permanence_is_structural_not_body_text() {
+        // Row #111 gate: token-endpoint permanence is derived from the typed
+        // status code, never from free-text body inspection. A 400/401
+        // token-endpoint failure must classify as ReauthRequired; a 5xx /
+        // network failure must classify as Transient. The body strings here are
+        // deliberately misleading ("transient" inside a 400, "invalid_grant"
+        // inside a 503) to prove the verdict ignores body text.
+        let bad_request = OAuthError::TokenEndpoint {
+            status: 400,
+            body: "this body literally says transient but is permanent".into(),
+        };
+        assert_eq!(
+            bad_request.refresh_permanence(),
+            OAuthRefreshPermanence::ReauthRequired
+        );
+        let unauthorized = OAuthError::TokenEndpoint {
+            status: 401,
+            body: String::new(),
+        };
+        assert_eq!(
+            unauthorized.refresh_permanence(),
+            OAuthRefreshPermanence::ReauthRequired
+        );
+        let server_error = OAuthError::TokenEndpoint {
+            status: 503,
+            body: r#"{"error":"invalid_grant"}"#.into(),
+        };
+        assert_eq!(
+            server_error.refresh_permanence(),
+            OAuthRefreshPermanence::Transient
+        );
+        assert_eq!(
+            OAuthError::Network("connection reset".into()).refresh_permanence(),
+            OAuthRefreshPermanence::Transient
+        );
+        assert_eq!(
+            OAuthError::Timeout.refresh_permanence(),
+            OAuthRefreshPermanence::Transient
+        );
+        assert_eq!(
+            OAuthError::StateMismatch.refresh_permanence(),
+            OAuthRefreshPermanence::Permanent
+        );
+        assert_eq!(
+            OAuthError::AccessDenied.refresh_permanence(),
+            OAuthRefreshPermanence::ReauthRequired
+        );
     }
 
     #[test]

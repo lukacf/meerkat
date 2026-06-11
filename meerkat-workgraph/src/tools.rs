@@ -691,29 +691,81 @@ mod tests {
         assert_eq!(ready["items"][0]["id"].as_str(), Some(id.as_str()));
     }
 
+    /// Canonical WorkGraph tool operation set, in `make ci` via the crate unit
+    /// lane. This is the single hand-authored snapshot of the operation surface;
+    /// the drift gate below proves the `WorkGraphToolContract` catalog, the
+    /// advertised tool list, and the dispatch entry point (`parse`) all agree
+    /// with it exactly, in both directions.
+    const CANONICAL_WORKGRAPH_TOOL_NAMES: &[&str] = &[
+        "workgraph_create",
+        "workgraph_get",
+        "workgraph_list",
+        "workgraph_ready",
+        "workgraph_snapshot",
+        "workgraph_events",
+        "workgraph_claim",
+        "workgraph_release",
+        "workgraph_update",
+        "workgraph_block",
+        "workgraph_close",
+        "workgraph_link",
+        "workgraph_add_evidence",
+    ];
+
     #[test]
-    fn workgraph_tools_list_contains_requested_surface() {
-        let names = workgraph_tools_list()
+    fn workgraph_tool_catalog_matches_canonical_operation_set_without_drift() {
+        let canonical = CANONICAL_WORKGRAPH_TOOL_NAMES
+            .iter()
+            .copied()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            canonical.len(),
+            CANONICAL_WORKGRAPH_TOOL_NAMES.len(),
+            "canonical WorkGraph operation names must be unique"
+        );
+
+        // The hand-authored contract catalog must equal the canonical set
+        // exactly — neither a missing operation nor an undeclared extra.
+        let catalog = WorkGraphToolContract::ALL
+            .iter()
+            .map(|contract| contract.name().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            catalog.len(),
+            WorkGraphToolContract::ALL.len(),
+            "WorkGraphToolContract::ALL must not contain duplicate operation names"
+        );
+        assert_eq!(
+            catalog, canonical,
+            "WorkGraphToolContract::ALL drifted from the canonical operation set"
+        );
+
+        // The advertised tool list must expose exactly the canonical surface.
+        let advertised = workgraph_tools_list()
             .into_iter()
             .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
             .collect::<BTreeSet<_>>();
-        for expected in [
-            "workgraph_create",
-            "workgraph_get",
-            "workgraph_list",
-            "workgraph_ready",
-            "workgraph_snapshot",
-            "workgraph_events",
-            "workgraph_claim",
-            "workgraph_release",
-            "workgraph_update",
-            "workgraph_block",
-            "workgraph_close",
-            "workgraph_link",
-            "workgraph_add_evidence",
-        ] {
-            assert!(names.contains(expected), "missing {expected}");
+        assert_eq!(
+            advertised, canonical,
+            "advertised WorkGraph tool list drifted from the canonical operation set"
+        );
+
+        // Every canonical operation must route through the single dispatch entry
+        // point, and `parse` must reject anything not in the catalog — proving
+        // the listed surface and the dispatchable surface are the same set.
+        for name in CANONICAL_WORKGRAPH_TOOL_NAMES {
+            let contract = WorkGraphToolContract::parse(name)
+                .expect("canonical WorkGraph operation must be dispatchable");
+            assert_eq!(
+                contract.name(),
+                *name,
+                "dispatch round-trip changed the operation name for {name}"
+            );
         }
+        let unknown = WorkGraphToolContract::parse("workgraph_not_a_real_tool")
+            .expect_err("dispatch must reject operations outside the catalog");
+        assert_eq!(unknown.code, WorkGraphToolErrorCode::NotFound);
     }
 
     #[test]

@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use meerkat_core::lifecycle::run_primitive::{
-    TurnMetadataOverride, legacy_override_from_split_fields, take_legacy_clear_bool,
-};
+use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
@@ -34,114 +32,57 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 ///
 /// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
 /// tri-state via [`TurnMetadataOverride`]: `None` keeps the session's current
-/// value, `Some(Set)` overrides it, `Some(Clear)` removes it. The legacy split
-/// wire form (`provider_params` + `clear_provider_params: bool`) is still
-/// accepted at the serde boundary and folded into the tri-state, rejecting a
-/// `set + clear` payload there. This prevents cross-realm credential bleed in
-/// multi-tenant setups (deferral §2 / Dogma §10).
-#[derive(Debug)]
+/// value, `Some(Set)` overrides it, `Some(Clear)` removes it. Unknown fields
+/// (including the retired `clear_*` split wire form) fail closed at the serde
+/// boundary. This prevents cross-realm credential bleed in multi-tenant
+/// setups (deferral §2 / Dogma §10).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: ContentInput,
+    #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,
-    pub skill_references: Option<Vec<String>>,
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
-    pub additional_instructions: Option<Vec<String>>,
-    pub keep_alive: Option<bool>,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub max_tokens: Option<u32>,
-    pub system_prompt: Option<String>,
-    pub output_schema: Option<serde_json::Value>,
-    pub structured_output_retries: Option<u32>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
-    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StartTurnParamsFields {
-    session_id: String,
-    prompt: ContentInput,
-    #[serde(default)]
-    skill_refs: Option<Vec<SkillRef>>,
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
-    skill_references: Option<Vec<String>>,
+    pub skill_references: Option<Vec<String>>,
     #[serde(default)]
-    flow_tool_overlay: Option<TurnToolOverlay>,
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
     #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
+    pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]
-    keep_alive: Option<bool>,
+    pub keep_alive: Option<bool>,
     #[serde(default)]
-    model: Option<String>,
+    pub model: Option<String>,
     #[serde(default)]
-    provider: Option<String>,
+    pub provider: Option<String>,
     #[serde(default)]
-    max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
     #[serde(default)]
-    system_prompt: Option<String>,
+    pub system_prompt: Option<String>,
     #[serde(default)]
-    output_schema: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
     #[serde(default)]
-    structured_output_retries: Option<u32>,
+    pub structured_output_retries: Option<u32>,
     #[serde(default)]
-    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     #[serde(default)]
-    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-impl<'de> Deserialize<'de> for StartTurnParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: StartTurnParamsFields =
-            serde_json::from_value(raw).map_err(D::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-        Ok(Self {
-            session_id: fields.session_id,
-            prompt: fields.prompt,
-            skill_refs: fields.skill_refs,
-            skill_references: fields.skill_references,
-            flow_tool_overlay: fields.flow_tool_overlay,
-            additional_instructions: fields.additional_instructions,
-            keep_alive: fields.keep_alive,
-            model: fields.model,
-            provider: fields.provider,
-            max_tokens: fields.max_tokens,
-            system_prompt: fields.system_prompt,
-            output_schema: fields.output_schema,
-            structured_output_retries: fields.structured_output_retries,
-            provider_params,
-            auth_binding,
-        })
-    }
+    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
 /// Parameters for `turn/interrupt` — canonical wire type from contracts.
 pub use meerkat_contracts::wire::InterruptParams;
+
+/// Result for `turn/interrupt` — canonical wire type from contracts.
+///
+/// Carries the generated interrupt public-result tri-state: a live run was
+/// cancelled (`interrupted`), or a staged (not-yet-promoted) session interrupt
+/// was a typed no-op terminal (`staged_noop`). NotFound/SessionBusy/Conflict
+/// remain typed JSON-RPC errors. This mirrors the REST surface exactly — the
+/// previous hand-shaped `{"interrupted": true}` claimed a live cancellation
+/// for every non-error outcome.
+pub use meerkat_contracts::wire::{InterruptResult, WireInterruptOutcome};
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -175,7 +116,9 @@ pub struct TurnOverrides {
     pub system_prompt: Option<String>,
     pub output_schema: Option<serde_json::Value>,
     pub structured_output_retries: Option<u32>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
@@ -207,6 +150,28 @@ pub async fn handle_start(
         Err(resp) => return resp.with_id(id),
     };
 
+    start_turn_with_params(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+}
+
+/// Typed `turn/start` entrypoint shared with identity-native callers
+/// (`mob/turn_start`). Takes a fully-formed [`StartTurnParams`] so callers can
+/// route typed params without re-serializing through a JSON `Map`.
+pub async fn start_turn_with_params(
+    id: Option<RpcId>,
+    params: StartTurnParams,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
     let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, &runtime) {
         Ok(sid) => sid,
         Err(resp) => return resp,
@@ -316,8 +281,47 @@ pub async fn handle_interrupt(
         Err(resp) => return resp,
     };
 
+    // `SessionRuntime::interrupt` surfaces the generated interrupt
+    // public-result tri-state (Interrupted vs StagedNoop) for non-error
+    // outcomes; NotFound/SessionBusy/Conflict arrive as typed RpcErrors.
+    // The handler serializes the contracts `InterruptResult` wire type —
+    // no hand-shaped payloads — so RPC reports a staged-session no-op
+    // honestly instead of fabricating a live cancellation.
     match runtime.interrupt(&session_id).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+        Ok(outcome) => RpcResponse::success(
+            id,
+            InterruptResult::from_outcome(session_id.to_string(), outcome),
+        ),
         Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod interrupt_wire_tests {
+    use super::{InterruptResult, WireInterruptOutcome};
+
+    /// K17 regression: a staged-session interrupt must serialize as the
+    /// honest tri-state (`interrupted: false`, `result: staged_noop`) — RPC
+    /// and REST share the same generated wire contract, so the previous RPC
+    /// divergence (`{"interrupted": true}` for every Ok) cannot reappear.
+    #[test]
+    fn staged_noop_interrupt_serializes_honest_tri_state() {
+        let staged = InterruptResult::from_outcome(
+            "session-1".to_string(),
+            WireInterruptOutcome::StagedNoop,
+        );
+        let value = serde_json::to_value(&staged).unwrap();
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["interrupted"], false);
+        assert_eq!(value["result"], "staged_noop");
+
+        let interrupted = InterruptResult::from_outcome(
+            "session-1".to_string(),
+            WireInterruptOutcome::Interrupted,
+        );
+        let value = serde_json::to_value(&interrupted).unwrap();
+        assert_eq!(value["interrupted"], true);
+        assert_eq!(value["result"], "interrupted");
     }
 }

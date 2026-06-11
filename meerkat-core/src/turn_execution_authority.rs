@@ -194,7 +194,7 @@ impl TurnFailureSourceKind {
         match error {
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::StoreError,
-            AgentError::ToolError(_) => Self::ToolError,
+            AgentError::Tool { .. } => Self::ToolError,
             AgentError::McpError(_) => Self::McpError,
             AgentError::SessionNotFound(_) => Self::SessionNotFound,
             AgentError::TokenBudgetExceeded { .. } => Self::TokenBudgetExceeded,
@@ -360,6 +360,20 @@ impl std::fmt::Display for ContentShape {
     }
 }
 
+/// Pre-selected call-timeout source threaded into the MeerkatMachine
+/// `ClassifyCallTimeout` classifier (#323).
+///
+/// Source selection stays shell-side (the agent loop knows which budget fired
+/// before awaiting); the machine owns the verdict (retryable call timeout vs
+/// terminal turn-budget). Maps 1:1 to the generated `CallTimeoutSource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTimeoutSource {
+    /// Hard per-call timeout fired (override or profile default).
+    CallBudget,
+    /// Explicit whole-turn time budget fired.
+    TurnBudget,
+}
+
 /// Typed inputs describing turn-execution events.
 #[derive(Debug, Clone)]
 pub enum TurnExecutionInput {
@@ -428,6 +442,24 @@ pub enum TurnExecutionInput {
         failure_kind: Option<LlmRetryFailureKind>,
         retry_attempt: u32,
         max_retries: u32,
+    },
+    /// #128: drive MeerkatMachine's empty-assistant-output classifier. The
+    /// agent loop computes `has_visible_or_actionable` (this turn's assistant
+    /// message OR any prior visible/actionable output in the run) and mirrors
+    /// the emitted `AssistantOutputClassified.empty_response_terminal` verdict
+    /// into the existing `llm_empty_response` terminal path. Pure
+    /// classification — no turn state mutation.
+    ClassifyAssistantOutput {
+        has_visible_or_actionable: bool,
+    },
+    /// #323: drive MeerkatMachine's call-timeout classifier. Source selection
+    /// stays shell-side; the machine owns the verdict (retryable call timeout
+    /// vs terminal turn-budget). The loop mirrors the emitted
+    /// `CallTimeoutClassified.verdict`. Pure classification — no turn state
+    /// mutation.
+    ClassifyCallTimeout {
+        source: CallTimeoutSource,
+        timeout_ms: u64,
     },
     CancelNow {
         run_id: RunId,
@@ -502,6 +534,29 @@ pub enum TurnExecutionEffect {
     LlmFailureRecoveryClassified {
         recovery: LlmFailureRecoveryKind,
     },
+    /// #128: machine-owned empty-assistant-output verdict. The agent loop
+    /// mirrors `empty_response_terminal` into the existing `llm_empty_response`
+    /// terminal path instead of branching locally.
+    AssistantOutputClassified {
+        empty_response_terminal: bool,
+    },
+    /// #323: machine-owned call-timeout verdict. The agent loop routes a
+    /// `RetryableCallTimeout` into the existing CallTimeout retry path and a
+    /// `TerminalTurnBudget` into the existing budget-exceeded terminal.
+    CallTimeoutClassified {
+        verdict: CallTimeoutVerdict,
+        timeout_ms: u64,
+    },
+}
+
+/// Machine-owned call-timeout verdict (#323). Mirror of the generated
+/// `CallTimeoutVerdict`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTimeoutVerdict {
+    /// Per-call timeout — retryable as `LlmFailureReason::CallTimeout`.
+    RetryableCallTimeout,
+    /// Whole-turn time budget exhausted — terminal.
+    TerminalTurnBudget,
 }
 
 /// Successful transition outcome for turn execution.

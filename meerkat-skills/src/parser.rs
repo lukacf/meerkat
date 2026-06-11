@@ -4,7 +4,8 @@
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    CapabilityId, SkillDescriptor, SkillDocument, SkillError, SkillKey, SkillName, SkillScope,
+    CapabilityId, SkillDescriptor, SkillDocument, SkillError, SkillExtensionKey, SkillKey,
+    SkillName, SkillScope,
 };
 use serde_yaml::Value;
 
@@ -45,18 +46,7 @@ pub fn parse_skill_md(
         capability_requirements.push(CapabilityId::parse(&raw)?);
     }
 
-    let mut extensions = IndexMap::new();
-    for (k, value) in fm.extensions {
-        let serialized = if let Some(s) = value.as_str() {
-            s.to_string()
-        } else {
-            serde_yaml::to_string(&value)
-                .map_err(|e| SkillError::Parse(format!("extension serialize error: {e}").into()))?
-                .trim()
-                .to_string()
-        };
-        extensions.insert(k, serialized);
-    }
+    let extensions = parse_extensions(fm.extensions)?;
 
     Ok(SkillDocument {
         descriptor: SkillDescriptor {
@@ -90,44 +80,57 @@ fn validate_frontmatter(
         ));
     }
 
-    for k in fm.extensions.keys() {
-        let Some((namespace, suffix)) = k.split_once('.') else {
-            return Err(SkillError::Parse(
-                format!(
-                    "unknown frontmatter field '{k}': extension keys must be namespaced as 'vendor.key'"
-                )
-                .into(),
-            ));
+    Ok(())
+}
+
+/// Parse the raw flattened frontmatter extensions into a typed
+/// `namespace.key` → value map.
+///
+/// Each key is parsed into a [`SkillExtensionKey`] once, fail-closed: any
+/// non-namespaced or malformed key (the only frontmatter fields that reach the
+/// `#[serde(flatten)]` catch-all) errors here rather than silently surviving as
+/// a re-split string. Values stay open-ended author metadata; scalars are kept
+/// verbatim and structured values are serialized. A structured (non-scalar)
+/// value is policy-bearing and must declare a companion `<namespace>.version`,
+/// enforced over the typed key set.
+fn parse_extensions(
+    raw: IndexMap<String, Value>,
+) -> Result<IndexMap<SkillExtensionKey, String>, SkillError> {
+    let mut typed: IndexMap<SkillExtensionKey, (Value, String)> =
+        IndexMap::with_capacity(raw.len());
+    for (k, value) in raw {
+        let key = SkillExtensionKey::parse(&k)?;
+        let serialized = if let Some(s) = value.as_str() {
+            s.to_string()
+        } else {
+            serde_yaml::to_string(&value)
+                .map_err(|e| SkillError::Parse(format!("extension serialize error: {e}").into()))?
+                .trim()
+                .to_string()
         };
-        if namespace.is_empty() || suffix.is_empty() {
-            return Err(SkillError::Parse(
-                format!(
-                    "invalid extension key '{k}': expected non-empty namespace and key segments"
-                )
-                .into(),
-            ));
-        }
+        typed.insert(key, (value, serialized));
     }
 
-    for (k, value) in &fm.extensions {
-        let Some((namespace, suffix)) = k.split_once('.') else {
-            continue;
-        };
-        if suffix == "version" {
+    for (key, (value, _)) in &typed {
+        if key.is_version() {
             continue;
         }
         let nontrivial = matches!(value, Value::Mapping(_) | Value::Sequence(_));
-        if nontrivial && !fm.extensions.contains_key(&format!("{namespace}.version")) {
+        if nontrivial && !typed.contains_key(&key.version_companion()) {
             return Err(SkillError::Parse(
                 format!(
-                    "extension '{k}' requires companion '{namespace}.version' for nontrivial values"
+                    "extension '{key}' requires companion '{}' for nontrivial values",
+                    key.version_companion()
                 )
                 .into(),
             ));
         }
     }
 
-    Ok(())
+    Ok(typed
+        .into_iter()
+        .map(|(key, (_, serialized))| (key, serialized))
+        .collect())
 }
 
 /// Split content into frontmatter and body, separated by `---` delimiters.
@@ -165,7 +168,7 @@ fn split_frontmatter(content: &str) -> Result<(String, &str), SkillError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_core::skills::SourceUuid;
@@ -298,6 +301,64 @@ body";
             content,
             Some("correct-name"),
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_structured_extension_with_version_parses_into_typed_key() {
+        let content = r"---
+name: test-skill
+description: d
+vendor.version: '1'
+vendor.policy:
+  allow: [a, b]
+  deny: [c]
+---
+body";
+        let doc =
+            parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None).unwrap();
+
+        // Keys are typed `SkillExtensionKey` owners with namespace/key splits
+        // parsed once, not re-split strings.
+        let policy = doc
+            .extensions
+            .keys()
+            .find(|k| k.key() == "policy")
+            .expect("policy extension present");
+        assert_eq!(policy.namespace(), "vendor");
+        assert_eq!(policy.as_str(), "vendor.policy");
+
+        // The structured value round-trips into its serialized form rather than
+        // being silently dropped.
+        let serialized = &doc.extensions[policy];
+        assert!(serialized.contains("allow"));
+        assert!(serialized.contains("deny"));
+    }
+
+    #[test]
+    fn test_structured_extension_without_version_fails_closed() {
+        let content = r"---
+name: test-skill
+description: d
+vendor.policy:
+  allow: [a]
+---
+body";
+        let result = parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None);
+        // Policy-bearing (structured) extension without a companion
+        // `vendor.version` fails at parse rather than silently stringifying.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_extension_key_with_empty_segment() {
+        let content = r"---
+name: test-skill
+description: d
+vendor.: value
+---
+body";
+        let result = parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None);
         assert!(result.is_err());
     }
 }

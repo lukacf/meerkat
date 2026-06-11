@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::ToolName;
 
 /// Machine-backed tool-visibility owner. Staged-revision tokens are minted
 /// by the session's `MeerkatMachine` DSL authority via its
@@ -110,9 +111,9 @@ pub fn formal_projection_value<T: serde::Serialize>(value: &T) -> String {
 }
 
 fn authority_witnesses_for_names(
-    names: &std::collections::BTreeSet<String>,
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    names: &std::collections::BTreeSet<ToolName>,
+    witnesses: &std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<ToolName, ToolVisibilityWitness> {
     names
         .iter()
         .filter_map(|name| {
@@ -125,7 +126,7 @@ fn authority_witnesses_for_names(
 
 fn deferred_load_authority_map(
     authorities: &[DeferredToolLoadAuthority],
-) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError> {
+) -> Result<std::collections::BTreeMap<ToolName, ToolVisibilityWitness>, ToolScopeStageError> {
     let mut by_name = std::collections::BTreeMap::new();
     let mut invalid = Vec::new();
 
@@ -146,8 +147,8 @@ fn deferred_load_authority_map(
 }
 
 fn dsl_witnesses(
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness> {
+    witnesses: &std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<ToolName, super::dsl::ToolVisibilityWitness> {
     witnesses
         .iter()
         .map(|(name, witness)| {
@@ -178,7 +179,6 @@ fn core_tool_visibility_witness(
     witness: &super::dsl::ToolVisibilityWitness,
 ) -> ToolVisibilityWitness {
     ToolVisibilityWitness {
-        stable_owner_key: witness.stable_owner_key.clone(),
         last_seen_provenance: witness.last_seen_provenance.as_ref().map(|provenance| {
             meerkat_core::types::ToolProvenance {
                 kind: core_tool_source_kind(provenance.kind),
@@ -189,8 +189,8 @@ fn core_tool_visibility_witness(
 }
 
 fn core_witnesses(
-    witnesses: &std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness>,
-) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    witnesses: &std::collections::BTreeMap<ToolName, super::dsl::ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<ToolName, ToolVisibilityWitness> {
     witnesses
         .iter()
         .map(|(name, witness)| (name.clone(), core_tool_visibility_witness(witness)))
@@ -256,7 +256,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::dsl::MeerkatMachineMutator::apply(
             &mut *guard,
-            super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
+            super::dsl::MeerkatMachineInput::ReplaceVisibilityState {
                 capability_base_filter: super::dsl::ToolFilter::from(
                     &visibility_state.capability_base_filter,
                 ),
@@ -276,7 +276,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             },
         )
         .map_err(|err| ToolScopeApplyError::Owner {
-            message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
+            message: super::dsl_authority::map_error(err, "ReplaceVisibilityState"),
         })?;
         mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(())
@@ -285,7 +285,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     fn stage_persistent_filter(
         &self,
         filter: ToolFilter,
-        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         let authority = self.dsl_authority_for_stage()?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
@@ -313,7 +313,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn stage_requested_deferred_names(
         &self,
-        names: std::collections::BTreeSet<String>,
+        names: std::collections::BTreeSet<ToolName>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         if !names.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses {
@@ -374,7 +374,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn replace_deferred_tool_authority_catalog(
         &self,
-        catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     ) -> Result<(), ToolScopeApplyError> {
         let authority = self.dsl_authority_for_apply()?;
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
@@ -398,7 +398,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn replace_filter_tool_authority_catalog(
         &self,
-        catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     ) -> Result<(), ToolScopeApplyError> {
         let authority = self.dsl_authority_for_apply()?;
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
@@ -422,8 +422,8 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn set_turn_overlay(
         &self,
-        allow: Option<std::collections::BTreeSet<String>>,
-        deny: std::collections::BTreeSet<String>,
+        allow: Option<std::collections::BTreeSet<ToolName>>,
+        deny: std::collections::BTreeSet<ToolName>,
     ) -> Result<ToolScopeTurnOverlay, ToolScopeStageError> {
         let authority = self.dsl_authority_for_stage()?;
         let allow_active = allow.is_some();
@@ -603,7 +603,6 @@ impl MeerkatMachine {
             ops_lifecycle,
             completions_present,
             ops_registry_present,
-            attachment_live,
             epoch_id,
             _visibility_state,
             formal_pre_run_phase,
@@ -668,7 +667,6 @@ impl MeerkatMachine {
                 Arc::clone(&entry.ops_lifecycle),
                 true,
                 true,
-                entry.attachment_is_live(),
                 entry.epoch_id.clone(),
                 entry.tool_visibility_owner.visibility_state().ok()?,
                 formal_pre_run_phase,
@@ -750,7 +748,6 @@ impl MeerkatMachine {
             driver_present: true,
             completions_present,
             ops_registry_present,
-            attachment_live,
             epoch_id,
             cursor_state: {
                 let cursor_state = ops_lifecycle.completion_cursor_snapshot();
@@ -776,6 +773,7 @@ impl MeerkatMachine {
                 request_id: ingress.request_id(&input_id),
                 reservation_key: ingress.reservation_key(&input_id),
                 handling_mode: ingress.handling_mode(&input_id),
+                live_interrupt_required: ingress.live_interrupt_required(&input_id),
                 lifecycle: driver.input_phase(&input_id),
                 terminal_outcome: driver.input_terminal_outcome(&input_id),
                 last_run_id: driver.input_last_run_id(&input_id),

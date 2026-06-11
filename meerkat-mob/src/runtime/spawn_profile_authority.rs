@@ -1,5 +1,5 @@
 use crate::error::MobError;
-use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, ProfileName};
 use crate::machines::mob_machine as mob_dsl;
 use crate::profile::Profile;
 use serde::Serialize;
@@ -20,7 +20,7 @@ pub(super) struct AuthorizedSpawnProfileMaterial {
 
 pub(super) fn authorize_spawn_profile_material(
     authority: &mut mob_dsl::MobMachineAuthority,
-    agent_identity: &MeerkatId,
+    agent_identity: &AgentIdentity,
     profile_name: &ProfileName,
     profile: &Profile,
     context: &str,
@@ -37,7 +37,7 @@ pub(super) fn authorize_spawn_profile_material(
 }
 
 pub(super) fn authorize_spawn_profile_input(
-    agent_identity: &MeerkatId,
+    agent_identity: &AgentIdentity,
     profile_name: &ProfileName,
     profile: &Profile,
 ) -> Result<(mob_dsl::MobMachineInput, AuthorizedSpawnProfileMaterial), MobError> {
@@ -48,7 +48,12 @@ pub(super) fn authorize_spawn_profile_input(
     let tool_config_digest = digest_serializable(&profile.tools)?;
     let skills_digest = digest_serializable(&profile.skills)?;
     let provider_params_digest = optional_value_digest(profile.provider_params.as_ref())?;
-    let output_schema_digest = optional_value_digest(profile.output_schema.as_ref())?;
+    let output_schema_digest = optional_value_digest(
+        profile
+            .output_schema
+            .as_ref()
+            .map(meerkat_core::MeerkatSchema::as_value),
+    )?;
     let dsl_identity =
         mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
     let expected = AuthorizedSpawnProfileMaterial {
@@ -115,7 +120,7 @@ pub(super) fn require_authorized_effect(
     )))
 }
 
-fn optional_value_digest(value: Option<&serde_json::Value>) -> Result<Option<String>, MobError> {
+fn optional_value_digest<T: Serialize>(value: Option<&T>) -> Result<Option<String>, MobError> {
     value.map(digest_serializable).transpose()
 }
 

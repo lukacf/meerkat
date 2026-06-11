@@ -41,9 +41,19 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
+import { isCompatibleWith } from "./generated/version_compat.js";
 import {
   CONTRACT_VERSION,
   type AttentionBindingRequest,
+  type CapabilitiesResponse,
+  type ConfigPatchParams,
+  type ConfigSetParams,
+  type ConfigWriteResult,
+  type InterruptResult,
+  type ServerCapabilities,
+  type SkillEntry,
+  type WorkEventsResult,
+  type WorkItemsResult,
   type LiveChannelParams,
   type LiveCloseResult,
   type LiveCommitInputParams,
@@ -66,12 +76,14 @@ import {
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
+  SkillListResponse,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
   Mob,
   type MemberDeliveryReceipt,
   type MemberSendOptions,
+  type MobHandlingMode,
   type MobKickoffMemberSnapshot,
   type MobKickoffWaitOptions,
   type MobReadyMemberSnapshot,
@@ -133,7 +145,6 @@ import type {
   SessionOptions,
   SessionTranscriptRevision,
   SessionTranscriptRewriteResult,
-  SessionToolCall,
   SessionToolResult,
   SkillKey,
   SkillRef,
@@ -150,33 +161,26 @@ import type {
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
-  WorkAttentionBinding,
-  WorkGraphClaim,
-  WorkCompletionPolicy,
-  WorkGraphAttentionListRequest,
-  WorkGraphAttentionListResult,
-  WorkGraphAttentionTarget,
-  WorkGraphEdge,
-  WorkGraphEdgeKind,
-  WorkGraphEvent,
+  ReadyWorkFilter,
   WorkGraphEventFilter,
-  WorkGraphEventsResult,
-  WorkGraphEventKind,
-  WorkGraphGoalStatusRequest,
-  WorkGraphItemFilter,
+  WorkGraphIdParams,
   WorkGraphItemLookupOptions,
-  WorkGraphGoalResult,
-  WorkGraphOwner,
-  WorkGraphOwnerKey,
-  WorkGraphOwnerKind,
-  WorkGraphPriority,
-  WorkGraphReadyFilter,
-  WorkGraphSnapshot,
   WorkGraphSnapshotFilter,
-  WorkGraphStatus,
-  WorkItem,
-  WorkItemListResult,
+  WorkItemFilter,
 } from "./types.js";
+import {
+  parseAttentionListResult,
+  parseGoalStatusResult,
+  parseWorkGraphEvent,
+  parseWorkGraphSnapshot,
+  parseWorkItem,
+  type AttentionListRequest,
+  type AttentionListResult,
+  type GoalStatusRequest,
+  type GoalStatusResult,
+  type WorkGraphSnapshot,
+  type WorkItem,
+} from "./generated/types.js";
 
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
@@ -223,27 +227,6 @@ const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
   "work_not_found",
   "internal",
 ]);
-const WORK_ATTENTION_DELEGATED_AUTHORITIES = new Set<string>([
-  "add_evidence",
-  "close_own_review_item",
-  "request_closure",
-  "close_if_policy_allows",
-]);
-const WORK_ATTENTION_MODES = new Set<string>([
-  "pursue",
-  "coordinate",
-  "review",
-  "falsify",
-  "judge",
-  "observe",
-]);
-const WORK_ATTENTION_STATES = new Set<string>([
-  "active",
-  "paused",
-  "superseded",
-  "stopped",
-]);
-
 function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
 }
@@ -318,38 +301,6 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
-/**
- * Lower an ergonomic `value` / `clear` pair to the canonical tagged tri-state
- * `WireTurnMetadataOverride`:
- *
- * - `clear` truthy   -> `{ action: "clear" }` (Clear)
- * - `value` provided -> `{ action: "set", value }` (Set)
- * - neither          -> `undefined` (omitted = Inherit)
- *
- * The illegal `set + clear` combination is rejected here, mirroring the wire
- * serde boundary which fails the same payload.
- */
-function turnMetadataOverride(
-  value: Record<string, unknown> | undefined,
-  clear: boolean | undefined,
-  setField: string,
-  clearField: string,
-): Record<string, unknown> | undefined {
-  if (clear && value !== undefined) {
-    throw new MeerkatError(
-      "INVALID_ARGS",
-      `${clearField} cannot be combined with ${setField}`,
-    );
-  }
-  if (clear) {
-    return { action: "clear" };
-  }
-  if (value !== undefined) {
-    return { action: "set", value };
-  }
-  return undefined;
-}
-
 function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     mob_id: mobId,
@@ -420,26 +371,8 @@ function mobTurnStartPayload(
   setIfDefined(payload, "system_prompt", options?.systemPrompt);
   setIfDefined(payload, "output_schema", options?.outputSchema);
   setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
-  setIfDefined(
-    payload,
-    "provider_params",
-    turnMetadataOverride(
-      options?.providerParams,
-      options?.clearProviderParams,
-      "providerParams",
-      "clearProviderParams",
-    ),
-  );
-  setIfDefined(
-    payload,
-    "auth_binding",
-    turnMetadataOverride(
-      options?.authBinding,
-      options?.clearAuthBinding,
-      "authBinding",
-      "clearAuthBinding",
-    ),
-  );
+  setIfDefined(payload, "provider_params", options?.providerParams);
+  setIfDefined(payload, "auth_binding", options?.authBinding);
   return payload;
 }
 
@@ -456,6 +389,11 @@ function normalizeMobWireMembersBatchEdge(
 
 export class MeerkatClient {
   private process: ChildProcess | null = null;
+  // Permanent transport-failed state: once the JSONL framing is untrustworthy
+  // (corrupted frame), every subsequent call must reject with this recorded
+  // typed fault instead of writing into the condemned stream. Cleared only by
+  // a fresh connect() (new process, new stream).
+  private transportFault: MeerkatError | null = null;
   private processStderr = "";
   private requestId = 0;
   private _capabilities: Capability[] = [];
@@ -467,8 +405,16 @@ export class MeerkatClient {
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
-  private pendingStreamQueue: AsyncQueue<Record<string, unknown> | null> | null = null;
-  private pendingStreamRequestId: number | null = null;
+  // Per-request_id stream subscriptions for createSessionStreaming calls whose
+  // session_id is not yet bound. Keyed by the JSON-RPC request id so concurrent
+  // creates are admitted and correlated independently instead of colliding on a
+  // single client-local slot (which previously threw INVALID_STATE before the
+  // server had any chance to admit or reject the second create).
+  private pendingStreamQueues = new Map<number, AsyncQueue<Record<string, unknown> | null>>();
+  // Pre-binding events keyed by session_id. session_id is globally unique per
+  // session, so buffering by session_id correlates correctly even when several
+  // streams are pending: each event lands under the session it names, and the
+  // response that binds that session_id drains exactly its own buffer.
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
@@ -479,9 +425,15 @@ export class MeerkatClient {
     {
       description: string;
       inputSchema: Record<string, unknown>;
-      handler: (args: Record<string, unknown>) => Promise<string>;
+      handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>;
     }
   >();
+  // Typed faults from post-connect tool registration. `registerTool` is sync and
+  // the server round-trip is detached, so a genuine server rejection cannot be
+  // surfaced to the synchronous caller. Recording it here makes the
+  // silent-never-registers failure programmatically distinguishable instead of
+  // being swallowed by a best-effort `.catch(() => {})`.
+  private toolRegistrationErrors = new Map<string, MeerkatError>();
 
   constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
@@ -496,22 +448,91 @@ export class MeerkatClient {
    *   return `Results for ${args.q}`;
    * });
    * ```
+   *
+   * Handlers may return a plain string or a `ContentBlock[]` for multimodal
+   * tool results. Block arrays are forwarded faithfully to the runtime as
+   * `WireToolResultContent` (no string coercion).
    */
   registerTool(
     name: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>) => Promise<string>,
+    handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
+    // A fresh declaration supersedes any stale fault from a prior failed attempt.
+    this.toolRegistrationErrors.delete(name);
     // If already connected, register the new tool with the server immediately.
     if (this.process?.stdin) {
-      this.request("tools/register", {
-        tools: [{ name, description, input_schema: inputSchema }],
-      }).catch(() => {
-        // Best-effort: tool registration may fail if connection is closing.
-      });
+      void this.registerToolWithServer(name, description, inputSchema);
     }
+  }
+
+  /**
+   * Send a single post-connect tool registration and resolve its outcome
+   * without swallowing genuine faults.
+   *
+   * Benign disconnect/shutdown faults are tolerated: the local
+   * `toolHandlers` registry still holds the definition and the next
+   * `connect()` re-sends it, so the tool is not lost. A genuine server
+   * rejection or protocol fault is a real failure that cannot reach the
+   * synchronous `registerTool` caller, so we record it as an inspectable
+   * typed fault (queryable via {@link toolRegistrationError}), marking the
+   * tool unconfirmed. This replaces the previous `.catch(() => {})` that
+   * laundered every failure into silence. The recorded fault is the
+   * propagation channel: re-throwing on this detached promise would surface
+   * only as an unhandled rejection (the caller is sync), so the typed record
+   * is the observable signal instead.
+   */
+  private async registerToolWithServer(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.request("tools/register", {
+        tools: [{ name, description, input_schema: inputSchema }],
+      });
+    } catch (error) {
+      const fault =
+        error instanceof MeerkatError
+          ? error
+          : new MeerkatError(
+              "TOOL_REGISTRATION_FAILED",
+              `Tool ${name} registration failed: ${String(error)}`,
+            );
+      // Clean shutdown / disconnect is genuinely benign — the registry already
+      // holds the definition and a future connect() will re-send it.
+      const BENIGN_CODES = new Set([
+        "CLIENT_CLOSED",
+        "CONNECTION_CLOSED",
+        "NOT_CONNECTED",
+        "PROCESS_EXITED",
+        "PROCESS_ERROR",
+      ]);
+      if (BENIGN_CODES.has(fault.code)) {
+        return;
+      }
+      // Genuine server rejection / protocol fault: record the typed fault as
+      // caller-inspectable state so the tool is programmatically known to be
+      // unconfirmed. The synchronous `registerTool` caller cannot observe a
+      // rejection on this detached promise, so the recorded fault — not a
+      // re-throw — is the surfaced signal.
+      this.toolRegistrationErrors.set(name, fault);
+      return;
+    }
+    // Success: a prior failed attempt's fault no longer applies.
+    this.toolRegistrationErrors.delete(name);
+  }
+
+  /**
+   * Return the typed fault recorded for a tool whose post-connect registration
+   * was rejected by the server, or `undefined` if the tool's most recent
+   * registration attempt succeeded (or has not completed yet). Lets callers
+   * distinguish a tool that silently never registered from one that is live.
+   */
+  toolRegistrationError(name: string): MeerkatError | undefined {
+    return this.toolRegistrationErrors.get(name);
   }
 
   // -- Connection ---------------------------------------------------------
@@ -546,6 +567,8 @@ export class MeerkatClient {
     this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // Fresh process, fresh stream: clear any recorded transport fault.
+    this.transportFault = null;
     const child = this.process;
     this.processStderr = "";
     child.stderr?.on("data", (chunk: string | Buffer) => {
@@ -582,8 +605,10 @@ export class MeerkatClient {
     this.rl = createInterface({ input: this.process.stdout! });
     this.rl.on("line", (line: string) => this.handleLine(line));
 
-    // Handshake
-    const initResult = await this.request("initialize", {});
+    // Handshake — `initialize` returns the generated `ServerCapabilities`
+    // contract; fields are validated below.
+    const initResult = (await this.request("initialize", {})) as Partial<ServerCapabilities> &
+      Record<string, unknown>;
     const serverVersion = String(initResult.contract_version ?? "");
     if (!MeerkatClient.checkVersionCompatible(serverVersion, CONTRACT_VERSION)) {
       throw new MeerkatError(
@@ -597,15 +622,17 @@ export class MeerkatClient {
         : [],
     );
 
-    // Fetch capabilities
-    const capsResult = await this.request("capabilities/get", {});
-    const rawCaps = (capsResult.capabilities as Array<Record<string, unknown>>) ?? [];
-    this._capabilities = rawCaps.map(
-      (cap): Capability => ({
-        id: String(cap.id ?? ""),
-        description: String(cap.description ?? ""),
-        status: MeerkatClient.normalizeStatus(cap.status),
-      }),
+    // Fetch capabilities — generated `CapabilitiesResponse` contract.
+    const capsResult = (await this.request("capabilities/get", {})) as Partial<CapabilitiesResponse> &
+      Record<string, unknown>;
+    if (!Array.isArray(capsResult.capabilities)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid capabilities/get response: capabilities must be a list",
+      );
+    }
+    this._capabilities = capsResult.capabilities.map((cap) =>
+      MeerkatClient.parseWireCapabilityEntry(cap),
     );
 
     // Register callback tools if any were declared.
@@ -618,6 +645,8 @@ export class MeerkatClient {
         }),
       );
       await this.request("tools/register", { tools });
+      // The bulk re-send confirmed every declared tool; drop stale per-tool faults.
+      this.toolRegistrationErrors.clear();
     }
 
     return this;
@@ -655,6 +684,36 @@ export class MeerkatClient {
     this.pendingRequests.clear();
   }
 
+  /**
+   * Surface a typed transport/protocol fault to every pending caller and
+   * stream consumer. Used when the read loop encounters a corrupted frame and
+   * the stream can no longer be trusted, so callers fail closed instead of
+   * hanging on a dropped response.
+   */
+  private failTransport(reason: unknown): void {
+    if (!this.transportFault) {
+      this.transportFault =
+        reason instanceof MeerkatError
+          ? reason
+          : new MeerkatError("PROTOCOL_ERROR", String(reason));
+    }
+    this.rejectPendingRequests(reason);
+    this.closeQueues();
+    // Fail closed: the stream is condemned, so the process goes with it —
+    // leaving it alive would let later calls write into framing we just
+    // classified as untrustworthy.
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+    const process = this.process;
+    this.process = null;
+    if (process) {
+      process.stdin?.destroy();
+      process.kill();
+    }
+  }
+
   private closeQueues(): void {
     for (const [, queue] of this.eventQueues) {
       queue.put(null);
@@ -665,12 +724,11 @@ export class MeerkatClient {
     }
     this.streamQueues.clear();
     this.streamTerminalOutcomes.clear();
-    if (this.pendingStreamQueue) {
-      this.pendingStreamQueue.put(null);
-      this.pendingStreamQueue = null;
-      this.pendingStreamRequestId = null;
-      this.unmatchedStreamBuffer.clear();
+    for (const [, queue] of this.pendingStreamQueues) {
+      queue.put(null);
     }
+    this.pendingStreamQueues.clear();
+    this.unmatchedStreamBuffer.clear();
   }
 
   // -- Session lifecycle --------------------------------------------------
@@ -713,21 +771,20 @@ export class MeerkatClient {
     this.requestId++;
     const requestId = this.requestId;
 
-    if (this.pendingStreamQueue) {
-      throw new MeerkatError(
-        "INVALID_STATE",
-        "Only one createSessionStreaming request can be pending at a time",
-      );
-    }
+    // Per-request_id subscription: concurrent createSessionStreaming calls each
+    // get their own pending queue keyed by request id, so a second create is no
+    // longer rejected by a client-local singleton invariant. Admission/rejection
+    // is left to the server.
     const queue = new AsyncQueue<Record<string, unknown> | null>();
-    this.pendingStreamQueue = queue;
-    this.pendingStreamRequestId = requestId;
+    this.pendingStreamQueues.set(requestId, queue);
     const responsePromise = this.registerRequest(requestId);
 
-    // When response arrives, bind the queue to the session_id
+    // When response arrives, bind this request's queue to its session_id.
     const wrappedPromise = responsePromise.then((result) => {
       const sid = String(result.session_id ?? "");
       if (sid) {
+        // Drain only this session's pre-binding buffer — events are buffered by
+        // session_id, so concurrent pending streams do not cross-deliver.
         const buffered = this.unmatchedStreamBuffer.get(sid) ?? [];
         for (const evt of buffered) {
           queue.put(evt);
@@ -735,10 +792,15 @@ export class MeerkatClient {
         this.unmatchedStreamBuffer.delete(sid);
         this.eventQueues.set(sid, queue);
       }
-      this.pendingStreamQueue = null;
-      this.pendingStreamRequestId = null;
-      this.unmatchedStreamBuffer.clear();
+      this.pendingStreamQueues.delete(requestId);
       return result;
+    }, (error) => {
+      // The server rejected this create: tear down only this request's pending
+      // subscription so its consumer fails closed, and leave any concurrent
+      // pending streams untouched.
+      this.pendingStreamQueues.delete(requestId);
+      queue.put(null);
+      throw error;
     });
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "session/create", params };
@@ -846,7 +908,10 @@ export class MeerkatClient {
     text: string,
     options?: SessionIngressOptions,
   ): Promise<{ status: string }> {
-    const params: Record<string, unknown> = { session_id: sessionId, text };
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      content: { type: "text", text },
+    };
     if (options?.source !== undefined) {
       params.source = options.source;
     }
@@ -1005,32 +1070,32 @@ export class MeerkatClient {
   // -- Config -------------------------------------------------------------
 
   async getConfig(): Promise<ConfigEnvelope> {
-    const raw = await this.request("config/get", {});
-    return MeerkatClient.parseConfigEnvelope(raw);
+    // The wire body IS the generated `ConfigEnvelope` contract.
+    return (await this.request("config/get", {})) as unknown as ConfigEnvelope;
   }
 
   async setConfig(
     config: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<ConfigEnvelope> {
-    const params: Record<string, unknown> = { config };
+  ): Promise<ConfigWriteResult> {
+    const params: ConfigSetParams & Record<string, unknown> = { config };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    const raw = await this.request("config/set", params);
-    return MeerkatClient.parseConfigEnvelope(raw);
+    // The wire body IS the generated `ConfigWriteResult` contract (envelope
+    // plus the live-propagation report).
+    return (await this.request("config/set", params)) as unknown as ConfigWriteResult;
   }
 
   async patchConfig(
     patch: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<ConfigEnvelope> {
-    const params: Record<string, unknown> = { patch };
+  ): Promise<ConfigWriteResult> {
+    const params: ConfigPatchParams & Record<string, unknown> = { patch };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    const raw = await this.request("config/patch", params);
-    return MeerkatClient.parseConfigEnvelope(raw);
+    return (await this.request("config/patch", params)) as unknown as ConfigWriteResult;
   }
 
   async mcpAdd(params: McpAddParams): Promise<McpLiveOpResponse> {
@@ -1066,9 +1131,11 @@ export class MeerkatClient {
 
   // -- Skills ---------------------------------------------------------------
 
-  async listSkills(): Promise<Array<Record<string, unknown>>> {
+  async listSkills(): Promise<SkillEntry[]> {
     const result = await this.request("skills/list", {});
-    return (result.skills as Array<Record<string, unknown>>) ?? [];
+    MeerkatClient.requireRecordArray(result.skills, "Invalid skills/list response");
+    const envelope = result as unknown as SkillListResponse;
+    return envelope.skills;
   }
 
   async getBlob(blobId: string): Promise<BlobPayload> {
@@ -1239,79 +1306,61 @@ export class MeerkatClient {
     itemId: string,
     options?: WorkGraphItemLookupOptions,
   ): Promise<WorkItem> {
-    const result = await this.request("workgraph/get", {
-      id: itemId,
-      ...MeerkatClient.toWireWorkGraphScope(options),
-    });
-    return MeerkatClient.parseWorkItem(result);
+    const params: WorkGraphIdParams = { id: itemId };
+    if (options?.realmId !== undefined) {
+      params.realm_id = options.realmId;
+    }
+    if (options?.namespace !== undefined) {
+      params.namespace = options.namespace;
+    }
+    const result = await this.request("workgraph/get", params);
+    return parseWorkItem(result);
   }
 
-  async listWorkGraphItems(
-    filter: WorkGraphItemFilter = {},
-  ): Promise<WorkItemListResult> {
-    const result = await this.request(
-      "workgraph/list",
-      MeerkatClient.toWireWorkGraphItemFilter(filter),
-    );
-    return {
-      items: MeerkatClient.parseWorkItemArray(result.items),
-    };
+  async listWorkGraphItems(filter: WorkItemFilter = {}): Promise<WorkItemsResult> {
+    const result = await this.request("workgraph/list", filter);
+    const items: WorkItemsResult["items"] = MeerkatClient.requireRecordArray(
+      result.items,
+      "Invalid workgraph item list",
+    ).map((entry) => parseWorkItem(entry));
+    return { items };
   }
 
-  async listReadyWorkGraphItems(
-    filter: WorkGraphReadyFilter = {},
-  ): Promise<WorkItemListResult> {
-    const result = await this.request(
-      "workgraph/ready",
-      MeerkatClient.toWireWorkGraphReadyFilter(filter),
-    );
-    return {
-      items: MeerkatClient.parseWorkItemArray(result.items),
-    };
+  async listReadyWorkGraphItems(filter: ReadyWorkFilter = {}): Promise<WorkItemsResult> {
+    const result = await this.request("workgraph/ready", filter);
+    const items: WorkItemsResult["items"] = MeerkatClient.requireRecordArray(
+      result.items,
+      "Invalid workgraph item list",
+    ).map((entry) => parseWorkItem(entry));
+    return { items };
   }
 
   async getWorkGraphSnapshot(
     filter: WorkGraphSnapshotFilter = {},
   ): Promise<WorkGraphSnapshot> {
-    const result = await this.request(
-      "workgraph/snapshot",
-      MeerkatClient.toWireWorkGraphItemFilter(filter),
-    );
-    return MeerkatClient.parseWorkGraphSnapshot(result);
+    const result = await this.request("workgraph/snapshot", filter);
+    return parseWorkGraphSnapshot(result);
   }
 
-  async listWorkGraphEvents(
-    filter: WorkGraphEventFilter = {},
-  ): Promise<WorkGraphEventsResult> {
-    const result = await this.request(
-      "workgraph/events",
-      MeerkatClient.toWireWorkGraphEventFilter(filter),
-    );
-    return {
-      events: MeerkatClient.parseWorkGraphEventArray(result.events),
-    };
+  async listWorkGraphEvents(filter: WorkGraphEventFilter = {}): Promise<WorkEventsResult> {
+    const result = await this.request("workgraph/events", filter);
+    const events: WorkEventsResult["events"] = MeerkatClient.requireRecordArray(
+      result.events,
+      "Invalid workgraph event list",
+    ).map((entry) => parseWorkGraphEvent(entry));
+    return { events };
   }
 
-  async getWorkGraphGoalStatus(
-    params: WorkGraphGoalStatusRequest,
-  ): Promise<WorkGraphGoalResult> {
-    const result = await this.request<Record<string, unknown>>(
-      "workgraph/goal/status",
-      MeerkatClient.toWireWorkGraphGoalStatusRequest(params),
-    );
-    return MeerkatClient.parseWorkGraphGoalResult(result);
+  async getWorkGraphGoalStatus(params: GoalStatusRequest): Promise<GoalStatusResult> {
+    const result = await this.request("workgraph/goal/status", params);
+    return parseGoalStatusResult(result);
   }
 
   async listWorkGraphAttention(
-    params: WorkGraphAttentionListRequest = {},
-  ): Promise<WorkGraphAttentionListResult> {
-    const result = await this.request<Record<string, unknown>>(
-      "workgraph/attention/list",
-      MeerkatClient.toWireWorkGraphAttentionListRequest(params),
-    );
-    return {
-      attention: MeerkatClient.parseWorkAttentionBindingArray(result.attention),
-    };
+    params: AttentionListRequest = {},
+  ): Promise<AttentionListResult> {
+    const result = await this.request("workgraph/attention/list", params);
+    return parseAttentionListResult(result);
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -1336,7 +1385,7 @@ export class MeerkatClient {
   async listMobs(): Promise<MobSummary[]> {
     this.requireCapability("mob");
     const result = await this.request("mob/list", {});
-    const mobs = (result.mobs as Array<Record<string, unknown>>) ?? [];
+    const mobs = MeerkatClient.requireRecordArray(result.mobs, "Invalid mob/list response");
     return mobs.map((mob) => ({
       mobId: String(mob.mob_id ?? mob.mobId ?? ""),
       status: MeerkatClient.requireStringField(
@@ -1358,7 +1407,10 @@ export class MeerkatClient {
 
   async listMobMembers(mobId: string): Promise<MobMember[]> {
     const result = await this.request("mob/members", { mob_id: mobId });
-    const members = (result.members as Array<Record<string, unknown>>) ?? [];
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/members response",
+    );
     return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       const memberRef =
@@ -1389,7 +1441,6 @@ export class MeerkatClient {
               )
             : undefined,
         runtimeMode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
-        state: member.state != null ? String(member.state) : undefined,
         wiredTo: Array.isArray(member.wired_to)
           ? member.wired_to.map((peer) => String(peer))
           : undefined,
@@ -1440,10 +1491,10 @@ export class MeerkatClient {
           ? result.agent_identity
           : agentIdentity,
       memberRef,
-      handlingMode:
-        result.handling_mode === "steer" || result.handling_mode === "queue"
-          ? result.handling_mode
-          : (options?.handlingMode ?? "queue"),
+      handlingMode: MeerkatClient.parseWireHandlingMode(
+        result.handling_mode,
+        "Invalid mob/member_send response: missing or unknown handling_mode",
+      ),
     };
   }
 
@@ -1858,10 +1909,11 @@ export class MeerkatClient {
       params.timeout_ms = options.timeoutMs;
     }
     const result = await this.request("mob/wait_kickoff", params);
-    const members = Array.isArray(result.members) ? result.members : [];
-    return members.map((entry) => {
-      const member =
-        entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/wait_kickoff response",
+    );
+    return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       if (!agentIdentity) {
         throw new MeerkatError(
@@ -1928,10 +1980,11 @@ export class MeerkatClient {
       params.timeout_ms = options.timeoutMs;
     }
     const result = await this.request("mob/wait_ready", params);
-    const members = Array.isArray(result.members) ? result.members : [];
-    return members.map((entry) => {
-      const member =
-        entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const members = MeerkatClient.requireRecordArray(
+      result.members,
+      "Invalid mob/wait_ready response",
+    );
+    return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
       if (!agentIdentity) {
         throw new MeerkatError(
@@ -2299,8 +2352,10 @@ export class MeerkatClient {
       streamId,
       queue,
       closeRemote: async (id: string) => {
-        this.streamQueues.delete(id);
+        // Await stream-close authority before tearing down local dispatch:
+        // a rejected close must leave the subscription delivering events.
         await this.request(closeMethod, { stream_id: id });
+        this.streamQueues.delete(id);
       },
       parseEvent: parse,
       getTerminalOutcome: () => this.streamTerminalOutcomes.get(streamId),
@@ -2310,7 +2365,6 @@ export class MeerkatClient {
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
     const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
     const source = MeerkatClient.parseEventSourceIdentity(raw.source);
-    const sourceId = MeerkatClient.parseOptionalString(raw.source_id ?? raw.sourceId);
     const seq = MeerkatClient.parseOptionalNumber(raw.seq);
     const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
     const payloadRaw = raw.payload;
@@ -2320,7 +2374,6 @@ export class MeerkatClient {
     return {
       ...(eventId != null ? { eventId } : {}),
       ...(source != null ? { source } : {}),
-      ...(sourceId != null ? { sourceId } : {}),
       ...(seq != null ? { seq } : {}),
       ...(timestampMs != null ? { timestampMs } : {}),
       ...(payload ? { payload } : {}),
@@ -2494,8 +2547,10 @@ export class MeerkatClient {
   }
 
   /** @internal */
-  async _interrupt(sessionId: string): Promise<void> {
-    await this.request("turn/interrupt", { session_id: sessionId });
+  async _interrupt(sessionId: string): Promise<InterruptResult> {
+    return (await this.request("turn/interrupt", {
+      session_id: sessionId,
+    })) as unknown as InterruptResult;
   }
 
   /** @internal */
@@ -2730,15 +2785,14 @@ export class MeerkatClient {
    * `model_id` and `provider_id` match the channel's currently-open
    * identity and rejects swaps with a typed adapter-level error.
    *
-   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying both the
-   * generated-authority `status` discriminator (today: `"queued"`) and the
-   * legacy `refresh_enqueued: true` back-compat boolean. This SDK build
-   * accepts the generated status set it was built with and rejects missing or
-   * unknown status values until regenerated for a newer contract. The host
-   * queue acceptance happens before this result is projected; the adapter
-   * pump applies the `session.update` asynchronously, and the realtime stream
-   * is the source of truth for the actual outcome (failures surface as
-   * `WireLiveAdapterObservation::Error`).
+   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying the
+   * generated-authority `status` discriminator (today: `"queued"`). This SDK
+   * build accepts the generated status set it was built with and rejects
+   * missing or unknown status values until regenerated for a newer contract.
+   * The host queue acceptance happens before this result is projected; the
+   * adapter pump applies the `session.update` asynchronously, and the
+   * realtime stream is the source of truth for the actual outcome (failures
+   * surface as `WireLiveAdapterObservation::Error`).
    */
   async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
     const result = await this.request(
@@ -2903,6 +2957,16 @@ export class MeerkatClient {
     try {
       data = JSON.parse(line);
     } catch {
+      // A corrupted (non-JSON) frame means the JSONL stream framing can no
+      // longer be trusted. Surface a typed protocol fault to every pending
+      // caller and stream consumer rather than silently dropping the line,
+      // which would launder a corrupted stream into a hang / missing response.
+      this.failTransport(
+        new MeerkatError(
+          "PROTOCOL_ERROR",
+          "Corrupted JSON-RPC frame: stream framing is no longer trustworthy",
+        ),
+      );
       return;
     }
 
@@ -2972,7 +3036,10 @@ export class MeerkatClient {
         const queue = this.eventQueues.get(sessionId);
         if (queue) {
           queue.put(event);
-        } else if (this.pendingStreamQueue) {
+        } else if (this.pendingStreamQueues.size > 0) {
+          // A stream is pending but its session_id is not yet bound. Buffer by
+          // session_id; the create response that binds this session_id drains
+          // exactly this buffer into the matching request's queue.
           const buffered = this.unmatchedStreamBuffer.get(sessionId) ?? [];
           buffered.push(event);
           this.unmatchedStreamBuffer.set(sessionId, buffered);
@@ -2995,29 +3062,21 @@ export class MeerkatClient {
         details: parsed.details ?? parsed.reason ?? rawData,
       };
     }
-    const rawMessage = error.message;
-    if (typeof rawMessage === "string") {
-      try {
-        const parsed = JSON.parse(rawMessage) as Record<string, unknown>;
-        if (parsed && typeof parsed === "object") {
-          return {
-            code: String(parsed.code ?? error.code ?? "UNKNOWN"),
-            message: String(parsed.message ?? rawMessage),
-            details: parsed.details ?? parsed.reason ?? error.data,
-          };
-        }
-      } catch {
-        // Fall back to the outer JSON-RPC error payload.
-      }
-    }
+    // The server's typed error projection is `error.data` ({code, message,
+    // details}). `error.message` is presentation text only — it is never
+    // parsed as JSON to recover typed fields, so SDK error semantics cannot
+    // depend on message-string folklore.
     return {
       code: String(error.code ?? "UNKNOWN"),
-      message: String(rawMessage ?? "Unknown error"),
+      message: String(error.message ?? "Unknown error"),
       details: error.data,
     };
   }
 
   private request<T = Record<string, unknown>>(method: string, params: unknown): Promise<T> {
+    if (this.transportFault) {
+      throw this.transportFault;
+    }
     if (!this.process?.stdin) {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }
@@ -3040,16 +3099,6 @@ export class MeerkatClient {
   }
 
   // -- Static helpers -----------------------------------------------------
-
-  private static normalizeStatus(raw: unknown): string {
-    if (typeof raw === "string") return raw;
-    if (typeof raw === "object" && raw !== null) {
-      // Rust can emit externally-tagged enums for status:
-      // { DisabledByPolicy: { description: "..." } }
-      return Object.keys(raw)[0] ?? "Unknown";
-    }
-    return String(raw);
-  }
 
   private static requireRecord(
     raw: unknown,
@@ -3124,14 +3173,64 @@ export class MeerkatClient {
     throw new MeerkatError("INVALID_RESPONSE", message);
   }
 
+  /**
+   * Parse a runtime-emitted handling mode against the closed WireHandlingMode
+   * union. Fails closed on an absent or unrecognized variant — the SDK never
+   * substitutes the client-requested mode for the runtime receipt. Mirrors the
+   * web SDK `parseWireHandlingMode` and Python `_parse_wire_handling_mode`.
+   */
+  private static parseWireHandlingMode(
+    raw: unknown,
+    message: string,
+  ): MobHandlingMode {
+    if (raw === "queue" || raw === "steer") {
+      return raw;
+    }
+    throw new MeerkatError("INVALID_RESPONSE", message);
+  }
+
+  /**
+   * Parse a capability status against the externally-tagged Rust
+   * `CapabilityStatus` enum: either the bare string variant (e.g. "Available")
+   * or a single-key object like `{ DisabledByPolicy: {...} }`. The capability
+   * vocabulary evolves, so we do not whitelist variants, but we fail closed on
+   * an absent or otherwise unparseable status rather than fabricating a
+   * permissive default. Mirrors Python `_parse_wire_capability_status`.
+   */
+  private static parseWireCapabilityStatus(raw: unknown, context: string): string {
+    if (typeof raw === "string" && raw.length > 0) {
+      return raw;
+    }
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      const firstKey = Object.keys(raw as Record<string, unknown>)[0];
+      if (typeof firstKey === "string" && firstKey.length > 0) {
+        return firstKey;
+      }
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `${context}: missing or invalid capability status`,
+    );
+  }
+
+  /**
+   * Parse a single capabilities/get entry, failing closed on absent/malformed
+   * required fields rather than coercing to empty strings or a permissive
+   * status default. Mirrors the Python capability parser.
+   */
+  private static parseWireCapabilityEntry(raw: unknown): Capability {
+    const context = "Invalid capabilities/get response";
+    const record = MeerkatClient.requireRecord(raw, "capability", context);
+    return {
+      id: MeerkatClient.requireStringField(record, "id", context),
+      description: MeerkatClient.requireStringField(record, "description", context),
+      status: MeerkatClient.parseWireCapabilityStatus(record.status, context),
+    };
+  }
+
   private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {
     const context = "Invalid live/refresh response";
     const record = MeerkatClient.requireRecord(raw, "result", context);
-    const refreshEnqueued = MeerkatClient.requireBooleanField(
-      record,
-      "refresh_enqueued",
-      context,
-    );
     const status = MeerkatClient.requireStringField(record, "status", context);
     if (status !== "queued") {
       throw new MeerkatError(
@@ -3140,7 +3239,6 @@ export class MeerkatClient {
       );
     }
     return {
-      refresh_enqueued: refreshEnqueued,
       status,
     };
   }
@@ -3148,7 +3246,6 @@ export class MeerkatClient {
   private static parseLiveCloseResult(raw: unknown): LiveCloseResult {
     const context = "Invalid live/close response";
     const record = MeerkatClient.requireRecord(raw, "result", context);
-    const closed = MeerkatClient.requireBooleanField(record, "closed", context);
     const status = MeerkatClient.requireStringField(record, "status", context);
     if (status !== "closed") {
       throw new MeerkatError(
@@ -3157,7 +3254,6 @@ export class MeerkatClient {
       );
     }
     return {
-      closed,
       status,
     };
   }
@@ -3197,21 +3293,10 @@ export class MeerkatClient {
   }
 
   private static checkVersionCompatible(server: string, client: string): boolean {
-    const coreParts = (version: string): number[] =>
-      version
-        .split("-", 1)[0]
-        .split("+", 1)[0]
-        .split(".")
-        .map(Number);
-
-    try {
-      const s = coreParts(server);
-      const c = coreParts(client);
-      if (s[0] === 0 && c[0] === 0) return s[1] === c[1];
-      return s[0] === c[0];
-    } catch {
-      return false;
-    }
+    // Drive contract-version compatibility off the generated helper
+    // (mirrors `ContractVersion::is_compatible_with`) instead of a hand-rolled
+    // copy of the rule (dogma row #193).
+    return isCompatibleWith(server, client);
   }
 
   static parseRunResult(data: Record<string, unknown>): RunResult {
@@ -3350,29 +3435,6 @@ export class MeerkatClient {
     };
   }
 
-  static parseConfigEnvelope(data: Record<string, unknown>): ConfigEnvelope {
-    const rawConfig =
-      data.config && typeof data.config === "object"
-        ? (data.config as Record<string, unknown>)
-        : {};
-    const rawResolvedPaths =
-      data.resolved_paths && typeof data.resolved_paths === "object"
-        ? (data.resolved_paths as Record<string, unknown>)
-        : undefined;
-    const resolvedPaths = rawResolvedPaths
-      ? Object.fromEntries(
-          Object.entries(rawResolvedPaths).map(([key, value]) => [key, String(value)]),
-        )
-      : undefined;
-    return {
-      config: rawConfig,
-      generation: Number(data.generation ?? 0),
-      realmId: data.realm_id != null ? String(data.realm_id) : undefined,
-      instanceId: data.instance_id != null ? String(data.instance_id) : undefined,
-      backend: data.backend != null ? String(data.backend) : undefined,
-      resolvedPaths,
-    };
-  }
 
   static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendReceipt {
     return {
@@ -3596,74 +3658,6 @@ export class MeerkatClient {
     };
   }
 
-  private static toWireWorkGraphScope(
-    options?: WorkGraphItemLookupOptions,
-  ): Record<string, unknown> {
-    const params: Record<string, unknown> = {};
-    setIfDefined(params, "realm_id", options?.realmId);
-    setIfDefined(params, "namespace", options?.namespace);
-    return params;
-  }
-
-  private static toWireWorkGraphItemFilter(
-    filter: WorkGraphItemFilter,
-  ): Record<string, unknown> {
-    const params = MeerkatClient.toWireWorkGraphScope(filter);
-    setIfDefined(params, "all_namespaces", filter.allNamespaces);
-    setIfDefined(params, "statuses", filter.statuses);
-    setIfDefined(params, "labels", filter.labels);
-    setIfDefined(params, "include_terminal", filter.includeTerminal);
-    setIfDefined(params, "limit", filter.limit);
-    return params;
-  }
-
-  private static toWireWorkGraphReadyFilter(
-    filter: WorkGraphReadyFilter,
-  ): Record<string, unknown> {
-    const params = MeerkatClient.toWireWorkGraphScope(filter);
-    setIfDefined(params, "labels", filter.labels);
-    setIfDefined(params, "limit", filter.limit);
-    return params;
-  }
-
-  private static toWireWorkGraphEventFilter(
-    filter: WorkGraphEventFilter,
-  ): Record<string, unknown> {
-    const params = MeerkatClient.toWireWorkGraphScope(filter);
-    setIfDefined(params, "all_namespaces", filter.allNamespaces);
-    setIfDefined(params, "after_seq", filter.afterSeq);
-    setIfDefined(params, "limit", filter.limit);
-    return params;
-  }
-
-  private static toWireWorkGraphGoalStatusRequest(
-    request: WorkGraphGoalStatusRequest,
-  ): Record<string, unknown> {
-    const params = MeerkatClient.toWireWorkGraphScope(request);
-    params.binding_id = request.bindingId;
-    return params;
-  }
-
-  private static toWireWorkGraphAttentionTarget(
-    target: WorkGraphAttentionTarget,
-  ): Record<string, unknown> {
-    if (target.kind === "session") {
-      return { kind: "session", session_id: target.sessionId };
-    }
-    return { kind: "lowered_owner", owner_key: target.ownerKey };
-  }
-
-  private static toWireWorkGraphAttentionListRequest(
-    request: WorkGraphAttentionListRequest,
-  ): Record<string, unknown> {
-    const params = MeerkatClient.toWireWorkGraphScope(request);
-    setIfDefined(params, "status", request.status);
-    if (request.target !== undefined) {
-      params.target = MeerkatClient.toWireWorkGraphAttentionTarget(request.target);
-    }
-    return params;
-  }
-
   private static parseStringArray(value: unknown, context: string): string[] {
     if (value == null) {
       return [];
@@ -3708,37 +3702,6 @@ export class MeerkatClient {
     );
   }
 
-  private static parseWorkGraphOwner(raw: unknown, context: string): WorkGraphOwner | undefined {
-    if (raw == null) {
-      return undefined;
-    }
-    const data = MeerkatClient.requireRecord(raw, "owner", context);
-    const key = MeerkatClient.requireRecord(data.key, "key", context);
-    const kind = MeerkatClient.requireStringField(key, "kind", context);
-    if (!["principal", "agent", "session", "mob", "label"].includes(kind)) {
-      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid owner key kind`);
-    }
-    return {
-      key: {
-        kind: kind as WorkGraphOwnerKind,
-        id: MeerkatClient.requireStringField(key, "id", context),
-      },
-      displayName: MeerkatClient.parseOptionalString(data.display_name),
-    };
-  }
-
-  private static parseWorkOwnerKey(raw: unknown, context: string): WorkGraphOwnerKey {
-    const key = MeerkatClient.requireRecord(raw, "owner_key", context);
-    const kind = MeerkatClient.requireStringField(key, "kind", context);
-    if (!["principal", "agent", "session", "mob", "label"].includes(kind)) {
-      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid owner key kind`);
-    }
-    return {
-      kind: kind as WorkGraphOwnerKind,
-      id: MeerkatClient.requireStringField(key, "id", context),
-    };
-  }
-
   private static parseMobWireMembersBatchEdge(
     raw: unknown,
     context: string,
@@ -3769,381 +3732,6 @@ export class MeerkatClient {
       alreadyWired: MeerkatClient.parseMobWireMembersBatchEdges(
         data.already_wired,
         `${context} already_wired`,
-      ),
-    };
-  }
-
-  private static parseWorkGraphClaim(raw: unknown): WorkGraphClaim | undefined {
-    if (raw == null) {
-      return undefined;
-    }
-    const data = MeerkatClient.requireRecord(raw, "claim", "Invalid workgraph item");
-    const owner = MeerkatClient.parseWorkGraphOwner(
-      data.owner,
-      "Invalid workgraph item claim",
-    );
-    if (!owner) {
-      throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph item claim: missing owner");
-    }
-    return {
-      owner,
-      claimedAt: MeerkatClient.requireStringField(
-        data,
-        "claimed_at",
-        "Invalid workgraph item claim",
-      ),
-      leaseExpiresAt: MeerkatClient.parseOptionalString(data.lease_expires_at),
-    };
-  }
-
-  private static parseWorkCompletionPolicy(raw: unknown): WorkCompletionPolicy {
-    if (raw === undefined || raw === null) {
-      return { kind: "self_attest" };
-    }
-    const policy = MeerkatClient.requireRecord(
-      raw,
-      "completion_policy",
-      "Invalid workgraph item",
-    );
-    const kind = MeerkatClient.requireStringField(
-      policy,
-      "kind",
-      "Invalid workgraph completion policy",
-    );
-    switch (kind) {
-      case "self_attest":
-      case "host_confirmed":
-      case "principal_confirmed":
-        return { kind } as WorkCompletionPolicy;
-      case "supervisor":
-        return {
-          kind,
-          owner_key: MeerkatClient.parseWorkOwnerKey(
-            policy.owner_key,
-            "Invalid workgraph completion policy",
-          ),
-        };
-      case "reviewer_quorum":
-        return {
-          kind,
-          threshold: MeerkatClient.requireNumberField(
-            policy,
-            "threshold",
-            "Invalid workgraph completion policy",
-          ),
-        };
-      default:
-        throw new MeerkatError(
-          "INVALID_RESPONSE",
-          "Invalid workgraph completion policy: invalid kind",
-        );
-    }
-  }
-
-  static parseWorkItem(data: Record<string, unknown>): WorkItem {
-    const status = MeerkatClient.requireStringField(data, "status", "Invalid workgraph item");
-    if (!["open", "in_progress", "blocked", "completed", "cancelled", "failed"].includes(status)) {
-      throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph item: invalid status");
-    }
-    const priority = MeerkatClient.requireStringField(
-      data,
-      "priority",
-      "Invalid workgraph item",
-    );
-    if (!["low", "medium", "high"].includes(priority)) {
-      throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph item: invalid priority");
-    }
-    return {
-      id: MeerkatClient.requireStringField(data, "id", "Invalid workgraph item"),
-      realmId: MeerkatClient.requireStringField(data, "realm_id", "Invalid workgraph item"),
-      namespace: MeerkatClient.requireStringField(data, "namespace", "Invalid workgraph item"),
-      title: MeerkatClient.requireStringField(data, "title", "Invalid workgraph item"),
-      description: MeerkatClient.parseOptionalString(data.description),
-      status: status as WorkGraphStatus,
-      priority: priority as WorkGraphPriority,
-      completionPolicy: MeerkatClient.parseWorkCompletionPolicy(data.completion_policy),
-      labels: MeerkatClient.parseStringArray(data.labels, "Invalid workgraph item labels"),
-      owner: MeerkatClient.parseWorkGraphOwner(data.owner, "Invalid workgraph item"),
-      claim: MeerkatClient.parseWorkGraphClaim(data.claim),
-      machineState: MeerkatClient.requireRecord(
-        data.machine_state,
-        "machine_state",
-        "Invalid workgraph item",
-      ),
-      revision: MeerkatClient.requireNumberField(data, "revision", "Invalid workgraph item"),
-      dueAt: MeerkatClient.parseOptionalString(data.due_at),
-      notBefore: MeerkatClient.parseOptionalString(data.not_before),
-      snoozedUntil: MeerkatClient.parseOptionalString(data.snoozed_until),
-      createdAt: MeerkatClient.requireStringField(data, "created_at", "Invalid workgraph item"),
-      updatedAt: MeerkatClient.requireStringField(data, "updated_at", "Invalid workgraph item"),
-      terminalAt: MeerkatClient.parseOptionalString(data.terminal_at),
-      externalRefs: MeerkatClient.parseRecordArray(
-        data.external_refs,
-        "Invalid workgraph external refs",
-      ).map((ref) => ({
-        kind: MeerkatClient.requireStringField(ref, "kind", "Invalid workgraph external ref"),
-        id: MeerkatClient.requireStringField(ref, "id", "Invalid workgraph external ref"),
-        url: MeerkatClient.parseOptionalString(ref.url),
-      })),
-      evidenceRefs: MeerkatClient.parseRecordArray(
-        data.evidence_refs,
-        "Invalid workgraph evidence refs",
-      ).map((ref) => ({
-        kind: MeerkatClient.requireStringField(ref, "kind", "Invalid workgraph evidence ref"),
-        id: MeerkatClient.requireStringField(ref, "id", "Invalid workgraph evidence ref"),
-        label: MeerkatClient.parseOptionalString(ref.label),
-        summary: MeerkatClient.parseOptionalString(ref.summary),
-      })),
-    };
-  }
-
-  private static parseWorkItemArray(
-    value: unknown,
-    context = "Invalid workgraph item list",
-  ): WorkItem[] {
-    return MeerkatClient.requireRecordArray(value, context).map((item) =>
-      MeerkatClient.parseWorkItem(item),
-    );
-  }
-
-  private static parseWorkGraphGoalResult(
-    data: Record<string, unknown>,
-  ): WorkGraphGoalResult {
-    return {
-      item: MeerkatClient.parseWorkItem(
-        MeerkatClient.requireRecord(data.item, "item", "Invalid workgraph goal result"),
-      ),
-      attention: MeerkatClient.parseWorkAttentionBinding(
-        MeerkatClient.requireRecord(data.attention, "attention", "Invalid workgraph goal result"),
-      ),
-    };
-  }
-
-  private static parseWorkAttentionBinding(
-    data: Record<string, unknown>,
-  ): WorkGraphGoalResult["attention"] {
-    const bindingId = MeerkatClient.requireStringField(
-      data,
-      "binding_id",
-      "Invalid workgraph attention binding",
-    );
-    const createdAt = MeerkatClient.requireStringField(
-      data,
-      "created_at",
-      "Invalid workgraph attention binding",
-    );
-    const delegatedAuthority = MeerkatClient.requireStringField(
-      data,
-      "delegated_authority",
-      "Invalid workgraph attention binding",
-    );
-    if (!WORK_ATTENTION_DELEGATED_AUTHORITIES.has(delegatedAuthority)) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid workgraph attention binding: invalid delegated_authority",
-      );
-    }
-    const mode = MeerkatClient.requireStringField(
-      data,
-      "mode",
-      "Invalid workgraph attention binding",
-    );
-    if (!WORK_ATTENTION_MODES.has(mode)) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid workgraph attention binding: invalid mode",
-      );
-    }
-    const updatedAt = MeerkatClient.requireStringField(
-      data,
-      "updated_at",
-      "Invalid workgraph attention binding",
-    );
-
-    const status = MeerkatClient.requireRecord(
-      data.status,
-      "status",
-      "Invalid workgraph attention binding",
-    );
-    const statusState = MeerkatClient.requireStringField(
-      status,
-      "state",
-      "Invalid workgraph attention status",
-    );
-    if (!WORK_ATTENTION_STATES.has(statusState)) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid workgraph attention status: invalid state",
-      );
-    }
-
-    const target = MeerkatClient.requireRecord(
-      data.target,
-      "target",
-      "Invalid workgraph attention binding",
-    );
-    const targetKind = MeerkatClient.requireStringField(
-      target,
-      "kind",
-      "Invalid workgraph attention target",
-    );
-    if (targetKind === "session") {
-      MeerkatClient.requireStringField(target, "session_id", "Invalid workgraph attention target");
-    } else if (targetKind === "lowered_owner") {
-      MeerkatClient.requireRecord(
-        target.owner_key,
-        "owner_key",
-        "Invalid workgraph attention target",
-      );
-    } else {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid workgraph attention target: invalid kind",
-      );
-    }
-
-    const workRef = MeerkatClient.requireRecord(
-      data.work_ref,
-      "work_ref",
-      "Invalid workgraph attention binding",
-    );
-    MeerkatClient.requireStringField(workRef, "realm_id", "Invalid workgraph attention work ref");
-    MeerkatClient.requireStringField(workRef, "namespace", "Invalid workgraph attention work ref");
-    MeerkatClient.requireStringField(workRef, "item_id", "Invalid workgraph attention work ref");
-    const attention: WorkAttentionBinding = {
-      bindingId,
-      createdAt,
-      delegatedAuthority: delegatedAuthority as WorkAttentionBinding["delegatedAuthority"],
-      machineState: MeerkatClient.optionalRecord(data.machine_state),
-      mode: mode as WorkAttentionBinding["mode"],
-      projectionPolicy: MeerkatClient.optionalRecord(
-        data.projection_policy,
-      ) as WorkAttentionBinding["projectionPolicy"],
-      status: status as unknown as WorkAttentionBinding["status"],
-      target:
-        targetKind === "session"
-          ? {
-              kind: "session",
-              sessionId: MeerkatClient.requireStringField(
-                target,
-                "session_id",
-                "Invalid workgraph attention target",
-              ),
-            }
-          : {
-              kind: "loweredOwner",
-              ownerKey: MeerkatClient.parseWorkOwnerKey(
-                target.owner_key,
-                "Invalid workgraph attention target",
-              ),
-            },
-      updatedAt,
-      workRef: {
-        realmId: MeerkatClient.requireStringField(
-          workRef,
-          "realm_id",
-          "Invalid workgraph attention work ref",
-        ),
-        namespace: MeerkatClient.requireStringField(
-          workRef,
-          "namespace",
-          "Invalid workgraph attention work ref",
-        ),
-        itemId: MeerkatClient.requireStringField(
-          workRef,
-          "item_id",
-          "Invalid workgraph attention work ref",
-        ),
-      },
-    };
-    return attention;
-  }
-
-  private static parseWorkAttentionBindingArray(
-    value: unknown,
-  ): WorkGraphAttentionListResult["attention"] {
-    return MeerkatClient.requireRecordArray(value, "Invalid workgraph attention list").map(
-      (attention) => MeerkatClient.parseWorkAttentionBinding(attention),
-    );
-  }
-
-  private static parseWorkGraphEdge(data: Record<string, unknown>): WorkGraphEdge {
-    const kind = MeerkatClient.requireStringField(data, "kind", "Invalid workgraph edge");
-    if (!["blocks", "parent", "related", "supersedes", "derived_from"].includes(kind)) {
-      throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph edge: invalid kind");
-    }
-    return {
-      realmId: MeerkatClient.requireStringField(data, "realm_id", "Invalid workgraph edge"),
-      namespace: MeerkatClient.requireStringField(data, "namespace", "Invalid workgraph edge"),
-      kind: kind as WorkGraphEdgeKind,
-      fromId: MeerkatClient.requireStringField(data, "from_id", "Invalid workgraph edge"),
-      toId: MeerkatClient.requireStringField(data, "to_id", "Invalid workgraph edge"),
-      createdAt: MeerkatClient.requireStringField(data, "created_at", "Invalid workgraph edge"),
-    };
-  }
-
-  private static parseWorkGraphEvent(data: Record<string, unknown>): WorkGraphEvent {
-    const kind = MeerkatClient.requireStringField(data, "kind", "Invalid workgraph event");
-    if (
-      ![
-        "created",
-        "updated",
-        "claimed",
-        "released",
-        "blocked",
-        "closed",
-        "linked",
-        "evidence_added",
-        "attention_created",
-        "attention_updated",
-      ].includes(kind)
-    ) {
-      throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph event: invalid kind");
-    }
-    return {
-      seq: MeerkatClient.parseOptionalNumber(data.seq),
-      realmId: MeerkatClient.requireStringField(data, "realm_id", "Invalid workgraph event"),
-      namespace: MeerkatClient.requireStringField(data, "namespace", "Invalid workgraph event"),
-      itemId: MeerkatClient.parseOptionalString(data.item_id),
-      kind: kind as WorkGraphEventKind,
-      at: MeerkatClient.requireStringField(data, "at", "Invalid workgraph event"),
-      payload: data.payload,
-    };
-  }
-
-  static parseWorkGraphEventArray(value: unknown): WorkGraphEvent[] {
-    return MeerkatClient.requireRecordArray(value, "Invalid workgraph event list").map((event) =>
-      MeerkatClient.parseWorkGraphEvent(event),
-    );
-  }
-
-  static parseWorkGraphSnapshot(data: Record<string, unknown>): WorkGraphSnapshot {
-    return {
-      realmId: MeerkatClient.requireStringField(data, "realm_id", "Invalid workgraph snapshot"),
-      namespace: MeerkatClient.parseOptionalString(data.namespace),
-      allNamespaces: MeerkatClient.requireBooleanField(
-        data,
-        "all_namespaces",
-        "Invalid workgraph snapshot",
-      ),
-      capturedAt: MeerkatClient.requireStringField(
-        data,
-        "captured_at",
-        "Invalid workgraph snapshot",
-      ),
-      eventHighWaterMark: MeerkatClient.parseOptionalNumber(data.event_high_water_mark),
-      items: MeerkatClient.parseWorkItemArray(
-        data.items,
-        "Invalid workgraph snapshot items",
-      ),
-      edges: MeerkatClient.requireRecordArray(
-        data.edges,
-        "Invalid workgraph snapshot edges",
-      ).map((edge) => MeerkatClient.parseWorkGraphEdge(edge)),
-      attention: MeerkatClient.parseWorkAttentionBindingArray(data.attention ?? []),
-      readyItemIds: MeerkatClient.requireStringArray(
-        data.ready_item_ids,
-        "Invalid workgraph snapshot ready item ids",
       ),
     };
   }
@@ -4202,16 +3790,18 @@ export class MeerkatClient {
   }
 
   static parseSessionHistory(data: Record<string, unknown>): SessionHistory {
-    const rawMessages = Array.isArray(data.messages)
-      ? (data.messages as Array<Record<string, unknown>>)
-      : [];
+    const context = "Invalid session history response";
+    if (!Array.isArray(data.messages)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
+    }
+    const rawMessages = data.messages as Array<Record<string, unknown>>;
     return {
-      sessionId: String(data.session_id ?? ""),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      messageCount: Number(data.message_count ?? 0),
-      offset: Number(data.offset ?? 0),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
+      offset: MeerkatClient.requireNumberField(data, "offset", context),
       limit: data.limit != null ? Number(data.limit) : undefined,
-      hasMore: Boolean(data.has_more ?? false),
+      hasMore: MeerkatClient.requireBooleanField(data, "has_more", context),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
     };
   }
@@ -4219,40 +3809,48 @@ export class MeerkatClient {
   static parseSessionTranscriptRevision(
     data: Record<string, unknown>,
   ): SessionTranscriptRevision {
-    const rawMessages = Array.isArray(data.messages)
-      ? (data.messages as Array<Record<string, unknown>>)
-      : [];
+    const context = "Invalid session transcript revision response";
+    if (!Array.isArray(data.messages)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
+    }
+    const rawMessages = data.messages as Array<Record<string, unknown>>;
     return {
-      sessionId: String(data.session_id ?? ""),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      revision: String(data.revision ?? ""),
-      headRevision: String(data.head_revision ?? ""),
-      messageCount: Number(data.message_count ?? 0),
-      offset: Number(data.offset ?? 0),
+      revision: MeerkatClient.requireStringField(data, "revision", context),
+      headRevision: MeerkatClient.requireStringField(data, "head_revision", context),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
+      offset: MeerkatClient.requireNumberField(data, "offset", context),
       limit: data.limit != null ? Number(data.limit) : undefined,
-      hasMore: Boolean(data.has_more ?? false),
+      hasMore: MeerkatClient.requireBooleanField(data, "has_more", context),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
     };
   }
 
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
+    const context = "Invalid session fork response";
     return {
-      sourceSessionId: String(data.source_session_id ?? ""),
-      sessionId: String(data.session_id ?? ""),
+      sourceSessionId: MeerkatClient.requireStringField(data, "source_session_id", context),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      messageCount: Number(data.message_count ?? 0),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
     };
   }
 
   static parseSessionTranscriptRewriteResult(
     data: Record<string, unknown>,
   ): SessionTranscriptRewriteResult {
+    const context = "Invalid session transcript rewrite response";
+    const commit = data.commit;
+    if (typeof commit !== "object" || commit === null || Array.isArray(commit)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: commit must be an object`);
+    }
     return {
-      sessionId: String(data.session_id ?? ""),
-      parentRevision: String(data.parent_revision ?? ""),
-      revision: String(data.revision ?? ""),
-      messageCount: Number(data.message_count ?? 0),
-      commit: (data.commit ?? {}) as Record<string, unknown>,
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      parentRevision: MeerkatClient.requireStringField(data, "parent_revision", context),
+      revision: MeerkatClient.requireStringField(data, "revision", context),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
+      commit: commit as Record<string, unknown>,
     };
   }
 
@@ -4291,43 +3889,61 @@ export class MeerkatClient {
   }
 
   static parseSessionMessage(data: Record<string, unknown>): SessionMessage {
-    const role = String(data.role ?? "");
+    // Transcript truth fails closed: a message without its identity facts
+    // (role, created_at) or with malformed collections is a wire-contract
+    // violation, never coerced to ""/[] placeholder truth.
+    const context = "Invalid session message";
+    const role = MeerkatClient.requireStringField(data, "role", context);
+    const createdAt = MeerkatClient.requireStringField(data, "created_at", context);
     const contentValue =
       role === "system_notice" && data.content == null && data.body != null
         ? String(data.body)
         : data.content;
-    const rawToolCalls = Array.isArray(data.tool_calls)
-      ? (data.tool_calls as Array<Record<string, unknown>>)
-      : [];
-    const rawBlocks = Array.isArray(data.blocks)
-      ? (data.blocks as Array<Record<string, unknown>>)
-      : [];
-    const rawResults = Array.isArray(data.results)
-      ? (data.results as Array<Record<string, unknown>>)
-      : [];
+    if (data.blocks != null && !Array.isArray(data.blocks)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: blocks must be a list`);
+    }
+    if (data.results != null && !Array.isArray(data.results)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: results must be a list`);
+    }
+    const rawBlocks = (data.blocks as Array<Record<string, unknown>> | undefined) ?? [];
+    const rawResults = (data.results as Array<Record<string, unknown>> | undefined) ?? [];
     return {
       role,
-      createdAt: String(data.created_at ?? ""),
+      createdAt,
       kind: data.kind != null ? String(data.kind) : undefined,
       body: data.body != null ? String(data.body) : undefined,
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
-      toolCalls: rawToolCalls.map(
-        (toolCall): SessionToolCall => ({
-          id: String(toolCall.id ?? ""),
-          name: String(toolCall.name ?? ""),
-          args: toolCall.args,
-        }),
-      ),
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
-      results: rawResults.map(
-        (result): SessionToolResult => ({
-          toolUseId: String(result.tool_use_id ?? ""),
+      results: rawResults.map((result): SessionToolResult => {
+        if (typeof result !== "object" || result === null) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: tool result must be an object`,
+          );
+        }
+        const isError = result.is_error ?? false;
+        if (typeof isError !== "boolean") {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: is_error must be a boolean`,
+          );
+        }
+        // `WireToolResult.content` is mandatory on the wire; a frame without
+        // it is malformed and must not be coalesced into an empty transcript.
+        if (result.content === undefined || result.content === null) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: tool result missing content`,
+          );
+        }
+        return {
+          toolUseId: MeerkatClient.requireStringField(result, "tool_use_id", context),
           content: MeerkatClient.parseContentInput(result.content),
-          isError: Boolean(result.is_error ?? false),
-        }),
-      ),
+          isError,
+        };
+      }),
       raw: { ...data },
     };
   }
@@ -4360,13 +3976,6 @@ export class MeerkatClient {
         if (camel.content !== undefined) {
           payload.content = camel.content;
         }
-      }
-      if (camel.toolCalls?.length > 0) {
-        payload.tool_calls = camel.toolCalls.map((toolCall) => ({
-          id: toolCall.id,
-          name: toolCall.name,
-          args: toolCall.args,
-        }));
       }
       if (camel.stopReason !== undefined) {
         payload.stop_reason = camel.stopReason;
@@ -4457,6 +4066,10 @@ export class MeerkatClient {
   }
 
   static parseSessionAssistantBlock(data: Record<string, unknown>): SessionAssistantBlock {
+    const context = "Invalid session assistant block";
+    if (data.data != null && (typeof data.data !== "object" || Array.isArray(data.data))) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: data must be an object`);
+    }
     const blockData = (data.data as Record<string, unknown> | undefined) ?? {};
     const blobRef = blockData.blob_ref as Record<string, unknown> | undefined;
     const revisedPrompt =
@@ -4464,7 +4077,7 @@ export class MeerkatClient {
         ? (blockData.revised_prompt as Record<string, unknown>)
         : undefined;
     return {
-      blockType: String(data.block_type ?? ""),
+      blockType: MeerkatClient.requireStringField(data, "block_type", context),
       text: blockData.text != null ? String(blockData.text) : undefined,
       id: blockData.id != null ? String(blockData.id) : undefined,
       name: blockData.name != null ? String(blockData.name) : undefined,
@@ -4558,7 +4171,7 @@ export class MeerkatClient {
 
   private writeCallbackResponse(
     requestId: unknown,
-    result: { content: string; is_error: boolean },
+    result: { content: string | ContentBlock[]; is_error: boolean },
   ): void {
     const response = { jsonrpc: "2.0", id: requestId, result };
     this.process?.stdin?.write(JSON.stringify(response) + "\n");

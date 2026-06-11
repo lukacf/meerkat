@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::{Result, anyhow};
 use meerkat_machine_schema::canonical_machine_schemas;
 
 #[derive(Debug, Clone)]
@@ -9,7 +10,6 @@ pub struct AuditPolicy {
     pub protected_fields: Vec<ProtectedFieldRule>,
     pub forbidden_shell_reads: Vec<ForbiddenShellReadRule>,
     pub routed_effect_realizations: Vec<RoutedEffectRealizationRule>,
-    pub required_live_symbols: Vec<RequiredLiveSymbolRule>,
     pub handoff_protocol_coverage: Vec<HandoffProtocolCoverageRule>,
     pub protocol_realization_sites: Vec<ProtocolRealizationSiteRule>,
     pub protocol_feedback_constraints: Vec<ProtocolFeedbackConstraintRule>,
@@ -17,8 +17,8 @@ pub struct AuditPolicy {
 }
 
 impl AuditPolicy {
-    pub fn load() -> Self {
-        Self {
+    pub fn load() -> Result<Self> {
+        Ok(Self {
             projection_types: vec![
                 ProjectionTypeRule::new(
                     "LoopState",
@@ -70,13 +70,12 @@ impl AuditPolicy {
                 ),
             ],
             forbidden_shell_reads: default_forbidden_shell_reads(),
-            routed_effect_realizations: default_routed_effect_realizations(),
-            required_live_symbols: vec![],
+            routed_effect_realizations: default_routed_effect_realizations()?,
             handoff_protocol_coverage: default_handoff_protocol_coverage(),
             protocol_realization_sites: default_protocol_realization_sites(),
             protocol_feedback_constraints: default_protocol_feedback_constraints(),
             terminal_mapping_constraints: default_terminal_mapping_constraints(),
-        }
+        })
     }
 
     pub fn required_route_keys(
@@ -161,12 +160,7 @@ impl RoutedEffectRealizationRule {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RequiredLiveSymbolRule {
-    pub symbol: &'static str,
-}
-
-fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
+fn default_routed_effect_realizations() -> Result<Vec<RoutedEffectRealizationRule>> {
     let mut rules = Vec::new();
     for schema in canonical_machine_schemas() {
         for disposition in &schema.effect_dispositions {
@@ -179,7 +173,8 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
                 let producer_str = schema.machine.as_str();
                 let effect_str = disposition.effect_variant.as_str();
                 let consumer_str = consumer_machine.as_str();
-                let consumer_input = default_consumer_input(producer_str, effect_str, consumer_str);
+                let consumer_input =
+                    resolve_consumer_input(producer_str, effect_str, consumer_str)?;
                 rules.push(RoutedEffectRealizationRule::new(
                     producer_str.to_string(),
                     effect_str.to_string(),
@@ -190,39 +185,48 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
             }
         }
     }
-    rules
+    Ok(rules)
 }
 
-fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> String {
-    // Kept in lock-step with the typed `Route::to.input_variant` entries in
-    // the canonical composition schemas (see
-    // `meerkat-machine-schema/src/catalog/compositions.rs`). The RMAT audit
-    // `CompositionRouteSemanticCoverage` rule fails the build if this map
-    // and the typed routes disagree about which consumer input a given
-    // routed effect realizes.
-    match (producer, effect_variant, consumer) {
-        ("MobMachine", "RequestRuntimeBinding", "MeerkatMachine") => "PrepareBindings".to_string(),
-        ("MobMachine", "RequestRuntimeIngress", "MeerkatMachine") => "Ingest".to_string(),
-        ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "Retire".to_string(),
-        ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "Destroy".to_string(),
-        ("MeerkatMachine", "RuntimeBound", "MobMachine") => "ObserveRuntimeReady".to_string(),
-        ("MeerkatMachine", "RuntimeRetired", "MobMachine") => "ObserveRuntimeRetired".to_string(),
-        ("MeerkatMachine", "RuntimeDestroyed", "MobMachine") => {
-            "ObserveRuntimeDestroyed".to_string()
+/// Resolve the consumer input variant a routed effect realizes directly from
+/// the typed `Route::to.input_variant` entries in the canonical composition
+/// schemas — never from a hand-maintained string table. This makes the
+/// routed-effect realization rule structurally lock-stepped with the typed
+/// routes the `CompositionDispatcher` actually drives: there is no second
+/// hand-authored copy of the mapping to drift, and a routed disposition with
+/// no typed `Route` fails closed here instead of fabricating a synthetic
+/// `producer:effect->consumer` placeholder that the dispatcher would refuse.
+fn resolve_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> Result<String> {
+    use meerkat_machine_schema::canonical_composition_schemas;
+
+    for composition in canonical_composition_schemas() {
+        let Some(producer_instance) = composition
+            .machines
+            .iter()
+            .find(|inst| inst.machine_name.as_str() == producer)
+        else {
+            continue;
+        };
+        let Some(consumer_instance) = composition
+            .machines
+            .iter()
+            .find(|inst| inst.machine_name.as_str() == consumer)
+        else {
+            continue;
+        };
+        let route = composition.routes.iter().find(|route| {
+            route.from_machine == producer_instance.instance_id
+                && route.effect_variant.as_str() == effect_variant
+                && route.to.machine == consumer_instance.instance_id
+        });
+        if let Some(route) = route {
+            return Ok(route.to.input_variant.as_str().to_string());
         }
-        (
-            "ScheduleLifecycleMachine",
-            "SupersedePendingOccurrences",
-            "OccurrenceLifecycleMachine",
-        ) => "Supersede".to_string(),
-        ("OccurrenceLifecycleMachine", "OccurrencesSuperseded", "ScheduleLifecycleMachine") => {
-            "ConfirmOccurrencesSuperseded".to_string()
-        }
-        ("WorkGraphLifecycleMachine", "Closed", "WorkAttentionLifecycleMachine") => {
-            "Stop".to_string()
-        }
-        _ => format!("{producer}:{effect_variant}->{consumer}"),
     }
+
+    Err(anyhow!(
+        "routed effect `{producer}::{effect_variant}` has no typed Route to consumer `{consumer}` in any canonical composition; the CompositionDispatcher cannot realize this producer→consumer pair — declare the Route in meerkat-machine-schema/src/catalog/compositions.rs"
+    ))
 }
 
 /// Rule: every effect with `handoff_protocol: Some(name)` must have a matching
@@ -540,5 +544,68 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
             ]
         }
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn consumer_input_resolves_from_typed_route_not_a_hand_table() {
+        // The resolved input must equal the typed `Route::to.input_variant`
+        // in the canonical compositions — there is no hand-maintained map to
+        // drift against.
+        assert_eq!(
+            resolve_consumer_input("MobMachine", "RequestRuntimeBinding", "MeerkatMachine")
+                .expect("MobMachine RequestRuntimeBinding route resolves"),
+            "PrepareBindings"
+        );
+        assert_eq!(
+            resolve_consumer_input("MeerkatMachine", "RuntimeBound", "MobMachine")
+                .expect("MeerkatMachine RuntimeBound route resolves"),
+            "ObserveRuntimeReady"
+        );
+        assert_eq!(
+            resolve_consumer_input(
+                "WorkGraphLifecycleMachine",
+                "Closed",
+                "WorkAttentionLifecycleMachine"
+            )
+            .expect("WorkGraph Closed route resolves"),
+            "Stop"
+        );
+    }
+
+    #[test]
+    fn consumer_input_fails_closed_when_no_typed_route_exists() {
+        let err = resolve_consumer_input("MobMachine", "NoSuchRoutedEffect", "MeerkatMachine")
+            .expect_err("an undeclared routed effect must fail closed, not synthesize a string");
+        let message = err.to_string();
+        assert!(
+            message.contains("no typed Route"),
+            "fail-closed error must explain the missing typed Route: {message}"
+        );
+    }
+
+    #[test]
+    fn every_routed_disposition_resolves_against_typed_routes() {
+        // The whole realization table must build without fabricating any
+        // synthetic `producer:effect->consumer` placeholder.
+        let rules = default_routed_effect_realizations()
+            .expect("every routed disposition resolves to a typed Route");
+        assert!(
+            !rules.is_empty(),
+            "canonical schemas declare routed effects"
+        );
+        for rule in &rules {
+            assert!(
+                !rule.consumer_input.contains("->"),
+                "consumer_input `{}` looks like the deleted synthetic fallback",
+                rule.consumer_input
+            );
+        }
     }
 }

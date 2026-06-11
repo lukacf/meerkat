@@ -114,11 +114,7 @@ impl Pack for RedTeamPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some("Adversarial risk assessment".into()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("Adversarial risk assessment".into()), steps, None),
         );
 
         mob_definition(

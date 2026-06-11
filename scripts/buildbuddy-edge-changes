@@ -42,6 +42,10 @@ mark_path() {
       mark_all
       return
       ;;
+    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/architecture/dogma-audits/*)
+      mark_all
+      return
+      ;;
     deny.toml)
       audit_changed=true
       ;;
@@ -51,7 +55,7 @@ mark_path() {
     meerkat-web-runtime/*|meerkat-cli/src/web_runtime_template/*)
       wasm_changed=true
       ;;
-    meerkat/*|meerkat-anthropic/*|meerkat-auth-core/*|meerkat-client/*|meerkat-comms/*|meerkat-contracts/*|meerkat-core/*|meerkat-gemini/*|meerkat-hooks/*|meerkat-llm-core/*|meerkat-machine-derive/*|meerkat-machine-dsl/*|meerkat-machine-dsl-core/*|meerkat-machine-kernels/*|meerkat-machine-schema/*|meerkat-mob/*|meerkat-mob-mcp/*|meerkat-mob-pack/*|meerkat-models/*|meerkat-openai/*|meerkat-providers/*|meerkat-runtime/*|meerkat-schedule/*|meerkat-session/*|meerkat-skills/*|meerkat-store/*|meerkat-tools/*)
+    meerkat/*|meerkat-anthropic/*|meerkat-auth-core/*|meerkat-client/*|meerkat-comms/*|meerkat-contracts/*|meerkat-core/*|meerkat-gemini/*|meerkat-hooks/*|meerkat-llm-core/*|meerkat-machine-derive/*|meerkat-machine-dsl/*|meerkat-machine-dsl-core/*|meerkat-machine-kernels/*|meerkat-machine-schema/*|meerkat-mob/*|meerkat-mob-mcp/*|meerkat-mob-pack/*|meerkat-openai/*|meerkat-providers/*|meerkat-runtime/*|meerkat-schedule/*|meerkat-session/*|meerkat-skills/*|meerkat-store/*|meerkat-tools/*)
       wasm_changed=true
       ;;
   esac
@@ -60,7 +64,7 @@ mark_path() {
     sdks/*|tools/sdk-builder/*|tools/sdk-codegen/*)
       sdk_changed=true
       ;;
-    meerkat-rpc/*|meerkat-client/*|meerkat-contracts/*|meerkat-core/*|meerkat-llm-core/*|meerkat-models/*)
+    meerkat-rpc/*|meerkat-client/*|meerkat-contracts/*|meerkat-core/*|meerkat-llm-core/*)
       sdk_changed=true
       ;;
   esac

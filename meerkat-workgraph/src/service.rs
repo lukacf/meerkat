@@ -216,13 +216,6 @@ impl WorkGraphService {
             })
             .await?
             .attention;
-        if current.machine_state.revision != request.expected_revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: current.work_ref.item_id,
-                expected: request.expected_revision,
-                actual: current.machine_state.revision,
-            });
-        }
         let expected_previous_revision = request.expected_revision;
         let paused =
             WorkAttentionMachine::pause(current, expected_previous_revision, request.until, now)?;
@@ -259,13 +252,6 @@ impl WorkGraphService {
                 "work attention binding {} targets terminal item {}",
                 current.binding_id, item.id
             )));
-        }
-        if current.machine_state.revision != request.expected_revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: current.work_ref.item_id,
-                expected: request.expected_revision,
-                actual: current.machine_state.revision,
-            });
         }
         let expected_previous_revision = request.expected_revision;
         let resumed = WorkAttentionMachine::resume(current, expected_previous_revision, now)?;
@@ -353,13 +339,6 @@ impl WorkGraphService {
                 attention.work_ref.item_id.clone(),
             )
             .await?;
-        if item.revision != expected_revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: item.id.clone(),
-                expected: expected_revision,
-                actual: item.revision,
-            });
-        }
         let evidence = confirmation_evidence_for_policy(
             &item.completion_policy,
             principal.as_ref(),
@@ -438,13 +417,6 @@ impl WorkGraphService {
             )
             .await?;
         let requested_status = WorkStatus::from(request.status);
-        if item.revision != request.expected_revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: item.id.clone(),
-                expected: request.expected_revision,
-                actual: item.revision,
-            });
-        }
         let item = self
             .close(CloseWorkItemRequest {
                 id: item.id.clone(),
@@ -719,13 +691,6 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
-        if item.revision != request.expected_revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: item.id.clone(),
-                expected: request.expected_revision,
-                actual: item.revision,
-            });
-        }
         let (item, event) = WorkGraphMachine::close_item(item, request, now)?;
         let attention_updates = self.attention_stop_updates_for_item(&item, now).await?;
         let closed = self

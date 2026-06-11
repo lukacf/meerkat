@@ -17,7 +17,7 @@ use crate::input::{
 };
 #[allow(unused_imports)]
 use crate::service_ext::SessionServiceRuntimeExt as _;
-use crate::traits::RuntimeDriverError;
+use crate::traits::{RuntimeControlPlaneError, RuntimeDriverError};
 
 /// Create a FlowStepInput for a mob flow step.
 pub fn create_flow_step_input(
@@ -27,12 +27,6 @@ pub fn create_flow_step_input(
     step_index: usize,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
 ) -> Input {
-    let instructions_text = instructions.text_content();
-    let blocks = if instructions.has_images() {
-        Some(instructions.into_blocks())
-    } else {
-        None
-    };
     Input::FlowStep(FlowStepInput {
         header: InputHeader {
             id: InputId::new(),
@@ -48,15 +42,21 @@ pub fn create_flow_step_input(
             correlation_id: None,
         },
         step_id: step_id.into(),
-        instructions: instructions_text,
-        blocks,
+        content: instructions,
         turn_metadata,
     })
 }
 
 /// Register a mob member's session with the runtime adapter.
-pub async fn register_mob_member(adapter: &MeerkatMachine, session_id: SessionId) {
-    adapter.register_session(session_id).await;
+///
+/// Registration is a control-plane prerequisite. A failed register is propagated
+/// as a typed error rather than swallowed so the mob provisioning caller can abort
+/// instead of proceeding as if the member's runtime exists.
+pub async fn register_mob_member(
+    adapter: &MeerkatMachine,
+    session_id: SessionId,
+) -> Result<(), RuntimeControlPlaneError> {
+    adapter.register_session(session_id).await
 }
 
 /// Unregister a mob member's session from the runtime adapter.
@@ -101,7 +101,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
 
-        register_mob_member(&adapter, sid.clone()).await;
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
 
         // Session should have a runtime driver
         let state = adapter.runtime_state(&sid).await.unwrap();
@@ -112,7 +112,7 @@ mod tests {
     async fn flow_step_delivered_as_input() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
-        register_mob_member(&adapter, sid.clone()).await;
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
 
         let outcome = deliver_flow_step(&adapter, &sid, "step-1", "analyze the data", "flow-1", 0)
             .await
@@ -131,7 +131,7 @@ mod tests {
     async fn retire_without_runtime_loop_abandons_pending_inputs() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
-        register_mob_member(&adapter, sid.clone()).await;
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
 
         // Accept an input first
         deliver_flow_step(&adapter, &sid, "s1", "do it", "f1", 0)
@@ -167,8 +167,14 @@ mod tests {
             Input::FlowStep(flow_step) => flow_step,
             other => return Err(format!("expected flow step input, got {other:?}")),
         };
-        assert_eq!(flow_step.instructions, "inspect image\n[image: image/png]");
-        assert_eq!(flow_step.blocks.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            flow_step.content.text_content(),
+            "inspect image\n[image: image/png]"
+        );
+        assert!(matches!(
+            &flow_step.content,
+            meerkat_core::types::ContentInput::Blocks(blocks) if blocks.len() == 2
+        ));
         Ok(())
     }
 
@@ -176,7 +182,7 @@ mod tests {
     async fn unregister_removes_driver() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
-        register_mob_member(&adapter, sid.clone()).await;
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
 
         unregister_mob_member(&adapter, &sid).await;
 
@@ -192,9 +198,77 @@ mod tests {
         // through typed runtime-state queries.
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
-        register_mob_member(&adapter, sid.clone()).await;
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
 
         let active = adapter.list_active_inputs(&sid).await.unwrap();
         assert!(active.is_empty()); // No inputs yet
+    }
+
+    /// Gate (#99/#277): a control-plane registration that fails (the session was
+    /// destroyed, so the RegisterSession command returns `Destroyed`) must surface
+    /// a typed `Err` from `register_session` rather than being laundered to success.
+    /// Pre-fix the helper dropped the result with `let _ = ...` and returned `()`,
+    /// so the failure was invisible to callers.
+    #[tokio::test]
+    async fn register_session_surfaces_failure_on_destroyed_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let sid = SessionId::new();
+
+        // Establish the session, then destroy it so re-registration must fail.
+        adapter.register_session(sid.clone()).await.unwrap();
+        let runtime_id = MeerkatMachine::logical_runtime_id(&sid);
+        crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+            .await
+            .unwrap();
+
+        let result = adapter.register_session(sid.clone()).await;
+        assert!(
+            matches!(result, Err(RuntimeControlPlaneError::Internal(_))),
+            "register_session on a destroyed session must surface a typed control-plane error, got {result:?}"
+        );
+    }
+
+    /// Gate (#99): `register_mob_member` must propagate the typed registration
+    /// failure rather than swallow it — a mob member whose runtime cannot be
+    /// registered must not be reported as provisioned.
+    #[tokio::test]
+    async fn register_mob_member_propagates_failure_on_destroyed_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let sid = SessionId::new();
+
+        register_mob_member(&adapter, sid.clone()).await.unwrap();
+        let runtime_id = MeerkatMachine::logical_runtime_id(&sid);
+        crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+            .await
+            .unwrap();
+
+        let result = register_mob_member(&adapter, sid.clone()).await;
+        assert!(
+            result.is_err(),
+            "register_mob_member must propagate the typed registration failure, got {result:?}"
+        );
+    }
+
+    /// Gate (#41): `set_session_silent_intents` must surface the inner command's
+    /// typed `Err` to the caller instead of dropping it with `let _ = ...`. A
+    /// destroyed session makes the SetSilentIntents command return `Destroyed`.
+    #[tokio::test]
+    async fn set_session_silent_intents_surfaces_failure_on_destroyed_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let sid = SessionId::new();
+
+        adapter.register_session(sid.clone()).await.unwrap();
+        let runtime_id = MeerkatMachine::logical_runtime_id(&sid);
+        crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+            .await
+            .unwrap();
+
+        let result = adapter
+            .set_session_silent_intents(&sid, vec!["status".to_string()])
+            .await;
+        assert!(
+            matches!(result, Err(RuntimeDriverError::Destroyed)),
+            "set_session_silent_intents must surface the inner command failure, got {result:?}"
+        );
     }
 }

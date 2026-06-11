@@ -106,22 +106,20 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             PeerInput,
         };
 
-        let (body, blocks) = match content {
-            ContentInput::Text(body) => (body, None),
-            ContentInput::Blocks(blocks) => {
-                let body = meerkat_core::types::text_content(&blocks);
-                (body, Some(blocks))
-            }
-        };
-
+        // Provenance is the member's canonical runtime identity, not a synthetic
+        // `local-bridge:` session string: peer_id/display_identity are stamped
+        // from the same `LogicalRuntimeId` carried in `runtime_id`, so the
+        // origin parses back to the canonical runtime id rather than a
+        // transport-prefixed session string.
+        let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: format!("local-bridge:{}", self.session_id),
-                    display_identity: Some(format!("local-bridge:{}", self.session_id)),
-                    runtime_id: Some(LogicalRuntimeId::for_session(&self.session_id)),
+                    peer_id: runtime_id.0.clone(),
+                    display_identity: Some(runtime_id.0.clone()),
+                    runtime_id: Some(runtime_id),
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
@@ -132,9 +130,8 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body,
+            content,
             payload: None,
-            blocks,
             handling_mode: match handling_mode {
                 HandlingMode::Queue => None,
                 mode => Some(mode),
@@ -153,7 +150,6 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             input_id: input_id.to_string(),
                             canonical_input_id: Some(id.to_string()),
                             outcome: BridgeDeliveryOutcome::Accepted,
-                            completion: None,
                         }
                     }
                     meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -164,7 +160,6 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             outcome: BridgeDeliveryOutcome::Deduplicated {
                                 existing_input_id: existing_id,
                             },
-                            completion: None,
                         }
                     }
                     meerkat_runtime::AcceptOutcome::Rejected { reason } => {
@@ -176,7 +171,6 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                                 cause,
                                 reason: reason.to_string(),
                             },
-                            completion: None,
                         }
                     }
                     _ => BridgeDeliveryResponse {
@@ -188,7 +182,6 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             },
                             reason: "unexpected accept outcome".to_string(),
                         },
-                        completion: None,
                     },
                 };
                 Ok(response)
@@ -308,7 +301,7 @@ mod tests {
         CoreExecutorInterruptHandle,
     };
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-    use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceipt, RunId};
+    use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceiptDraft, RunId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -316,7 +309,10 @@ mod tests {
     async fn local_bridge_observe_returns_idle_for_registered_session() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let observation = bridge.observe_member().await.unwrap();
@@ -329,7 +325,10 @@ mod tests {
     async fn local_bridge_retire_returns_report() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let report = bridge.retire_member().await.unwrap();
@@ -342,7 +341,10 @@ mod tests {
     async fn local_bridge_interrupt_retired_runtime_is_terminal_noop() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         bridge.retire_member().await.unwrap();
@@ -414,13 +416,12 @@ mod tests {
                 self.allow_finish.notified().await;
                 self.apply_finished.notify_waiters();
                 Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
+                    receipt: RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,
                         contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     session_snapshot: None,
                     terminal: None,
@@ -567,7 +568,10 @@ mod tests {
     async fn local_bridge_destroy_returns_report() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let report = bridge.destroy_member().await.unwrap();

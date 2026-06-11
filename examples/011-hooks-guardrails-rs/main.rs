@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient, HookCapability,
-    HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HookRuntimeKind,
+    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient,
+    HookAdapterConfig, HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint,
     HooksConfig, ToolDef, ToolError, ToolResult,
 };
 use meerkat_core::{ToolCallView, ToolDispatchOutcome};
@@ -109,11 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 point: HookPoint::PreLlmRequest,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
-                runtime: HookRuntimeConfig::new(
-                    HookRuntimeKind::InProcess,
-                    Some(serde_json::json!({ "name": "audit-log" })),
-                )
-                .unwrap_or_default(),
+                runtime: HookAdapterConfig::in_process("audit-log"),
                 ..Default::default()
             },
             // Hook 2: Observe tool calls before execution (in-process)
@@ -122,11 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 point: HookPoint::PreToolExecution,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
-                runtime: HookRuntimeConfig::new(
-                    HookRuntimeKind::InProcess,
-                    Some(serde_json::json!({ "name": "tool-filter" })),
-                )
-                .unwrap_or_default(),
+                runtime: HookAdapterConfig::in_process("tool-filter"),
                 ..Default::default()
             },
             // Hook 3: Observe turn boundaries (in-process)
@@ -135,11 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 point: HookPoint::TurnBoundary,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
-                runtime: HookRuntimeConfig::new(
-                    HookRuntimeKind::InProcess,
-                    Some(serde_json::json!({ "name": "turn-monitor" })),
-                )
-                .unwrap_or_default(),
+                runtime: HookAdapterConfig::in_process("turn-monitor"),
                 ..Default::default()
             },
         ],
@@ -225,9 +213,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AgentEvent::HookFailed {
                     hook_id,
                     point,
-                    error,
+                    reason,
+                    ..
                 } => {
-                    println!("  [EVENT] HookFailed: {hook_id} @ {point:?}: {error}");
+                    println!("  [EVENT] HookFailed: {hook_id} @ {point:?}: {reason}");
                 }
                 _ => {}
             }

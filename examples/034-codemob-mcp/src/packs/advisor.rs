@@ -64,11 +64,7 @@ impl Pack for AdvisorPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some("Single-agent advisory opinion".into()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("Single-agent advisory opinion".into()), steps, None),
         );
 
         mob_definition(

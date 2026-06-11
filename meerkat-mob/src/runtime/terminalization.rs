@@ -1,15 +1,77 @@
 use crate::error::MobError;
-use crate::event::{MobEventKind, NewMobEvent};
+use crate::event::{FlowFailureClass, MobEventKind, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId};
 use crate::run::{MobRun, MobRunStatus, mob_machine_run_status_is_terminal};
 use crate::store::{MobEventStore, MobRunStore, authority_validating_mob_run_store};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+/// Typed categorization of why a flow run terminated in `Failed`.
+///
+/// The wire-persisted `MobEventKind::FlowFailed` carries the typed
+/// [`FlowFailureClass`] projected via [`FlowFailureCause::class`] plus the
+/// display `reason` rendered via [`FlowFailureCause::reason`]. The class is
+/// derived ONCE from the typed `MobError` at [`FlowFailureCause::from_step_error`]
+/// — no consumer re-parses the display string to recover the failure origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FlowFailureCause {
+    /// A step (single- or multi-target dispatch, collection policy, template
+    /// render, deadline, or escalation) failed and aborted the run. `class`
+    /// is the typed classification of the originating [`MobError`]; `detail`
+    /// is its display text.
+    StepError {
+        class: FlowFailureClass,
+        detail: String,
+    },
+    /// The mob lifecycle rejected the `StartRun` transition during admission.
+    AdmissionFailed { detail: String },
+    /// Repair fallback for a run already persisted as `Failed` whose original
+    /// failure reason is no longer available to reconstruct.
+    AlreadyFailed,
+}
+
+impl FlowFailureCause {
+    /// Classify a typed step-level [`MobError`] ONCE into a typed failure
+    /// cause, preserving the display detail.
+    pub(super) fn from_step_error(error: &MobError) -> Self {
+        let class = match error {
+            MobError::FlowTurnTimedOut => FlowFailureClass::StepTimeout,
+            MobError::TopologyViolation { .. } => FlowFailureClass::TopologyViolation,
+            MobError::SchemaValidation { .. } => FlowFailureClass::SchemaValidation,
+            MobError::RunCanceled(_) => FlowFailureClass::RunCanceled,
+            MobError::SupervisorEscalation(_) => FlowFailureClass::SupervisorEscalation,
+            MobError::InsufficientTargets { .. } => FlowFailureClass::InsufficientTargets,
+            MobError::FlowFailed { .. } => FlowFailureClass::StepError,
+            _ => FlowFailureClass::Internal,
+        };
+        Self::StepError {
+            class,
+            detail: error.to_string(),
+        }
+    }
+
+    /// Project the typed failure class persisted into the `FlowFailed` event.
+    pub(super) fn class(&self) -> FlowFailureClass {
+        match self {
+            Self::StepError { class, .. } => *class,
+            Self::AdmissionFailed { .. } => FlowFailureClass::AdmissionFailed,
+            Self::AlreadyFailed => FlowFailureClass::AlreadyFailed,
+        }
+    }
+
+    /// Render the display string persisted into the wire `FlowFailed` event.
+    pub(super) fn reason(&self) -> String {
+        match self {
+            Self::StepError { detail, .. } | Self::AdmissionFailed { detail } => detail.clone(),
+            Self::AlreadyFailed => "run already failed".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum TerminalizationTarget {
     Completed { structured_output: Option<Value> },
-    Failed { reason: String },
+    Failed { cause: FlowFailureCause },
     Canceled,
 }
 
@@ -37,10 +99,11 @@ impl TerminalizationTarget {
                 flow_id,
                 structured_output,
             },
-            Self::Failed { reason } => MobEventKind::FlowFailed {
+            Self::Failed { cause } => MobEventKind::FlowFailed {
                 run_id,
                 flow_id,
-                reason,
+                cause: cause.class(),
+                reason: cause.reason(),
             },
             Self::Canceled => MobEventKind::FlowCanceled { run_id, flow_id },
         }
@@ -73,33 +136,43 @@ impl FlowTerminalizationAuthority {
         }
     }
 
-    pub(super) async fn record_persisted_terminalization(
+    /// Commit the terminal run snapshot AND the terminal mob event through the
+    /// store's combined seam, so terminal status truth and terminal event
+    /// truth cannot split (single SQLite transaction on durable storage).
+    ///
+    /// Returns `Ok(Some(Transitioned))` when this caller won the CAS and the
+    /// terminal event is committed with it, `Ok(None)` when the CAS lost.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn commit_terminalization_with_snapshot(
         &self,
-        run_id: RunId,
+        run_id: &RunId,
         flow_id: FlowId,
         target: TerminalizationTarget,
-    ) -> Result<TerminalizationOutcome, MobError> {
-        let event_name = target.event_name();
+        expected_status: MobRunStatus,
+        expected_flow_state: &crate::run::flow_run::State,
+        next_flow_state: &crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<Option<TerminalizationOutcome>, MobError> {
+        let next_status = target.status();
         let event_kind = target.into_event_kind(run_id.clone(), flow_id);
-        if let Err(append_error) = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.mob_id.clone(),
-                timestamp: None,
-                kind: event_kind,
-            })
-            .await
-        {
-            return self
-                .record_terminal_event_append_failure(
-                    &run_id,
-                    event_name,
-                    MobError::from(append_error),
-                )
-                .await;
-        }
-
-        Ok(TerminalizationOutcome::Transitioned)
+        let stored = self
+            .run_store
+            .cas_run_snapshot_and_append_terminal_event_with_authority(
+                run_id,
+                expected_status,
+                expected_flow_state,
+                next_status,
+                next_flow_state,
+                authority_inputs,
+                self.events.as_ref(),
+                NewMobEvent {
+                    mob_id: self.mob_id.clone(),
+                    timestamp: None,
+                    kind: event_kind,
+                },
+            )
+            .await?;
+        Ok(stored.map(|_| TerminalizationOutcome::Transitioned))
     }
 
     pub(super) async fn repair_persisted_terminalization(
@@ -156,11 +229,11 @@ impl FlowTerminalizationAuthority {
                 }
             }
             MobRunStatus::Failed => {
-                let reason = match requested {
-                    TerminalizationTarget::Failed { reason } => reason,
-                    _ => "run already failed".to_string(),
+                let cause = match requested {
+                    TerminalizationTarget::Failed { cause } => cause,
+                    _ => FlowFailureCause::AlreadyFailed,
                 };
-                TerminalizationTarget::Failed { reason }
+                TerminalizationTarget::Failed { cause }
             }
             MobRunStatus::Canceled => TerminalizationTarget::Canceled,
             MobRunStatus::Pending | MobRunStatus::Running => requested,
@@ -211,8 +284,11 @@ impl FlowTerminalizationAuthority {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget};
-    use crate::event::{MobEvent, MobEventKind, NewMobEvent};
+    use super::{
+        FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome,
+        TerminalizationTarget,
+    };
+    use crate::event::{FlowFailureClass, MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
     use crate::run::{MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry};
     use crate::store::{
@@ -227,19 +303,13 @@ mod tests {
 
     struct RecordingRunStore {
         inner: InMemoryMobRunStore,
-        fail_get_run: RwLock<bool>,
     }
 
     impl RecordingRunStore {
         fn new() -> Self {
             Self {
                 inner: InMemoryMobRunStore::new(),
-                fail_get_run: RwLock::new(false),
             }
-        }
-
-        async fn fail_get_run(&self, fail: bool) {
-            *self.fail_get_run.write().await = fail;
         }
     }
 
@@ -250,11 +320,6 @@ mod tests {
         }
 
         async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
-            if *self.fail_get_run.read().await {
-                return Err(MobStoreError::Internal(
-                    "fault-injected get_run failure".to_string(),
-                ));
-            }
             self.inner.get_run(run_id).await
         }
 
@@ -682,28 +747,133 @@ mod tests {
         .expect("authority-backed sample run")
     }
 
+    #[test]
+    fn test_flow_failure_cause_classifies_typed_error_into_typed_event_cause() {
+        use crate::error::MobError;
+
+        // The typed MobError is classified ONCE into a typed cause...
+        let cause = FlowFailureCause::from_step_error(&MobError::FlowTurnTimedOut);
+        assert_eq!(cause.class(), FlowFailureClass::StepTimeout);
+        assert_eq!(
+            FlowFailureCause::from_step_error(&MobError::TopologyViolation {
+                from_role: crate::ids::ProfileName::from("a"),
+                to_role: crate::ids::ProfileName::from("b"),
+            })
+            .class(),
+            FlowFailureClass::TopologyViolation
+        );
+        assert_eq!(
+            FlowFailureCause::from_step_error(&MobError::RunCanceled(RunId::new())).class(),
+            FlowFailureClass::RunCanceled
+        );
+
+        // ...and the persisted FlowFailed event carries that typed class, not
+        // only a display string.
+        let kind = TerminalizationTarget::Failed { cause }
+            .into_event_kind(RunId::new(), FlowId::from("flow"));
+        match kind {
+            MobEventKind::FlowFailed { cause, reason, .. } => {
+                assert_eq!(cause, FlowFailureClass::StepTimeout);
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected FlowFailed, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
-    async fn test_terminalization_records_persisted_terminal_event() {
+    async fn test_terminalization_commits_snapshot_and_terminal_event_through_one_seam() {
         let run_store = Arc::new(RecordingRunStore::new());
         let events = Arc::new(FaultInjectedEventStore::default());
-        let authority =
-            FlowTerminalizationAuthority::new(run_store.clone(), events, MobId::from("mob"));
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
 
         let run_id = RunId::new();
-        run_store
-            .create_run(sample_run(run_id.clone(), MobRunStatus::Pending))
-            .await
-            .expect("create run");
+        let run = sample_run(run_id.clone(), MobRunStatus::Running);
+        let expected_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCanceled(
+                    crate::run::flow_run::inputs::TerminalizeCanceled {},
+                ),
+            )
+            .expect("project canceled run state");
+        run_store.create_run(run).await.expect("create run");
 
         let outcome = authority
-            .record_persisted_terminalization(
-                run_id.clone(),
+            .commit_terminalization_with_snapshot(
+                &run_id,
                 FlowId::from("flow"),
                 TerminalizationTarget::Canceled,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                &next_flow_state,
+                vec![authority_input],
             )
             .await
             .expect("terminalize");
-        assert_eq!(outcome, TerminalizationOutcome::Transitioned);
+        assert_eq!(outcome, Some(TerminalizationOutcome::Transitioned));
+
+        let run = run_store
+            .get_run(&run_id)
+            .await
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(run.status, MobRunStatus::Canceled);
+        let emitted = events.replay_all().await.expect("replay events");
+        assert_eq!(emitted.len(), 1);
+        assert!(matches!(emitted[0].kind, MobEventKind::FlowCanceled { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_terminalization_cas_loss_appends_no_terminal_event() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        let run = sample_run(run_id.clone(), MobRunStatus::Running);
+        let stale_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCanceled(
+                    crate::run::flow_run::inputs::TerminalizeCanceled {},
+                ),
+            )
+            .expect("project canceled run state");
+        run_store.create_run(run).await.expect("create run");
+
+        // Wrong expected status → CAS loses → NOTHING is appended (the event
+        // cannot exist without the snapshot commit).
+        let outcome = authority
+            .commit_terminalization_with_snapshot(
+                &run_id,
+                FlowId::from("flow"),
+                TerminalizationTarget::Canceled,
+                MobRunStatus::Pending,
+                &stale_flow_state,
+                &next_flow_state,
+                vec![authority_input],
+            )
+            .await
+            .expect("commit attempt");
+        assert_eq!(outcome, None, "lost CAS must not report a transition");
+        assert!(
+            events.replay_all().await.expect("replay events").is_empty(),
+            "a lost CAS must not append a terminal event"
+        );
+        let run = run_store
+            .get_run(&run_id)
+            .await
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(run.status, MobRunStatus::Running);
     }
 
     #[tokio::test]
@@ -717,14 +887,22 @@ mod tests {
         );
 
         let run_id = RunId::new();
-        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
+        let mut run = sample_run(run_id.clone(), MobRunStatus::Running);
         run.root_step_outputs
             .insert(StepId::from("step-1"), serde_json::json!({"answer": 42}));
+        let expected_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
         run_store.create_run(run).await.expect("create run");
 
         let outcome = authority
-            .record_persisted_terminalization(
-                run_id.clone(),
+            .commit_terminalization_with_snapshot(
+                &run_id,
                 FlowId::from("flow"),
                 TerminalizationTarget::Completed {
                     structured_output: Some(serde_json::json!({
@@ -735,10 +913,14 @@ mod tests {
                         }
                     })),
                 },
+                MobRunStatus::Running,
+                &expected_flow_state,
+                &next_flow_state,
+                vec![authority_input],
             )
             .await
             .expect("terminalize");
-        assert_eq!(outcome, TerminalizationOutcome::Transitioned);
+        assert_eq!(outcome, Some(TerminalizationOutcome::Transitioned));
 
         let emitted = events.replay_all().await.expect("replay events");
         match &emitted[0].kind {
@@ -759,48 +941,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_completed_terminalization_does_not_read_snapshot_for_structured_output() {
-        let run_store = Arc::new(RecordingRunStore::new());
-        let events = Arc::new(FaultInjectedEventStore::default());
-        let authority = FlowTerminalizationAuthority::new(
-            run_store.clone(),
-            events.clone(),
-            MobId::from("mob"),
-        );
-
-        let run_id = RunId::new();
-        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
-        run.root_step_outputs
-            .insert(StepId::from("step-1"), serde_json::json!({"answer": 42}));
-        run_store.create_run(run).await.expect("create run");
-        run_store.fail_get_run(true).await;
-
-        let outcome = authority
-            .record_persisted_terminalization(
-                run_id.clone(),
-                FlowId::from("flow"),
-                TerminalizationTarget::Completed {
-                    structured_output: Some(serde_json::json!({
-                        "steps": {
-                            "step-1": {
-                                "answer": 42
-                            }
-                        }
-                    })),
-                },
-            )
-            .await
-            .expect("terminalize");
-
-        assert_eq!(outcome, TerminalizationOutcome::Transitioned);
-        assert_eq!(
-            events.replay_all().await.expect("replay events").len(),
-            1,
-            "FlowCompleted should use the target output and avoid an extra run read"
-        );
-    }
-
-    #[tokio::test]
     async fn test_completed_terminalization_repair_appends_missing_event() {
         let run_store = Arc::new(RecordingRunStore::new());
         let events = Arc::new(FaultInjectedEventStore::default());
@@ -811,14 +951,23 @@ mod tests {
         );
 
         let run_id = RunId::new();
-        run_store
-            .create_run(sample_run(run_id.clone(), MobRunStatus::Completed))
-            .await
-            .expect("create run");
+        let run = sample_run(run_id.clone(), MobRunStatus::Running);
+        let expected_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
+        run_store.create_run(run).await.expect("create run");
         events.fail_appends_for("FlowCompleted").await;
+        // The non-durable fallback seam surfaces the injected append fault as
+        // a typed error after the snapshot commit (the durable SQLite seam has
+        // no such window at all — both sides share one transaction).
         authority
-            .record_persisted_terminalization(
-                run_id.clone(),
+            .commit_terminalization_with_snapshot(
+                &run_id,
                 FlowId::from("flow"),
                 TerminalizationTarget::Completed {
                     structured_output: Some(serde_json::json!({
@@ -829,6 +978,10 @@ mod tests {
                         }
                     })),
                 },
+                MobRunStatus::Running,
+                &expected_flow_state,
+                &next_flow_state,
+                vec![authority_input],
             )
             .await
             .expect_err("initial terminal event append should fail");
@@ -882,18 +1035,28 @@ mod tests {
         );
 
         let run_id = RunId::new();
-        run_store
-            .create_run(sample_run(run_id.clone(), MobRunStatus::Completed))
-            .await
-            .expect("create run");
+        let run = sample_run(run_id.clone(), MobRunStatus::Running);
+        let expected_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
+        run_store.create_run(run).await.expect("create run");
 
         authority
-            .record_persisted_terminalization(
-                run_id.clone(),
+            .commit_terminalization_with_snapshot(
+                &run_id,
                 FlowId::from("flow"),
                 TerminalizationTarget::Completed {
                     structured_output: Some(serde_json::json!({"steps": {"step-1": "ok"}})),
                 },
+                MobRunStatus::Running,
+                &expected_flow_state,
+                &next_flow_state,
+                vec![authority_input],
             )
             .await
             .expect("record terminal event");
@@ -933,7 +1096,10 @@ mod tests {
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "fallback failure".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        class: FlowFailureClass::Internal,
+                        detail: "fallback failure".to_string(),
+                    },
                 },
             )
             .await
@@ -982,7 +1148,10 @@ mod tests {
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "fallback failure".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        class: FlowFailureClass::Internal,
+                        detail: "fallback failure".to_string(),
+                    },
                 },
             )
             .await
@@ -1017,25 +1186,38 @@ mod tests {
             FlowTerminalizationAuthority::new(run_store.clone(), events, MobId::from("mob"));
 
         let run_id = RunId::new();
-        run_store
-            .create_run(sample_run(run_id.clone(), MobRunStatus::Failed))
-            .await
-            .expect("create run");
+        let run = sample_run(run_id.clone(), MobRunStatus::Running);
+        let expected_flow_state = run.flow_state.clone();
+        let (next_flow_state, authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeFailed(
+                    crate::run::flow_run::inputs::TerminalizeFailed {},
+                ),
+            )
+            .expect("project failed run state");
+        run_store.create_run(run).await.expect("create run");
 
         let error = authority
-            .record_persisted_terminalization(
-                run_id.clone(),
+            .commit_terminalization_with_snapshot(
+                &run_id,
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "boom".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        class: FlowFailureClass::Internal,
+                        detail: "boom".to_string(),
+                    },
                 },
+                MobRunStatus::Running,
+                &expected_flow_state,
+                &next_flow_state,
+                vec![authority_input],
             )
             .await
             .expect_err("append failure should surface as terminalization error");
         assert!(
             error
                 .to_string()
-                .contains("terminal run status persisted but FlowFailed append failed"),
+                .contains("terminal run status persisted but terminal event append failed"),
             "error should mention terminal append divergence"
         );
 

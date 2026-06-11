@@ -85,17 +85,25 @@ macro_rules! mob_catalog_machine_dsl {
             member_startup_binding_requested: Set<AgentRuntimeId>,
             member_startup_runtime_ready: Set<AgentRuntimeId>,
             member_startup_ready: Set<AgentRuntimeId>,
-            member_kickoff_pending: Set<String>,
-            member_kickoff_starting: Set<String>,
-            member_kickoff_callback_pending: Set<String>,
-            member_kickoff_started: Set<String>,
-            member_kickoff_failed: Set<String>,
-            member_kickoff_cancelled: Set<String>,
-            member_kickoff_error: Map<String, String>,
+            member_kickoff_pending: Set<AgentIdentity>,
+            member_kickoff_starting: Set<AgentIdentity>,
+            member_kickoff_callback_pending: Set<AgentIdentity>,
+            member_kickoff_started: Set<AgentIdentity>,
+            member_kickoff_failed: Set<AgentIdentity>,
+            member_kickoff_cancelled: Set<AgentIdentity>,
+            member_kickoff_error: Map<AgentIdentity, String>,
             // Identity-level restore failures are lifecycle facts owned by
             // MobMachine. Projection code may surface the reason, but the
             // Broken/terminal classification comes from this map.
             member_restore_failures: Map<AgentIdentity, String>,
+            // Machine-owned revival obligation: members whose live
+            // materialization was observed missing while a durable session
+            // snapshot still exists. Inserted by the revivable arm of
+            // ClassifyMemberLiveMaterialization; cleared by the
+            // ResolveMemberRevival* resolutions and by every lifecycle
+            // transition that replaces or clears the member's restore
+            // classification. The session-registry cache never owns this fact.
+            member_revival_pending: Set<AgentIdentity>,
             // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
             // draining/retiring sub-state independently of the mob-level
             // lifecycle phase so generated SubmitWork authority can decide
@@ -186,6 +194,27 @@ macro_rules! mob_catalog_machine_dsl {
             resource_claim_owner_present: Map<ResourceClaimId, bool>,
             resource_claim_expires_at_ms: Map<ResourceClaimId, Option<u64>>,
             coordination_event_next_sequence: u64,
+            // Wave-G1 catalog folds.
+            // Row #293: declared default topology-edge policy. Applied in-DSL
+            // for edges with no matching declarative rule. Defaults to Allow to
+            // preserve the former shell `map_or(Allow, ..)` behavior.
+            topology_default_policy: Enum<PolicyDecision>,
+            // Row #314: per-identity external-member rebind capability. Minted
+            // by the bridge/spawn chokepoints; read by
+            // project_external_member_observation instead of deriving from
+            // roster bootstrap_token presence.
+            external_member_rebind_capability: Map<AgentIdentity, Enum<ExternalMemberRebindCapability>>,
+            // Row #320: orphan budget for detached turns. Seeded once from
+            // `definition.limits.max_orphaned_turns` via `SeedOrphanBudget`.
+            // A non-retryable timeout detaches while budget > 0 (decrementing
+            // it), otherwise cancels.
+            orphan_budget: u64,
+            // Row #351: machine-owned membership intent. `ReconcileRunning`
+            // recomputes the spawn/retire diff against `identity_to_runtime`
+            // into these sets; the handle reads them and executes mechanically.
+            desired_members: Set<AgentIdentity>,
+            members_to_spawn: Set<AgentIdentity>,
+            members_to_retire: Set<AgentIdentity>,
         }
 
         init(Running) {
@@ -272,6 +301,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
             member_restore_failures = EmptyMap,
+            member_revival_pending = EmptySet,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
@@ -322,6 +352,12 @@ macro_rules! mob_catalog_machine_dsl {
             resource_claim_owner_present = EmptyMap,
             resource_claim_expires_at_ms = EmptyMap,
             coordination_event_next_sequence = 1,
+            topology_default_policy = PolicyDecision::Allow,
+            external_member_rebind_capability = EmptyMap,
+            orphan_budget = 0,
+            desired_members = EmptySet,
+            members_to_spawn = EmptySet,
+            members_to_retire = EmptySet,
         }
 
         terminal [Destroyed]
@@ -636,14 +672,72 @@ macro_rules! mob_catalog_machine_dsl {
             ResolveSpawnPolicy { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             Shutdown,
             ForceCancel { agent_identity: AgentIdentity },
-            KickoffMarkPending { member_id: String },
-            KickoffMarkStarting { member_id: String },
+            KickoffMarkPending { member_id: AgentIdentity },
+            KickoffMarkStarting { member_id: AgentIdentity },
             StartupMarkReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            KickoffResolveStarted { member_id: String },
-            KickoffResolveCallbackPending { member_id: String },
-            KickoffResolveFailed { member_id: String, error: String },
-            KickoffCancelRequested { member_id: String },
-            KickoffClear { member_id: String },
+            KickoffResolveStarted { member_id: AgentIdentity },
+            KickoffResolveCallbackPending { member_id: AgentIdentity },
+            KickoffResolveFailed { member_id: AgentIdentity, error: String },
+            KickoffCancelRequested { member_id: AgentIdentity },
+            KickoffClear { member_id: AgentIdentity },
+            // ---------------------------------------------------------------
+            // Wave-G1 catalog folds (rows #14, #181, #260, #261, #293, #314,
+            // #320). These lower duplicate-admission, respawn-generation,
+            // step-fault classification, supervisor escalation, topology-edge
+            // verdict, external-member rebind capability, and turn-timeout
+            // disposition into MobMachine authority. Each carries only RAW
+            // typed caller facts; MobMachine owns every verdict.
+            // ---------------------------------------------------------------
+            // Row #14: duplicate-member admission probe. The actor reads the
+            // emitted verdict instead of probing the PendingSpawnLineage map.
+            ProbeMemberAdmission { agent_identity: AgentIdentity },
+            // Row #181: compute the next monotone respawn generation. The
+            // actor reads the emitted generation instead of `generation.next()`.
+            ComputeRespawnGeneration { agent_identity: AgentIdentity },
+            // Row #260: classify a typed step-output fault into retry/terminal.
+            ClassifyStepOutputFault {
+                run_id: RunId,
+                step_id: StepId,
+                target_retry_key: String,
+                fault: Enum<StepOutputFaultKind>,
+                attempt: u32,
+                max_retries: u32,
+            },
+            // Row #261: supervisor escalation. Presence of an eligible target is
+            // structural (two inputs, no `Option<AgentIdentity>`): a target was
+            // selected, or no eligible target exists.
+            EscalateToSupervisor {
+                run_id: RunId,
+                step_id: StepId,
+                supervisor_identity: AgentIdentity,
+                turn_timeout_ms: u64,
+            },
+            EscalateToSupervisorNoEligibleTarget { run_id: RunId, step_id: StepId },
+            // Row #293: topology-edge admission verdict. The shell projects the
+            // declarative rule match (if any) as `Option<PolicyDecision>`;
+            // MobMachine applies the declared default policy for unmatched edges.
+            // `from_role`/`to_role` are opaque role strings (no `ProfileName`
+            // type is bound in the mob catalog metadata; the existing
+            // FlowDelegationEdgeAdmission effect uses `String` too).
+            EvaluateTopologyEdge {
+                from_role: String,
+                to_role: String,
+                rule_match: Option<Enum<PolicyDecision>>,
+            },
+            // Row #314: external-member rebind capability. The bridge supplies
+            // the typed capability bit; the projection reads the machine map.
+            SetExternalMemberRebindCapability {
+                agent_identity: AgentIdentity,
+                capability: Enum<ExternalMemberRebindCapability>,
+            },
+            // Row #320: turn-timeout disposition. `orphan_budget` is a typed
+            // machine field; the shell reads the detach/cancel/retryable verdict.
+            ClassifyTurnTimeoutDisposition { timed_out_run_id: RunId, retryable: bool },
+            // Row #320 (G1 regression fix): one-time orphan-budget seed. The
+            // lead dispatches this once at actor build from
+            // `definition.limits.max_orphaned_turns` (default 8) so non-retryable
+            // timeouts can detach rather than always classifying Canceled.
+            SeedOrphanBudget { budget: u64 },
             // ---------------------------------------------------------------
             // Mob coordination board inputs (folded). These carry only RAW
             // typed caller facts: no `already_exists`, no `current_revision`
@@ -721,7 +815,7 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
             RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
-            RecoverMemberKickoff { member_id: String, phase: KickoffPhase, error: Option<String> },
+            RecoverMemberKickoff { member_id: AgentIdentity, phase: KickoffPhase, error: Option<String> },
             RecoverRosterWiring { edge: WiringEdge },
             RecoverRosterUnwire { edge: WiringEdge },
             RecoverExternalPeerWiring { key: ExternalPeerKey, edge: ExternalPeerEdge },
@@ -729,6 +823,9 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
             RecoverOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
+            ClassifyMemberLiveMaterialization { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
+            ResolveMemberRevivalSucceeded { agent_identity: AgentIdentity },
+            ResolveMemberRevivalFailed { agent_identity: AgentIdentity, reason: String },
             AdmitDestroyCleanup,
             AdmitDestroyStorageFinalizing,
             MarkCompleted,
@@ -785,12 +882,65 @@ macro_rules! mob_catalog_machine_dsl {
             EmitMemberTerminalNotice,
             AdmitPeerInput,
             EmitProgressNote,
-            PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
-            PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
-            EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
+            PersistKickoffUpdate { member_id: AgentIdentity, phase: KickoffPhase },
+            PersistKickoffFailureUpdate { member_id: AgentIdentity, phase: KickoffPhase, error: String },
+            EmitKickoffLifecycleNotice { member_id: AgentIdentity, intent: Enum<KickoffIntent> },
+            // Row #14: machine-owned duplicate-member admission verdict. The
+            // actor mirrors this (Admitted -> Ok; DuplicateRejected ->
+            // MemberAlreadyExists) instead of probing the PendingSpawnLineage map.
+            MemberAdmissionProbed { agent_identity: AgentIdentity, verdict: Enum<MemberAdmissionVerdictKind> },
+            // Row #181: machine-owned next monotone respawn generation. The
+            // actor consumes `next_generation` instead of `generation.next()`.
+            RespawnGenerationComputed { agent_identity: AgentIdentity, next_generation: Generation },
+            // Row #260: machine-owned step-output fault disposition. The flow
+            // shell mirrors Retry (attempt+=1, continue) / Terminal (fail). The
+            // typed `terminal_cause` flows into terminalization (row #126).
+            StepOutputFaultClassified {
+                run_id: RunId,
+                step_id: StepId,
+                target_retry_key: String,
+                disposition: Enum<StepFaultDispositionKind>,
+                terminal_cause: Enum<StepOutputFaultKind>,
+            },
+            // Row #261: machine-owned supervisor escalation request. The shell
+            // runs the internal turn with the machine-supplied timeout and
+            // realizes the escalation evidence.
+            SupervisorEscalationRequested {
+                run_id: RunId,
+                step_id: StepId,
+                supervisor_identity: AgentIdentity,
+                turn_timeout_ms: u64,
+            },
+            // Row #261: machine-owned typed escalation failure. Fail-closed is a
+            // typed terminal cause, not a free-form `SupervisorEscalation` string.
+            SupervisorEscalationFailed {
+                run_id: RunId,
+                step_id: StepId,
+                cause: Enum<SupervisorEscalationFailureCause>,
+            },
+            // Row #293: machine-owned topology-edge verdict. The FlowEngine reads
+            // the verdict; the default policy is applied in-DSL for unmatched edges.
+            TopologyEdgeVerdictResolved {
+                from_role: String,
+                to_role: String,
+                verdict: Enum<PolicyDecision>,
+            },
+            // Row #320: machine-owned turn-timeout disposition. The shell mirrors
+            // Detached (reconcile detached turn) / Canceled (abort) / Retryable.
+            TurnTimeoutDispositionClassified {
+                timed_out_run_id: RunId,
+                disposition: Enum<TurnTimeoutDisposition>,
+            },
+            // Row #351: machine-owned membership-intent effects emitted by the
+            // single-identity EnsureMember path. The handle mechanically realizes
+            // spawn/retain/retire instead of computing the desired-vs-current diff.
+            MemberSpawnRequired { agent_identity: AgentIdentity },
+            MemberRetainRequired { agent_identity: AgentIdentity },
+            MemberRetireRequired { agent_identity: AgentIdentity },
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             OwnerBridgeSessionBound { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
+            MemberLiveMaterializationClassified { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, verdict: Enum<MemberRevivalVerdictKind>, reason: String },
             SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
             MemberWaitClassified { agent_identity: AgentIdentity, result: Enum<MemberWaitClassificationKind> },
             // Machine-owned flow topology edge admission verdict. The shell
@@ -941,88 +1091,99 @@ macro_rules! mob_catalog_machine_dsl {
             },
         }
 
-        disposition RequestRuntimeBinding => routed [MeerkatMachine],
-        disposition SpawnProfileAuthorized => local,
-        disposition RequestRuntimeIngress => routed [MeerkatMachine],
-        disposition RequestPeerRuntimeIngress => local,
-        disposition SubmitWorkRejected => local,
-        disposition CancelAllWorkRejected => local,
-        disposition RequestRuntimeRetire => routed [MeerkatMachine],
-        disposition RequestRuntimeDestroy => routed [MeerkatMachine],
-        disposition PendingSpawnOperationOwnerAuthorized => local,
-        disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress,
-        disposition AppendLifecycleJournal => local,
-        disposition AppendOperatorActionProvenance => local,
-        disposition EmitMemberLifecycleNotice => external,
-        disposition EmitRunLifecycleNotice => external,
-        disposition EmitFlowRunNotice => external,
-        disposition AppendFailureLedger => local,
-        disposition FlowTerminalized => external,
-        disposition FlowRunTerminal => local,
-        disposition FlowRunNonTerminal => local,
-        disposition FlowStepTerminal => local,
-        disposition FlowStepNonTerminal => local,
-        disposition FlowFrameTerminalStatusClassified => local,
-        disposition FlowFrameTerminalStatusUnavailable => local,
-        disposition FlowRunPublicResultClassified => local,
-        disposition EscalateSupervisor => external,
-        disposition NotifyCoordinator => external,
-        disposition ExposePendingSpawn => external,
-        disposition EmitMemberTerminalNotice => external,
-        disposition AdmitPeerInput => external,
-        disposition EmitProgressNote => external,
-        disposition PersistKickoffUpdate => local,
-        disposition PersistKickoffFailureUpdate => local,
-        disposition EmitKickoffLifecycleNotice => external,
-        disposition SpawnPolicyResolutionRecorded => local,
-        disposition OwnerBridgeSessionBound => local,
-        disposition RespawnTopologyRestoreResolved => local,
-        disposition SpawnManyFailureClassified => local,
-        disposition MemberWaitClassified => local,
-        disposition FlowDelegationEdgeAdmissionResolved => local,
-        disposition RemoteMemberRuntimeTerminalityClassified => local,
-        disposition SpawnMemberAdmissionResolved => local,
-        disposition CurrentMobAdmissionResolved => local,
-        disposition SpawnToolAdmissionResolved => local,
-        disposition CreateMobAdmissionResolved => local,
-        disposition ProfileMutationAdmissionResolved => local,
-        disposition MemberOperationEligibilityResolved => local,
-        disposition BridgeRejectionRecoveryClassified => local,
-        disposition PendingSupervisorAcceptanceClassified => local,
-        disposition FrameSeedConfirmed => local,
-        disposition WiringGraphChanged => external,
-        disposition MemberSessionBindingChanged => external,
-        disposition SessionProvisionOperationOwnerAuthorized => local,
-        disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
-        disposition MemberTrustUnwiringRequested => external handoff mob_member_trust_unwiring,
-        disposition WiringTrustRepairRequested => local,
-        disposition ExternalPeerTrustWiringRequested => external handoff mob_external_peer_trust_wiring,
-        disposition ExternalPeerTrustUnwiringRequested => external handoff mob_external_peer_trust_unwiring,
-        disposition ExternalPeerTrustRepairRequested => external handoff mob_external_peer_trust_repair,
-        disposition MemberPeerRegistered => local,
-        disposition MemberPeerRebindAuthorized => local,
-        disposition MemberPeerOverlayAuthorized => external handoff mob_member_peer_overlay,
-        disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust,
-        disposition PersistSupervisorAuthority => local,
-        disposition DeleteSupervisorAuthority => local,
-        disposition EmitWiringLifecycleNotice => external,
-        disposition EmitExternalPeerWiringLifecycleNotice => external,
-        disposition AuthorizeAgentEventSubscription => local,
-        disposition RejectAgentEventSubscription => local,
-        disposition AuthorizeAllAgentEventSubscription => local,
-        disposition RejectAllAgentEventSubscription => local,
-        disposition AuthorizeMobEventRouter => local,
-        disposition AuthorizeMobEventRouterMemberSubscription => local,
-        disposition AuthorizeMobEventRouterMemberRemoval => local,
-        disposition AuthorizeStructuralEventSubscription => local,
-        disposition RejectStructuralEventSubscription => local,
-        disposition AuthorizeStrictEventPoll => local,
-        disposition RejectStrictEventPoll => local,
-        disposition WorkIntentRecorded => local,
-        disposition ResourceClaimRecorded => local,
-        disposition WorkIntentStatusChanged => local,
-        disposition ResourceClaimStatusChanged => local,
-        disposition ResourceClaimOverlapObserved => local,
+        disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
+        disposition SpawnProfileAuthorized => local seam NoOwnerRealization,
+        disposition RequestRuntimeIngress => routed [MeerkatMachine] seam NoOwnerRealization,
+        disposition RequestPeerRuntimeIngress => local seam SurfaceResultAlignment,
+        disposition SubmitWorkRejected => local seam SurfaceResultAlignment,
+        disposition CancelAllWorkRejected => local seam SurfaceResultAlignment,
+        disposition RequestRuntimeRetire => routed [MeerkatMachine] seam NoOwnerRealization,
+        disposition RequestRuntimeDestroy => routed [MeerkatMachine] seam NoOwnerRealization,
+        disposition PendingSpawnOperationOwnerAuthorized => local seam NoOwnerRealization,
+        disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress seam NoOwnerRealization,
+        disposition AppendLifecycleJournal => local seam NoOwnerRealization,
+        disposition AppendOperatorActionProvenance => local seam NoOwnerRealization,
+        disposition EmitMemberLifecycleNotice => external seam SurfaceResultAlignment,
+        disposition EmitRunLifecycleNotice => external seam SurfaceResultAlignment,
+        disposition EmitFlowRunNotice => external seam SurfaceResultAlignment,
+        disposition AppendFailureLedger => local seam NoOwnerRealization,
+        disposition FlowTerminalized => external seam SurfaceResultAlignment,
+        disposition FlowRunTerminal => local seam SurfaceResultAlignment,
+        disposition FlowRunNonTerminal => local seam SurfaceResultAlignment,
+        disposition FlowStepTerminal => local seam SurfaceResultAlignment,
+        disposition FlowStepNonTerminal => local seam SurfaceResultAlignment,
+        disposition FlowFrameTerminalStatusClassified => local seam SurfaceResultAlignment,
+        disposition FlowFrameTerminalStatusUnavailable => local seam SurfaceResultAlignment,
+        disposition FlowRunPublicResultClassified => local seam SurfaceResultAlignment,
+        disposition EscalateSupervisor => external seam OwnerRealizationOnly,
+        disposition NotifyCoordinator => external seam OwnerRealizationOnly,
+        disposition ExposePendingSpawn => external seam OwnerRealizationOnly,
+        disposition EmitMemberTerminalNotice => external seam SurfaceResultAlignment,
+        disposition AdmitPeerInput => external seam OwnerRealizationOnly,
+        disposition EmitProgressNote => external seam OwnerRealizationOnly,
+        disposition PersistKickoffUpdate => local seam NoOwnerRealization,
+        disposition PersistKickoffFailureUpdate => local seam NoOwnerRealization,
+        disposition EmitKickoffLifecycleNotice => external seam OwnerRealizationOnly,
+        disposition MemberAdmissionProbed => local seam SurfaceResultAlignment,
+        disposition RespawnGenerationComputed => local seam SurfaceResultAlignment,
+        disposition StepOutputFaultClassified => local seam SurfaceResultAlignment,
+        disposition SupervisorEscalationRequested => external seam OwnerRealizationOnly,
+        disposition SupervisorEscalationFailed => local seam SurfaceResultAlignment,
+        disposition TopologyEdgeVerdictResolved => local seam SurfaceResultAlignment,
+        disposition TurnTimeoutDispositionClassified => local seam SurfaceResultAlignment,
+        disposition MemberSpawnRequired => external seam OwnerRealizationOnly,
+        disposition MemberRetainRequired => local seam SurfaceResultAlignment,
+        disposition MemberRetireRequired => external seam OwnerRealizationOnly,
+        disposition SpawnPolicyResolutionRecorded => local seam NoOwnerRealization,
+        disposition OwnerBridgeSessionBound => local seam SurfaceResultAlignment,
+        disposition RespawnTopologyRestoreResolved => local seam SurfaceResultAlignment,
+        disposition MemberLiveMaterializationClassified => local seam SurfaceResultAlignment,
+        disposition SpawnManyFailureClassified => local seam SurfaceResultAlignment,
+        disposition MemberWaitClassified => local seam SurfaceResultAlignment,
+        disposition FlowDelegationEdgeAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition RemoteMemberRuntimeTerminalityClassified => local seam SurfaceResultAlignment,
+        disposition SpawnMemberAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition CurrentMobAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition SpawnToolAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition CreateMobAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition ProfileMutationAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition MemberOperationEligibilityResolved => local seam SurfaceResultAlignment,
+        disposition BridgeRejectionRecoveryClassified => local seam SurfaceResultAlignment,
+        disposition PendingSupervisorAcceptanceClassified => local seam SurfaceResultAlignment,
+        disposition FrameSeedConfirmed => local seam SurfaceResultAlignment,
+        disposition WiringGraphChanged => external seam SurfaceResultAlignment,
+        disposition MemberSessionBindingChanged => external seam SurfaceResultAlignment,
+        disposition SessionProvisionOperationOwnerAuthorized => local seam NoOwnerRealization,
+        disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring seam OwnerRealizationOnly,
+        disposition MemberTrustUnwiringRequested => external handoff mob_member_trust_unwiring seam OwnerRealizationOnly,
+        disposition WiringTrustRepairRequested => local seam NoOwnerRealization,
+        disposition ExternalPeerTrustWiringRequested => external handoff mob_external_peer_trust_wiring seam OwnerRealizationOnly,
+        disposition ExternalPeerTrustUnwiringRequested => external handoff mob_external_peer_trust_unwiring seam OwnerRealizationOnly,
+        disposition ExternalPeerTrustRepairRequested => external handoff mob_external_peer_trust_repair seam OwnerRealizationOnly,
+        disposition MemberPeerRegistered => local seam NoOwnerRealization,
+        disposition MemberPeerRebindAuthorized => local seam NoOwnerRealization,
+        disposition MemberPeerOverlayAuthorized => external handoff mob_member_peer_overlay seam OwnerRealizationOnly,
+        disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust seam OwnerRealizationOnly,
+        disposition PersistSupervisorAuthority => local seam SurfaceResultAlignment,
+        disposition DeleteSupervisorAuthority => local seam SurfaceResultAlignment,
+        disposition EmitWiringLifecycleNotice => external seam SurfaceResultAlignment,
+        disposition EmitExternalPeerWiringLifecycleNotice => external seam SurfaceResultAlignment,
+        disposition AuthorizeAgentEventSubscription => local seam SurfaceResultAlignment,
+        disposition RejectAgentEventSubscription => local seam SurfaceResultAlignment,
+        disposition AuthorizeAllAgentEventSubscription => local seam SurfaceResultAlignment,
+        disposition RejectAllAgentEventSubscription => local seam SurfaceResultAlignment,
+        disposition AuthorizeMobEventRouter => local seam SurfaceResultAlignment,
+        disposition AuthorizeMobEventRouterMemberSubscription => local seam SurfaceResultAlignment,
+        disposition AuthorizeMobEventRouterMemberRemoval => local seam SurfaceResultAlignment,
+        disposition AuthorizeStructuralEventSubscription => local seam SurfaceResultAlignment,
+        disposition RejectStructuralEventSubscription => local seam SurfaceResultAlignment,
+        disposition AuthorizeStrictEventPoll => local seam SurfaceResultAlignment,
+        disposition RejectStrictEventPoll => local seam SurfaceResultAlignment,
+        disposition WorkIntentRecorded => local seam NoOwnerRealization,
+        disposition ResourceClaimRecorded => local seam NoOwnerRealization,
+        disposition WorkIntentStatusChanged => local seam NoOwnerRealization,
+        disposition ResourceClaimStatusChanged => local seam NoOwnerRealization,
+        disposition ResourceClaimOverlapObserved => local seam NoOwnerRealization,
 
         // =====================================================================
         // Invariants
@@ -2216,6 +2377,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2269,6 +2431,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2321,6 +2484,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2378,8 +2542,13 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            update {}
+            update {
+                self.desired_members.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
             to Running
+            emit MemberRetainRequired { agent_identity: agent_identity }
         }
 
         transition EnsureMemberRunningMissing {
@@ -2387,8 +2556,13 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
-            update {}
+            update {
+                self.desired_members.insert(agent_identity);
+                self.members_to_spawn.insert(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
             to Running
+            emit MemberSpawnRequired { agent_identity: agent_identity }
         }
 
         transition RecoverRosterMemberRunning {
@@ -2410,6 +2584,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2431,6 +2606,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -2506,6 +2682,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2532,6 +2709,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2551,6 +2729,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -2657,10 +2836,20 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // Row #351: machine-owned membership reconciliation. The batch diff
+        // (desired-vs-current) is recomputed in-DSL from `identity_to_runtime`
+        // and stored into the membership-intent sets. The handle reads these
+        // sets from the returned snapshot and executes spawn/retire mechanically
+        // rather than computing the difference itself. Each ReconcileRunning
+        // fully recomputes the sets so successive reconciles stay self-fresh.
         transition ReconcileRunning {
             on input Reconcile { desired, retire_stale }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            update {
+                self.members_to_spawn = mob_machine_members_to_spawn(self.identity_to_runtime, desired);
+                self.members_to_retire = mob_machine_members_to_retire(self.identity_to_runtime, desired, retire_stale);
+                self.desired_members = desired;
+            }
             to Running
         }
 
@@ -2676,6 +2865,13 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Completed }
             update {}
             to Completed
+        }
+
+        transition ReconcileDestroyed {
+            on input Reconcile { desired, retire_stale }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
         }
 
         transition ObserveRuntimeReady {
@@ -2840,6 +3036,235 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_kickoff_error.remove(member_id);
             }
             to Running
+        }
+
+        // =====================================================================
+        // Wave-G1 catalog folds: classification / probe / escalation transitions
+        // =====================================================================
+
+        // Row #14: duplicate-member admission probe. The verdict is read from
+        // machine-owned binding state, not the PendingSpawnLineage side-map.
+        // CRITICAL FIX (G1 regression): the Duplicate guard must also reject an
+        // in-flight pending spawn (pending_spawn_sessions) so a concurrent
+        // second spawn probing before the first records its binding still sees a
+        // duplicate. Admitted is the exact negation of all three presence facts.
+        transition ProbeMemberAdmissionDuplicate {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ProbeMemberAdmission { agent_identity }
+            guard "identity_already_bound_or_pending" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                || self.member_session_bindings.contains_key(agent_identity) == true
+                || self.pending_spawn_sessions.contains_key(agent_identity) == true
+            }
+            update {}
+            to Running
+            emit MemberAdmissionProbed { agent_identity: agent_identity, verdict: MemberAdmissionVerdictKind::DuplicateRejected }
+        }
+
+        transition ProbeMemberAdmissionAdmitted {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ProbeMemberAdmission { agent_identity }
+            guard "identity_not_bound_and_not_pending" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                && self.member_session_bindings.contains_key(agent_identity) == false
+                && self.pending_spawn_sessions.contains_key(agent_identity) == false
+            }
+            update {}
+            to Running
+            emit MemberAdmissionProbed { agent_identity: agent_identity, verdict: MemberAdmissionVerdictKind::Admitted }
+        }
+
+        // Row #181: compute the next monotone respawn generation. Reads the
+        // machine-owned current Generation for the identity and emits
+        // current.saturating_add(1) (starting at 1 when absent).
+        transition ComputeRespawnGeneration {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ComputeRespawnGeneration { agent_identity }
+            update {}
+            to Running
+            emit RespawnGenerationComputed {
+                agent_identity: agent_identity,
+                next_generation: mob_machine_next_respawn_generation(self.identity_runtime_generations, agent_identity)
+            }
+        }
+
+        // Row #260: classify a typed step-output fault into retry vs terminal.
+        // The retry-vs-fail decision is machine-owned; the typed terminal cause
+        // flows into terminalization. Fault detail strings stay shell-side.
+        transition ClassifyStepOutputFaultRetry {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyStepOutputFault { run_id, step_id, target_retry_key, fault, attempt, max_retries }
+            guard "attempts_remaining" { attempt < max_retries }
+            update {}
+            to Running
+            emit StepOutputFaultClassified {
+                run_id: run_id,
+                step_id: step_id,
+                target_retry_key: target_retry_key,
+                disposition: StepFaultDispositionKind::Retry,
+                terminal_cause: fault
+            }
+        }
+
+        transition ClassifyStepOutputFaultTerminal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyStepOutputFault { run_id, step_id, target_retry_key, fault, attempt, max_retries }
+            guard "attempts_exhausted" { attempt >= max_retries }
+            update {}
+            to Running
+            emit StepOutputFaultClassified {
+                run_id: run_id,
+                step_id: step_id,
+                target_retry_key: target_retry_key,
+                disposition: StepFaultDispositionKind::Terminal,
+                terminal_cause: fault
+            }
+        }
+
+        // Row #261: supervisor escalation. Presence of an eligible target is
+        // structural — two inputs, not an Option<AgentIdentity>. Target
+        // selection, timeout policy, and escalation evidence are machine-owned;
+        // fail-closed is a typed terminal cause, not a free-form string.
+        transition EscalateToSupervisorTargetFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EscalateToSupervisor { run_id, step_id, supervisor_identity, turn_timeout_ms }
+            update {}
+            to Running
+            emit SupervisorEscalationRequested {
+                run_id: run_id,
+                step_id: step_id,
+                supervisor_identity: supervisor_identity,
+                turn_timeout_ms: turn_timeout_ms
+            }
+        }
+
+        transition EscalateToSupervisorTargetMissing {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EscalateToSupervisorNoEligibleTarget { run_id, step_id }
+            update {}
+            to Running
+            emit SupervisorEscalationFailed {
+                run_id: run_id,
+                step_id: step_id,
+                cause: SupervisorEscalationFailureCause::NoEligibleSupervisor
+            }
+        }
+
+        // Row #293: topology-edge admission verdict. A matched declarative rule
+        // resolves directly; an unmatched edge applies the declared default
+        // policy field. Default policy is an explicit machine field, not a
+        // shell map_or(Allow, ..).
+        transition EvaluateTopologyEdgeRuleAllow {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EvaluateTopologyEdge { from_role, to_role, rule_match }
+            guard "rule_allows_edge" { rule_match == Some(PolicyDecision::Allow) }
+            update {}
+            to Running
+            emit TopologyEdgeVerdictResolved { from_role: from_role, to_role: to_role, verdict: PolicyDecision::Allow }
+        }
+
+        transition EvaluateTopologyEdgeRuleDeny {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EvaluateTopologyEdge { from_role, to_role, rule_match }
+            guard "rule_denies_edge" { rule_match == Some(PolicyDecision::Deny) }
+            update {}
+            to Running
+            emit TopologyEdgeVerdictResolved { from_role: from_role, to_role: to_role, verdict: PolicyDecision::Deny }
+        }
+
+        transition EvaluateTopologyEdgeDefaultAllow {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EvaluateTopologyEdge { from_role, to_role, rule_match }
+            guard "no_rule_and_default_allow" {
+                rule_match == None
+                && self.topology_default_policy == PolicyDecision::Allow
+            }
+            update {}
+            to Running
+            emit TopologyEdgeVerdictResolved { from_role: from_role, to_role: to_role, verdict: PolicyDecision::Allow }
+        }
+
+        transition EvaluateTopologyEdgeDefaultDeny {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input EvaluateTopologyEdge { from_role, to_role, rule_match }
+            guard "no_rule_and_default_deny" {
+                rule_match == None
+                && self.topology_default_policy == PolicyDecision::Deny
+            }
+            update {}
+            to Running
+            emit TopologyEdgeVerdictResolved { from_role: from_role, to_role: to_role, verdict: PolicyDecision::Deny }
+        }
+
+        // Row #314: external-member rebind capability. The bridge supplies the
+        // typed capability bit; the projection reads the machine map directly.
+        transition SetExternalMemberRebindCapability {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input SetExternalMemberRebindCapability { agent_identity, capability }
+            update {
+                self.external_member_rebind_capability.insert(agent_identity, capability);
+            }
+            to Running
+        }
+
+        // Row #320: one-time orphan-budget seed. Dispatched once at actor build
+        // from definition.limits.max_orphaned_turns (default 8). Without this,
+        // every non-retryable timeout would classify Canceled.
+        transition SeedOrphanBudget {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input SeedOrphanBudget { budget }
+            update {
+                self.orphan_budget = budget;
+            }
+            to Running
+        }
+
+        // Row #320: turn-timeout disposition. A retryable timeout is Retryable;
+        // a non-retryable timeout detaches while orphan_budget > 0 (decrementing
+        // it), otherwise cancels. The detach/cancel verdict and the orphan
+        // budget are machine-owned.
+        transition ClassifyTurnTimeoutDispositionRetryable {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyTurnTimeoutDisposition { timed_out_run_id, retryable }
+            guard "timeout_is_retryable" { retryable == true }
+            update {}
+            to Running
+            emit TurnTimeoutDispositionClassified {
+                timed_out_run_id: timed_out_run_id,
+                disposition: TurnTimeoutDisposition::Retryable
+            }
+        }
+
+        transition ClassifyTurnTimeoutDispositionDetached {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyTurnTimeoutDisposition { timed_out_run_id, retryable }
+            guard "non_retryable_with_budget" {
+                retryable == false
+                && self.orphan_budget > 0
+            }
+            update {
+                self.orphan_budget -= 1;
+            }
+            to Running
+            emit TurnTimeoutDispositionClassified {
+                timed_out_run_id: timed_out_run_id,
+                disposition: TurnTimeoutDisposition::Detached
+            }
+        }
+
+        transition ClassifyTurnTimeoutDispositionCanceled {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyTurnTimeoutDisposition { timed_out_run_id, retryable }
+            guard "non_retryable_without_budget" {
+                retryable == false
+                && self.orphan_budget == 0
+            }
+            update {}
+            to Running
+            emit TurnTimeoutDispositionClassified {
+                timed_out_run_id: timed_out_run_id,
+                disposition: TurnTimeoutDisposition::Canceled
+            }
         }
 
         transition SubmitWorkRunningExternal {
@@ -3352,6 +3777,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
             }
@@ -3389,6 +3815,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
             }
@@ -3420,6 +3847,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -3449,6 +3877,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Stopped
@@ -3489,6 +3918,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: session_id }
@@ -3518,6 +3948,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: session_id }
@@ -3556,6 +3987,79 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverMemberRestoreFailure { agent_identity, reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Running
+        }
+
+        // Post-discard member revival seam (#37). The shell observes "the
+        // member's current bridge session has no live materialization" at the
+        // dispatch boundary and feeds the raw observation (durable snapshot
+        // present or missing) here; MobMachine — never the session-registry
+        // cache — owns the verdict. A durable snapshot makes the member
+        // revivable: the machine records the revival obligation and authorizes
+        // exactly one shell materialization attempt via the emitted
+        // ReviveAuthorized verdict. A missing durable snapshot is a terminal
+        // restore failure (existing Broken classification). Resolution comes
+        // back as a typed signal: success clears the obligation; failure
+        // converts it into the Broken classification, whose `not_broken`
+        // guard below refuses any further revival authorization — fail-closed,
+        // no retry loop.
+        transition ClassifyMemberLiveMaterializationRevivable {
+            on signal ClassifyMemberLiveMaterialization { agent_identity, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
+            update {
+                self.member_revival_pending.insert(agent_identity);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::ReviveAuthorized,
+                reason: reason
+            }
+        }
+
+        transition ClassifyMemberLiveMaterializationTerminal {
+            on signal ClassifyMemberLiveMaterialization { agent_identity, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
+            update {
+                self.member_revival_pending.remove(agent_identity);
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::BrokenRecorded,
+                reason: reason
+            }
+        }
+
+        transition ResolveMemberRevivalSucceededRunning {
+            on signal ResolveMemberRevivalSucceeded { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            update {
+                self.member_revival_pending.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition ResolveMemberRevivalFailedRunning {
+            on signal ResolveMemberRevivalFailed { agent_identity, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            update {
+                self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
             }
             to Running
@@ -3636,6 +4140,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_revival_pending = EmptySet;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -3661,6 +4166,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_revival_pending = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
@@ -6717,6 +7223,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -6749,6 +7256,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -6777,6 +7285,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -6806,6 +7315,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -6895,6 +7405,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -6923,6 +7434,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -7995,6 +8507,56 @@ macro_rules! mob_catalog_machine_dsl {
         ) -> bool {
             !Self::mob_coordination_resource_claim_active_at(status, expires_at_ms, now_ms)
         }
+
+        // -----------------------------------------------------------------
+        // Wave-G1 catalog fold helpers.
+        // -----------------------------------------------------------------
+
+        // Row #181: compute the next monotone respawn generation for an
+        // identity. Reads the machine-owned current Generation and returns
+        // current.saturating_add(1), starting at 1 when the identity has no
+        // recorded generation yet.
+        fn mob_machine_next_respawn_generation(
+            identity_runtime_generations: &std::collections::BTreeMap<AgentIdentity, Generation>,
+            agent_identity: &AgentIdentity,
+        ) -> Generation {
+            let current = identity_runtime_generations
+                .get(agent_identity)
+                .map(|generation| generation.0)
+                .unwrap_or(0);
+            Generation(current.saturating_add(1))
+        }
+
+        // Row #351: members that must be spawned — desired identities that are
+        // not currently bound to a runtime.
+        fn mob_machine_members_to_spawn(
+            identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+            desired: &std::collections::BTreeSet<AgentIdentity>,
+        ) -> std::collections::BTreeSet<AgentIdentity> {
+            desired
+                .iter()
+                .filter(|identity| !identity_to_runtime.contains_key(*identity))
+                .cloned()
+                .collect()
+        }
+
+        // Row #351: members that must be retired — currently bound identities
+        // that are no longer desired. Only computed when `retire_stale` is set;
+        // otherwise no member is retired (the set is empty).
+        fn mob_machine_members_to_retire(
+            identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+            desired: &std::collections::BTreeSet<AgentIdentity>,
+            retire_stale: &bool,
+        ) -> std::collections::BTreeSet<AgentIdentity> {
+            if !*retire_stale {
+                return std::collections::BTreeSet::new();
+            }
+            identity_to_runtime
+                .keys()
+                .filter(|identity| !desired.contains(*identity))
+                .cloned()
+                .collect()
+        }
         }
     };
 }
@@ -8629,6 +9191,27 @@ pub enum RespawnTopologyRestoreResultKind {
     TopologyRestoreFailed,
 }
 
+/// Typed shell observation of a member's live materialization at the dispatch
+/// boundary: the member's current bridge session has no live runtime, and the
+/// durable session snapshot is either still present (revivable) or gone
+/// (terminal). The shell observes; MobMachine owns the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    DurableSnapshotPresent,
+    DurableSnapshotMissing,
+}
+
+/// Machine-owned verdict for a member live-materialization observation:
+/// authorize exactly one shell revival attempt, or record the terminal Broken
+/// classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    ReviveAuthorized,
+    BrokenRecorded,
+}
+
 /// Typed shell observation for a per-row `mob/spawn_many` failure.
 /// MobMachine maps this observation to the public failure cause before any
 /// surface can serialize the row.
@@ -9003,6 +9586,83 @@ impl std::fmt::Display for KickoffIntent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave-G1 catalog fold enums. All are unit-variant closed mirrors carried as
+// the typed verdict/disposition/capability fields on the G1 inputs/effects.
+// ---------------------------------------------------------------------------
+
+/// Row #14: machine-owned duplicate-member admission verdict for
+/// [`MobMachineInput::ProbeMemberAdmission`]. The actor mirrors `Admitted ->
+/// Ok` / `DuplicateRejected -> MemberAlreadyExists` instead of probing the
+/// PendingSpawnLineage side-map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberAdmissionVerdictKind {
+    #[default]
+    Admitted,
+    DuplicateRejected,
+}
+
+/// Row #260: typed step-output fault carried by
+/// [`MobMachineInput::ClassifyStepOutputFault`] /
+/// [`MobMachineEffect::StepOutputFaultClassified`]. Fault detail strings stay
+/// shell-side; this enum is the guard-visible, terminalizable cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum StepOutputFaultKind {
+    #[default]
+    MalformedJson,
+}
+
+/// Row #260: machine-owned step-fault disposition. The flow shell mirrors
+/// `Retry` (attempt += 1, continue) / `Terminal` (fail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum StepFaultDispositionKind {
+    #[default]
+    Retry,
+    Terminal,
+}
+
+/// Row #261: typed supervisor-escalation failure cause for
+/// [`MobMachineEffect::SupervisorEscalationFailed`]. Fail-closed is a typed
+/// terminal, not a free-form `SupervisorEscalation` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorEscalationFailureCause {
+    #[default]
+    NoEligibleSupervisor,
+    TimeoutExceeded,
+}
+
+/// Row #293: topology-edge policy decision. Carried by
+/// [`MobMachineInput::EvaluateTopologyEdge`] (as `Option<PolicyDecision>` rule
+/// match), the declared `topology_default_policy` state field, and the
+/// [`MobMachineEffect::TopologyEdgeVerdictResolved`] verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PolicyDecision {
+    #[default]
+    Allow,
+    Deny,
+}
+
+/// Row #314: external-member rebind capability. Minted by the bridge/spawn
+/// chokepoints into `external_member_rebind_capability`; read by
+/// `project_external_member_observation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalMemberRebindCapability {
+    #[default]
+    Unavailable,
+    Available,
+}
+
+/// Row #320: machine-owned turn-timeout disposition for
+/// [`MobMachineEffect::TurnTimeoutDispositionClassified`]. The shell mirrors
+/// `Detached` (reconcile detached turn) / `Canceled` (abort) / `Retryable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnTimeoutDisposition {
+    #[default]
+    Detached,
+    Canceled,
+    Retryable,
 }
 
 /// Undirected wiring edge between two identities. Callers MUST normalize

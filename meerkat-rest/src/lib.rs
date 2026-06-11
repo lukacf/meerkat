@@ -123,7 +123,6 @@ pub struct SessionMcpState {
 #[derive(Clone)]
 pub struct AppState {
     pub store_path: PathBuf,
-    pub default_model: Cow<'static, str>,
     pub max_tokens: u32,
     pub rest_host: Cow<'static, str>,
     pub rest_port: u16,
@@ -461,7 +460,6 @@ impl AppState {
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
 
-        let default_model = Cow::Owned(config.agent.model.clone());
         let max_tokens = config.agent.max_tokens_per_turn;
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
@@ -470,13 +468,14 @@ impl AppState {
         // OAuth write-path handlers (auth/login/complete, auth/profile/
         // create, auth/logout) can read/write the same persisted
         // credentials as the factory's resolve_binding path.
+        //
+        // A persisted store that cannot be opened is a startup fault, not a
+        // signal to silently run ephemeral: that would launder a real auth
+        // backend failure into apparent "no credentials". Propagate the typed
+        // TokenStoreError and fail REST startup.
         let token_store: Arc<dyn meerkat_providers::auth_store::TokenStore> =
-            match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-                .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
-            {
-                Ok(store) => store,
-                Err(_) => Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-            };
+            meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+                .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)?;
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
@@ -523,7 +522,6 @@ impl AppState {
 
         Ok(Self {
             store_path,
-            default_model,
             max_tokens,
             rest_host,
             rest_port,
@@ -980,29 +978,6 @@ async fn require_rest_session_exists_for_read(
         })
 }
 
-fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
 fn pending_system_context_appends(
     appends: &[ConversationContextAppend],
 ) -> Vec<PendingSystemContextAppend> {
@@ -1010,7 +985,7 @@ fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
@@ -1060,6 +1035,28 @@ async fn resolve_validation_identity(
         provider_params: None,
         auth_binding: None,
     })
+}
+
+/// Resolve the create-session default model from the CURRENT durable config
+/// through the canonical [`meerkat::resolve_create_session_default_model`]
+/// ladder — the single owner of the create-time default-model fact across
+/// surfaces (RPC resolves through the same seam).
+///
+/// Resolved at request time rather than cached at server construction: REST
+/// config is mutable for the server's lifetime (`PUT`/`PATCH /config` via
+/// `ConfigRuntime`) and the session build path already re-reads the latest
+/// config per build, so a startup snapshot would silently diverge from the
+/// config the built agent actually uses. A config read failure is propagated
+/// as a typed fault, never laundered into a fallback default.
+async fn resolve_default_model(state: &AppState) -> Result<String, ApiError> {
+    let snapshot = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(config_runtime_err_to_api)?;
+    Ok(meerkat::resolve_create_session_default_model(
+        &snapshot.config,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -1294,10 +1291,7 @@ async fn apply_runtime_turn(
                         agent_llm_client_decorator: None,
                         external_tools: None,
                         checkpointer: None,
-                        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                            bindings,
-                        )),
-                        require_runtime_build_mode: true,
+                        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                         realm_id: Some(context.realm.clone()),
                         instance_id: context.instance_id.clone(),
                         backend: Some(context.backend.clone()),
@@ -1364,16 +1358,18 @@ async fn apply_runtime_turn(
         }
         _ => Vec::new(),
     };
-    // The turn-metadata keep_alive carrier is typed (`KeepAlivePolicy`); the
-    // session recovery override and stored session metadata still track a
-    // boolean. Collapse the typed per-turn policy into the boolean used by
-    // the recovery path: presence of a policy is interpreted as "keep the
-    // materialized resources alive across this turn".
+    // The turn-metadata keep_alive carrier is the typed tri-state
+    // `KeepAliveDirective`; the session recovery override and stored session
+    // metadata still track a boolean. Map the full tri-state (Dogma K13):
+    // `Enable(_)` -> true, `Disable` -> false (explicit operator intent —
+    // never collapsed into "enable"), absent -> preserve the persisted
+    // session intent.
     let keep_alive = match primitive
         .turn_metadata()
         .and_then(|metadata| metadata.keep_alive.as_ref())
     {
-        Some(_policy) => true,
+        Some(meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(_)) => true,
+        Some(meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable) => false,
         None => {
             let session = context
                 .session_service
@@ -1398,11 +1394,7 @@ async fn apply_runtime_turn(
         system_prompt: None,
         event_tx: Some(event_tx.clone()),
         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-            None,
             meerkat_core::types::HandlingMode::Queue,
-            primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
             primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -1545,10 +1537,7 @@ async fn apply_runtime_turn(
                     agent_llm_client_decorator: None,
                     external_tools: None,
                     checkpointer: None,
-                    runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                        bindings,
-                    )),
-                    require_runtime_build_mode: true,
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                     realm_id: Some(context.realm.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
@@ -1594,11 +1583,7 @@ async fn apply_runtime_turn(
                         system_prompt: None,
                         event_tx: Some(event_tx.clone()),
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            None,
                             meerkat_core::types::HandlingMode::Queue,
-                            primitive
-                                .turn_metadata()
-                                .and_then(|meta| meta.skill_references.clone()),
                             primitive
                                 .turn_metadata()
                                 .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -1730,24 +1715,27 @@ fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError>
 /// default used elsewhere in the runtime layer.
 const REST_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
 
-/// Translate the REST wire `Option<bool>` keep-alive override into the typed
-/// `Option<KeepAlivePolicy>` carried on `RuntimeTurnMetadata`.
+/// Map the REST wire `Option<bool>` keep-alive request onto the typed
+/// tri-state carrier (dogma K13):
 ///
-/// * `Some(true)` -> `Some(Pinned, ttl = REST_TURN_KEEP_ALIVE_TTL_SECS)` —
+/// * `Some(true)` -> `Enable(Pinned, ttl = REST_TURN_KEEP_ALIVE_TTL_SECS)` —
 ///   opts in to a caller-owned keep-alive lifetime for this turn.
-/// * `Some(false)` and `None` -> `None`. Per-turn metadata cannot "disable"
-///   keep-alive; the session-level `keep_alive` flag on `SessionBuildOptions`
-///   is the authoritative switch. A false override is interpreted as
-///   "inherit session default" on the turn metadata seam.
+/// * `Some(false)` -> explicit `Disable` — must NOT be dropped into preserve.
+/// * `None` -> preserve the persisted session intent.
 fn resolve_turn_keep_alive_policy(
     requested: Option<bool>,
-) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+) -> Option<meerkat_core::lifecycle::run_primitive::KeepAliveDirective> {
     match requested {
-        Some(true) => Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-            ttl: std::time::Duration::from_secs(REST_TURN_KEEP_ALIVE_TTL_SECS),
-            policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-        }),
-        Some(false) | None => None,
+        Some(true) => Some(
+            meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(REST_TURN_KEEP_ALIVE_TTL_SECS),
+                    policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                },
+            ),
+        ),
+        Some(false) => Some(meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable),
+        None => None,
     }
 }
 
@@ -1784,88 +1772,8 @@ fn validate_public_surface_metadata(
         .map_err(ApiError::BadRequest)
 }
 
-/// Create session request
-#[derive(Debug, Deserialize)]
-pub struct CreateSessionRequest {
-    pub prompt: ContentInput,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub model: Option<Cow<'static, str>>,
-    #[serde(default)]
-    pub provider: Option<Provider>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    /// JSON schema for structured output extraction (wrapper or raw schema).
-    #[serde(default)]
-    pub output_schema: Option<OutputSchema>,
-    /// Max retries for structured output validation.
-    /// Omit to use the product default.
-    #[serde(default)]
-    pub structured_output_retries: Option<u32>,
-    /// Enable verbose event logging (server-side).
-    #[serde(default)]
-    pub verbose: bool,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    /// Requires comms_name when enabled.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
-    /// Agent name for inter-agent communication. Required for keep_alive.
-    #[serde(default)]
-    pub comms_name: Option<String>,
-    /// Friendly metadata for peer discovery.
-    #[serde(default)]
-    pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Optional run-scoped hook overrides.
-    #[serde(default)]
-    pub hooks_override: Option<HookRunOverrides>,
-    /// Enable built-in tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_builtins: Option<bool>,
-    /// Enable shell tool. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_shell: Option<bool>,
-    /// Enable semantic memory. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_memory: Option<bool>,
-    /// Enable mob tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_mob: Option<bool>,
-    /// Enable schedule tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_schedule: Option<bool>,
-    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
-    #[serde(default)]
-    pub enable_web_search: Option<bool>,
-    /// Enable WorkGraph tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_workgraph: Option<bool>,
-    /// Explicit budget limits for this run.
-    #[serde(default)]
-    pub budget_limits: Option<meerkat_core::BudgetLimits>,
-    /// Provider-specific parameters (for example reasoning config).
-    #[serde(default)]
-    pub provider_params: Option<Value>,
-    /// Skills to preload into the system prompt.
-    #[serde(default)]
-    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Optional key-value labels attached at session creation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub labels: Option<BTreeMap<String, String>>,
-    /// Additional instruction sections appended to the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-    /// Opaque application context passed through to custom builders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_context: Option<Value>,
-    /// Per-agent environment variables injected into shell tool subprocesses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_env: Option<std::collections::HashMap<String, String>>,
-}
+/// Create session request — canonical wire contract (K20).
+pub use meerkat_contracts::wire::RestCreateSessionRequest as CreateSessionRequest;
 
 fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
     req.model.is_some()
@@ -1928,65 +1836,13 @@ async fn canonical_skill_keys_for_state(
     Ok(params.canonical_skill_keys())
 }
 
-/// Continue session request
-#[derive(Debug, Deserialize, Clone)]
-pub struct ContinueSessionRequest {
-    pub session_id: String,
-    pub prompt: ContentInput,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// JSON schema for structured output extraction (wrapper or raw schema).
-    #[serde(default)]
-    pub output_schema: Option<OutputSchema>,
-    /// Max retries for structured output validation.
-    /// Omit to inherit the current/persisted session value.
-    #[serde(default)]
-    pub structured_output_retries: Option<u32>,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
-    /// Agent name for inter-agent communication. Required for keep_alive.
-    #[serde(default)]
-    pub comms_name: Option<String>,
-    /// Friendly metadata for peer discovery.
-    #[serde(default)]
-    pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Enable verbose event logging (server-side).
-    #[serde(default)]
-    pub verbose: bool,
-    #[serde(default)]
-    pub model: Option<Cow<'static, str>>,
-    #[serde(default)]
-    pub provider: Option<Provider>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    /// Optional run-scoped hook overrides.
-    #[serde(default)]
-    pub hooks_override: Option<HookRunOverrides>,
-    /// Enable Meerkat-owned fallback web search. Omit to inherit.
-    #[serde(default)]
-    pub enable_web_search: Option<bool>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Optional per-turn flow tool overlay.
-    #[serde(default)]
-    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-    /// Additional instruction sections prepended as system notices to the prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-}
+/// Continue session request — canonical wire contract (K20).
+pub use meerkat_contracts::wire::RestContinueSessionRequest as ContinueSessionRequest;
 
-/// Append runtime system context to a session.
-#[derive(Debug, Deserialize)]
-pub struct AppendSystemContextRequest {
-    pub text: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
+/// Append runtime system context to a session — canonical wire contract
+/// (K20). The body is the typed [`CoreRenderable`] owner rather than a bare
+/// `text` string.
+pub use meerkat_contracts::wire::RestAppendSystemContextRequest as AppendSystemContextRequest;
 
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsQuery {
@@ -2014,18 +1870,8 @@ pub type SessionResponse = meerkat_contracts::WireRunResult;
 /// Usage response — re-export from contracts.
 pub type UsageResponse = meerkat_contracts::WireUsage;
 
-/// Session details response
-#[derive(Debug, Serialize)]
-pub struct SessionDetailsResponse {
-    pub session_id: String,
-    pub session_ref: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub message_count: usize,
-    pub total_tokens: u64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
+/// Session details response — canonical wire contract (K20).
+pub use meerkat_contracts::wire::RestSessionDetailsResponse as SessionDetailsResponse;
 
 #[derive(Debug, Serialize)]
 pub struct ScheduleListResponse {
@@ -2363,17 +2209,26 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
-                        "mob_id": id,
-                        "member": member,
-                    })).unwrap_or_default(),
-                ));
+                match serde_json::to_string(&json!({
+                    "mob_id": id,
+                    "member": member,
+                })) {
+                    Ok(data) => yield Ok(Event::default().event("stream_opened").data(data)),
+                    Err(e) => {
+                        yield Ok(sse_serialization_error_event(&e));
+                        return;
+                    }
+                }
 
                 while let Some(envelope) = futures::StreamExt::next(&mut event_stream).await {
                     let event_type = agent_event_type(&envelope.payload);
-                    let data = serde_json::to_string(&envelope).unwrap_or_default();
-                    yield Ok(Event::default().event(event_type).data(data));
+                    match serde_json::to_string(&envelope) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
 
                 yield Ok(Event::default().event("done").data("{}"));
@@ -2387,16 +2242,25 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
-                        "mob_id": id,
-                    })).unwrap_or_default(),
-                ));
+                match serde_json::to_string(&json!({
+                    "mob_id": id,
+                })) {
+                    Ok(data) => yield Ok(Event::default().event("stream_opened").data(data)),
+                    Err(e) => {
+                        yield Ok(sse_serialization_error_event(&e));
+                        return;
+                    }
+                }
 
                 while let Some(attributed) = handle.event_rx.recv().await {
                     let event_type = agent_event_type(&attributed.envelope.payload);
-                    let data = serde_json::to_string(&attributed).unwrap_or_default();
-                    yield Ok(Event::default().event(event_type).data(data));
+                    match serde_json::to_string(&attributed) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
 
                 yield Ok(Event::default().event("done").data("{}"));
@@ -2410,18 +2274,45 @@ async fn mob_event_stream(
 // Mob parity endpoints
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
-struct SpawnHelperRequest {
-    prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
-    #[serde(default)]
-    role_name: Option<String>,
-    #[serde(default)]
-    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    #[serde(default)]
-    backend: Option<meerkat_mob::MobBackendKind>,
+use meerkat_contracts::wire::RestMobHelperRequest as SpawnHelperRequest;
+
+#[cfg(feature = "mob")]
+fn mob_runtime_mode_from_wire(
+    mode: meerkat_contracts::WireMobRuntimeMode,
+) -> meerkat_mob::MobRuntimeMode {
+    match mode {
+        meerkat_contracts::WireMobRuntimeMode::AutonomousHost => {
+            meerkat_mob::MobRuntimeMode::AutonomousHost
+        }
+        meerkat_contracts::WireMobRuntimeMode::TurnDriven => {
+            meerkat_mob::MobRuntimeMode::TurnDriven
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mob_backend_kind_from_wire(
+    kind: meerkat_contracts::WireMobBackendKind,
+) -> meerkat_mob::MobBackendKind {
+    match kind {
+        meerkat_contracts::WireMobBackendKind::Session => meerkat_mob::MobBackendKind::Session,
+        meerkat_contracts::WireMobBackendKind::External => meerkat_mob::MobBackendKind::External,
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mob_fork_context_from_wire(
+    context: meerkat_contracts::wire::WireForkContext,
+) -> meerkat_mob::ForkContext {
+    match context {
+        meerkat_contracts::wire::WireForkContext::FullHistory => {
+            meerkat_mob::ForkContext::FullHistory
+        }
+        meerkat_contracts::wire::WireForkContext::LastMessages { count } => {
+            meerkat_mob::ForkContext::LastMessages { count }
+        }
+    }
 }
 
 /// POST /mob/{id}/spawn-helper — spawn a short-lived helper, wait, return result.
@@ -2432,16 +2323,23 @@ async fn mob_spawn_helper(
     Json(req): Json<SpawnHelperRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(
-        req.agent_identity
-            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed rather than fabricating a synthetic
+    // `helper-{uuid}` on the runtime identity path — identity allocation is
+    // the mob substrate's responsibility.
+    let Some(agent_identity) = req.agent_identity else {
+        return Err(ApiError::BadRequest(
+            "spawn-helper requires agent_identity; the surface does not allocate member identity"
+                .to_string(),
+        ));
+    };
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.runtime_mode = req.runtime_mode;
-    options.backend = req.backend;
+    options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
+    options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state
         .mob_state
         .mob_spawn_helper(&mob_id, identity, req.prompt, options)
@@ -2453,37 +2351,14 @@ async fn mob_spawn_helper(
     Ok(Json(payload))
 }
 
-#[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
-struct ForkHelperRequest {
-    source_member_id: String,
-    prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
-    #[serde(default)]
-    role_name: Option<String>,
-    #[serde(default)]
-    fork_context: Option<meerkat_mob::ForkContext>,
-    #[serde(default)]
-    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    #[serde(default)]
-    backend: Option<meerkat_mob::MobBackendKind>,
-}
+use meerkat_contracts::wire::RestMobForkHelperRequest as ForkHelperRequest;
 
-#[derive(Debug, Deserialize, Default)]
 #[cfg(feature = "mob")]
-struct WaitKickoffRequest {
-    #[serde(default)]
-    member_ids: Option<Vec<String>>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
+use meerkat_contracts::wire::RestMobWaitRequest as WaitKickoffRequest;
 
-#[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
-struct RestMobWireMembersBatchRequest {
-    edges: Vec<meerkat_contracts::MobWireMembersBatchEdge>,
-}
+use meerkat_contracts::wire::RestMobWireMembersBatchRequest;
 
 #[cfg(feature = "mob")]
 fn rest_member_wire_edge(
@@ -2570,19 +2445,25 @@ async fn mob_fork_helper(
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let source_identity = meerkat_mob::AgentIdentity::from(req.source_member_id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(
-        req.agent_identity
-            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity (no synthetic
+    // `fork-{uuid}` fallback).
+    let Some(agent_identity) = req.agent_identity else {
+        return Err(ApiError::BadRequest(
+            "fork-helper requires agent_identity; the surface does not allocate member identity"
+                .to_string(),
+        ));
+    };
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let fork_context = req
         .fork_context
+        .map(mob_fork_context_from_wire)
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.runtime_mode = req.runtime_mode;
-    options.backend = req.backend;
+    options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
+    options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state
         .mob_state
         .mob_fork_helper(
@@ -2614,7 +2495,11 @@ async fn mob_member_status(
         .mob_member_status(&mob_id, &identity)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!(snapshot)))
+    let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+    let result = snapshot
+        .to_member_status_result(member_ref)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!(result)))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -2844,16 +2729,7 @@ enum RestSessionExternalEventEnvelope {
     PeerResponseTerminal {},
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RestPeerResponseTerminalBody {
-    peer_id: meerkat_core::comms::PeerId,
-    #[serde(default)]
-    display_name: Option<meerkat_core::comms::PeerName>,
-    request_id: meerkat_core::PeerCorrelationId,
-    status: meerkat_contracts::PeerResponseTerminalStatusWire,
-    result: Value,
-}
+use meerkat_contracts::wire::RestPeerResponseTerminalRequest as RestPeerResponseTerminalBody;
 
 /// Queue an external event into the runtime without waking an idle session.
 ///
@@ -3239,7 +3115,7 @@ fn skill_entry(
         key: e.descriptor.key.clone(),
         name: e.descriptor.name.clone(),
         description: e.descriptor.description.clone(),
-        scope: e.descriptor.scope.to_string(),
+        scope: e.descriptor.scope,
         source: skill_source_provenance(source_identity),
         is_active: e.is_active,
         shadowed_by: e.shadowed_by_identity.clone().map(skill_source_provenance),
@@ -3256,6 +3132,51 @@ async fn get_capabilities(
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(meerkat::surface::build_capabilities_response(&config)))
+}
+
+/// Which optional feature gates a catalogued REST path.
+///
+/// The axum `router()` registers `/mob/*` behind `#[cfg(feature = "mob")]`,
+/// `/sessions/{id}/mcp/*` behind `#[cfg(feature = "mcp")]`, and the schedule
+/// families track the `schedule` feature. Host-info advertisement must mirror
+/// the same gate set so a feature-disabled build does not advertise routes the
+/// router never registered. Classification is fail-closed: a path that does not
+/// match a known feature family is `Always` (unconditionally advertised), and
+/// any future feature-owned family must be added here explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestPathFeature {
+    Always,
+    Mob,
+    Mcp,
+    Schedule,
+}
+
+impl RestPathFeature {
+    fn classify(path: &str) -> Self {
+        if path == "/mob" || path.starts_with("/mob/") {
+            RestPathFeature::Mob
+        } else if path.contains("/mcp/") {
+            RestPathFeature::Mcp
+        } else if path == "/schedule"
+            || path.starts_with("/schedule/")
+            || path == "/schedules"
+            || path.starts_with("/schedules/")
+        {
+            RestPathFeature::Schedule
+        } else {
+            RestPathFeature::Always
+        }
+    }
+
+    /// Whether this path family is enabled given the cfg-gated option set.
+    fn is_enabled(self, options: &meerkat::surface::RuntimeHostSurfaceOptions) -> bool {
+        match self {
+            RestPathFeature::Always => true,
+            RestPathFeature::Mob => options.mobs,
+            RestPathFeature::Mcp => options.mcp_live,
+            RestPathFeature::Schedule => options.schedules,
+        }
+    }
 }
 
 fn rest_runtime_host_surface_options(
@@ -3276,11 +3197,18 @@ fn rest_runtime_host_surface_options(
     options.session_events = true;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
-    options.skills = true;
+    // Skills availability is owned by the runtime capability seam (the
+    // resolved skill runtime), mirroring the RPC initialize pattern — never
+    // a hardcoded `true` that diverges when `config.skills.enabled = false`.
+    options.skills = state.skill_runtime.is_some();
     options.approvals = false;
     options.rest_base_url = Some(format!("http://{}:{}", state.rest_host, state.rest_port));
+    // Derive advertised paths from the SAME cfg-gated option set the axum
+    // router uses: filter the static catalog so feature-disabled builds omit
+    // the mob/mcp/schedule routes they never register.
     options.rest_paths = meerkat_contracts::rest_path_catalog()
         .into_iter()
+        .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
         .map(|path| path.path.to_string())
         .collect();
     options
@@ -3326,28 +3254,11 @@ async fn get_models_catalog(
     Ok(Json(response))
 }
 
-/// Get the current config
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SetConfigRequest {
-    Wrapped {
-        config: Config,
-        #[serde(default)]
-        expected_generation: Option<u64>,
-    },
-    Direct(Config),
-}
+/// Replace-config request — canonical wire contract (K20).
+use meerkat_contracts::wire::RestSetConfigRequest as SetConfigRequest;
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PatchConfigRequest {
-    Wrapped {
-        patch: Value,
-        #[serde(default)]
-        expected_generation: Option<u64>,
-    },
-    Direct(Value),
-}
+/// Merge-patch config request — canonical wire contract (K20).
+use meerkat_contracts::wire::RestPatchConfigRequest as PatchConfigRequest;
 
 async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigEnvelope>, ApiError> {
     let snapshot = state
@@ -3461,28 +3372,10 @@ fn validate_config_for_commit_with_roots(
     Ok(())
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ApiError> {
-    let mut value = serde_json::to_value(config)
-        .map_err(|e| ApiError::Internal(format!("Failed to serialize config: {e}")))?;
-    merge_patch(&mut value, patch);
-    serde_json::from_value(value).map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
+    // Single owner of RFC-7386 patch semantics: meerkat-core.
+    meerkat_core::apply_config_patch_preview(config, patch)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -3599,7 +3492,7 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             let message = format!("turn abandoned: {reason}");
             if session_created {
                 Err(session_created_with_turn_failure_api_error(
@@ -3631,11 +3524,11 @@ fn completion_outcome_to_api_result(
             }
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
             error,
         } => {
-            let response = run_result_to_response(*result, realm);
-            let structured_output = response.structured_output.clone();
+            // Finalization (durable commit) failed: the run is not durably
+            // terminal. Surface ONLY the typed error — never the (non-durable)
+            // run_result/structured_output, which would be a false success.
             Err(ApiError::InternalWithData {
                 message: error
                     .detail
@@ -3644,12 +3537,10 @@ fn completion_outcome_to_api_result(
                 code: "TURN_FINALIZATION_FAILED".to_string(),
                 details: json!({
                     "error": error,
-                    "run_result": response,
-                    "structured_output": structured_output,
                 }),
             })
         }
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(ApiError::Internal(format!("runtime terminated: {reason}")))
         }
     }
@@ -4123,8 +4014,10 @@ fn help_request_to_create_session(
 
     Ok(CreateSessionRequest {
         prompt: prompt.into(),
-        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
-        model: req.model.map(Cow::Owned),
+        system_prompt: meerkat::SystemPromptOverride::Set(
+            meerkat::help::help_system_prompt().to_string(),
+        ),
+        model: req.model,
         provider,
         max_tokens: req.max_tokens,
         output_schema: None,
@@ -4190,7 +4083,16 @@ async fn create_session_inner(
     let model_was_explicit = req.model.is_some();
     let provider_was_explicit = req.provider.is_some();
     let resume_override_mask = create_session_resume_override_mask(&req, keep_alive_override);
-    let model = req.model.unwrap_or_else(|| state.default_model.clone());
+    let model = match req.model {
+        Some(model) => model,
+        // No caller-pinned model: resolve through the canonical
+        // create-session default-model ladder over the CURRENT config —
+        // never a surface-cached copy of `config.agent.model`.
+        None => match resolve_default_model(state).await {
+            Ok(model) => model,
+            Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+        },
+    };
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
@@ -4346,8 +4248,12 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
         provider: (provider_was_explicit || model_was_explicit)
             .then_some(initial_identity.provider),
+        override_comms: Default::default(),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req.structured_output_retries,
@@ -4356,7 +4262,7 @@ async fn create_session_inner(
         peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
         budget_limits: req.budget_limits,
-        provider_params: req.provider_params.clone(),
+        provider_params: req.provider_params.clone().map(Into::into),
         external_tools: mcp_external_tools,
         recoverable_tool_defs: None,
         llm_client_override: state
@@ -4378,7 +4284,7 @@ async fn create_session_inner(
         preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.clone()),
         instance_id: state.instance_id.clone(),
-        backend: Some(state.backend.clone()),
+        backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
         auth_binding: None,
         // REST is not a mob runtime. On resume the factory preserves the
@@ -4391,6 +4297,7 @@ async fn create_session_inner(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         initial_metadata_entries: std::collections::BTreeMap::new(),
+        initial_tool_filter: None,
         shell_env: req.shell_env,
         resume_override_mask,
         call_timeout_override: Default::default(),
@@ -4407,12 +4314,9 @@ async fn create_session_inner(
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
         prompt: req.prompt.clone(),
-        render_metadata: None,
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
-
-        skill_references: skill_references.clone(),
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -4497,9 +4401,16 @@ async fn create_session_inner(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        adapter
+        if let Err(error) = adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                "failed to update peer ingress context: {error}"
+            ))));
+        }
     }
 
     // Create input and route through runtime
@@ -4631,16 +4542,14 @@ async fn schedule_tools() -> Json<Value> {
     Json(json!({ "tools": schedule_tools_list() }))
 }
 
-#[derive(Debug, Deserialize)]
-struct ScheduleToolCallRequest {
-    name: String,
-    #[serde(default)]
-    arguments: Value,
-}
-
 async fn schedule_call(
     State(state): State<AppState>,
-    Json(req): Json<ScheduleToolCallRequest>,
+    // The canonical wire contract for a schedule tool call is
+    // `meerkat_contracts::ScheduleToolCallParams` (shared with the RPC
+    // `schedule/call` method and the generated SDK schemas). REST
+    // deserializes that contract type directly instead of owning a private
+    // handler-local mirror that could drift.
+    Json(req): Json<meerkat_contracts::wire::ScheduleToolCallParams>,
 ) -> Result<Json<Value>, ApiError> {
     state
         .ensure_schedule_host_started()
@@ -4844,7 +4753,7 @@ async fn list_schedule_occurrences(
 async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::ListSessionsResult>, ApiError> {
     let label_filters = parse_label_filters(query.label).map_err(ApiError::BadRequest)?;
 
     let sessions = state
@@ -4867,7 +4776,9 @@ async fn list_sessions(
         })
         .collect();
 
-    Ok(Json(json!({ "sessions": wire_sessions })))
+    Ok(Json(meerkat_contracts::wire::ListSessionsResult {
+        sessions: wire_sessions,
+    }))
 }
 
 /// Get session details
@@ -4934,7 +4845,7 @@ async fn get_session_history(
 async fn interrupt_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::InterruptResult>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
     let result = match state
         .runtime_adapter
@@ -4985,10 +4896,21 @@ async fn interrupt_session(
     .map_err(|e| ApiError::Internal(format!("Failed to classify interrupt result: {e}")))?;
 
     match result {
-        meerkat_runtime::UserInterruptPublicResult::Interrupted => Ok(Json(json!({
-            "session_id": session_id.to_string(),
-            "interrupted": true
-        }))),
+        meerkat_runtime::UserInterruptPublicResult::Interrupted => Ok(Json(
+            meerkat_contracts::wire::InterruptResult::from_outcome(
+                session_id.to_string(),
+                meerkat_contracts::wire::WireInterruptOutcome::Interrupted,
+            ),
+        )),
+        // #348: a staged-session interrupt is a typed no-op terminal — report it
+        // honestly rather than claiming a live run was interrupted. RPC and
+        // REST share the generated `InterruptResult` wire contract (K17).
+        meerkat_runtime::UserInterruptPublicResult::StagedNoop => Ok(Json(
+            meerkat_contracts::wire::InterruptResult::from_outcome(
+                session_id.to_string(),
+                meerkat_contracts::wire::WireInterruptOutcome::StagedNoop,
+            ),
+        )),
         meerkat_runtime::UserInterruptPublicResult::NotFound => {
             Err(ApiError::NotFound(format!("Session not found: {id}")))
         }
@@ -5082,7 +5004,7 @@ async fn append_system_context(
 ) -> Result<Json<Value>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
     let svc_req = SvcAppendSystemContextRequest {
-        text: req.text,
+        content: req.content,
         source: req.source,
         idempotency_key: req.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5382,7 +5304,11 @@ async fn continue_session_inner(
             }
         };
         let mut build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: llm_binding.provider,
+            override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id,
             output_schema: req.output_schema,
             structured_output_retries: req.structured_output_retries,
@@ -5413,7 +5339,7 @@ async fn continue_session_inner(
             preload_skills: None,
             realm_id: Some(state.realm.clone()),
             instance_id: state.instance_id.clone(),
-            backend: Some(state.backend.clone()),
+            backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: None,
             mob_member_binding: None,
@@ -5424,6 +5350,7 @@ async fn continue_session_inner(
             app_context: None,
             additional_instructions: None,
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
@@ -5443,18 +5370,35 @@ async fn continue_session_inner(
             initial_turn_metadata: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
+        let model = match req.model.clone() {
+            Some(model) => model,
+            // No caller-pinned model: same canonical default-model ladder
+            // over the CURRENT config as POST /sessions (the resume mask
+            // keeps the persisted model authoritative unless overridden).
+            None => match resolve_default_model(state).await {
+                Ok(model) => model,
+                Err(e) => {
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        &session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(e));
+                }
+            },
+        };
         let create_req = SvcCreateSessionRequest {
-            model: req
-                .model
-                .clone()
-                .unwrap_or_else(|| state.default_model.clone())
-                .to_string(),
+            model,
             prompt: turn_prompt.clone(),
-            render_metadata: None,
-            system_prompt: req.system_prompt.clone(),
+            system_prompt: match req.system_prompt.clone() {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens: req.max_tokens.or(Some(state.max_tokens)),
             event_tx: Some(caller_event_tx.clone()),
-            skill_references: skill_references.clone(),
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -5568,9 +5512,16 @@ async fn continue_session_inner(
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
-            adapter
+            if let Err(error) = adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+            {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "failed to update peer ingress context: {error}"
+                ))));
+            }
         }
         if let Err(error) =
             ensure_rest_session_runtime_executor(state, &create_result.session_id).await
@@ -5589,7 +5540,10 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req
+                            .flow_tool_overlay
+                            .clone()
+                            .map(meerkat_core::service::TurnToolOverlay::from),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -5883,7 +5837,10 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req
+                            .flow_tool_overlay
+                            .clone()
+                            .map(meerkat_core::service::TurnToolOverlay::from),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -5961,9 +5918,16 @@ async fn continue_session_inner(
         }
         #[cfg(feature = "comms")]
         {
-            adapter
+            if let Err(error) = adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+            {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "failed to update peer ingress context: {error}"
+                ))));
+            }
         }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
@@ -6203,6 +6167,34 @@ async fn continue_session_inner(
     }
 }
 
+/// SSE event type used to surface a serialization fault to the stream.
+const SSE_SERIALIZATION_ERROR_EVENT: &str = "error";
+
+/// Build the JSON data payload for a serialization-fault SSE error event.
+///
+/// Built from a [`serde_json::Value`] whose `Display` impl always emits valid
+/// JSON, so this is infallible. Carries the typed cause (`message`) rather than
+/// laundering it away.
+fn sse_serialization_error_data(error: &serde_json::Error) -> String {
+    json!({
+        "error": "event_serialization_failed",
+        "message": error.to_string(),
+    })
+    .to_string()
+}
+
+/// Build an SSE `error` event carrying a typed serialization fault.
+///
+/// Used when an authoritative SSE payload (a session event or the
+/// `session_loaded` snapshot) fails to serialize. The fault must surface to the
+/// client as an explicit error rather than be laundered into a fabricated
+/// success-shaped event or an empty data frame.
+fn sse_serialization_error_event(error: &serde_json::Error) -> Event {
+    Event::default()
+        .event(SSE_SERIALIZATION_ERROR_EVENT)
+        .data(sse_serialization_error_data(error))
+}
+
 /// SSE endpoint for streaming session events
 async fn session_events(
     State(state): State<AppState>,
@@ -6225,14 +6217,20 @@ async fn session_events(
 
     // Create a stream that sends agent events as SSE events
     let stream = async_stream::stream! {
-        // Emit a session_loaded event for compatibility
-        let event = Event::default()
-            .event("session_loaded")
-            .data(serde_json::to_string(&json!({
-                "session_id": session_id.to_string(),
-                "message_count": session.messages().len(),
-            })).unwrap_or_default());
-        yield Ok(event);
+        // Emit a session_loaded event for compatibility. A serialization fault
+        // here is authoritative state we cannot fabricate around: surface it as
+        // an SSE `error` event and terminate the stream rather than shipping an
+        // empty/fake payload.
+        match serde_json::to_string(&json!({
+            "session_id": session_id.to_string(),
+            "message_count": session.messages().len(),
+        })) {
+            Ok(data) => yield Ok(Event::default().event("session_loaded").data(data)),
+            Err(e) => {
+                yield Ok(sse_serialization_error_event(&e));
+                return;
+            }
+        }
 
         loop {
             match rx.recv().await {
@@ -6242,16 +6240,17 @@ async fn session_events(
                     }
 
                     let event_type = agent_event_type(&payload.event.payload);
-                    let json = serde_json::to_value(&payload.event).unwrap_or_else(|_| {
-                        json!({
-                            "payload": {"type": "unknown"}
-                        })
-                    });
-
-                    let event = Event::default()
-                        .event(event_type)
-                        .data(serde_json::to_string(&json).unwrap_or_default());
-                    yield Ok(event);
+                    // Serializing the authoritative event must not be laundered
+                    // into a fabricated success payload: a failure surfaces as
+                    // an `error` event carrying the typed cause and ends the
+                    // stream.
+                    match serde_json::to_string(&payload.event) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     continue;
@@ -6601,12 +6600,24 @@ async fn mcp_reload(
                 .map_err(ApiError::Internal)?;
         }
         None => {
-            let names = adapter.active_server_names().await;
-            for name in names {
-                adapter
-                    .stage_reload(McpReloadTarget::ServerName(name))
-                    .await
-                    .map_err(ApiError::Internal)?;
+            // K14: reload-all is the lifecycle owner's typed primitive; a
+            // non-clean report surfaces as a typed wire fault, never a
+            // half-staged hand loop.
+            let report = adapter
+                .stage_reload_all()
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            if !report.is_clean() {
+                let failed = report
+                    .failed
+                    .iter()
+                    .map(|failure| format!("{}: {}", failure.server, failure.error))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(ApiError::Internal(format!(
+                    "MCP reload-all staged {} server(s) but rejected: {failed}",
+                    report.staged.len()
+                )));
             }
         }
     }
@@ -6644,7 +6655,7 @@ async fn cleanup_archived_session_runtime(
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
-    state.runtime_adapter.abort_comms_drain(session_id).await;
+    abort_comms_drain_for_archived_session(state, session_id).await?;
     state.runtime_adapter.unregister_session(session_id).await;
     Ok(())
 }
@@ -6656,9 +6667,34 @@ async fn cleanup_archived_session_surface_runtime(
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
-    state.runtime_adapter.abort_comms_drain(session_id).await;
+    abort_comms_drain_for_archived_session(state, session_id).await?;
     state.runtime_adapter.unregister_session(session_id).await;
     Ok(())
+}
+
+/// Abort a session's comms drain during archive cleanup.
+///
+/// The session's runtime may already be absent or terminal by the time this
+/// cleanup runs (the archive destroyed it, or the session never had a REST
+/// surface runtime). The machine legitimately rejects drain commands for such
+/// runtimes; those verdicts prove no drain remains running, which is exactly
+/// the post-condition this cleanup wants. Any other fault is propagated.
+#[cfg(feature = "comms")]
+async fn abort_comms_drain_for_archived_session(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    match state.runtime_adapter.abort_comms_drain(session_id).await {
+        Ok(()) => Ok(()),
+        Err(
+            meerkat_runtime::RuntimeDriverError::NotFound { .. }
+            | meerkat_runtime::RuntimeDriverError::Destroyed
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => Ok(()),
+        Err(error) => Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(error.to_string()),
+        )),
+    }
 }
 
 async fn archive_session_with_runtime_cleanup(
@@ -6863,6 +6899,51 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
 
+    /// Test-side view of the canonical create-session default model: resolved
+    /// per call from the state's current config (the `AppState` no longer
+    /// carries a default-model mirror).
+    async fn resolved_default_model(state: &AppState) -> String {
+        resolve_default_model(state)
+            .await
+            .expect("default model must resolve")
+    }
+
+    /// Regression: a serialization fault on an authoritative SSE payload must
+    /// surface AS a fault — an `error` event carrying the typed cause — never a
+    /// fabricated success-shaped event (the old `json!({"type":"unknown"})`
+    /// launder) nor an empty data frame (`unwrap_or_default()`).
+    #[test]
+    fn sse_serialization_fault_surfaces_as_error_event_not_fake_success() {
+        // A real serde_json::Error from a failed parse stands in for the
+        // serialization fault the SSE path now propagates.
+        let err = serde_json::from_str::<serde_json::Value>("{not json}")
+            .expect_err("invalid JSON must fail to parse");
+
+        let data = sse_serialization_error_data(&err);
+
+        // Event type is the dedicated error channel, not a session/agent event.
+        assert_eq!(SSE_SERIALIZATION_ERROR_EVENT, "error");
+
+        // Payload is an explicit fault carrying the typed cause...
+        let parsed: serde_json::Value =
+            serde_json::from_str(&data).expect("error payload must be valid JSON");
+        assert_eq!(parsed["error"], "event_serialization_failed");
+        assert!(
+            parsed["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "typed cause must be carried in `message`, got: {data}"
+        );
+
+        // ...and is NOT a fabricated success-shaped event.
+        assert_ne!(
+            parsed["payload"]["type"], "unknown",
+            "must not launder into a fabricated `unknown` success event"
+        );
+        assert!(
+            !data.is_empty(),
+            "must not launder into an empty data frame"
+        );
+    }
+
     async fn runtime_terminated_completion_handle(
         adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
         session_id: &SessionId,
@@ -6935,7 +7016,7 @@ mod tests {
         };
 
         assert_eq!(
-            render_context_append_text(&content),
+            content.render_text(),
             meerkat_core::types::SystemNoticeMessage::with_blocks(
                 meerkat_core::types::SystemNoticeKind::Comms,
                 Some("Peer terminal response context".to_string()),
@@ -7136,8 +7217,6 @@ mod tests {
                 transport: SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: SelfHostedApiStyle::ChatCompletions,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -7199,16 +7278,17 @@ mod tests {
         let create_result = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -7318,16 +7398,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -7456,16 +7537,17 @@ mod tests {
         state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -7506,16 +7588,17 @@ mod tests {
         let created = match state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -7565,8 +7648,13 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -7576,7 +7664,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let owner_session_id =
             SessionId::parse(owner_session_id).expect("valid owner bridge session id");
@@ -7602,8 +7690,13 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -7616,7 +7709,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
             .with_session_service(mob_state.session_service())
@@ -7675,16 +7768,17 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -7727,16 +7821,17 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     comms_name: Some("rest-capacity-target".to_string()),
                     keep_alive: false,
@@ -8261,7 +8356,8 @@ mod tests {
         state
             .runtime_adapter
             .register_session(target_session_id.clone())
-            .await;
+            .await
+            .expect("register session");
         state
             .runtime_adapter
             .stop_runtime_executor(&target_session_id, "seed stopped projection")
@@ -8850,16 +8946,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -8920,9 +9017,47 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
-        assert!(!state.default_model.is_empty());
+        assert!(!resolved_default_model(&state).await.is_empty());
         assert!(state.max_tokens > 0);
         // runtime_adapter is always present (non-optional)
+    }
+
+    /// Regression (default-model ladder): with `config.agent.model` EMPTY the
+    /// create-session default must resolve through the canonical
+    /// `meerkat::resolve_create_session_default_model` ladder (per-provider
+    /// defaults → catalog global default), never collapse to `""` the way the
+    /// deleted `AppState.default_model` snapshot of `config.agent.model` did.
+    #[tokio::test]
+    async fn create_session_default_model_resolves_ladder_when_agent_model_empty() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mut config = state
+            .config_runtime
+            .get()
+            .await
+            .expect("config should read")
+            .config;
+        config.agent.model = String::new();
+        state
+            .config_runtime
+            .set(config.clone(), None)
+            .await
+            .expect("config should persist");
+
+        let resolved = resolve_default_model(&state)
+            .await
+            .expect("default model must resolve");
+        assert!(
+            !resolved.is_empty(),
+            "empty config.agent.model must resolve the catalog ladder, not ''"
+        );
+        assert_eq!(
+            resolved,
+            meerkat::resolve_create_session_default_model(&config),
+            "REST must serve exactly the canonical ladder over the current config"
+        );
     }
 
     #[tokio::test]
@@ -9288,7 +9423,7 @@ mod tests {
 
         let Json(created) = schedule_call(
             State(state.clone()),
-            Json(ScheduleToolCallRequest {
+            Json(meerkat_contracts::wire::ScheduleToolCallParams {
                 name: "meerkat_schedule_create".into(),
                 arguments: missing_target_schedule_tool_args(),
             }),
@@ -9461,7 +9596,7 @@ mod tests {
         assert!(
             create
                 .system_prompt
-                .as_deref()
+                .as_set_prompt()
                 .is_some_and(|prompt| prompt.contains("dedicated help surface"))
         );
         assert_eq!(create.model.as_deref(), Some("claude-sonnet-4-5"));
@@ -9957,17 +10092,18 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -10036,17 +10172,18 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -10068,7 +10205,7 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({
-                    "text": "Coordinate with the orchestrator.",
+                    "content": { "type": "text", "text": "Coordinate with the orchestrator." },
                     "source": "mob",
                     "idempotency_key": "ctx-rest-test"
                 })
@@ -10113,17 +10250,18 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     resume_session: Some(pre_session),
                     llm_client_override: state
                         .llm_client_override
@@ -10223,6 +10361,97 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let health: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "ok");
+    }
+
+    #[test]
+    fn test_rest_path_feature_classifier_maps_feature_families() {
+        // Every mob/mcp/schedule path in the catalog must classify to its
+        // owning feature so host-info gating mirrors the cfg-gated router.
+        for descriptor in meerkat_contracts::rest_path_catalog() {
+            let path = descriptor.path;
+            let expected = if path == "/mob" || path.starts_with("/mob/") {
+                RestPathFeature::Mob
+            } else if path.contains("/mcp/") {
+                RestPathFeature::Mcp
+            } else if path.starts_with("/schedule/")
+                || path == "/schedules"
+                || path.starts_with("/schedules/")
+                || path == "/schedule"
+            {
+                RestPathFeature::Schedule
+            } else {
+                RestPathFeature::Always
+            };
+            assert_eq!(
+                RestPathFeature::classify(path),
+                expected,
+                "path `{path}` classified to the wrong feature family",
+            );
+        }
+        // Always-on families stay always-on.
+        assert_eq!(
+            RestPathFeature::classify("/sessions"),
+            RestPathFeature::Always
+        );
+        assert_eq!(RestPathFeature::classify("/help"), RestPathFeature::Always);
+    }
+
+    #[test]
+    fn test_host_info_rest_paths_omit_disabled_feature_routes() {
+        // Construct options with mob/mcp/schedule force-disabled to model a
+        // build compiled without those features, then apply the SAME filter
+        // `rest_runtime_host_surface_options` uses.
+        let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
+            "meerkat-rest",
+            env!("CARGO_PKG_VERSION"),
+        );
+        options.mobs = false;
+        options.mcp_live = false;
+        options.schedules = false;
+
+        let advertised: Vec<String> = meerkat_contracts::rest_path_catalog()
+            .into_iter()
+            .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
+            .map(|path| path.path.to_string())
+            .collect();
+
+        assert!(
+            !advertised.is_empty(),
+            "always-on routes must still be advertised"
+        );
+        for path in &advertised {
+            assert!(
+                !(path == "/mob" || path.starts_with("/mob/")),
+                "no-mob build must not advertise mob route `{path}`",
+            );
+            assert!(
+                !path.contains("/mcp/"),
+                "no-mcp build must not advertise mcp route `{path}`",
+            );
+            assert!(
+                !(path.starts_with("/schedule/")
+                    || path == "/schedule"
+                    || path == "/schedules"
+                    || path.starts_with("/schedules/")),
+                "no-schedule build must not advertise schedule route `{path}`",
+            );
+        }
+        // Always-on routes survive the filter.
+        assert!(advertised.iter().any(|p| p == "/sessions"));
+        assert!(advertised.iter().any(|p| p == "/health"));
+
+        // Conversely, enabling all three re-admits at least one path per family.
+        options.mobs = true;
+        options.mcp_live = true;
+        options.schedules = true;
+        let full: Vec<String> = meerkat_contracts::rest_path_catalog()
+            .into_iter()
+            .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
+            .map(|path| path.path.to_string())
+            .collect();
+        assert!(full.iter().any(|p| p.starts_with("/mob/")));
+        assert!(full.iter().any(|p| p.contains("/mcp/")));
+        assert!(full.iter().any(|p| p.starts_with("/schedules")));
     }
 
     #[tokio::test]
@@ -10605,7 +10834,7 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
 
-        req.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay::default());
+        req.flow_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
         assert!(
             !rest_continue_requires_rebuild(&req),
             "flow tool overlay stays on the live path"
@@ -10641,16 +10870,17 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -10712,16 +10942,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     comms_name: Some("stale-rest-agent".to_string()),
                     llm_client_override: state
                         .llm_client_override
@@ -10796,16 +11027,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -10883,16 +11115,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -10972,16 +11205,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -11014,7 +11248,7 @@ mod tests {
                 comms_name: None,
                 peer_meta: None,
                 verbose: false,
-                model: Some(Cow::Borrowed("gpt-5.4")),
+                model: Some("gpt-5.4".to_string()),
                 provider: Some(Provider::Anthropic),
                 max_tokens: None,
                 hooks_override: None,
@@ -11052,16 +11286,17 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
                     llm_client_override: state
                         .llm_client_override
                         .clone()
@@ -11093,7 +11328,7 @@ mod tests {
                     comms_name: None,
                     peer_meta: None,
                     verbose: false,
-                    model: Some(Cow::Borrowed("gpt-5.4")),
+                    model: Some("gpt-5.4".to_string()),
                     provider: Some(Provider::Anthropic),
                     max_tokens: None,
                     hooks_override: None,
@@ -11194,7 +11429,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                meerkat_runtime::CompletionOutcome::RuntimeTerminated(_)
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
             ),
             "cleanup failure must not synthesize a runtime terminal outcome: {outcome:?}"
         );
@@ -11444,6 +11679,7 @@ mod tests {
                     handshake_failed: false,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
 
@@ -11558,24 +11794,14 @@ mod tests {
     }
 
     #[test]
-    fn completion_outcome_to_api_result_surfaces_output_and_finalization_error() {
+    fn completion_outcome_to_api_result_finalization_failure_hides_nondurable_result() {
+        // Row #85 gate: a finalization (durable-commit) failure is NOT durably
+        // terminal, so the REST reply must carry ONLY the typed error and must
+        // NOT expose run_result / structured_output (a false success).
         let session_id = SessionId::new();
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
-        let run_result = meerkat_core::RunResult {
-            text: "{\"gate\":\"green\"}".to_string(),
-            session_id: session_id.clone(),
-            usage: Default::default(),
-            turns: 1,
-            tool_calls: 0,
-            terminal_cause_kind: None,
-            structured_output: Some(json!({ "gate": "green" })),
-            extraction_error: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        };
         let err = completion_outcome_to_api_result(
             meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-                result: Box::new(run_result),
                 error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
                     "runtime loop commit failed: synthetic finalization failure",
                 ),
@@ -11599,11 +11825,14 @@ mod tests {
         assert!(message.contains("synthetic finalization failure"));
         assert_eq!(details["error"]["kind"], "runtime_apply_failure");
         assert_eq!(details["error"]["terminal"], true);
-        assert_eq!(
-            details["run_result"]["structured_output"],
-            json!({ "gate": "green" })
+        assert!(
+            details.get("run_result").is_none(),
+            "finalization failure must not expose a non-durable run_result"
         );
-        assert_eq!(details["structured_output"], json!({ "gate": "green" }));
+        assert!(
+            details.get("structured_output").is_none(),
+            "finalization failure must not expose non-durable structured_output"
+        );
     }
 
     #[test]
@@ -11756,8 +11985,13 @@ mod tests {
             meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob"));
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig {
                     comms: true,
@@ -11770,7 +12004,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mob_id = state
             .mob_state
@@ -11928,6 +12162,45 @@ mod tests {
         assert!(
             payload.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak to app-facing responses"
+        );
+    }
+
+    /// #115: the REST surface must not mint mob-member identity. A
+    /// spawn-helper request without `agent_identity` fails closed with 400
+    /// instead of fabricating a synthetic `helper-{uuid}`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_spawn_helper_without_agent_identity_fails_closed() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mob/some-mob/spawn-helper")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "prompt": "Hello from helper" }).to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "missing agent_identity must be a 400, got: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            String::from_utf8_lossy(&body).contains("agent_identity"),
+            "error must name the missing field"
         );
     }
 
@@ -12230,16 +12503,17 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
-                    model: state.default_model.to_string(),
+                    model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
-                    render_metadata: None,
-                    system_prompt: None,
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
                     max_tokens: Some(state.max_tokens),
                     event_tx: None,
-                    skill_references: None,
                     initial_turn: InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(SessionBuildOptions {
+                        custom_models: std::collections::BTreeMap::new(),
+                        image_generation_provider: None,
+                        auto_compact_threshold_override: None,
                         resume_session: Some(pre_session),
                         llm_client_override: state
                             .llm_client_override
@@ -12297,16 +12571,17 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
-                    model: state.default_model.to_string(),
+                    model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
-                    render_metadata: None,
-                    system_prompt: None,
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
                     max_tokens: Some(state.max_tokens),
                     event_tx: None,
-                    skill_references: None,
                     initial_turn: InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(SessionBuildOptions {
+                        custom_models: std::collections::BTreeMap::new(),
+                        image_generation_provider: None,
+                        auto_compact_threshold_override: None,
                         resume_session: Some(pre_session),
                         llm_client_override: state
                             .llm_client_override
@@ -12322,7 +12597,8 @@ mod tests {
             state
                 .runtime_adapter
                 .register_session(created.session_id.clone())
-                .await;
+                .await
+                .expect("register session");
             state
                 .runtime_adapter
                 .stop_runtime_executor(&created.session_id, "seed stopped projection")

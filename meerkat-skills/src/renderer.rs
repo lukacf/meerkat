@@ -50,14 +50,6 @@ pub fn render_inventory(
     }
 }
 
-/// Render an explicit inventory failure block for prompt surfaces.
-pub fn render_inventory_failure(message: &str) -> String {
-    format!(
-        "<available_skills state=\"unavailable\">\n  <inventory_failure>{}</inventory_failure>\n</available_skills>",
-        escape_xml(message)
-    )
-}
-
 /// Escape XML-special characters in text content.
 /// Note: O(5n) worst case — five sequential replace() calls, each allocating.
 /// Acceptable for short strings (skill names/descriptions). For large content,
@@ -78,14 +70,20 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
 }
 
 /// Flat XML listing of all skills.
+///
+/// Identity is emitted as the two typed attributes that map 1:1 to the
+/// `load_skill` tool contract (`source_uuid` + `skill_name`), not a single
+/// re-parseable slash id.
 fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
     let mut output = String::from("<available_skills>\n");
     for skill in skills {
-        let rendered_id = format!("{}/{}", skill.key.source_uuid, skill.key.skill_name);
+        let source_uuid = skill.key.source_uuid.to_string();
+        let skill_name = skill.key.skill_name.as_str();
         let _ = write!(
             output,
-            "  <skill id=\"{}\">\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&rendered_id),
+            "  <skill source_uuid=\"{}\" skill_name=\"{}\">\n    <description>{}</description>\n  </skill>\n",
+            escape_xml(&source_uuid),
+            escape_xml(skill_name),
             escape_xml(&skill.description),
         );
     }
@@ -116,7 +114,8 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
 /// Render a per-turn skill injection block.
 ///
 /// Escapes `</skill>` variants in the body (case-insensitive, optional whitespace)
-/// before truncation. Returns the `<skill id="...">body</skill>` XML block.
+/// before truncation. Returns the
+/// `<skill source_uuid="..." skill_name="...">body</skill>` XML block.
 pub fn render_injection(key: &SkillKey, body: &str) -> String {
     render_injection_with_limit(key, body, MAX_INJECTION_BYTES)
 }
@@ -126,16 +125,23 @@ pub fn render_injection_with_limit(key: &SkillKey, body: &str, max_bytes: usize)
     // 1. Escape closing tags in the body BEFORE wrapping/truncating.
     let escaped_body = escape_closing_tags(body);
 
-    // 2. Wrap in <skill> tags (escape id to prevent attribute breakout).
-    let rendered_id = format!("{}/{}", key.source_uuid, key.skill_name);
-    let escaped_id = escape_xml(&rendered_id);
-    let mut content = format!("<skill id=\"{escaped_id}\">\n{escaped_body}\n</skill>");
+    // 2. Wrap in <skill> tags. Emit the typed identity as two distinct
+    //    attributes (source_uuid + skill_name) matching the load_skill tool
+    //    contract — never a single re-parseable slash id. Escape each
+    //    attribute to prevent attribute breakout.
+    let source_uuid = key.source_uuid.to_string();
+    let escaped_source_uuid = escape_xml(&source_uuid);
+    let escaped_skill_name = escape_xml(key.skill_name.as_str());
+    let mut content = format!(
+        "<skill source_uuid=\"{escaped_source_uuid}\" skill_name=\"{escaped_skill_name}\">\n{escaped_body}\n</skill>"
+    );
 
     // 3. Truncate if needed (after escaping). Use char boundary to avoid UTF-8 split.
     if content.len() > max_bytes {
         tracing::warn!(
-            "Skill injection for '{}' truncated from {} to {} bytes",
-            rendered_id,
+            "Skill injection for '{}/{}' truncated from {} to {} bytes",
+            key.source_uuid,
+            key.skill_name,
             content.len(),
             max_bytes,
         );
@@ -216,10 +222,13 @@ mod tests {
 
         assert!(output.starts_with("<available_skills>"));
         assert!(output.ends_with("</available_skills>"));
-        assert!(output.contains("email-extractor"));
+        assert!(output.contains("skill_name=\"email-extractor\""));
+        assert!(output.contains("source_uuid=\""));
         assert!(output.contains("<description>Extract entities from emails</description>"));
-        assert!(output.contains("markdown"));
+        assert!(output.contains("skill_name=\"markdown\""));
         assert!(!output.contains("mode="));
+        // Row #42: identity is two typed attrs, never a single slash id.
+        assert!(!output.contains("<skill id=\""));
     }
 
     #[test]
@@ -245,26 +254,41 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_render_inventory_failure_xml() {
-        let output = render_inventory_failure("source identity resolution failed: <bad>");
-
-        assert!(output.starts_with("<available_skills state=\"unavailable\">"));
-        assert!(output.ends_with("</available_skills>"));
-        assert!(output.contains("<inventory_failure>"));
-        assert!(output.contains("&lt;bad&gt;"));
-    }
-
     // --- Injection tests ---
 
     #[test]
     fn test_render_injection_xml() {
         let key = test_key("email-extractor");
         let output = render_injection(&key, "# Email Extractor\n\nExtract entities.");
-        assert!(output.starts_with("<skill id=\""));
-        assert!(output.contains("email-extractor"));
+        assert!(output.starts_with("<skill source_uuid=\""));
+        assert!(output.contains("skill_name=\"email-extractor\""));
         assert!(output.ends_with("</skill>"));
         assert!(output.contains("# Email Extractor"));
+        // Row #42: never a single re-parseable slash id.
+        assert!(!output.contains("<skill id=\""));
+    }
+
+    #[test]
+    fn render_injection_exposes_typed_identity_attrs_matching_load_skill() {
+        // Row #42 gate: rendered identity must expose source_uuid + skill_name
+        // as distinct attributes that map 1:1 to load_skill's SkillKey args,
+        // with no slash to re-parse.
+        let key = test_key("email-extractor");
+        let output = render_injection(&key, "body");
+
+        let expected_source = key.source_uuid.to_string();
+        assert!(
+            output.contains(&format!("source_uuid=\"{expected_source}\"")),
+            "must emit the typed source_uuid attribute; got {output}"
+        );
+        assert!(
+            output.contains("skill_name=\"email-extractor\""),
+            "must emit the typed skill_name attribute; got {output}"
+        );
+        assert!(
+            !output.contains(&format!("{expected_source}/email-extractor")),
+            "must not emit a single slash-joined id; got {output}"
+        );
     }
 
     #[test]

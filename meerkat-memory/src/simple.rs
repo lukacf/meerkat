@@ -49,15 +49,21 @@ impl MemoryStore for SimpleMemoryStore {
         batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
         let (receipt_scope, requests) = batch.into_parts();
-        let indexed_entries = requests.len();
         let mut entries = self.entries.write().await;
+        let mut indexed_entries = 0usize;
         for request in requests {
             let (scope, content, metadata) = request.into_parts();
+            // Store-side include/exclude gate (#319): skip content the producer
+            // marked non-indexable (Excluded), index the rest.
+            if !content.is_indexable() {
+                continue;
+            }
             entries.push(MemoryEntry {
                 scope,
-                content,
+                content: content.into_indexable_text(),
                 metadata,
             });
+            indexed_entries += 1;
         }
         Ok(MemoryIndexReceipt {
             scope: receipt_scope,
@@ -115,14 +121,16 @@ impl MemoryStore for SimpleMemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::MemoryIndexRequest;
+    use meerkat_core::memory::{MemoryIndexRequest, MemorySource, MessageRange};
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 
     fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
             session_id: session_id.clone(),
-            turn: Some(1),
+            source: MemorySource::Compaction {
+                source_range: MessageRange::single(0),
+            },
             indexed_at: SystemTime::now(),
         }
     }
@@ -130,7 +138,7 @@ mod tests {
     fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
         MemoryIndexRequest::new(
             MemoryIndexScope::for_session(session_id.clone()),
-            content.into(),
+            meerkat_core::MemoryIndexableContent::Indexable(content.into()),
             meta(session_id),
         )
         .unwrap()
@@ -224,7 +232,7 @@ mod tests {
         let other_session_id = SessionId::new();
         let error = MemoryIndexRequest::new(
             MemoryIndexScope::for_session(session_id),
-            "outside scope".to_string(),
+            meerkat_core::MemoryIndexableContent::Indexable("outside scope".to_string()),
             meta(&other_session_id),
         )
         .unwrap_err();

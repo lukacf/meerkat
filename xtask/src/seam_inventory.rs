@@ -1,49 +1,22 @@
-use std::fmt;
-
 use clap::Args;
 use meerkat_machine_schema::{
-    CompositionSchema, EffectDisposition, MachineSchema, Route, canonical_composition_schemas,
-    canonical_machine_schemas, compat_composition_schemas,
+    CompositionSchema, EffectDisposition, EffectTeardownClass, MachineSchema, Route,
+    SeamClassification, TeardownObligationClass, canonical_composition_schemas,
+    canonical_machine_schemas,
 };
 
 /// CLI args for `xtask seam-inventory`.
 #[derive(Debug, Clone, Args, Default)]
 pub struct SeamInventoryArgs {
-    /// In strict mode every Local/External effect must carry an explicit
-    /// classification (the disposition-based fallback arm is a hard error),
-    /// and every routed effect must have a typed realization (consumer
-    /// machine + input + route id resolvable in the composition schema).
+    /// Escalate teardown-declaration completeness debt to a hard failure: a
+    /// handoff protocol declaring `TeardownObligationClass::DetachBeforeDestroy`
+    /// that no `EffectTeardownClass::DestroyRequest` route names as its
+    /// `detach_obligation` is a dangling teardown declaration. The realization
+    /// debts (handoff protocols, public-surface contracts, routed-effect typed
+    /// realization, unpaired/incoherent destroy obligations) are always hard
+    /// errors regardless of this flag.
     #[arg(long)]
     pub strict: bool,
-}
-
-/// Classification of an effect's ownership boundary characteristics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeamClassification {
-    /// Effect is fully internal to the machine — no owner realization needed.
-    /// Examples: state projection, local bookkeeping.
-    NoOwnerRealization,
-    /// Effect requires owner/shell to realize it, but no feedback is expected.
-    /// The machine emits and moves on; correctness does not depend on acknowledgment.
-    OwnerRealizationOnly,
-    /// Effect requires owner realization AND the owner must feed back into the
-    /// machine (or another composed machine) for the lifecycle to close.
-    /// This is the seam that needs a formal handoff protocol.
-    OwnerRealizationPlusFeedback,
-    /// Effect is a terminal/result signal whose surface representation must align
-    /// with machine truth. Divergence here means the API lies about outcomes.
-    SurfaceResultAlignment,
-}
-
-impl fmt::Display for SeamClassification {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoOwnerRealization => write!(f, "no-owner-realization"),
-            Self::OwnerRealizationOnly => write!(f, "owner-realization-only"),
-            Self::OwnerRealizationPlusFeedback => write!(f, "owner-realization-plus-feedback"),
-            Self::SurfaceResultAlignment => write!(f, "surface-result-alignment"),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -51,9 +24,12 @@ pub struct SeamEntry {
     pub machine: String,
     pub effect_variant: String,
     pub disposition: String,
+    /// Schema-owned seam classification read straight off the generated
+    /// `EffectDispositionRule::seam_classification`. Because the DSL parser
+    /// requires the `seam` clause on every disposition, every Local/External
+    /// effect carries an explicit classification by construction — there is no
+    /// unclassified-effect case to recover from.
     pub classification: SeamClassification,
-    pub notes: String,
-    pub explicitly_classified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,1984 +56,6 @@ pub struct RoutedRealization {
     pub composition: String,
     pub resolved_consumers: Vec<(String, String, String)>,
     pub missing_consumers: Vec<String>,
-}
-
-/// Known effect classifications for canonical machines.
-///
-/// This is the manually-curated ground truth that drives the seam inventory.
-/// Every `Local`/`External` effect declared in a canonical machine schema
-/// must be listed here; the heuristic fallback in [`classify_effect`] is
-/// a hard error under `--strict` and a classification-debt entry otherwise.
-fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassification, &'static str)> {
-    vec![
-        // =========================================================================
-        // MeerkatMachine — runtime kernel
-        // =========================================================================
-        //
-        // Local effects: purely internal kernel bookkeeping. The runtime loop
-        // observes them synchronously and they never cross a shell boundary.
-        (
-            "MeerkatMachine",
-            "RequestCancellationAtBoundary",
-            SeamClassification::NoOwnerRealization,
-            "Local boundary-cancel intent retained entirely inside the Meerkat kernel",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnRunStarted",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-run start marker retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnBoundaryApplied",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-boundary marker retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveBoundaryContextReceiptResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local live-boundary context receipt retained inside the boundary region",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnRunCompleted",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-run completion marker retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnRunFailed",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-run failure marker retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnRunCancelled",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-run cancellation marker retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnCheckCompaction",
-            SeamClassification::NoOwnerRealization,
-            "Local turn compaction check retained inside the agent loop boundary tracker",
-        ),
-        (
-            "MeerkatMachine",
-            "WakeInterrupt",
-            SeamClassification::NoOwnerRealization,
-            "Local wake signal consumed by the in-process runtime loop",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeEffectFact",
-            SeamClassification::NoOwnerRealization,
-            "Local typed runtime-effect fact consumed by the runtime shell to construct sealed executor effects",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeCompletionResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime completion public result class must align with generated runtime completion truth",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeCompletionCleanupResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local runtime completion cleanup action retained inside the runtime completion region",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeCompletionWaitFailureResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime completion wait failure public class/reason must align with generated runtime completion truth",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeOpsLifecycleDurabilityResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime ops lifecycle durability action must align with generated runtime durability truth",
-        ),
-        (
-            "MeerkatMachine",
-            "UserInterruptPublicResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "User-interrupt public result class must align with generated interrupt admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "ResolveAdmission",
-            SeamClassification::NoOwnerRealization,
-            "Local admission resolution inside the kernel's input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "SubmitAdmittedIngressEffect",
-            SeamClassification::NoOwnerRealization,
-            "Local handoff from admission to ingress inside the kernel",
-        ),
-        (
-            "MeerkatMachine",
-            "SubmitRunPrimitive",
-            SeamClassification::NoOwnerRealization,
-            "Local run-primitive submission to the agent-loop driver",
-        ),
-        (
-            "MeerkatMachine",
-            "ResolveCompletionAsTerminated",
-            SeamClassification::NoOwnerRealization,
-            "Local terminal-completion resolution inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "ApplyControlPlaneCommand",
-            SeamClassification::NoOwnerRealization,
-            "Local control-plane command application inside the runtime control region",
-        ),
-        (
-            "MeerkatMachine",
-            "InitiateRecycle",
-            SeamClassification::NoOwnerRealization,
-            "Local recycle intent routed to the runtime's attachment lifecycle",
-        ),
-        (
-            "MeerkatMachine",
-            "PostAdmissionSignal",
-            SeamClassification::NoOwnerRealization,
-            "Local admission signal consumed by the kernel's admission region",
-        ),
-        (
-            "MeerkatMachine",
-            "ReadyForRun",
-            SeamClassification::NoOwnerRealization,
-            "Local readiness signal consumed by the agent loop",
-        ),
-        (
-            "MeerkatMachine",
-            "CompletionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local completion resolution inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "CheckCompaction",
-            SeamClassification::NoOwnerRealization,
-            "Local compaction budget check inside the agent loop",
-        ),
-        (
-            "MeerkatMachine",
-            "RecordTerminalOutcome",
-            SeamClassification::NoOwnerRealization,
-            "Local terminal-outcome record in the runtime state",
-        ),
-        (
-            "MeerkatMachine",
-            "RecordRunAssociation",
-            SeamClassification::NoOwnerRealization,
-            "Local run-association record inside the runtime control region",
-        ),
-        (
-            "MeerkatMachine",
-            "RecordBoundarySequence",
-            SeamClassification::NoOwnerRealization,
-            "Local boundary-sequence record inside the runtime control region",
-        ),
-        (
-            "MeerkatMachine",
-            "SubmitOpEvent",
-            SeamClassification::NoOwnerRealization,
-            "Local op-event submission to the ops lifecycle registry",
-        ),
-        (
-            "MeerkatMachine",
-            "NotifyOpWatcher",
-            SeamClassification::NoOwnerRealization,
-            "Local op-watcher notification inside the ops lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "ExposeOperationPeer",
-            SeamClassification::NoOwnerRealization,
-            "Local peer-exposure record inside the ops lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "RetainTerminalRecord",
-            SeamClassification::NoOwnerRealization,
-            "Local terminal-record retention inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "EvictCompletedRecord",
-            SeamClassification::NoOwnerRealization,
-            "Local completed-record eviction inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "CompletionFeedEntryRecovered",
-            SeamClassification::NoOwnerRealization,
-            "Local completion-feed entry recovery retained inside the completion-feed region",
-        ),
-        (
-            "MeerkatMachine",
-            "CompletionProduced",
-            SeamClassification::NoOwnerRealization,
-            "Local completion-produced record inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "WaitAllSatisfied",
-            SeamClassification::NoOwnerRealization,
-            "Local wait-all satisfaction record inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "CollectCompletedResult",
-            SeamClassification::NoOwnerRealization,
-            "Local completed-result collection inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "EnqueueClassifiedEntry",
-            SeamClassification::NoOwnerRealization,
-            "Local classified-interaction enqueue inside the peer-ingress region",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerIngressClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local typed peer-ingress classification result consumed synchronously by the runtime peer-comms handle",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerIngressReceiveResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local typed peer-ingress receive admission/phase result consumed synchronously by the runtime peer-comms handle",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerIngressDequeueResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local typed peer-ingress dequeue phase result consumed synchronously by the runtime peer-comms handle",
-        ),
-        (
-            "MeerkatMachine",
-            "SpawnDrainTask",
-            SeamClassification::NoOwnerRealization,
-            "Local drain-task spawn inside the comms drain-control region",
-        ),
-        (
-            "MeerkatMachine",
-            "ScheduleSurfaceCompletion",
-            SeamClassification::NoOwnerRealization,
-            "Local surface-completion schedule inside the external-tool surface region",
-        ),
-        (
-            "MeerkatMachine",
-            "CloseSurfaceConnection",
-            SeamClassification::NoOwnerRealization,
-            "Local surface-connection close inside the external-tool surface region",
-        ),
-        (
-            "MeerkatMachine",
-            "SwitchTurnPersistentReconfigureRequested",
-            SeamClassification::NoOwnerRealization,
-            "Local persistent model-routing reconfiguration request consumed by the runtime kernel",
-        ),
-        (
-            "MeerkatMachine",
-            "SwitchTurnFiniteOverrideActivated",
-            SeamClassification::NoOwnerRealization,
-            "Local finite model-routing override activation consumed by the runtime kernel",
-        ),
-        (
-            "MeerkatMachine",
-            "SwitchTurnFiniteOverrideRestored",
-            SeamClassification::NoOwnerRealization,
-            "Local finite model-routing override restoration consumed by the runtime kernel",
-        ),
-        (
-            "MeerkatMachine",
-            "SessionLlmReconfigurePlanResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Session LLM capability/default reconfigure plan must align with generated session capability truth",
-        ),
-        (
-            "MeerkatMachine",
-            "AdmissionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local typed admission result retained inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "AdmissionValidationResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local typed admission validation result retained inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "AdmissionIdempotencyResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local typed idempotency result retained inside the input-lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "RecoveredInputLifecycleNormalized",
-            SeamClassification::NoOwnerRealization,
-            "Local recovered-input lifecycle normalization retained inside the recovery region",
-        ),
-        (
-            "MeerkatMachine",
-            "RecoveredInputDurabilityClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local recovered-input durability classification retained inside the recovery region",
-        ),
-        (
-            "MeerkatMachine",
-            "StoredInputStateSeedAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local generated authorization for persisted input-state seed writes retained inside the runtime persistence/recovery region",
-        ),
-        (
-            "MeerkatMachine",
-            "InputPublicLifecycleResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Public input lifecycle projection must align with canonical input-lifecycle machine truth",
-        ),
-        (
-            "MeerkatMachine",
-            "InputPublicTerminalOutcomeResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Public input terminal outcome projection must align with canonical terminal-outcome machine truth",
-        ),
-        (
-            "MeerkatMachine",
-            "InputBehavioralTerminalityResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Behavioral terminality projection must align with canonical input lifecycle and terminality truth",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnTerminalCauseClassResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Terminal-cause class projection feeds the codegen-derived surface-result table and must align with canonical terminal-cause truth",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnTerminalityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Turn-terminality verdict (which turn phases are terminal) is decided by MeerkatMachine ClassifyTurnTerminality over the machine-owned turn_phase; the turn-state owner mirrors it onto the snapshot turn_terminal and the agent loop / session host consume that instead of reclassifying TurnPhase locally, failing closed",
-        ),
-        (
-            "MeerkatMachine",
-            "TurnSurfaceResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface-result class projection feeds the codegen-derived classify_terminal table and must align with canonical terminal outcome/cause truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LlmFailureRecoveryClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "LLM-failure recovery verdict (Recover/Exhausted/Fatal) is decided by MeerkatMachine ClassifyLlmFailureRecovery from the shell's extracted typed failure_kind + one-based retry_attempt/max_retries; the agent loop mirrors it (Recover -> schedule retry; Exhausted/Fatal -> return Err) instead of unilaterally deciding fatal via schedule_retry returning None",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeLifecycleStateClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime lifecycle classification must align with canonical runtime lifecycle state",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeLifecycleDurabilityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime lifecycle durability classification must align with canonical runtime durability truth",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeLoopQueueAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Runtime loop queue admission classification must align with canonical runtime admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "VisibleRuntimePhaseResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Visible/authoritative runtime-phase arbitration (publish_control terminal precedence + Running+pre_run(Retired)->Retired visibility rewrite) is decided by MeerkatMachine ResolveVisibleRuntimePhase over the shell's pure RuntimeState observations; the runtime status/ingress shell mirrors selected_raw_phase/visible_phase instead of re-deriving the disposition",
-        ),
-        (
-            "MeerkatMachine",
-            "DiscardRecoveredOperationRecord",
-            SeamClassification::NoOwnerRealization,
-            "Local recovered-operation discard record retained inside the ops lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation terminal classification must align with canonical ops lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationNonTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation non-terminal classification must align with canonical ops lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationPublicResultClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation public result class must align with generated ops lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationCompletionFeedClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation completion-feed publication must align with generated operation-kind truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationCompletionWakeClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation completion wake behavior must align with generated operation-kind truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationDurabilityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation durability action must align with generated operation-kind truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationTransitionIdempotentSuccess",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation transition idempotent-success result must align with generated lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "OperationTransitionNotIdempotent",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation transition rejection result must align with generated lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "AgentCompletionCursorAdvanced",
-            SeamClassification::NoOwnerRealization,
-            "Local agent completion cursor advancement retained inside the completion-feed region",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeObservedCompletionCursorAdvanced",
-            SeamClassification::NoOwnerRealization,
-            "Local runtime-observed completion cursor advancement retained inside the completion-feed region",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeInjectedCompletionCursorAdvanced",
-            SeamClassification::NoOwnerRealization,
-            "Local runtime-injected completion cursor advancement retained inside the completion-feed region",
-        ),
-        (
-            "MeerkatMachine",
-            "OpRegistrationAdmissionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local operation registration admission result retained inside the ops lifecycle region",
-        ),
-        (
-            "MeerkatMachine",
-            "OpLifecycleTransitionRejected",
-            SeamClassification::SurfaceResultAlignment,
-            "Operation lifecycle rejection projection must align with canonical ops lifecycle truth",
-        ),
-        (
-            "MeerkatMachine",
-            "WaitAllAdmissionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local wait-all admission result retained inside the ops barrier region",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAdmissionAccepted",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request admission acceptance must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAdmissionDuplicate",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request duplicate admission must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestNotFound",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request not-found result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestTerminalPublish",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request terminal publish result must align with canonical surface request terminal truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestTerminalRespondWithoutPublish",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request terminal response-without-publish result must align with canonical terminal truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestCancelled",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request cancellation result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAlreadyCancelled",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request already-cancelled result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAlreadyPublished",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request already-published result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAlreadyCompleted",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request already-completed result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestPublished",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request published result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestAlreadyTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request already-terminal result must align with canonical terminal truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestCancelledBeforePublish",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request cancelled-before-publish result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestCompleted",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request completed result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "SurfaceRequestSupersededByCancel",
-            SeamClassification::SurfaceResultAlignment,
-            "Surface request superseded-by-cancel result must align with canonical surface request state",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveRefreshResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live refresh result projection must align with canonical live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveCloseResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live close result projection must align with canonical live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveCommandResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live command result projection must align with generated live command truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveCommandRejectionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live command rejection projection must align with generated live command truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveChannelRequestRejectionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live channel request rejection projection must align with generated live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveWebrtcTokenIssued",
-            SeamClassification::SurfaceResultAlignment,
-            "Live WebRTC token issuance surface must align with generated token-binding truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveWebrtcAnswerAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live WebRTC answer admission projection must align with generated answer admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveWebrtcAnswerResultResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live WebRTC answer result projection must align with generated answer result truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveWebsocketTokenIssued",
-            SeamClassification::SurfaceResultAlignment,
-            "Live WebSocket token issuance surface must align with generated token-binding truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveWebsocketTokenAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live WebSocket token admission projection must align with generated token admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveOpenAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live open admission projection must align with generated live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveOpenAdmissionAbandoned",
-            SeamClassification::SurfaceResultAlignment,
-            "Live open admission abandonment projection must align with generated live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SessionEventStreamOpenResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Session event-stream open result must align with generated MeerkatMachine stream admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SessionEventStreamTerminalResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Session event-stream terminal result must align with generated MeerkatMachine stream terminal truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SessionEventStreamCloseResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Session event-stream close result must align with generated MeerkatMachine stream close truth",
-        ),
-        (
-            "MeerkatMachine",
-            "MobEventStreamOpenResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-stream open result must align with generated MeerkatMachine stream admission truth",
-        ),
-        (
-            "MeerkatMachine",
-            "MobEventStreamTerminalResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-stream terminal result must align with generated MeerkatMachine stream terminal truth",
-        ),
-        (
-            "MeerkatMachine",
-            "MobEventStreamCloseResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-stream close result must align with generated MeerkatMachine stream close truth",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveChannelStatusResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Live channel status projection must align with canonical live channel truth",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerResponseReplyClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local peer response reply classification consumed synchronously by the peer-comms handle",
-        ),
-        //
-        // External effects that carry surface truth back to callers must align
-        // the surface representation with the kernel state they were derived
-        // from — otherwise the API lies about outcomes.
-        (
-            "MeerkatMachine",
-            "CommittedVisibleSetPublished",
-            SeamClassification::SurfaceResultAlignment,
-            "Committed visibility publication must align exactly with the kernel truth seen at boundary apply",
-        ),
-        (
-            "MeerkatMachine",
-            "RuntimeNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External Meerkat notices must reflect kernel lifecycle and runtime truth accurately",
-        ),
-        (
-            "MeerkatMachine",
-            "IngressNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External ingress notices must reflect kernel input-lifecycle classification verbatim",
-        ),
-        (
-            "MeerkatMachine",
-            "InputLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External input-lifecycle notices must reflect canonical input-lifecycle transitions",
-        ),
-        (
-            "MeerkatMachine",
-            "ModelRoutingStatusChanged",
-            SeamClassification::SurfaceResultAlignment,
-            "External model-routing status deltas must align with canonical routing topology truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SwitchTurnDenied",
-            SeamClassification::SurfaceResultAlignment,
-            "External switch-turn denials must reflect the exact canonical routing denial reason",
-        ),
-        (
-            "MeerkatMachine",
-            "ImageOperationPhaseChanged",
-            SeamClassification::SurfaceResultAlignment,
-            "External image-operation phase deltas must align with canonical image routing state",
-        ),
-        (
-            "MeerkatMachine",
-            "ImageOperationDenied",
-            SeamClassification::SurfaceResultAlignment,
-            "External image-operation denials must reflect the exact canonical denial reason",
-        ),
-        (
-            "MeerkatMachine",
-            "ImageOperationTerminalClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Image operation public terminal class must align with generated MeerkatMachine provider-observation classification",
-        ),
-        (
-            "MeerkatMachine",
-            "ModelRoutingApprovalTerminalized",
-            SeamClassification::SurfaceResultAlignment,
-            "External routing approval terminal notices must align with canonical approval state",
-        ),
-        (
-            "MeerkatMachine",
-            "SilentIntentApplied",
-            SeamClassification::SurfaceResultAlignment,
-            "External silent-intent confirmation must reflect the admission-policy change accurately",
-        ),
-        //
-        // External effects that the shell realizes without a machine-level
-        // feedback obligation — the machine emits and moves on; correctness
-        // does not depend on acknowledgment.
-        (
-            "MeerkatMachine",
-            "IngressAccepted",
-            SeamClassification::OwnerRealizationOnly,
-            "External ingress-accepted notice realized by the shell without feedback",
-        ),
-        (
-            "MeerkatMachine",
-            "RefreshVisibleSurfaceSet",
-            SeamClassification::OwnerRealizationOnly,
-            "External tool-surface visibility refresh realized by the MCP router",
-        ),
-        (
-            "MeerkatMachine",
-            "PublishSupervisorTrustEdge",
-            SeamClassification::OwnerRealizationOnly,
-            "External supervisor trust-edge publication realized by the supervisor bridge",
-        ),
-        (
-            "MeerkatMachine",
-            "RevokeSupervisorTrustEdge",
-            SeamClassification::OwnerRealizationOnly,
-            "External supervisor trust-edge revocation realized by the supervisor bridge",
-        ),
-        (
-            "MeerkatMachine",
-            "EmitExternalToolDelta",
-            SeamClassification::OwnerRealizationOnly,
-            "External tool-delta emission realized by the MCP router without feedback",
-        ),
-        (
-            "MeerkatMachine",
-            "RejectSurfaceCall",
-            SeamClassification::OwnerRealizationOnly,
-            "External surface-call rejection realized by the external-tool surface",
-        ),
-        (
-            "MeerkatMachine",
-            "McpServerStateChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External MCP server state change realized by the MCP router",
-        ),
-        (
-            "MeerkatMachine",
-            "McpServerReloadRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External MCP server reload realized by the MCP router without feedback",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerInteractionStateChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer-interaction state delta realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerInteractionCleanup",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer-interaction cleanup realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "InboundPeerInteractionStateChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External inbound peer-interaction state delta realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "SessionContextAdvanced",
-            SeamClassification::OwnerRealizationOnly,
-            "External session-context advancement realized by the session surface",
-        ),
-        (
-            "MeerkatMachine",
-            "InteractionStreamStateChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External interaction-stream state delta realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "InteractionStreamCleanup",
-            SeamClassification::OwnerRealizationOnly,
-            "External interaction-stream cleanup realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "LocalEndpointChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External local-endpoint delta realized by the connectivity surface",
-        ),
-        (
-            "MeerkatMachine",
-            "PeerProjectionChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer-projection delta realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "CommsTrustReconcileRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External comms trust-reconcile request realized by the comms surface",
-        ),
-        (
-            "MeerkatMachine",
-            "SupervisorBindAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor bind admission projection must align with generated supervisor bind truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SupervisorBindMaterialAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor bind material admission verdict (address/sender/peer-id/token precedence) must align with the shell mirror in validate_bind_request",
-        ),
-        (
-            "MeerkatMachine",
-            "TranscriptEditAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Transcript-edit session-liveness verdict (runtime_running || has_active_inputs => SESSION_BUSY) must align with the shell mirror in reject_active_transcript_edit",
-        ),
-        (
-            "MeerkatMachine",
-            "SupervisorAuthorizeAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor authorize admission projection must align with generated supervisor authorization truth",
-        ),
-        (
-            "MeerkatMachine",
-            "SupervisorBridgeCommandAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor bridge command admission projection must align with generated supervisor command truth",
-        ),
-        //
-        // =========================================================================
-        // MobMachine — multi-agent orchestration
-        // =========================================================================
-        (
-            "MobMachine",
-            "EmitMemberLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External member lifecycle notices must align with canonical identity/runtime transitions",
-        ),
-        (
-            "MobMachine",
-            "EmitRunLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External run-lifecycle notices must align with mob run transitions",
-        ),
-        (
-            "MobMachine",
-            "EmitFlowRunNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External flow-run notices must align with flow-frame-engine transitions",
-        ),
-        (
-            "MobMachine",
-            "EmitMemberTerminalNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External member-terminal notices must align with member lifecycle terminal truth",
-        ),
-        (
-            "MobMachine",
-            "FlowTerminalized",
-            SeamClassification::SurfaceResultAlignment,
-            "External flow-terminalized notice must align with canonical flow terminal truth",
-        ),
-        (
-            "MobMachine",
-            "FlowRunTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow run terminal classification must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowRunNonTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow run non-terminal classification must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowStepTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow step terminal classification must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowStepNonTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow step non-terminal classification must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowFrameTerminalStatusClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow frame terminal status classification must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowFrameTerminalStatusUnavailable",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow frame terminal status absence must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "FlowRunPublicResultClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow run public result class must align with generated MobMachine flow truth",
-        ),
-        (
-            "MobMachine",
-            "WiringGraphChanged",
-            SeamClassification::SurfaceResultAlignment,
-            "External wiring-graph delta must align with roster wiring-projection truth",
-        ),
-        (
-            "MobMachine",
-            "EmitWiringLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External wiring-lifecycle notices (members wired / unwired) must align with the \
-             canonical `WireMembersRunning` / `UnwireMembersRunning` DSL transitions so event \
-             consumers see the same wiring truth the DSL committed",
-        ),
-        (
-            "MobMachine",
-            "EmitExternalPeerWiringLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External peer wiring-lifecycle notices must align with the canonical \
-             `WireExternalPeerRunning` / `UnwireExternalPeerRunning` DSL transitions so event \
-             consumers see the same external peer wiring truth the DSL committed",
-        ),
-        (
-            "MobMachine",
-            "MemberSessionBindingChanged",
-            SeamClassification::SurfaceResultAlignment,
-            "External member-session binding delta must align with canonical runtime binding truth",
-        ),
-        (
-            "MobMachine",
-            "OwnerBridgeSessionBound",
-            SeamClassification::SurfaceResultAlignment,
-            "Owner bridge-session binding projection must align with generated MobMachine owner-binding truth",
-        ),
-        (
-            "MobMachine",
-            "RequestSessionIngressDetachForMobDestroy",
-            SeamClassification::NoOwnerRealization,
-            "Local mob-destroy ingress detach request consumed by the runtime seam handoff owner",
-        ),
-        (
-            "MobMachine",
-            "SpawnProfileAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local generated spawn-profile material authorization consumed synchronously by mob spawn/session-build plumbing",
-        ),
-        (
-            "MobMachine",
-            "PendingSpawnOperationOwnerAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local generated pending-spawn operation owner authorization consumed synchronously by mob spawn plumbing",
-        ),
-        (
-            "MobMachine",
-            "SessionProvisionOperationOwnerAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local generated session-provision operation owner authorization consumed synchronously by mob runtime plumbing",
-        ),
-        (
-            "MobMachine",
-            "RequestPeerRuntimeIngress",
-            SeamClassification::SurfaceResultAlignment,
-            "Peer runtime ingress request must align with generated MobMachine work-admission truth",
-        ),
-        (
-            "MobMachine",
-            "AppendFailureLedger",
-            SeamClassification::NoOwnerRealization,
-            "Local failure-ledger append inside the mob orchestrator",
-        ),
-        (
-            "MobMachine",
-            "EscalateSupervisor",
-            SeamClassification::OwnerRealizationOnly,
-            "External supervisor-escalation realized by the supervisor bridge without feedback",
-        ),
-        (
-            "MobMachine",
-            "NotifyCoordinator",
-            SeamClassification::OwnerRealizationOnly,
-            "External coordinator notification realized by the mob coordinator surface",
-        ),
-        (
-            "MobMachine",
-            "ExposePendingSpawn",
-            SeamClassification::OwnerRealizationOnly,
-            "External pending-spawn exposure realized by the mob handle surface",
-        ),
-        (
-            "MobMachine",
-            "AdmitPeerInput",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer-input admission realized by the mob handle surface",
-        ),
-        (
-            "MobMachine",
-            "EmitProgressNote",
-            SeamClassification::OwnerRealizationOnly,
-            "External progress-note emission realized by the mob event stream",
-        ),
-        (
-            "MobMachine",
-            "EmitTaskNotice",
-            SeamClassification::OwnerRealizationOnly,
-            "External task-notice emission realized by the task-board surface",
-        ),
-        (
-            "MobMachine",
-            "PersistKickoffUpdate",
-            SeamClassification::NoOwnerRealization,
-            "Local kickoff lifecycle state persistence consumed inside the mob startup tracker",
-        ),
-        (
-            "MobMachine",
-            "PersistKickoffFailureUpdate",
-            SeamClassification::NoOwnerRealization,
-            "Local kickoff failure persistence consumed inside the mob startup tracker",
-        ),
-        (
-            "MobMachine",
-            "EmitKickoffLifecycleNotice",
-            SeamClassification::OwnerRealizationOnly,
-            "External kickoff lifecycle notice realized by the mob event stream",
-        ),
-        (
-            "MobMachine",
-            "SubmitWorkRejected",
-            SeamClassification::SurfaceResultAlignment,
-            "Submit-work rejection result must align with canonical mob admission truth",
-        ),
-        (
-            "MobMachine",
-            "CancelAllWorkRejected",
-            SeamClassification::SurfaceResultAlignment,
-            "Cancel-all-work rejection result must align with canonical mob admission truth",
-        ),
-        (
-            "MobMachine",
-            "AppendLifecycleJournal",
-            SeamClassification::NoOwnerRealization,
-            "Local lifecycle journal append retained inside the mob event store projection path",
-        ),
-        (
-            "MobMachine",
-            "AppendOperatorActionProvenance",
-            SeamClassification::NoOwnerRealization,
-            "Local operator-action provenance append retained inside the mob audit path",
-        ),
-        (
-            "MobMachine",
-            "SpawnPolicyResolutionRecorded",
-            SeamClassification::NoOwnerRealization,
-            "Local spawn-policy resolution record retained inside the mob policy region",
-        ),
-        (
-            "MobMachine",
-            "RespawnTopologyRestoreResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Respawn topology-restore public result class must align with generated MobMachine truth",
-        ),
-        (
-            "MobMachine",
-            "SpawnManyFailureClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Spawn-many public failure cause must align with generated MobMachine error-observation classification",
-        ),
-        (
-            "MobMachine",
-            "MemberWaitClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Member wait result classification must align with generated MobMachine runtime-material truth",
-        ),
-        (
-            "MobMachine",
-            "FlowDelegationEdgeAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Flow topology edge admission verdict (Admitted/DeniedStrict/DeniedAdvisory) is decided by MobMachine; the flow engine mirrors it (Strict-block keyed on DeniedStrict) instead of computing+enforcing the admission",
-        ),
-        (
-            "MobMachine",
-            "RemoteMemberRuntimeTerminalityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Remote-member runtime observation terminality (Terminal/NonTerminal) is decided by MobMachine; the bridge cleanup shell mirrors it (stop vs force-destroy) instead of classifying the observed wire state itself",
-        ),
-        (
-            "MobMachine",
-            "SpawnMemberAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Composite spawn-member operator admission (Allowed/Denied) is decided by MobMachine from raw scope/privileged-arg observations; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
-        ),
-        (
-            "MobMachine",
-            "CurrentMobAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Per-mob operator admission for current-mob tools (Allowed/Denied) is decided by MobMachine from the raw manage-scope observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
-        ),
-        (
-            "MobMachine",
-            "SpawnToolAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Coarse spawn-tool admission for the spawn-member tool surfaces (Allowed/Denied) is decided by MobMachine from the raw can-spawn-any-profile observation; the tool surface mirrors it (Denied -> access_denied) instead of reducing the scope projection itself — uniquely covering the empty-specs spawn_many_members case",
-        ),
-        (
-            "MobMachine",
-            "CreateMobAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Operator create-mob admission (Allowed/Denied) is decided by MobMachine from the raw create-mobs capability observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
-        ),
-        (
-            "MobMachine",
-            "ProfileMutationAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Operator profile-mutation admission (Allowed/Denied) is decided by MobMachine from the raw mutate-profiles capability observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
-        ),
-        (
-            "MobMachine",
-            "MemberOperationEligibilityResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Within-mob member-operation eligibility (Admitted/DeniedNotRunning) for spawn finalization, peer messaging, and respawn finalization is decided by MobMachine from its own lifecycle phase plus the destroy_admitted marker; the actor mirrors it (DeniedNotRunning -> InvalidTransition to Running) instead of pre-checking the phase off self.state() itself",
-        ),
-        (
-            "MobMachine",
-            "BridgeRejectionRecoveryClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",
-        ),
-        (
-            "MobMachine",
-            "PendingSupervisorAcceptanceClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Pending-supervisor-acceptance recovery (NotConfirmedReattempt/StalePendingAuthority/Fatal) is decided by MobMachine from the raw wire rejection cause while re-verifying an already-accepted remote peer during supervisor rotation; the actor mirrors it (NotConfirmedReattempt -> drop+re-attempt; StalePendingAuthority -> stale-pending error; Fatal -> bubble up) instead of reducing the cause into an acceptance/recovery conclusion itself",
-        ),
-        (
-            "MobMachine",
-            "FrameSeedConfirmed",
-            SeamClassification::SurfaceResultAlignment,
-            "Frame-seed idempotency disposition (Seeded/AlreadySeeded) is decided by MobMachine's idempotent CreateFrameSeed; the flow shell mirrors it (AlreadySeeded -> idempotent Ok short-circuit; Seeded -> validate snapshot) instead of reinterpreting a guard rejection by literal-matching the frame_seed_is_new guard name",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeAgentEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "Agent event subscription authorization result must align with generated MobMachine target/session truth",
-        ),
-        (
-            "MobMachine",
-            "RejectAgentEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "Agent event subscription rejection result must align with generated MobMachine target/session truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeAllAgentEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "All-agent event subscription authorization result must align with generated MobMachine roster truth",
-        ),
-        (
-            "MobMachine",
-            "RejectAllAgentEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "All-agent event subscription rejection result must align with generated MobMachine roster truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeMobEventRouter",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-router authorization result must align with generated MobMachine router truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeMobEventRouterMemberSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-router member-subscription authorization result must align with generated MobMachine router/member truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeMobEventRouterMemberRemoval",
-            SeamClassification::SurfaceResultAlignment,
-            "Mob event-router member-removal authorization result must align with generated MobMachine router/member truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeStructuralEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "Structural event subscription authorization result must align with generated MobMachine structural stream truth",
-        ),
-        (
-            "MobMachine",
-            "RejectStructuralEventSubscription",
-            SeamClassification::SurfaceResultAlignment,
-            "Structural event subscription rejection result must align with generated MobMachine structural stream truth",
-        ),
-        (
-            "MobMachine",
-            "AuthorizeStrictEventPoll",
-            SeamClassification::SurfaceResultAlignment,
-            "Strict event poll authorization result must align with generated MobMachine event cursor truth",
-        ),
-        (
-            "MobMachine",
-            "RejectStrictEventPoll",
-            SeamClassification::SurfaceResultAlignment,
-            "Strict event poll rejection result must align with generated MobMachine event cursor truth",
-        ),
-        (
-            "MobMachine",
-            "WorkIntentRecorded",
-            SeamClassification::NoOwnerRealization,
-            "Coordination board work-intent record is machine-owned local state; no owner realization required",
-        ),
-        (
-            "MobMachine",
-            "ResourceClaimRecorded",
-            SeamClassification::NoOwnerRealization,
-            "Coordination board resource-claim record is machine-owned local state; no owner realization required",
-        ),
-        (
-            "MobMachine",
-            "WorkIntentStatusChanged",
-            SeamClassification::NoOwnerRealization,
-            "Coordination board work-intent status change is machine-owned local state; no owner realization required",
-        ),
-        (
-            "MobMachine",
-            "ResourceClaimStatusChanged",
-            SeamClassification::NoOwnerRealization,
-            "Coordination board resource-claim status change is machine-owned local state; no owner realization required",
-        ),
-        (
-            "MobMachine",
-            "ResourceClaimOverlapObserved",
-            SeamClassification::NoOwnerRealization,
-            "Coordination board overlap observation is a machine-owned local projection over recorded resource claims; no owner realization required",
-        ),
-        (
-            "MobMachine",
-            "MemberTrustWiringRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External member trust-wiring request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "MemberTrustUnwiringRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External member trust-unwiring request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "WiringTrustRepairRequested",
-            SeamClassification::NoOwnerRealization,
-            "Local wiring trust-repair marker retained inside the mob trust-repair path",
-        ),
-        (
-            "MobMachine",
-            "ExternalPeerTrustWiringRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer trust-wiring request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "ExternalPeerTrustUnwiringRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer trust-unwiring request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "ExternalPeerTrustRepairRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer trust-repair request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "MemberPeerRegistered",
-            SeamClassification::NoOwnerRealization,
-            "Local member peer registration retained inside the mob peer registry",
-        ),
-        (
-            "MobMachine",
-            "MemberPeerRebindAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local member peer rebind authorization retained inside the mob peer registry",
-        ),
-        (
-            "MobMachine",
-            "MemberPeerOverlayAuthorized",
-            SeamClassification::OwnerRealizationOnly,
-            "External member peer overlay authorization realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "ExternalPeerReciprocalTrustRequested",
-            SeamClassification::OwnerRealizationOnly,
-            "External peer reciprocal trust request realized by the mob comms trust owner",
-        ),
-        (
-            "MobMachine",
-            "PersistSupervisorAuthority",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor authority persistence token must align with generated MobMachine supervisor trust identity truth",
-        ),
-        (
-            "MobMachine",
-            "DeleteSupervisorAuthority",
-            SeamClassification::SurfaceResultAlignment,
-            "Supervisor authority deletion token must align with generated MobMachine supervisor trust identity truth",
-        ),
-        //
-        // =========================================================================
-        // ScheduleLifecycleMachine
-        // =========================================================================
-        (
-            "ScheduleLifecycleMachine",
-            "EmitScheduleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External schedule notices must align with the schedule lifecycle kernel state",
-        ),
-        (
-            "ScheduleLifecycleMachine",
-            "PlanningWindowRecorded",
-            SeamClassification::NoOwnerRealization,
-            "Planning window recording is local bookkeeping inside the schedule kernel",
-        ),
-        //
-        // =========================================================================
-        // OccurrenceLifecycleMachine
-        // =========================================================================
-        (
-            "OccurrenceLifecycleMachine",
-            "Claimed",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DispatchStarted",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "AwaitingCompletion",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "Completed",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "Skipped",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "Misfired",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "Superseded",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DeliveryFailed",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "LeaseExpired",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DueNoAction",
-            SeamClassification::NoOwnerRealization,
-            "Local due-occurrence no-action classification retained inside the occurrence scheduler",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DueClaimEligible",
-            SeamClassification::NoOwnerRealization,
-            "Local due-occurrence claim eligibility classification retained inside the occurrence scheduler",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DueMisfireRequired",
-            SeamClassification::NoOwnerRealization,
-            "Local due-occurrence misfire classification retained inside the occurrence scheduler",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "DueLeaseExpired",
-            SeamClassification::NoOwnerRealization,
-            "Local due-occurrence lease-expired classification retained inside the occurrence scheduler",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "OccurrenceTerminalityClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local terminality verdict over the occurrence's machine-owned lifecycle_phase; the store filter mirrors it instead of a handwritten phase matches!",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "ClaimedDispatchDispositionClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local claimed-occurrence pre-dispatch disposition (Frozen/Supersede/Ready/FutureRevision) decided by the occurrence machine; the driver mirrors it instead of classifying schedule facts itself",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "CompletionSupersessionClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local post-completion supersession disposition (Supersede/Proceed) decided by the occurrence machine; the driver mirrors it instead of classifying schedule facts itself on the post-completion path",
-        ),
-        (
-            "OccurrenceLifecycleMachine",
-            "TransitionFailureClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "Occurrence transition failure public result class must align with generated occurrence refusal-evidence classification",
-        ),
-        //
-        // =========================================================================
-        // WorkGraphLifecycleMachine
-        // =========================================================================
-        (
-            "WorkGraphLifecycleMachine",
-            "Created",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph creation effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "Updated",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph update effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "Claimed",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph claim effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "Released",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph release effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "Blocked",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph block effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "LinkValidated",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph topology-validation effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "Closed",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph terminal effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "EvidenceAdded",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph evidence-reference effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "BlockerSatisfied",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph blocker-satisfied classification retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "BlockerUnsatisfied",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph blocker-unsatisfied classification retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "LifecycleTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph terminal lifecycle classification must align with canonical WorkGraph item truth",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "LifecycleNonTerminal",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph non-terminal lifecycle classification must align with canonical WorkGraph item truth",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "WorkReady",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph ready classification must align with canonical dependency and lifecycle truth",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "WorkNotReady",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph not-ready classification must align with canonical dependency and lifecycle truth",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "WorkGraphPublicErrorClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph public error classification must align with canonical WorkGraph error truth",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "WorkItemTerminalityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph terminality verdict must align with canonical WorkGraph lifecycle-phase truth; the service mirrors it to gate attention binding/projection admission and fails closed",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "WorkItemReadinessClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph readiness verdict reproduces the Claim transition guards (ClaimOpen / ClaimExpiredInProgress) over canonical item state; the ready_items filter mirrors it and fails closed instead of probe-and-skip claiming",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "BlockerSatisfactionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph per-blocking-edge satisfaction verdict must align with canonical blocker lifecycle truth; the service mirrors it and mechanically fans-in the unresolved_blocker_count revalidated by the dependencies_satisfied guard",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "CreateStatusAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph create-status admission verdict (AdmittedOpen/AdmittedBlocked/Denied) is decided by WorkGraphLifecycleMachine from the requested initial status observation; the create shell mirrors it (AdmittedOpen -> CreateOpen, AdmittedBlocked -> CreateBlocked, Denied -> InvalidTransition) instead of deciding the only-open-or-blocked creation policy itself",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "CreateCompletionPolicyAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph create-time completion-policy admission verdict (Admitted/DeniedNonSelfAttest) is decided by WorkGraphLifecycleMachine from the requested completion_policy observation; the create shell mirrors it (DeniedNonSelfAttest -> InvalidInput) instead of deciding the non-goal-must-be-self-attest creation policy itself",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "CloseStatusAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph close-status admission verdict (AdmittedCompleted/AdmittedCancelled/AdmittedFailed/DeniedNonTerminal) is decided by WorkGraphLifecycleMachine from the requested close-target status observation; the close shell mirrors it (AdmittedCompleted -> CloseCompleted, AdmittedCancelled -> CloseCancelled, AdmittedFailed -> CloseFailed, DeniedNonTerminal -> InvalidTransition) instead of deciding the close-requires-terminal lifecycle-class fact itself",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "PublicConfirmationAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph public-confirmation admission verdict (Admitted/DeniedRequiresTrustedHost) is decided by WorkGraphLifecycleMachine from the machine-owned completion_policy observation; the public-confirm surface mirrors it (DeniedRequiresTrustedHost -> InvalidInput) instead of deciding the trust-scoped eligibility itself",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "CompletionPolicyMutationAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph completion-policy mutation admission verdict (Admitted/Denied) is decided by WorkGraphLifecycleMachine by comparing the requested completion policy in full against the machine-owned policy; the update shell mirrors it (Denied -> InvalidInput) instead of deciding the immutability invariant itself",
-        ),
-        (
-            "WorkGraphLifecycleMachine",
-            "ConfirmationAdmissionClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph trusted-path confirmation admission verdict (Admitted / DeniedPrincipalRequired / DeniedPrincipalKindMismatch / DeniedSupervisorMismatch / DeniedEvidenceKind / DeniedSelfAttestEmptyEvidenceKind) is decided by WorkGraphLifecycleMachine from the typed completion-policy, supervisor owner key, requested principal owner key + kind, and evidence-kind observations; the goal-confirm shell mirrors it (Admitted -> stamp evidence, each Denied* -> the same InvalidInput rejection) instead of deciding the per-policy principal/evidence eligibility itself",
-        ),
-        //
-        // =========================================================================
-        // ApprovalLifecycleMachine
-        // =========================================================================
-        (
-            "ApprovalLifecycleMachine",
-            "ApprovalStatusResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Approval public status projection must align with generated ApprovalLifecycleMachine truth",
-        ),
-        (
-            "ApprovalLifecycleMachine",
-            "ApprovalLifecycleRejected",
-            SeamClassification::SurfaceResultAlignment,
-            "Approval public rejection projection must align with generated ApprovalLifecycleMachine rejection truth",
-        ),
-        //
-        // =========================================================================
-        // SessionDocumentMachine — per-session session-document registry
-        // =========================================================================
-        //
-        // Local effects: the session shell mirrors the machine-owned decision
-        // (phase + initial-prompt/tool-results staging) back onto the durable
-        // SessionDeferredTurnState projection; the effects never cross a shell
-        // boundary on their own.
-        (
-            "SessionDocumentMachine",
-            "SessionFirstTurnPhaseResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local first-turn phase decision mirrored onto the durable SessionDeferredTurnState projection inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionFirstTurnOverridesResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local build-override legality decision consumed in-process by the session shell first-turn override gate",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionInitialPromptStageResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local initial-prompt staging decision mirrored onto the session pending-prompt payload inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionToolResultsStageResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local tool-results staging decision mirrored onto the session pending-tool-results payload inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionConsumedInputsRestoreResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local consumed-input rollback decision mirrored onto the session pending payloads inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionFirstTurnPhaseRecovered",
-            SeamClassification::NoOwnerRealization,
-            "Local durable snapshot recovery acknowledgement consumed in-process by the session restore path",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemContextAppendResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local runtime system-context append disposition mirrored onto the session SessionSystemContextState pending/seen collections inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemContextPendingApplyItemResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local per-append apply/discard decision (keyed on the typed SystemContextSource marker) mirrored onto the session applied/seen collections inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemContextSteerCleanupItemResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local per-item transient runtime-steer discard decision (keyed on the typed SystemContextSource marker) mirrored onto the session pending/applied/seen collections inside meerkat-core session",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemContextSnapshotRestoreAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local system-context snapshot restore authorization consumed in-process by the session restore path",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemContextPersistAppendAdmissionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local persist-time system-context append-admission verdict (Admit/Reject) mirrored onto the session-store atomic append-only save guard bool inside meerkat-core session_store (same machine as the staging-path append disposition; shell decides nothing)",
-        ),
-        (
-            "SessionDocumentMachine",
-            "RealtimeTranscriptEventResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local realtime-transcript action vector mirrored onto the session SessionRealtimeTranscriptState item/segment/completion registry inside meerkat-core realtime_transcript_revision",
-        ),
-        (
-            "SessionDocumentMachine",
-            "RealtimeMaterializeCandidateResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local per-item materialize verdict mirrored onto the session SessionRealtimeTranscriptState by the meerkat-core realtime_transcript_revision materializer (shell performs only topological ordering and message assembly)",
-        ),
-        (
-            "SessionDocumentMachine",
-            "RealtimeTranscriptSnapshotRestoreAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local realtime-transcript snapshot restore authorization consumed in-process by the session restore path",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionMetadataPersistAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local session-metadata persist admission consumed in-process by the meerkat-core session_durable_config_authority shell, which passes the original SessionMetadata through unchanged on admit",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionBuildStatePersistAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local build-state persist admission consumed in-process by the meerkat-core session_durable_config_authority shell, which passes the original SessionBuildState through unchanged on admit",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionBuildStateRestoreAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local build-state restore authorization consumed in-process by the meerkat-core session_durable_config_authority shell restore path",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SystemPromptMutationAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local system-prompt mutation admission consumed in-process by the meerkat-core session_durable_config_authority shell, which applies the original prompt unchanged on admit",
-        ),
-        (
-            "SessionDocumentMachine",
-            "PendingContinuationResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local pending-continuation disposition mirrored in-process by the meerkat-core pending_continuation driver (run_pending) and the meerkat-session turn-admission shell",
-        ),
-        (
-            "SessionDocumentMachine",
-            "PendingContinuationPublicTerminalResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local NoPendingBoundary terminal witness mirrored alongside the pending-continuation disposition; consumed in-process, never crosses a shell boundary",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionResumeOverridesAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local resume-override admission verdict + LLM-binding selection mirrored in-process by the meerkat-core session_recovery shell (resolve_effective_turn_config / resolve_resume_llm_binding), which supplies the concrete provider/server values the typed selection points at",
-        ),
-        (
-            "SessionDocumentMachine",
-            "SessionResumeOverridesRejected",
-            SeamClassification::NoOwnerRealization,
-            "Local resume-override rejection reason mapped in-process by the meerkat-core session_recovery shell to its typed SurfaceSessionRecoveryError; never crosses a shell boundary",
-        ),
-        (
-            "SessionDocumentMachine",
-            "LiveSessionAuthorityClassified",
-            SeamClassification::NoOwnerRealization,
-            "Local live-vs-durable session-document authority verdict + typed precedence reason mirrored in-process by the meerkat-session persistent shell (live_session_authority); the shell branches its sync path on the typed reason and never crosses a shell boundary",
-        ),
-        //
-        // =========================================================================
-        // SessionTurnAdmissionMachine — ephemeral turn-admission gate
-        // =========================================================================
-        //
-        // Local effects: the EphemeralSessionService turn-admission slot observes
-        // each emitted effect synchronously under its mutex and mirrors the
-        // projection/disposition. None crosses an actor or shell boundary.
-        (
-            "SessionTurnAdmissionMachine",
-            "TurnAdmissionProjected",
-            SeamClassification::NoOwnerRealization,
-            "Local turn-admission projection mirrored in-process by the EphemeralSessionService turn-admission slot",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "TurnInterruptRequested",
-            SeamClassification::NoOwnerRealization,
-            "Local interrupt wake feedback consumed in-process by the turn-admission slot to decide whether to wake the running turn",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "StartTurnDispatchResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local start-turn dispatch authorization mirrored in-process by the ephemeral start-turn path",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "CancelAfterBoundaryAuthorized",
-            SeamClassification::NoOwnerRealization,
-            "Local boundary-cancel authorization consumed in-process by the ephemeral cancel-after-boundary path",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "StartTurnDispositionResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local start-turn disposition mirrored in-process by the ephemeral start-turn path",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "StartTurnPublicTerminalResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local NoPendingBoundary terminal witness mirrored in-process alongside the start-turn disposition",
-        ),
-        (
-            "SessionTurnAdmissionMachine",
-            "RuntimeKeepAliveResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local runtime keep-alive persistence verdict consumed in-process by the ephemeral start-turn path",
-        ),
-        //
-        // =========================================================================
-        // WorkAttentionLifecycleMachine
-        // =========================================================================
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionPaused",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph attention pause effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionResumed",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph attention resume effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionSuperseded",
-            SeamClassification::NoOwnerRealization,
-            "Reserved WorkGraph attention supersession effect; no production supersession path is wired yet",
-        ),
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionStopped",
-            SeamClassification::NoOwnerRealization,
-            "Local WorkGraph attention stop effect retained inside the WorkGraph service projection path",
-        ),
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionEligibilityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph attention-projection eligibility verdict must align with canonical attention phase + paused-deadline truth; the service mirrors it and fails closed",
-        ),
-        (
-            "WorkAttentionLifecycleMachine",
-            "AttentionAuthorityClassified",
-            SeamClassification::SurfaceResultAlignment,
-            "WorkGraph projected-authority permissions must align with canonical attention mode + delegated-authority truth; the service mirrors them to scope tool admission and fails closed",
-        ),
-        //
-        // =========================================================================
-        // AuthMachine — per-binding auth lease lifecycle (dogma #43/#44 resolved)
-        // =========================================================================
-        (
-            "AuthMachine",
-            "EmitLifecycleEvent",
-            SeamClassification::SurfaceResultAlignment,
-            "Auth lifecycle events are consumed by the RuntimeOpsLifecycleRegistry audit sink and the surface truth must match the AuthMachine phase",
-        ),
-        (
-            "AuthMachine",
-            "WakeRefreshLoop",
-            SeamClassification::NoOwnerRealization,
-            "Local refresh-loop wake consumed by the per-binding auth refresh task",
-        ),
-        (
-            "AuthMachine",
-            "CredentialUseAdmissionResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Credential-use disposition (Authorized/RefreshRequired/ReauthRequired/LeaseAbsent/AlreadyRefreshing) is decided by the per-binding AuthMachine from its own (lifecycle_phase, credential_present) plus the resolver's typed intent; the auth-core resolver mirrors it instead of duplicating the phase->disposition policy across four match-phase reducers",
-        ),
-    ]
-}
-
-/// Classify a Local or External effect using the known-classifications table.
-///
-/// Strict mode turns a missing classification into a hard error (the caller
-/// treats the returned `explicitly_classified = false` as classification
-/// debt). Non-strict mode falls back to the disposition-based heuristic
-/// purely for reporting — classification debt is still the failure signal.
-fn classify_effect(
-    machine: &str,
-    effect: &str,
-    disposition: &EffectDisposition,
-    known: &[(&str, &str, SeamClassification, &str)],
-) -> (SeamClassification, String, bool) {
-    // Check known classifications first.
-    for (m, e, class, notes) in known {
-        if *m == machine && *e == effect {
-            return (*class, notes.to_string(), true);
-        }
-    }
-
-    // Heuristic fallback — only ever reported. Under `--strict` the caller
-    // turns the resulting `was_explicit == false` into a hard error.
-    match disposition {
-        EffectDisposition::Local => (
-            SeamClassification::NoOwnerRealization,
-            "Default: Local effect with no known owner feedback requirement".into(),
-            false,
-        ),
-        EffectDisposition::External => (
-            SeamClassification::OwnerRealizationOnly,
-            "Default: External effect assumed to need shell realization without feedback".into(),
-            false,
-        ),
-        EffectDisposition::Routed { .. } => {
-            // Routed effects are handled by the routed-effect realization
-            // check below, not the seam-inventory classification table.
-            (
-                SeamClassification::NoOwnerRealization,
-                "Routed — handled by composition routes, not seam inventory".into(),
-                false,
-            )
-        }
-    }
 }
 
 fn known_public_surface_contracts() -> Vec<SurfaceContractEntry> {
@@ -2090,15 +88,134 @@ fn known_public_surface_contracts() -> Vec<SurfaceContractEntry> {
     ]
 }
 
+/// One row of the typed destroy-obligation inventory: a route declaring
+/// [`EffectTeardownClass::DestroyRequest`] together with the resolution state
+/// of the detach obligation it names.
+#[derive(Debug)]
+pub struct DestroyRouteEntry {
+    pub producer_machine: String,
+    pub effect_variant: String,
+    pub composition: String,
+    pub producer_instance: String,
+    pub detach_obligation: String,
+    pub paired: bool,
+}
+
+/// Typed C-F3 teardown inventory derived purely from the declared
+/// [`Route::teardown`] / [`EffectHandoffProtocol::teardown`] facts.
+#[derive(Debug, Default)]
+pub struct TeardownInventory {
+    pub destroy_routes: Vec<DestroyRouteEntry>,
+    /// Routes carrying the same (producer machine, effect variant) must agree
+    /// on their teardown classification. A divergent sibling (e.g. a second
+    /// route for a destroy-request effect that omits the declaration) is a
+    /// hard coherence violation — the typed replacement for the old
+    /// `contains("Destroy")` name sweep.
+    pub coherence_violations: Vec<String>,
+    /// Protocols declaring `DetachBeforeDestroy` that no `DestroyRequest`
+    /// route names. Escalated to a hard failure under `--strict`.
+    pub dangling_detach_protocols: Vec<String>,
+}
+
+/// Build the typed teardown inventory across every composition.
+fn collect_teardown_inventory(compositions: &[&CompositionSchema]) -> TeardownInventory {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut inventory = TeardownInventory::default();
+
+    // Index detach-obligation protocols by name: protocol must declare the
+    // DetachBeforeDestroy teardown class and at least one feedback input
+    // (the ack that closes the obligation).
+    let mut detach_protocols: BTreeSet<String> = BTreeSet::new();
+    for composition in compositions {
+        for protocol in &composition.handoff_protocols {
+            if protocol.teardown == Some(TeardownObligationClass::DetachBeforeDestroy)
+                && !protocol.allowed_feedback_inputs.is_empty()
+            {
+                detach_protocols.insert(protocol.name.as_str().to_string());
+            }
+        }
+    }
+
+    // Coherence: every route carrying the same producer effect must agree on
+    // its teardown classification across all compositions.
+    let mut teardown_by_effect: BTreeMap<(String, String), BTreeSet<Option<EffectTeardownClass>>> =
+        BTreeMap::new();
+    for composition in compositions {
+        for route in &composition.routes {
+            let producer_machine = composition
+                .machines
+                .iter()
+                .find(|m| m.instance_id == route.from_machine)
+                .map(|m| m.machine_name.as_str().to_string())
+                .unwrap_or_default();
+            teardown_by_effect
+                .entry((
+                    producer_machine.clone(),
+                    route.effect_variant.as_str().to_string(),
+                ))
+                .or_default()
+                .insert(route.teardown.clone());
+
+            let Some(EffectTeardownClass::DestroyRequest { detach_obligation }) = &route.teardown
+            else {
+                continue;
+            };
+            let paired = detach_protocols.contains(detach_obligation.as_str());
+            inventory.destroy_routes.push(DestroyRouteEntry {
+                producer_machine,
+                effect_variant: route.effect_variant.as_str().to_string(),
+                composition: composition.name.as_str().to_string(),
+                producer_instance: route.from_machine.as_str().to_string(),
+                detach_obligation: detach_obligation.as_str().to_string(),
+                paired,
+            });
+        }
+    }
+    for ((machine, effect), classes) in &teardown_by_effect {
+        if classes.len() > 1 {
+            inventory.coherence_violations.push(format!(
+                "{machine}::{effect} carries divergent teardown declarations across its routes: {classes:?}"
+            ));
+        }
+    }
+
+    let referenced: BTreeSet<&str> = inventory
+        .destroy_routes
+        .iter()
+        .map(|entry| entry.detach_obligation.as_str())
+        .collect();
+    inventory.dangling_detach_protocols = detach_protocols
+        .iter()
+        .filter(|name| !referenced.contains(name.as_str()))
+        .cloned()
+        .collect();
+
+    inventory.destroy_routes.sort_by(|a, b| {
+        (
+            &a.producer_machine,
+            &a.effect_variant,
+            &a.composition,
+            &a.producer_instance,
+        )
+            .cmp(&(
+                &b.producer_machine,
+                &b.effect_variant,
+                &b.composition,
+                &b.producer_instance,
+            ))
+    });
+    inventory
+}
+
 pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     let machines = canonical_machine_schemas();
     let compositions = canonical_composition_schemas();
-    let known = known_classifications();
     let mut entries: Vec<SeamEntry> = Vec::new();
     let public_surface_contracts = known_public_surface_contracts();
 
     for machine in &machines {
-        collect_machine_seams(machine, &known, &mut entries);
+        collect_machine_seams(machine, &mut entries);
     }
 
     // Routed-effect realization inventory — the teeth on the
@@ -2133,10 +250,6 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
             },
         );
 
-    let unresolved_classification_debt = entries
-        .iter()
-        .filter(|entry| !entry.explicitly_classified)
-        .collect::<Vec<_>>();
     let unresolved_protocol_debt = entries
         .iter()
         .filter(|entry| entry.classification == SeamClassification::OwnerRealizationPlusFeedback)
@@ -2153,6 +266,10 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         .filter(|rr| !rr.missing_consumers.is_empty())
         .collect::<Vec<_>>();
 
+    // Typed C-F3 teardown inventory over canonical compositions.
+    let all_compositions: Vec<&CompositionSchema> = compositions.iter().collect();
+    let teardown_inventory = collect_teardown_inventory(&all_compositions);
+
     // Print the report
     print_report(&entries);
     print_routed_realizations(&routed_realizations);
@@ -2160,63 +277,72 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     // Summary statistics
     print_summary(
         &entries,
-        &unresolved_classification_debt,
         &unresolved_protocol_debt,
         &public_surface_contracts,
         &unresolved_public_surface_alignment_debt,
         &routed_realizations,
         &unresolved_routed_debt,
-        &compositions,
+        &all_compositions,
+        &teardown_inventory,
     );
 
-    let strict = args.strict;
-    let classification_debt = unresolved_classification_debt.len();
+    // Explicit seam classification is enforced by construction (the
+    // machine-catalog DSL parser requires a `seam <Classification>` clause on
+    // every disposition), so there is no classification-debt arm here. The
+    // realization debts — handoff protocols, public-surface contracts,
+    // routed-effect realization, and the typed C-F3 destroy obligations
+    // (unpaired destroy routes and teardown-coherence divergence) — are
+    // unconditional hard errors. `--strict` additionally escalates dangling
+    // detach-obligation declarations (a `DetachBeforeDestroy` protocol no
+    // destroy route references) from report-only to a hard failure.
     let protocol_debt = unresolved_protocol_debt.len();
     let public_surface_debt = unresolved_public_surface_alignment_debt.len();
     let routed_debt = unresolved_routed_debt.len();
+    let unpaired_destroy_debt = teardown_inventory
+        .destroy_routes
+        .iter()
+        .filter(|entry| !entry.paired)
+        .count();
+    let teardown_coherence_debt = teardown_inventory.coherence_violations.len();
+    let dangling_detach_debt = teardown_inventory.dangling_detach_protocols.len();
 
-    if strict && classification_debt > 0 {
+    if protocol_debt > 0
+        || public_surface_debt > 0
+        || routed_debt > 0
+        || unpaired_destroy_debt > 0
+        || teardown_coherence_debt > 0
+    {
         anyhow::bail!(
-            "seam-inventory --strict: {classification_debt} effect(s) lack explicit classification; add entries to known_classifications() for every Local/External effect",
+            "seam inventory has unresolved debt: protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}, unpaired_destroy={unpaired_destroy_debt}, teardown_coherence={teardown_coherence_debt}",
         );
     }
-    if classification_debt > 0 || protocol_debt > 0 || public_surface_debt > 0 || routed_debt > 0 {
+
+    if args.strict && dangling_detach_debt > 0 {
         anyhow::bail!(
-            "seam inventory has unresolved debt: classification={classification_debt}, protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}",
+            "seam inventory (strict) has dangling detach-obligation declarations: {}",
+            teardown_inventory.dangling_detach_protocols.join(", "),
         );
     }
 
     Ok(())
 }
 
-fn collect_machine_seams(
-    machine: &MachineSchema,
-    known: &[(&str, &str, SeamClassification, &str)],
-    entries: &mut Vec<SeamEntry>,
-) {
+fn collect_machine_seams(machine: &MachineSchema, entries: &mut Vec<SeamEntry>) {
     for rule in &machine.effect_dispositions {
         match &rule.disposition {
             EffectDisposition::Local | EffectDisposition::External => {
                 let disposition_str = match &rule.disposition {
-                    EffectDisposition::Local => "Local",
                     EffectDisposition::External => "External",
-                    EffectDisposition::Routed { .. } => unreachable!(),
+                    // The outer arm restricts us to Local/External; any
+                    // non-External disposition here is Local.
+                    _ => "Local",
                 };
-
-                let (classification, notes, explicitly_classified) = classify_effect(
-                    machine.machine.as_str(),
-                    rule.effect_variant.as_str(),
-                    &rule.disposition,
-                    known,
-                );
 
                 entries.push(SeamEntry {
                     machine: machine.machine.as_str().to_string(),
                     effect_variant: rule.effect_variant.as_str().to_string(),
                     disposition: disposition_str.to_string(),
-                    classification,
-                    notes,
-                    explicitly_classified,
+                    classification: rule.seam_classification,
                 });
             }
             EffectDisposition::Routed { .. } => {
@@ -2377,8 +503,8 @@ fn print_report(entries: &[SeamEntry]) {
         }
 
         println!(
-            "  {:40} {:10} {:40} {}",
-            entry.effect_variant, entry.disposition, entry.classification, entry.notes,
+            "  {:40} {:10} {}",
+            entry.effect_variant, entry.disposition, entry.classification,
         );
     }
 }
@@ -2386,13 +512,13 @@ fn print_report(entries: &[SeamEntry]) {
 #[allow(clippy::too_many_arguments)]
 fn print_summary(
     entries: &[SeamEntry],
-    unresolved_classification_debt: &[&SeamEntry],
     unresolved_protocol_debt: &[&SeamEntry],
     public_surface_contracts: &[SurfaceContractEntry],
     unresolved_public_surface_alignment_debt: &[&SurfaceContractEntry],
     routed_realizations: &[RoutedRealization],
     unresolved_routed_debt: &[&RoutedRealization],
-    compositions: &[CompositionSchema],
+    all_compositions: &[&CompositionSchema],
+    teardown_inventory: &TeardownInventory,
 ) {
     let total = entries.len();
     let no_owner = entries
@@ -2436,11 +562,8 @@ fn print_summary(
     // → realising actor → typed feedback input(s) that close the
     // step-lock (ack / failure). Producers now host the annotation on
     // their canonical effect rather than through bridge-only schemas.
-    let compat = compat_composition_schemas();
     let mut protocol_rows: Vec<(String, String, String, String, String, String)> = Vec::new();
-    let all_compositions: Vec<&CompositionSchema> =
-        compositions.iter().chain(compat.iter()).collect();
-    for composition in &all_compositions {
+    for composition in all_compositions {
         for protocol in &composition.handoff_protocols {
             let feedback_variants: Vec<String> = protocol
                 .allowed_feedback_inputs
@@ -2487,93 +610,57 @@ fn print_summary(
     // `MobOwned` by that mob must receive `DetachIngress` first,
     // otherwise the `peer_ingress_mob_id` on that session dangles.
     //
-    // This section walks every canonical routed effect whose variant
-    // name contains the substring "Destroy" and asserts a paired
-    // handoff obligation exists whose feedback inputs include at
-    // least one variant that mentions "IngressDetached" or "Detach".
-    // Unpaired destroy routes are emitted as debt so the
-    // `mob-destroy → session-detach` ordering cannot regress
-    // silently.
-    let mut destroy_routes: Vec<(String, String, String, String, bool)> = Vec::new();
-    for composition in &all_compositions {
-        for route in &composition.routes {
-            // Filter to destroy *requests* that flow from a producer to a
-            // consumer that will be torn down. Reply signals like
-            // `RuntimeDestroyed` (consumer → producer, "destroy observed")
-            // are not request-side effects and do not need a paired
-            // detach obligation: the destroy is already done by the time
-            // they fire.
-            let variant = route.effect_variant.as_str();
-            if !(variant.contains("Destroy") && variant.starts_with("Request")) {
-                continue;
-            }
-            let producer_instance = route.from_machine.as_str().to_string();
-            let producer_machine = composition
-                .machines
-                .iter()
-                .find(|m| m.instance_id == route.from_machine)
-                .map(|m| m.machine_name.as_str().to_string())
-                .unwrap_or_default();
-            let effect = route.effect_variant.as_str().to_string();
-            let composition_name = composition.name.as_str().to_string();
-            // Paired iff some protocol (across all compositions) has a
-            // feedback input whose variant name is "*IngressDetach*"
-            // or "*Detach*" AND the protocol's allowed feedback inputs
-            // route into the same consumer as this destroy route.
-            let consumer_instance = &route.to.machine;
-            let paired = all_compositions.iter().any(|other| {
-                other.handoff_protocols.iter().any(|protocol| {
-                    protocol.allowed_feedback_inputs.iter().any(|fb| {
-                        let variant = fb.input_variant.as_str();
-                        (variant.contains("IngressDetached") || variant.contains("Detach"))
-                            && (fb.machine_instance == *consumer_instance
-                                || other.machines.iter().any(|m| {
-                                    m.instance_id == fb.machine_instance
-                                        && other
-                                            .machines
-                                            .iter()
-                                            .any(|cm| cm.machine_name.as_str() == producer_machine)
-                                })
-                                || protocol.name.as_str().contains("session_ingress"))
-                    })
-                })
-            });
-            destroy_routes.push((
-                producer_machine.clone(),
-                effect,
-                composition_name,
-                producer_instance,
-                paired,
-            ));
-        }
-    }
-    destroy_routes.sort();
-    println!("## Destroy-obligation Pairing (C-F3)");
-    if destroy_routes.is_empty() {
-        println!("  (no canonical routed *Destroy* effects declared)");
+    // The inventory is derived purely from the typed teardown
+    // declarations on the composition schema: a route declaring
+    // `EffectTeardownClass::DestroyRequest` must name a protocol that
+    // declares `TeardownObligationClass::DetachBeforeDestroy` with at
+    // least one feedback input (the detach ack). Coherence enforcement
+    // (every route carrying the same producer effect agrees on its
+    // teardown class) replaces the old variant-name substring sweep,
+    // so an undeclared sibling of a destroy route fails the gate.
+    println!("## Destroy-obligation Pairing (C-F3, typed)");
+    if teardown_inventory.destroy_routes.is_empty() {
+        println!("  (no DestroyRequest-classified routes declared)");
     } else {
         println!(
-            "  {:24} {:32} {:32} {:32} paired",
-            "producer_machine", "effect_variant", "composition", "producer_instance"
+            "  {:24} {:32} {:32} {:32} {:36} paired",
+            "producer_machine",
+            "effect_variant",
+            "composition",
+            "producer_instance",
+            "detach_obligation"
         );
-        for (producer, effect, composition_name, instance, paired) in &destroy_routes {
+        for entry in &teardown_inventory.destroy_routes {
             println!(
-                "  {:24} {:32} {:32} {:32} {}",
-                producer,
-                effect,
-                composition_name,
-                instance,
-                if *paired { "yes" } else { "NO" }
+                "  {:24} {:32} {:32} {:32} {:36} {}",
+                entry.producer_machine,
+                entry.effect_variant,
+                entry.composition,
+                entry.producer_instance,
+                entry.detach_obligation,
+                if entry.paired { "yes" } else { "NO" }
             );
         }
     }
-    let unpaired_destroy_debt: Vec<&(String, String, String, String, bool)> = destroy_routes
+    let unpaired_destroy_debt = teardown_inventory
+        .destroy_routes
         .iter()
-        .filter(|(_, _, _, _, paired)| !paired)
-        .collect();
+        .filter(|entry| !entry.paired)
+        .count();
+    println!("  unpaired destroy routes (debt):            {unpaired_destroy_debt}");
+    for violation in &teardown_inventory.coherence_violations {
+        println!("  ! TEARDOWN COHERENCE: {violation}");
+    }
     println!(
-        "  unpaired destroy routes (debt):            {}",
-        unpaired_destroy_debt.len()
+        "  teardown coherence violations (debt):      {}",
+        teardown_inventory.coherence_violations.len()
+    );
+    for dangling in &teardown_inventory.dangling_detach_protocols {
+        println!("  ! DANGLING DETACH OBLIGATION: {dangling}");
+    }
+    println!(
+        "  dangling detach obligations (strict debt): {}",
+        teardown_inventory.dangling_detach_protocols.len()
     );
     println!();
     println!("## Public Surface Contracts");
@@ -2591,10 +678,6 @@ fn print_summary(
     println!();
     println!("## Debt");
     println!(
-        "  unresolved classification debt:            {}",
-        unresolved_classification_debt.len()
-    );
-    println!(
         "  unresolved protocol debt:                  {}",
         unresolved_protocol_debt.len()
     );
@@ -2606,8 +689,9 @@ fn print_summary(
         "  unresolved routed-effect debt:             {}",
         unresolved_routed_debt.len()
     );
+    println!("  unpaired destroy-obligation debt (C-F3):   {unpaired_destroy_debt}");
     println!(
-        "  unpaired destroy-obligation debt (C-F3):   {}",
-        unpaired_destroy_debt.len()
+        "  teardown coherence debt (C-F3):            {}",
+        teardown_inventory.coherence_violations.len()
     );
 }

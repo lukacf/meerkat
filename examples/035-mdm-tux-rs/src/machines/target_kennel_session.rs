@@ -47,8 +47,8 @@ machine! {
             ControlPayloadAdmitted,
         }
 
-        disposition RegisterPayloadAuthorized => local,
-        disposition ControlPayloadAdmitted => local,
+        disposition RegisterPayloadAuthorized => local seam NoOwnerRealization,
+        disposition ControlPayloadAdmitted => local seam NoOwnerRealization,
 
         transition RecordReregisterIntentDisconnected {
             on input RecordReregisterIntent { attached_tux_id }

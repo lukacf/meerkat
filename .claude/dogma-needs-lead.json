@@ -1,0 +1,782 @@
+[
+ {
+  "id": 82,
+  "lane": "A-comms",
+  "evidence": "Still live. The router-local privacy side-channel `private_peer_ids: Arc<RwLock<PeerIdSet>>` exists at router.rs:136 (constructed :176/:201), and `is_private` (router.rs:215-219) + `is_private_peer_id` (router.rs:436-438) + directory resolution (comms_runtime.rs:2550,2584) read the flat set. The TrustedPeer descriptor (trust.rs:223-232) carries NO `visibility`/`PeerVisibility` field; no PeerVisibility type exists. The canonical privacy authority is the meerkat-core split `CommsTrustMutation::AddPrivateTrustedPeer` vs `AddTrustedPeer` (meerkat-core/src/comms.rs:1135 vs :1127) over `TrustedPeerDescriptor`. Promoting visibility onto the typed descriptor per the repair requires: (a) adding `visibility: PeerVisibility` to TrustedPeer (trust.rs) which cascades into every `TrustedPeer { .. }` struct-literal across the workspace (meerkat-tools/src/builtin/comms/surface.rs:158, meerkat/tests, examples/020, tests/integration, etc.); and (b) changing the meerkat-core `TrustedPeerDescriptor`/`CommsTrustMutation` contract (schema-derived) so the privacy fact rides the descriptor. Both are cross-crate + schema, outside the A-comms lane."
+ },
+ {
+  "id": 267,
+  "lane": "A-comms",
+  "evidence": "The cited runtime owner IS closed: comms_runtime.rs no longer matches body=='DISMISS' (drain path comment at :1177-1180 documents dismissal must arrive as a typed lifecycle signal; meerkat-runtime/src/comms_drain.rs:128-142 fires typed DrainExitReason::Dismissed via runtime drain-lifecycle authority, no body match), with gate test peer_message_body_dismiss_does_not_control_lifecycle (comms_runtime.rs:5369). BUT a genuine same-shape residual persists in-crate: `contains_dismiss` in the legacy CommsAgent wrapper at meerkat-comms/src/agent/mod.rs:117-124 still does `body.trim().eq_ignore_ascii_case(\"DISMISS\")` to stop `run_stay_alive` (agent/mod.rs:108-110). CommsContent (agent/types.rs:173-206) has no typed lifecycle variant and drops MessageKind::Lifecycle (types.rs:274 returns None). Proper typed fix needs a `PeerLifecycleKind::Dismiss` variant in meerkat-core/src/comms.rs:1284 (schema-derived \u2192 make regen-schemas) threaded into a typed CommsContent lifecycle, outside the A-comms lane."
+ },
+ {
+  "id": 291,
+  "lane": "A-comms",
+  "evidence": "Still live. Both peer-request send/reservation failure sites still call `peer_handle.request_timed_out(corr_id)`, collapsing a non-timeout failure into the OutboundPeerRequestState::TimedOut terminal: the stream-reservation failure (comms_runtime.rs:803) and the send failure (comms_runtime.rs:831). The typed SendError is returned to the caller verbatim (comms_runtime.rs:821-832), so the caller isn't lied to, but the MACHINE state is wrong (TimedOut not Failed). OutboundPeerRequestState::Failed exists (meerkat-core/src/peer_correlation.rs:107) but its emitting transition is only for remote PeerResponseRejected/Failed. The repair needs a new `PeerRequestSendFailed{corr_id}` machine input + transition emitting Failed in meerkat-machine-schema (catalog/dsl/meerkat_machine.rs) + make machine-codegen (regenerates meerkat-machine-kernels/src/generated/meerkat.rs), plus a `request_send_failed` method on the PeerInteractionHandle trait in meerkat-core/src/handles.rs and its impl in meerkat-runtime/src/handles/peer_interaction.rs. All outside the A-comms lane; the two comms call sites would then call request_send_failed instead of request_timed_out."
+ },
+ {
+  "id": 5,
+  "lane": "A-core",
+  "evidence": "Budget terminal verdict still shell-decided in call_llm_with_retry: meerkat-core/src/agent/state.rs:444-445,456,524,589,653 call `exceeded.to_agent_error()` directly. The machine-owned path TurnExecutionInput::BudgetLimitExceeded exists and is used in the main loop (state.rs:1296,1870,1914) but the call_llm_with_retry budget gates bypass it. Proper fix per plan = feed Budget.observe() snapshots as a typed TurnExecutionInput (new BudgetObserved{snapshot}) so the generated MeerkatMachine owns the exceeded->terminal classification. TurnExecutionInput is consumed by the generated runtime handle (apply_turn_input), so adding/routing a new variant requires machine-codegen \u2014 outside A-core write-only lane."
+ },
+ {
+  "id": 6,
+  "lane": "A-core",
+  "evidence": "Two residuals confirmed live. (1) AgentEvent::Retrying still carries `error: String` (meerkat-core/src/event.rs:1641) and is populated with `error.to_string()` at state.rs:580,644 beside the typed `retry: Some(retry_schedule)`. Dropping the string field for AgentErrorReport is a wire change (AgentEvent is wire; needs make regen-schemas). (2) Retry sleep lives in the shell (tokio::time::sleep at state.rs:587,651); folding sleep-then-RetryRequested into the machine's recoverable transition is a machine-codegen change. Both outside lane."
+ },
+ {
+  "id": 76,
+  "lane": "A-core",
+  "evidence": "override_comms is genuinely missing from the recovery path. SurfaceSessionRecoveryOverrides (meerkat-core/src/session_recovery.rs:40-47) has override_builtins/shell/memory/schedule/workgraph/mob/image_generation/web_search but no override_comms. SessionBuildOptions (meerkat-core/src/service/mod.rs:242-259) also lacks override_comms. The factory ALREADY has AgentBuildConfig.override_comms (meerkat/src/factory.rs:385) and consumes it (factory.rs:4882-4883), but apply_build (factory.rs:747-759) copies override_* from SessionBuildOptions and there is no `self.override_comms = build.override_comms` because the source field is absent. Full fix needs: add override_comms to SurfaceSessionRecoveryOverrides + SessionBuildOptions + ResumeOverrideMask (all core) AND wire SessionBuildOptions.override_comms -> AgentBuildConfig.override_comms in factory.rs apply_build (outside A-core lane). Core-only fields would be dead without the factory wiring, so the gate test cannot pass without cross-crate work."
+ },
+ {
+  "id": 93,
+  "lane": "A-core",
+  "evidence": "Could not confirm closure within meerkat-core (gateway.rs is the owner). I focused investigation on confirmed core seams; ToolGateway dispatch (meerkat-core/src/gateway.rs) routing-by-name-string with first-wins iteration vs a typed ToolName->DispatcherEntry routing map was not verified as closed. Marking for lead re-adjudication: needs a read of gateway.rs build()/dispatch_with_context to confirm whether a typed routing map keyed by ToolName was already introduced; if not, building it is in-lane but I did not complete it this pass. Treat as uncertain/live pending gateway.rs verification."
+ },
+ {
+  "id": 128,
+  "lane": "A-core",
+  "evidence": "Empty-output terminal decision is still shell-owned: meerkat-core/src/agent/state.rs:1925 branches locally on `!assistant_msg.has_visible_or_actionable_output()` then calls terminalize_fatal_error with llm_empty_response (state.rs:1927-1941). Proper fix per plan = lower the visibility classification into a typed TurnExecutionInput (AssistantOutputClassified{has_visible_or_actionable}) so the generated MeerkatMachine owns the empty-output terminal verdict. New TurnExecutionInput variant processed by the generated machine = machine-codegen, outside lane."
+ },
+ {
+  "id": 129,
+  "lane": "A-core",
+  "evidence": "External dispatch timeout is policy-ownership (not fault-laundering): dispatch_external_tool_call_with_timeout_policy (meerkat-core/src/agent/runner.rs:523) takes a typed ToolDispatchTimeoutPolicy parameter and applies tokio::time::timeout (runner.rs:552), with expiry producing typed ToolError::timeout (runner.rs:559) \u2014 no laundering to success. The plan itself says this is policy-ownership not fault-laundering, lower priority, and 'accept as bounded if the policy is genuinely caller plumbing' is acceptable. Moving timeout ownership into the ops/dispatch authority is a structural decision for the lead (the typed policy + typed timeout error already exist); not a mechanical in-lane fix."
+ },
+ {
+  "id": 143,
+  "lane": "A-core",
+  "evidence": "AgentEvent::CompactionFailed { error: String } is still string-typed (meerkat-core/src/event.rs:1625), emitted at agent/compact.rs:259,278 with hard-coded/stringified messages. The typed CompactionError exists (agent/compact.rs:19) but embeds AgentError (CompactionError::LlmFailed(#[from] AgentError)) which is not Serialize. Fix = change the wire event to carry a serializable typed cause (CompactionError needs Serialize/Deserialize/JsonSchema, or a new CompactionFailureCause) then make regen-schemas + version-parity (AgentEvent is wire). Wire change + serialization rework outside lane."
+ },
+ {
+  "id": 166,
+  "lane": "A-core",
+  "evidence": "Bare futures::future::join_all(dispatch_futures) at meerkat-core/src/agent/state.rs:2192 still lacks per-tool timeout and concurrency bound. ToolsConfig (config.rs:1606) has default_timeout/tool_timeouts/max_concurrent, but the Agent struct holds no tools_config (no field in agent.rs/state.rs/builder.rs), so the normal dispatch path cannot read it. Fix needs an Agent field + builder method (core) AND the factory to call .with_tools_config(config.tools) (meerkat/src/factory.rs, outside lane) so the value is actually populated \u2014 otherwise the gate (tool exceeding default_timeout yields typed timeout; max_concurrent=1 serializes) cannot pass. Cross-crate cascade."
+ },
+ {
+  "id": 205,
+  "lane": "A-core",
+  "evidence": "Missing-blob hydration on the LLM-execution path is hard-coded to MissingBlobBehavior::HistoricalPlaceholder at meerkat-core/src/agent/state.rs:442 (call_llm_with_retry). MissingBlobBehavior::Error already exists (image_content.rs:51-52) and yields BlobStoreError::NotFound. No build/config knob exists to select the policy (grep for MissingBlobBehavior/missing_blob in config.rs/agent.rs/builder.rs is empty). Fix needs a build-mode/config policy field + factory plumbing so a surface can select Error; without the factory wiring an in-lane field would be dead (always HistoricalPlaceholder), so the gate (Error policy -> typed AgentError) cannot pass. Cross-crate cascade."
+ },
+ {
+  "id": 207,
+  "lane": "A-core",
+  "evidence": "RealmDefaults.backend is still Option<String> (meerkat-core/src/session_recovery.rs:68,130) and SessionBuildOptions.backend: Option<String> (service/mod.rs:270). The canonical typed owner NormalizedBackendKind is defined in meerkat-llm-core (binding.rs:30), re-exported via meerkat-providers \u2014 and meerkat-core does NOT depend on either (confirmed: no meerkat-llm-core/meerkat-providers in meerkat-core/Cargo.toml). So the typed type cannot be imported into core without a cross-crate type move or relocation decision by the lead, plus the backend flows to the factory. Cross-crate."
+ },
+ {
+  "id": 220,
+  "lane": "A-core",
+  "evidence": "The violating code is in meerkat-skills, not meerkat-core: FilesystemSkillSource::list (meerkat-skills/src/source/filesystem.rs) and EmbeddedSkillSource::list (meerkat-skills) silently drop invalid skills and leave SourceHealthSnapshot at Default. The health contract types (SourceHealthSnapshot, classify_source_health) live in meerkat-core/src/skills/mod.rs (my lane) and already exist, but the behavioral fix (recording skipped/parse-failed entries into invalid_count/total_count, mirroring remote.rs::health_from_cache) is in meerkat-skills \u2014 outside A-core."
+ },
+ {
+  "id": 233,
+  "lane": "A-core",
+  "evidence": "AuthStatusPhase::from_lease_snapshot (meerkat-core/src/auth/status.rs:58-69) and from_lease_phase (status.rs:48-56) still collapse Released, absent (None), AND missing-credential (!credential_present) into the single Unknown variant. Fix = split Unknown into typed Released/Absent/MissingCredential and branch the rehydration gate on the typed state. AuthStatusPhase is a wire enum (Serialize/Deserialize/JsonSchema) used by REST/RPC/CLI/SDK; adding variants needs make regen-schemas + version-parity, AND the REST (meerkat-rest auth_endpoints.rs) and RPC (meerkat-rpc handlers/auth.rs) rehydration gates that steer on Unknown must be updated. Wire change + cross-crate."
+ },
+ {
+  "id": 239,
+  "lane": "A-core",
+  "evidence": "collect_skill_diagnostics still launders (meerkat-core/src/agent/state.rs:2869-2877): health_snapshot().await.ok()? drops snapshot failure to whole-None, quarantined_diagnostics().await.unwrap_or_default() drops collection failure to empty. Fix = make the fn return Result / add a typed failure variant on SkillRuntimeDiagnostics and surface it into WireRunResult.skill_diagnostics. But WireRunResult (meerkat-contracts/src/wire/result.rs:73) embeds meerkat_core::skills::SkillRuntimeDiagnostics directly into the wire, so changing the diagnostics type to carry a collection-failure variant is a wire-schema change requiring make regen-schemas \u2014 outside lane."
+ },
+ {
+  "id": 253,
+  "lane": "A-core",
+  "evidence": "content_blob_id(media_type: &str, data: &str) hashes the raw media-type string (meerkat-core/src/blob.rs:38-45), so 'image/PNG' and 'image/png' mint different BlobIds. MediaType (image_generation.rs:128) has only new()/as_str() \u2014 no canonical normalize / fail-closed parse. Fix needs: add MediaType::normalize+parse (core, in-lane) AND retype content_blob_id to (&MediaType, &str) hashing the normalized form \u2014 which cascades to its callers, including meerkat-store/src/blob.rs:22 (outside lane) \u2014 AND blob_load_file in meerkat-tools (blob_file.rs) must parse into a normalized MediaType. Cross-crate signature cascade + meerkat-tools."
+ },
+ {
+  "id": 270,
+  "lane": "A-core",
+  "evidence": "LiveToolResult.call_id: String (meerkat-core/src/live_adapter.rs:79) and LiveObservation::ToolCallRequested { provider_call_id: String, tool_name: String } (live_adapter.rs:322-324) are raw provider strings (the test at live_adapter.rs:1199 documents provider_call_id as intentionally the provider-native string). ToolCallId newtype exists (image_generation.rs:73). Fix per plan = deserialize once at the adapter boundary into typed ToolCallId/ToolName and route host dispatch/error correlation on the typed id. LiveToolResult derives JsonSchema (wire), so retyping needs make regen-schemas + version-parity, plus host-dispatch routing changes outside core. Large cross-crate + wire change."
+ },
+ {
+  "id": 275,
+  "lane": "A-core",
+  "evidence": "ApprovalOwnerRef inner ids are still String (meerkat-core/src/approval.rs:87-91: session_id/mob_id/run_id/tool_call_id/member_ref) and ApprovalResourceRef.id: String (approval.rs:113); ApprovalRecord.request_body/request_provenance are Option<Value> (per plan :198/:209). Fix = typed newtypes (SessionId/MobId/RunId/ToolCallId/AgentIdentity) + typed payload/provenance enums. ApprovalOwnerRef/ApprovalResourceRef derive JsonSchema (wire/contract-adjacent); plan gate explicitly requires make regen-schemas + verify-version-parity. Wire change, large \u2014 outside lane."
+ },
+ {
+  "id": 279,
+  "lane": "A-core",
+  "evidence": "HnswMemoryStore and the hard-coded bag-of-words hashing (text_to_embedding) + const VOCAB_DIM/MAX_NB_CONNECTION/EF_CONSTRUCTION live in meerkat-memory/src/hnsw.rs (NOT meerkat-core), and the factory wiring is in meerkat/src/factory.rs. Fix = introduce a typed EmbeddingModel/MemoryRankingPolicy contract (could go in meerkat-core memory) and have HnswMemoryStore consume an injected policy wired at the factory. The consumer (meerkat-memory) and factory (meerkat) changes are outside A-core; the gate requires HnswMemoryStore construction with the typed policy. Cross-crate."
+ },
+ {
+  "id": 308,
+  "lane": "A-core",
+  "evidence": "Core AgentBuilder still owns default-prompt policy: builder.rs:462-474 applies SystemPromptConfig::new().compose() with source DefaultBuild for new sessions lacking an explicit prompt. Fix per plan = gate this behind an explicit build-mode/policy flag so standalone core construction injects no default prompt and only the facade opts in. Requires a builder flag (core, in-lane) AND the facade (meerkat/src/factory.rs) to set it (the facade composes its own prompt at factory.rs:4760-4764 and passes it explicitly), so making standalone core stop injecting the default + having the facade re-enable it via the flag is a cross-crate cascade. Row is also marked 'after 272'."
+ },
+ {
+  "id": 309,
+  "lane": "A-core",
+  "evidence": "runtime_execution_snapshot (meerkat-core/src/agent/runner.rs:104-153) uses u32::try_from(...).ok()? at lines 141,146,150,151 \u2014 counter overflow collapses the WHOLE snapshot to None \u2014 and state() (runner.rs:623-627) does .unwrap_or(LoopState::CallingLlm), fabricating a false running state. Fix per plan = a typed projection-failure surfaced from state()/execution_snapshot(). But execution_snapshot() returns Option<AgentExecutionSnapshot> and is wired through the SessionAgent trait consumed across meerkat/meerkat-cli/meerkat-rpc/meerkat-session/meerkat-mob; changing it to Result<_, SnapshotProjectionError> (or adding a distinguishable LoopState variant, which is a wire change) cascades outside lane."
+ },
+ {
+  "id": 312,
+  "lane": "A-core",
+  "evidence": "SkillRepoTransport::Http.auth_token (meerkat-core/src/skills_config.rs:110), Git.auth_token (skills_config.rs:125), Git.ssh_key (skills_config.rs:127) are plaintext Option<String>. Fix = typed credential reference resolved through the credential-owner/auth-binding seam. SkillRepoTransport is a wire type (Serialize/Deserialize -> make regen-schemas), the materialization into HttpSkillAuth::Bearer/Header is in meerkat-skills (resolve.rs/http.rs, outside lane), and the auth-binding seam lives in meerkat-providers. Wire change + cross-crate."
+ },
+ {
+  "id": 322,
+  "lane": "A-core",
+  "evidence": "TurnToolOverlay (meerkat-core/src/service/mod.rs:1261-1272) still has allowed_tools/blocked_tools: Option<Vec<String>> and dispatch_context: BTreeMap<String, serde_json::Value> (opaque JSON). Fix = typed ToolName newtype for allow/deny sets (ToolName exists at types.rs:2289) + a typed dispatch-metadata struct. TurnToolOverlay derives JsonSchema and crosses into meerkat-contracts (emit.rs, wire/mob.rs, wire/runtime.rs) and SDK generated types (Python/TS), so retyping the lists/metadata is a wire change requiring make regen-schemas + SDK codegen, plus the dispatch_context flows into turn_tool_dispatch_metadata (ToolDispatchContext). Wire + SDK cascade."
+ },
+ {
+  "id": 331,
+  "lane": "A-core",
+  "evidence": "HookToolResult.content: String legacy mirror is still present (meerkat-core/src/hooks.rs:214), populated from result.text_content() (hooks.rs:238). Fix = remove the content mirror so post-tool hooks can only deny/terminalize on content_blocks. HookToolResult is part of the hook payload serialized to external command/HTTP hook runtimes (meerkat-hooks crate), and the row itself flags 'schema regen if HookToolResult is wire' \u2014 removing a field from the externally-serialized hook payload is a wire-contract decision the lead must verify with regen-schemas. In-core readers of .content are only tests (hooks.rs:505-585), but the external-payload/wire aspect crosses the lane."
+ },
+ {
+  "id": 332,
+  "lane": "A-core",
+  "evidence": "effective_failure_policy() (meerkat-core/src/config.rs:1716) has zero callers (only its own definition repo-wide). But the failure_policy field on HookEntryConfig (config.rs:1704) still has struct-literal initializers in OTHER crates: meerkat-hooks/src/lib.rs:1958,2000 (Some(HookFailurePolicy::...)) and meerkat/tests/smoke_meerkat_sdk.rs:720,735,750 (None). Deleting the field (the row's prescribed clean-break) would break those other-crate callers and requires coordinated edits to meerkat-hooks + meerkat tests + the lib.rs re-export of default_failure_policy (lib.rs:193) + docs/guides/hooks.mdx \u2014 a cross-crate clean-break the lead must drive. A partial in-lane delete would leave the workspace non-compiling."
+ },
+ {
+  "id": 356,
+  "lane": "A-core",
+  "evidence": "The core side is correct/complete: MemberCommsName::new is the fail-closed construction returning Result<Self, MemberCommsNameError> (meerkat-core/src/connection.rs:297-313) with Display. The actual violation \u2014 render_member_comms_name catching the construction failure and rebuilding the raw format!(\"{mob_id}/{role}/{member}\") \u2014 is in meerkat-mob/src/runtime/actor.rs:333-339 (outside A-core). Fix (change render_member_comms_name to return Result<String, MemberCommsNameError> and propagate; update callers) is in meerkat-mob."
+ },
+ {
+  "id": 51,
+  "lane": "A-facade",
+  "evidence": "meerkat-openai/src/live.rs:1444 pending_explicit_commit_text_items is now a typed Vec<StagedTextTurn> (was Vec<(String,String)>) \u2014 partial improvement \u2014 but it remains an ADAPTER-LOCAL Vec, not lowered into the machine-owned realtime staging fact (RealtimeTranscript/AppendRealtimeTranscript) the plan prescribes. Gate ('crash/cancel between stage and commit cannot leave an orphaned untracked pending text item') unmet by an adapter-local Vec. Fix is in meerkat-openai + a machine-owned staging fact \u2014 out of lane."
+ },
+ {
+  "id": 68,
+  "lane": "A-facade",
+  "evidence": "meerkat-openai/src/live.rs:1376-1408 openai_realtime_capabilities_for derives only the video field from model_profile::profile_for; input_kinds/output_kinds (Text/Audio), turning_modes, interrupt_supported:true, transcript_supported:true, tool_lifecycle_events_supported:true, and audio formats remain STATIC literals. Gate requires no static capability literal + catalog-row-driven caps. Needs realtime-capability fields on meerkat-models catalog / meerkat-core ModelProfile \u2014 cross-crate, out of lane. Partial progress (video) noted."
+ },
+ {
+  "id": 72,
+  "lane": "A-facade",
+  "evidence": "meerkat/src/factory.rs:3075-3159 legacy_self_hosted_connection still synthesizes a self_hosted_legacy transient realm + an FNV-hashed BindingId (3148-3153 0xcbf29ce484222325 hash -> format!(\"legacy-{hash:016x}\")) when server_id is not a valid BindingId; SELF_HOSTED_LEGACY_REALM_ID const at 1072. No expiry milestone / documented fuse / HDA approval (path 1) and not deleted (path 2). Tests at 6914 (non_slug_server_id_uses_safe_transient_binding) and 7598 (without_credentials_remains_authless_compatible) PIN the current behavior. This is a back-compat removal-vs-fuse policy decision that cascades through resolution chain + several pinning tests \u2014 the lead must arbitrate. File is in my lane but the decision is a behavioral/back-compat policy call with test cascade, deferred to lead per dogmatic-default ambiguity."
+ },
+ {
+  "id": 103,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/types.rs:2582-2611 RunResult still has text:String and NO blocks:Vec<AssistantBlock> field; AgentEvent::RunCompleted (event.rs:1458) likewise lacks blocks. The lossy text projection persists. Fix adds wire-adjacent fields to RunResult + RunCompleted in meerkat-core + event.rs, requiring regen-schemas + version-parity + SDK drift \u2014 cross-crate, out of lane."
+ },
+ {
+  "id": 111,
+  "lane": "A-facade",
+  "evidence": "meerkat-auth-core/src/auth_oauth/token_exchange.rs:116,128 still wraps failures as OAuthError::Network(String) and OAuthError::TokenEndpoint{status,body} (120) \u2014 no typed Permanent/Transient/ReauthRequired permanence variant on OAuthError. Fix adds typed permanence to OAuthError in meerkat-auth-core \u2014 out of lane."
+ },
+ {
+  "id": 123,
+  "lane": "A-facade",
+  "evidence": "OpenAI OAuth client_id is duplicated VERBATIM: meerkat-openai/src/runtime/oauth.rs:33 CHATGPT_CLIENT_ID=\"app_EMoamEEZ73f0CkXaXp7hrann\" and meerkat-auth-core/src/oauth_flow.rs:40 OPENAI_CLIENT_ID=\"app_EMoamEEZ73f0CkXaXp7hrann\" (+ OPENAI_AUTHORIZE_URL at 41). No single OAuthProviderDeclaration. Collapsing to one provider-owned declaration is a cross-crate change (meerkat-auth-core + meerkat-openai) \u2014 out of lane."
+ },
+ {
+  "id": 132,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/event.rs:1514-1518 AgentEvent::HookFailed still carries error:String (no reason_code); meerkat-core/src/hooks.rs:336 HookOutcome.error:Option<String>; InteractionFailed (event.rs:1690) string-only. Only HookDenied has typed reason_code:HookReasonCode. Introducing a typed HookFailureReason on HookOutcome/HookFailed/InteractionFailed is a meerkat-core + event-wire change requiring regen-schemas \u2014 out of lane."
+ },
+ {
+  "id": 141,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/hooks.rs:258 prompt:Option<String> and 265 error:Option<String> legacy mirrors persist beside typed prompt_input:Option<ContentInput> (255) and error_report:Option<AgentErrorReport> (260), with no drift-test fuse documented; RunCompleted.result/RunFailed.error string fields also remain (per #103). run_started (294) derives prompt from prompt_input.text_content(). Full fuse-with-drift-test or deletion is a meerkat-core + event-wire change + regen-schemas \u2014 out of lane."
+ },
+ {
+  "id": 142,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/event.rs:1713-1736 BackgroundJobCompleted still sets legacy_status:Some(terminal_status.as_str().to_string()) (1735) beside typed terminal_status:BackgroundJobTerminalStatus (1714) \u2014 a pure derived mirror not yet deleted or fused with a drift test. Deletion/derivation is a meerkat-core event-wire change requiring regen-schemas \u2014 out of lane."
+ },
+ {
+  "id": 149,
+  "lane": "A-facade",
+  "evidence": "meerkat-openai/src/live.rs: the env-var ladder is GONE (openai_realtime_transcription_model_for at 1022-1030 reads no env) but the transcription model is still a hardcoded named const OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL=\"gpt-4o-mini-transcribe\" (1011), NOT a catalog row. Gate ('grep live.rs for gpt-4o-mini-transcribe = zero' + 'resolves from the catalog row') unmet: the literal persists at 1011/888. Adding a catalog transcription-model field is a meerkat-models change \u2014 out of lane. Env-ladder removal noted as progress."
+ },
+ {
+  "id": 167,
+  "lane": "A-facade",
+  "evidence": "meerkat/src/session_runtime/live_orchestration.rs: Part 2 (typed LiveConfigPropagationReport with swapped/skipped/swap_failed/refreshed/closed/refresh_failed, defined 288-303, returned from propagate_config_to_live_channels at 923-926) is DONE \u2014 the pure-logging fan-out is replaced. Part 1 (SessionMetadata Inherit/Pinned origin marker) is NOT done and is DELIBERATELY rejected by this branch's documented design: docstring 188-205 and should_apply_global_model_hot_swap (212-218) intentionally broadcast the global to pinned sessions (s72 regression rationale). The gate's first assertion (pinned model not global-hot-swapped) conflicts with that documented decision, and the marker requires a SessionMetadata typed field change in meerkat-core + schema/SDK cascade. Lead must adjudicate the s72-vs-pinned-marker conflict and own the cross-crate type change."
+ },
+ {
+  "id": 208,
+  "lane": "A-facade",
+  "evidence": "meerkat-gemini/src/runtime/mod.rs:228-349 resolve_code_assist_user_project still runs loadCodeAssist/onboardUser project+tier resolution INSIDE the provider runtime (reading binding options + GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT env at 235-238, calling onboardUser at 320) and materializes the result into GoogleAuthMetadata. Now returns a typed CodeAssistProjectResolution (223-226) \u2014 partial \u2014 but the policy has NOT moved to AuthMachine/factory; onboarding still runs as a request side-effect. Plan's 'largest single fix'; cross-crate (meerkat-gemini + AuthMachine) \u2014 out of lane."
+ },
+ {
+  "id": 230,
+  "lane": "A-facade",
+  "evidence": "meerkat-openai/src/text_adapter.rs: the temperature half is FIXED (resolve_realtime_temperature 66-77 distinguishes caller-Unset None from explicit-invalid -> typed LlmError::InvalidRequest). The zero-cap half is NOT: realtime_max_output_tokens (54-55) maps max_tokens==0 -> None (provider default) with no typed reject. LlmRequest.max_tokens is u32 (meerkat-llm-core/src/types.rs:194, default 4096) so there is no Unset distinction to reject explicit-0 against \u2014 fixing properly needs LlmRequest.max_tokens -> Option in meerkat-llm-core cascading through all providers. Out of lane. Temperature progress noted."
+ },
+ {
+  "id": 243,
+  "lane": "A-facade",
+  "evidence": "meerkat-live/src/webrtc.rs:485-495 the WebRTC data channel still deserializes core LiveInputChunk directly (serde_json::from_slice::<LiveInputChunk>) rather than the generated LiveInputChunkWire + shared live_input_chunk_from_wire conversion that RPC live/send_input uses. The code comment (485-494) explicitly defers this as cross-lane: the conversion helper lives in meerkat-rpc handlers/live.rs and 'adopting it here requires lifting it to a shared owner (meerkat-contracts/meerkat-core)'. Out of lane. (Note #329 terminality is independently closed.)"
+ },
+ {
+  "id": 272,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/agent/state.rs:1217-1220 run_loop computes max_turns = self.config.max_turns.unwrap_or(crate::config::DEFAULT_MAX_TURNS) \u2014 the bare literal 100 is gone and a named owner DEFAULT_MAX_TURNS:u32=100 now exists (config.rs:752, documented as the canonical owner). However the gate requires the default be RESOLVED at the build seam (factory), assertable, with no resolution inside run_loop; the resolution still happens in run_loop. config.max_turns stays Option<u32> (config.rs:773). Moving resolution to the build seam touches meerkat-core run_loop + factory \u2014 out of lane. Named-owner progress noted."
+ },
+ {
+  "id": 273,
+  "lane": "A-facade",
+  "evidence": "Owner is meerkat-core/src/agent/state.rs (the WaitingForOps arm + terminalize_fatal_error), not the meerkat facade crate. Routing the missing-pending-op-refs / wait_all-failed / registry-missing faults through terminalize_fatal_error before returning Err is a meerkat-core change \u2014 out of lane. (Not independently re-verified in detail since it is unambiguously outside my lane.)"
+ },
+ {
+  "id": 274,
+  "lane": "A-facade",
+  "evidence": "Owner is meerkat-core/src/agent/state.rs tool-result handling (reorder the video-unsupported check before the success-shaped ToolExecutionCompleted/ToolResultReceived emits, route through terminalize_fatal_error). meerkat-core change \u2014 out of lane."
+ },
+ {
+  "id": 276,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/agent/compact.rs:168-175 load_compaction_cadence still uses .and_then(serde_json::from_value::<SessionCompactionCadence>...ok()).unwrap_or_else(|| ... infer_session_boundary_index(session.messages())) \u2014 optional-metadata read with a transcript-count fallback (159). Folding cadence into the canonical session-document authority + gating the infer fallback behind a migration input is a meerkat-core change plus new machine authority \u2014 out of lane."
+ },
+ {
+  "id": 301,
+  "lane": "A-facade",
+  "evidence": "meerkat-rpc/src/live_projection_sink.rs:234-235 still maps SessionError::Unsupported(reason)->LiveProjectionError::Rejected(reason) and 'other => LiveProjectionError::Internal(other.to_string())' \u2014 erasing typed SessionError causes. The gate ('grep for other.to_string() in the mapper = zero', each SessionError variant -> distinct typed LiveProjectionError variant) is unmet. Fix adds typed cause variants to LiveProjectionError in meerkat-live/meerkat-rpc \u2014 out of lane."
+ },
+ {
+  "id": 319,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/types.rs:933 Message::as_indexable_text()->String still flattens (silently excludes System/SystemNotice/ToolResults); producer meerkat-core/src/agent/state.rs:1026 calls it then builds MemoryIndexRequest::new(scope, content, metadata) with the flattened string (1038). No typed MemoryIndexableContent on the request; the store does not see include/exclude policy. Cross-cutting meerkat-core change (types.rs/memory.rs/state.rs) \u2014 out of lane."
+ },
+ {
+  "id": 323,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/agent/state.rs: CallTimeoutSource (49-53 CallBudget/TurnBudget) selection and the in-loop terminal classification (resolve_effective_call_timeout 379-, source select 470-471) keep the retryable-vs-terminal decision in the loop. Lowering the terminal class into the turn machine is a meerkat-core (state.rs + turn machine) change \u2014 out of lane."
+ },
+ {
+  "id": 324,
+  "lane": "A-facade",
+  "evidence": "meerkat-core/src/agent/state.rs still does strip-and-push SystemNotice transcript mutation for MCP-pending (1348-1369), background-completion (1382-1445), and tool-scope (1577-1677). Introducing a single prompt/context assembly seam that projects these typed runtime facts at assembly time (so replay is byte-identical with no persisted SystemNotice) is a large meerkat-core architectural change \u2014 out of lane."
+ },
+ {
+  "id": 326,
+  "lane": "A-facade",
+  "evidence": "meerkat-rpc/src/protocol.rs:12 RpcRequest.jsonrpc is a free String; no jsonrpc==\"2.0\" validation at the transport/router boundary (grep of transport.rs/router.rs/server.rs finds only construction-side \"2.0\".to_string() and test literals). Frames are still classified by method presence. Validating the version (typed JsonRpcVersion or equality check) at the boundary is a meerkat-rpc change \u2014 out of lane."
+ },
+ {
+  "id": 337,
+  "lane": "A-facade",
+  "evidence": "meerkat/src/prompt_assembly.rs:23 per_request_prompt:Option<&str> still collapses set/disable/inherit into one optional string (Some skips config/AGENTS, None inherits, no Disable). meerkat/src/factory.rs:314 AgentBuildConfig.system_prompt:Option<String>. The prescribed typed SystemPromptOverride{Inherit,Set,Disable} mirrors TurnMetadataOverride/ToolCategoryOverride which BOTH live in meerkat-core (run_primitive.rs / session.rs); the source field CreateSessionRequest.system_prompt / SessionBuildOptions.system_prompt is in meerkat-core/src/service/mod.rs:177,1194 and appears in meerkat-contracts wire types. Disable cannot be expressed at the wire boundary today, so a faithful fix needs a meerkat-core + meerkat-contracts type change + regen-schemas \u2014 cascades outside the facade. Lead owns the contract change."
+ },
+ {
+  "id": 346,
+  "lane": "A-facade",
+  "evidence": "meerkat-rpc/src/handlers/live.rs:1388-1410: answer_offer (meerkat-live/src/webrtc.rs:390 self.peers.insert) installs the peer BEFORE resolve_live_webrtc_answer_result (1395); on authority reject (1403-1409) the RPC returns an error but the inserted peer is NOT removed \u2014 orphaned-peer window. No remove_peer on the reject branch. Fix (fold insertion behind answer-result, or add fail-closed remove_peer on reject) spans meerkat-rpc + meerkat-live \u2014 out of lane."
+ },
+ {
+  "id": 355,
+  "lane": "A-facade",
+  "evidence": "meerkat-rpc/src/handlers/live.rs:758-817 close_live_channel_after_open_failure still tracing::warn-and-return when generated close authority rejects (772-781) or host close commit fails (792-803), leaving channel/session maps installed \u2014 best-effort, not pending-close-metadata/retry like handle_rotate_supervisor. Fix spans meerkat-rpc + generated live-close authority \u2014 out of lane."
+ },
+ {
+  "id": 169,
+  "lane": "A-mcp-mobpack",
+  "evidence": "meerkat-mcp-server/src/lib.rs:2554-2561 handle_meerkat_mcp_reload no-server-name branch loops adapter.stage_reload(ServerName) per active server and returns on the first Err via ? (line 2559), leaving the earlier-staged reloads committed in the surface-owner machine + staged_payloads with no rollback or per-server status. Both prescribed repairs cross my lane: (a) all-or-nothing batch with rollback needs an UnstageReload/CancelReload input on the GENERATED MeerkatMachine surface handle \u2014 meerkat-mcp/src/external_tool_surface_authority.rs:172-186 ExternalToolSurfaceInput is explicitly a test-only fixture (doc lines 3-6: production legality is owned by the generated surface handle), and the canonical enum lives in meerkat-core/src/handles.rs:884 + machine DSL/schema requiring `make machine-codegen`; no rollback primitive exists today (grep found no unstage/cancel reload). (b) A typed per-server partial-status return needs a new variant on meerkat-contracts/src/wire/mcp_live.rs McpLiveOpStatus + regen-schemas. Either path cascades outside meerkat-mcp/meerkat-mcp-server."
+ },
+ {
+  "id": 185,
+  "lane": "A-mcp-mobpack",
+  "evidence": "meerkat-mob-mcp/src/schedule_host.rs:445-497: mob_error_failure_reason, mob_error_is_missing_target, and mob_delivery_failed_terminal are still hand-written local classifiers re-matching MobError variants. The prescribed owner is MobError in meerkat-mob (delivery_failure_reason()/is_missing_target() methods) \u2014 out of my lane. Additionally, delivery_failure_reason returns DeliveryFailureReason which is defined in meerkat-schedule/src/types.rs, and meerkat-mob/Cargo.toml does NOT depend on meerkat-schedule (only meerkat-contracts), so moving the classifier onto MobError requires a new cross-crate dependency + the method addition in meerkat-mob. is_missing_target() is a pure bool but still requires editing meerkat-mob. Cascade outside lane."
+ },
+ {
+  "id": 14,
+  "lane": "A-mob",
+  "evidence": "meerkat-mob/src/runtime/actor.rs:7838 and :8677 still gate duplicate-member admission via `self.pending_spawns.contains_member(&agent_identity)` (PendingSpawnLineage side-map, pending_spawn_lineage.rs:42-46) BEFORE the typed transition. The row's owner is a MobMachine `apply_command_admission` admission-probe that owns the duplicate-member verdict, but the MobMachine is DSL-generated from `meerkat_machine_schema::catalog::dsl::mob_machine` (outside lane) \u2014 replacing the shell precheck requires a new machine input/transition that rejects duplicate-member spawns against pending_spawn_sessions/roster. LEAD: add the admission-probe input to the schema catalog + machine-codegen, then drive it through apply_command_admission (actor.rs:3697) and delete both contains_member prechecks; keep PendingSpawnLineage as JoinHandle registry only."
+ },
+ {
+  "id": 70,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/roster.rs:187-188 fabricates a nil-UUID local identity via `member_spawned.bridge_member_ref.clone().unwrap_or_else(|| MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil())))`, and event.rs:537 keeps `#[serde(skip, default)] pub(crate) bridge_member_ref: Option<MemberRef>`. Fix cascades outside a mechanical in-lane edit: (a) making the field required + removing #[serde(skip)] conflicts with the DELIBERATE public/stored wire-shape split (event.rs:277-289 doc + custom stored serializer at 600-648 + test member_spawned_public_wire_shape_excludes_bridge_member_ref); (b) fail-closed replay requires Roster::apply/Roster::project (roster.rs:184,175) to become Result-returning, cascading to all project/apply callers across the crate. LEAD must decide the migration (likely: keep stored ref required in the stored shape, make apply fallible, error/skip on absent ref)."
+ },
+ {
+  "id": 126,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/terminalization.rs:12 TerminalizationTarget::Failed { reason: String } and event.rs:406 MobEventKind::FlowFailed { run_id, flow_id, reason: String }. Introducing a typed FlowFailureCause threaded through TerminalizationTarget, MobEventKind::FlowFailed, and MobError::FlowFailed (error.rs:121), plus mapping ~8 origin sites (flow.rs:269,424,778,889,896,2365,2558; actor.rs:17958) changes the PERSISTED/replayed mob-event wire shape (roundtrip-tested event.rs:748, consumed store/mod.rs:51) AND cascades to meerkat-mob-mcp/src/agent_tools.rs (consumes MobEventKind). Cross-crate + persisted-shape change \u2014 out of write-only scope. LEAD: add FlowFailureCause enum, change the three carriers, keep a display string for UX, update the mob-mcp consumer."
+ },
+ {
+  "id": 181,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/actor.rs:12966 `let replacement_generation = snapshot.generation.next();` \u2014 the monotone respawn generation increment is computed shell-side. The DSL already stores identity_runtime_generations (machines/mob_machine.rs:1549) and guards monotonicity, but emitting the next generation as a machine effect/input requires a new MobMachine transition in the DSL schema catalog (machine-codegen, outside lane). LEAD: add the next-generation effect/input to the schema, run machine-codegen, then read the machine-emitted next generation at actor.rs:12966 (replacing snapshot.generation.next())."
+ },
+ {
+  "id": 258,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/conditions.rs:9-24 evaluate_condition returns bool and uses is_some_and over resolve_context_path (path.rs:110 returns Option), so a missing/invalid path silently evaluates false. Callers: flow.rs:435 (`!evaluate_condition` \u2192 step skipped silently with reason 'condition evaluated to false') and flow_frame_engine.rs:1897 (`let until_met = evaluate_condition(...)` \u2014 loop until). Fix is in-lane (conditions.rs/path.rs/flow.rs/flow_frame_engine.rs, no machine-codegen/contracts) but NOT mechanical: it changes flow semantics (missing path must fail the step/flow, not skip), requires a typed ConditionEvalError, template paths resolving to typed values (no Value::Null at flow.rs:2278), and condition/template-path schema validation at flow load. Behavioral + loop-kernel-touching; needs lead build+new tests."
+ },
+ {
+  "id": 259,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/definition.rs:221 `pub expected_schema_ref: Option<String>` re-parsed as inline-JSON-or-filesystem-path during execution (flow.rs:2074). Replacing with a typed `Option<FlowSchemaRef>` enum (Inline(MeerkatSchema) | Named(SchemaName)) resolved+validated at flow-definition load requires MeerkatSchema (meerkat-core) and SchemaName typed owners that cascade outside meerkat-mob, plus changing the FlowStep definition shape (consumed by validate.rs and surfaces). Cross-crate typed-owner change. LEAD: introduce FlowSchemaRef in definition.rs, resolve at load, executor reads the resolved typed schema."
+ },
+ {
+  "id": 260,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/flow.rs:1966 parse_output_value -> Result<Value, String> (and completed_output_value at :2002). The row's owner requires the retry-vs-fail decision (flow.rs ~817-838) to be driven by a MobMachine input that classifies a typed StepOutputFault, with terminal cause flowing typed into terminalization \u2014 i.e. machine-owned classification. That needs a new MobMachine flow-run terminal-classification input in the DSL schema catalog (machine-codegen, outside lane), plus a StepOutputFault enum threaded into terminalization (overlaps row 126's typed FlowFailureCause). LEAD: machine input + typed fault."
+ },
+ {
+  "id": 261,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/supervisor.rs \u2014 escalation target selection is shell `find` (`.find(|entry| entry.role == supervisor_role)`, lines 63-73), timeout policy is a shell const ESCALATION_TURN_TIMEOUT (line 12), escalation evidence is emitted via self.emitter.supervisor_escalation (92-98), and a missing supervisor returns a generic `MobError::SupervisorEscalation(String)` (69-73). The row requires lowering target selection, timeout policy, and escalation-evidence emission into a MobMachine EscalateToSupervisor transition (machine DSL, outside lane). LEAD: add the escalation transition/effect to the schema catalog; shell projects candidates, submits the input, reads machine-selected target, fails closed typed on no eligible supervisor."
+ },
+ {
+  "id": 282,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/handle.rs:3017-3032 get_member returns Option<RosterEntry> with `Err(_) => None`, and :4024-4038 list_members_matching returns Vec<MobMemberListEntry> with `Err(_) => Vec::new()` \u2014 a genuine query/transport fault is indistinguishable from true absence/empty. The prescribed signature change to Result<Option<_>, MobError> / Result<Vec<_>, MobError> with `?` propagation cascades outside the lane: get_member has ~192 callsites incl. meerkat-mob-mcp/src/schedule_host.rs; list_members_matching is called from meerkat-rpc/src/router.rs and meerkat-rpc/src/handlers/mob.rs. LEAD must update the sibling-crate callsites (mob-mcp, rpc)."
+ },
+ {
+  "id": 293,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/topology.rs:33-60 MobTopologyService::evaluate uses allow-by-default `self.spec.as_ref().map_or(PolicyDecision::Allow, ...)` and evaluate_topology uses last-match-wins (`.rfind(...).map_or(Allow, ...)`) \u2014 shell-owned role-edge admission. The row requires a MobMachine EvaluateTopologyEdge{from,to} input owning the verdict, with the default policy a declared machine field. That is a new MobMachine transition in the DSL schema catalog (machine-codegen, outside lane). LEAD: add the edge-admission input/field to the schema; FlowEngine submits the input and reads the machine verdict."
+ },
+ {
+  "id": 314,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/handle.rs:5002-5032 project_external_member_observation derives ExternalMemberRebindStatus (NotRequired/Available/Unavailable) from `bridge_session_present = session_id.is_some()` (5002) + `has_bootstrap_token` (5003-5005) \u2014 roster field presence, not a machine fact. The Broken branch (5021, reads snapshot.status) is machine-derived and fine. The row requires a machine-owned ExternalMemberRebindCapability fact that the projection merely reads \u2014 a new MobMachine/bridge-authority fact in the DSL schema (machine-codegen, outside lane). LEAD: add the rebind-capability fact, project it instead of recomputing from session_id/bootstrap_token presence."
+ },
+ {
+  "id": 320,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/actor_turn_executor.rs on_timeout decides Detached vs Canceled from executor-local orphan budget (orphan_budget AtomicUsize at :28, per_run_orphan_limit at :45, reserve_orphan_slot_for_run) before flow code records retry/failure. The row requires lowering the timeout disposition (detached/canceled/retryable) into a MobMachine input with orphan-budget as a typed machine field \u2014 a new MobMachine transition in the DSL schema (machine-codegen, outside lane). LEAD: add the timeout-disposition input/field to the schema; shell projects budget state and reads the machine verdict."
+ },
+ {
+  "id": 333,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/profile.rs carries model: String (147), skills: Vec<String> (150), rust_bundles: Vec<String> (49), output_schema: Option<serde_json::Value> (191), provider_params: Option<serde_json::Value> (198), copied raw into AgentBuildConfig at build.rs:185. Replacing with typed owners (ModelName/ModelRef catalog-validated, SkillName/SkillRef, RustBundleKey, MeerkatSchema, typed ProviderParams) pulls in types owned by meerkat-models, meerkat-skills, and meerkat-core, and AgentBuildConfig lives in the meerkat facade \u2014 a large cross-crate typed-identity change. LEAD: introduce/reuse the typed owners, validate at profile load, populate AgentBuildConfig from typed fields."
+ },
+ {
+  "id": 334,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/supervisor_bridge.rs:525-540 supervisor_spec_for_authority_and_recipient chooses the advertised self-address by branching on `recipient.address.transport() == PeerTransport::Inproc` (synthetic inproc://{participant_name}) vs supervisor_routable_address (537). The bridge's own advertised peer address should be its identity fact, invariant to who is asking. The fix is in-lane (supervisor_bridge.rs) but carries transport-routing risk: inproc recipients currently require an inproc:// self-address for loopback delivery; collapsing to a single (TCP/routable) self-address regardless of recipient could break in-process supervisor reachability. This needs lead build + integration verification (the gate is a behavioral 'same self-address regardless of recipient transport; unspecified bind still fails closed' test), so I did not apply it write-only. LEAD: resolve one typed self-address (advertised_address or comms advertised address, fail-closed on unspecified) and delete the recipient-transport branch, verifying inproc loopback still routes."
+ },
+ {
+  "id": 336,
+  "lane": "A-mob",
+  "evidence": "Still live: meerkat-mob/src/runtime/bridge_protocol.rs:26-66 decode_bridge_success_payload decodes serde_json::Value into typed BridgeReply then serialize_success_payload (78-87) re-serializes the typed payload back to Value; callers re-deserialize via serde_json::from_value again (send_bridge_command_typed<R: DeserializeOwned> at actor.rs:2849-2868 and provisioner.rs:2929; decode_bridge_ack at bridge_protocol.rs:68-76). The fix (return typed BridgeReply/payload directly) is in-lane (BridgeReply already typed in contracts, no contract change) but is NOT mechanical: the transport send_bridge_command (supervisor_bridge.rs:592) returns serde_json::Value because request_json yields a wire Value, and rejection detection (bridge_rejection_reply) currently runs on the raw Value before decode. Restructuring touches send_bridge_command's return type, the generic typed helpers, rejection interleaving, and ~10 bridge callsites across actor.rs/provisioner.rs. Breadth + rejection-handling subtlety warrant lead build verification. LEAD: have the sender path return typed BridgeReply, match command/reply compat on the enum once, delete the to_value/from_value roundtrip."
+ },
+ {
+  "id": 7,
+  "lane": "A-providers",
+  "evidence": "Config.provider_params and provider_tool_defaults are still serde_json::Value bags at meerkat-core/src/config.rs:780 (`pub provider_params: Option<serde_json::Value>`) and :792 (`pub provider_tool_defaults: Option<serde_json::Value>`). No typed ProviderParams owner exists. AgentConfig lives in meerkat-core (NOT my lane), the RFC-7396 merge is in meerkat-core/src/state.rs, and the row itself states provider_params is persisted wire requiring schema regen + version-parity. Cross-crate + wire-type + codegen \u2014 lead must define a typed ProviderParams in meerkat-models/meerkat-core, retype AgentConfig, port the merge, and regen schemas."
+ },
+ {
+  "id": 8,
+  "lane": "A-providers",
+  "evidence": "Browser-flow lifecycle in OAuthFlowRegistry (meerkat-auth-core/src/oauth_flow.rs:886) still owns ttl/max_outstanding as Mutex<HashMap> with prune_expired_locked (start/verify/consume via OAuthFlowAuthority impl at :1246 prune at :1265/:1281). Device flows route through OAuthDevicePollLifecycle but browser flows do not route admission/expiry/consume through an AuthMachine lease. The prescribed repair (model flow admission/expiry/consume as typed AuthMachine transitions keyed on OAuthProviderIdentity+state) requires new AuthMachine transitions \u2014 the AuthMachine lease handle is generated (meerkat-core/src/generated/auth_lease_*.rs, GeneratedAuthLeaseHandle at meerkat-core/src/handles.rs:1483), so this needs DSL/machine-codegen in meerkat-core, outside my lane."
+ },
+ {
+  "id": 75,
+  "lane": "A-providers",
+  "evidence": "ServerToolContent still carries name: String + content: Value in both LlmEvent::ServerToolContent (meerkat-llm-core/src/types.rs:369-372) and AssistantBlock::ServerToolContent (meerkat-core/src/types.rs:538-545). No ServerToolKind/ServerToolEvidence enum exists. AssistantBlock is a wire/contract type; the row explicitly states 'schema regen + version-parity green (wire type change)'. The typed ServerToolKind must be introduced in meerkat-core (the wire AssistantBlock, outside my lane) plus meerkat-llm-core, and cascades to meerkat-contracts + SDK codegen. Lead-only."
+ },
+ {
+  "id": 100,
+  "lane": "A-providers",
+  "evidence": "The auth-core owner side is CLOSED: persisted_auth_mode_for_auth_method (meerkat-auth-core/src/auth_store/mod.rs:47) is a documented parse-at-boundary shim delegating to the typed per-provider *AuthMethod::persisted_auth_mode (:51-63), and NormalizedAuthMethod::persisted_auth_mode (meerkat-llm-core/src/provider_runtime/binding.rs:84) is the typed owner. The LIVE residue is the last-mile surface plumb: REST (meerkat-rest/src/auth_endpoints.rs:779), RPC (meerkat-rpc/src/handlers/auth.rs:940/:1744), and CLI (meerkat-cli/src/main.rs) still call the shim with raw auth_profile.auth_method strings instead of threading the typed NormalizedAuthMethod from the ValidatedBinding. All three are surface crates outside my lane."
+ },
+ {
+  "id": 113,
+  "lane": "A-providers",
+  "evidence": "LiveToolDispatchError (meerkat-live/src/host.rs:1414) has only Tool(#[from] ToolError), Rejected(String), Internal(String) \u2014 no typed NotFound/Timeout/NoDispatcher variants. RuntimeLiveToolDispatcher (meerkat-rpc/src/router.rs:52-58) stringifies the typed fault: SessionError::NotFound -> Rejected(format!), all else -> Internal(other.to_string()). The fix needs BOTH adding typed variants to LiveToolDispatchError (my lane, meerkat-live) AND mapping SessionError variants at the RPC boundary (meerkat-rpc, outside my lane). SessionError (meerkat-core/src/service/mod.rs:60) is not visible to meerkat-live, so the mapping must live at the RPC seam; adding variants alone would be dead code. Coordinated cross-crate change \u2014 lead must do both halves together."
+ },
+ {
+  "id": 122,
+  "lane": "A-providers",
+  "evidence": "ProviderRuntimeCatalog::supports (meerkat-llm-core/src/provider_runtime/catalog.rs:199) + normalize_backend (:157)/normalize_auth (:178) still centralize the {backend,auth} matrix with a hand-typed pair list; no inventory/linkme aggregation exists (grep for inventory|linkme|register_provider in provider_matrix/catalog = zero). This is the consumer of row 178's keystone (per-provider declaration aggregation), which itself requires restructuring meerkat-core/src/provider_matrix/* (outside my lane) and a dep-cycle-safe build-time/registry aggregation. Cannot land without the 178 keystone \u2014 lead-only."
+ },
+ {
+  "id": 177,
+  "lane": "A-providers",
+  "evidence": "meerkat-models/src/lib.rs is entirely a B2-split re-export shim of meerkat_core::model_profile (1-20, no expiry/owner/HDA-approval fuse; guards.rs holds only blast-radius + field-parity tests, not a compat-shim drift fuse). auth_store/mod.rs:31 re-exports moved-to-core token-store types. The pre-1.0 preferred fix is DELETE the shim crate + sweep imports, but 16 meerkat_models::* import sites span meerkat, meerkat-web-runtime, meerkat-rpc, and integration tests (all outside my lane), plus removing the crate from workspace Cargo.toml. Cross-crate cascade + workspace manifest edit \u2014 lead-only."
+ },
+ {
+  "id": 178,
+  "lane": "A-providers",
+  "evidence": "Provider-native declarations remain hand-authored in meerkat-core/src/provider_matrix/* : header consts CHATGPT_ACCOUNT_HEADER/FEDRAMP_HEADER (openai_auth.rs:9/:12), per-provider backend/auth enums (anthropic_backend.rs, openai_auth.rs, etc.), no inventory/linkme aggregation. The keystone repair (per-provider declaration aggregated via build-time/registry projection so core holds only the aggregate) must restructure meerkat-core/provider_matrix (outside my lane). The dep-cycle constraint (provider adapter crates meerkat-openai/anthropic/gemini sit ABOVE core) means the aggregation scaffold must land in core/registry FIRST before declarations can move into my-lane provider crates. Lead-only keystone."
+ },
+ {
+  "id": 254,
+  "lane": "A-providers",
+  "evidence": "Catalog primitives exist (meerkat-core/src/model_profile/catalog.rs: global_default_model :380, provider_priority :387, default_model :236) but NO composite create-session default resolver. REST still has the surface-local ladder req.model.unwrap_or_else(|| state.default_model.clone()) (meerkat-rest/src/lib.rs:4223; state.default_model seeded from config.agent.model :464), and RPC falls back to config.agent.model (meerkat-rpc/src/handlers/session.rs:213-222). The fix adds a catalog/AgentFactory default resolver (meerkat-core model_profile or meerkat facade \u2014 outside my lane) and deletes the REST/RPC ladders (both surface crates outside my lane). Lead-only."
+ },
+ {
+  "id": 170,
+  "lane": "A-rest-cli",
+  "evidence": "GENUINELY LIVE. The CLI-owned mob persistence sidecar is fully present: PersistedMobRegistry (meerkat-cli/src/main.rs:11779) and PersistedMob (11785, carrying definition/status/events/runs), mob_registry_path -> 'mob_registry.json' (11798-11801), mob_registry_lock_path + MobRegistryLock + acquire_mob_registry_lock (11805-11838+), load_mob_registry (11930), save_mob_registry (11944), hydrate_mob_state (12105). save/load_mob_registry are called across the CLI mob command surface (8084, 8110, 12018, 12043, 12315, 12350, 12389, 12423, 12474, 12530, 12549, 12564, 12602, 19556). FIX (cross-crate, outside lane): delete the entire sidecar + locking and route CLI mob list/deploy/status/events through MobStorage (meerkat-mob) so CLI becomes a thin translation surface over the same persistent substrate RPC/MCP use. This requires threading a MobStorage handle (e.g. MobStorage::sqlite at the realm root) into every CLI mob command and replacing the PersistedMob read/write/hydrate paths with MobStorage queries -- a High/large mob-runtime integration, not a mechanical in-lane edit. Owner: persistent mob substrate (MobStorage / mob runtime). NOT edited."
+ },
+ {
+  "id": 245,
+  "lane": "A-rest-cli",
+  "evidence": "GENUINELY LIVE, but the typed owner lives outside my lane. meerkat-mob-pack/src/archive.rs:58-75 still stores `config` as a raw BTreeMap<String, Vec<u8>> byte map; MobpackDeployPolicy does not exist anywhere in the repo (grep empty). CLI load_deploy_config_with_pack_defaults (meerkat-cli/src/main.rs:12998-13022) still applies the pack's raw config/defaults.toml as the BASE layer FIRST via apply_toml_delta_layer (13005) -- before realm/env (13008-13020) -- and apply_toml_delta_layer -> config.merge_toml_str(text) (13033) merges arbitrary pack TOML into Config, so a pack can override host policy (provider/auth). FIX requires, in order: (a) meerkat-mob-pack -- replace the raw config byte map with a typed MobpackDeployPolicy struct parsed/validated at archive load, exposing only declared capability-gated knobs; (b) CLI -- stop calling apply_toml_delta_layer on pack bytes as the base, resolve the typed MobpackDeployPolicy through the same capability gate as validate_required_capabilities (main.rs:12865) and apply only allow-listed fields AFTER realm/env, and delete merge_toml_str of pack bytes. The CLI half cannot be written until the meerkat-mob-pack typed contract exists, so this is a cross-crate cascade. Owner: meerkat-mob-pack typed mobpack policy contract + capability seam consumed by CLI deploy. NOT edited."
+ },
+ {
+  "id": 97,
+  "lane": "A-rpc",
+  "evidence": "SessionRuntime still answers pending-session existence via ~12 `staged_sessions.contains(id)` calls (meerkat-rpc/src/session_runtime.rs:508, 769, 856, 1028, 1621, 2229, 3737, 3745, 4233, ...) rather than a machine query. There is a StagedSessionPhase enum in meerkat-runtime/src/meerkat_machine/dsl.rs:1973 but no MeerkatMachine `staged session exists/phase` query read at those sites. Fix requires adding a typed MeerkatMachine query input (machine DSL in meerkat-machine-schema + `make machine-codegen`), then reading it at the contains() sites; out of lane (machine codegen)."
+ },
+ {
+  "id": 105,
+  "lane": "A-rpc",
+  "evidence": "meerkat-runtime/src/completion.rs:67 `Abandoned(String)` and :80 `RuntimeTerminated(String)` are STILL string-only (vs the typed `AbandonedWithError { reason, error: TurnErrorMetadata }` at :69). The prescribed repair (give these variants typed TurnErrorMetadata mirroring AbandonedWithError) is a change to the meerkat-runtime CompletionOutcome enum, which cascades. The RPC consumer (meerkat-rpc/src/session_runtime.rs:8076-8082, 8108-8114) was partially improved to carry data:{\"reason\": reason}, but the typed-metadata-variant repair the row prescribes is not done and is out of lane."
+ },
+ {
+  "id": 115,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/handlers/mob.rs:1247 still mints `format!(\"helper-{}\", uuid::Uuid::new_v4())` for missing agent_identity (and :1316 `format!(\"fork-{}\", ...)`). The row's named owner is the mob substrate (AgentIdentity allocation), and an identical `helper-{uuid}` violation lives in meerkat-mob-mcp/src/agent_tools.rs:812 \u2014 the gate requires no `helper-` literal on the runtime identity path. The proper fix moves identity allocation into mob_spawn_helper/the substrate (matching spawn_spec_with_generated_owner_context discipline), changing meerkat-mob/meerkat-mob-mcp signatures and the agent_tools.rs sibling. A within-crate fail-closed would leave the sibling literal and not match the substrate-allocation owner the row specifies; cross-crate."
+ },
+ {
+  "id": 157,
+  "lane": "A-rpc",
+  "evidence": "The member_status_payload-as-empty-{} part overlaps with my row-156 fix. But the row's residual scope requires (a) replacing 6 json! schemas in PUBLIC_TOOLS in meerkat-mob-mcp/src/public_mcp.rs with typed_schema::<T>() and extending the set-equality #[test] there (out of lane), and (b) replacing json!({status: status.to_string()}) at handlers/mob.rs handle_list (:290) and handle_status (:316) with typed MobStatusResult/MobListResult. The typed structs exist (meerkat-contracts wire/mob.rs:611 MobStatusResult, :619 MobListResult) but the canonical MobState->WireMobLifecycleStatus projection lives in meerkat-mob-mcp/src/lib.rs:3241 wire_mob_lifecycle_status which is PRIVATE; consuming it in RPC requires exporting it from meerkat-mob-mcp (cross-crate) \u2014 reimplementing the projection in-crate would duplicate projection truth (dogma violation). Gate is nextest -p meerkat-mob-mcp -p meerkat-rpc + the public_mcp.rs test. Cross-crate."
+ },
+ {
+  "id": 198,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/live_projection_sink.rs:799 signal_terminal_error still drains buffers + tracing::warn!(\"live adapter terminal error\") + returns Ok(()); the code comment at :807-809 explicitly states the canonical terminal-error seam does not yet exist on SessionService. The prescribed repair adds record_live_terminal_error (typed terminal cause) to the SessionService trait (meerkat-core) so non-live callers observe the cause on the session terminal/event stream \u2014 a core trait addition cascading to all implementors; out of lane."
+ },
+ {
+  "id": 199,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/live_projection_sink.rs:173 build_assistant_text_delta_event and :191 build_assistant_transcript_delta_event still coalesce identity.response_id/.delta_id/.provider_item_id with unwrap_or_default() to empty strings (:178-180, :196-198). The row's named owner is LiveTranscriptIdentity (meerkat-live/src/host.rs:526), whose fields are Option<&str> and whose assistant_delta constructor (:552) injects the Options. The canonical fix makes the identity carry required (non-Option) IDs for the delta case (changing meerkat-live + every constructor/caller). A within-crate fail-closed at the build functions would not address the upstream Option-carrying owner the row designates; cross-crate."
+ },
+ {
+  "id": 209,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/handlers/live.rs:662 extract_system_prompt_from_seed_messages still re-derives prompt truth by inspecting seed_messages[0] (called at :701 into LiveProjectionSnapshot.system_prompt); the doc at :633 states \"RealtimeSessionOpenConfig does not yet model system_prompt as a typed field.\" The prescribed repair adds a typed system_prompt field to RealtimeSessionOpenConfig (meerkat-llm-core/src/realtime_session.rs:221), populated at projection time and consumed by the OpenAI refresh path \u2014 out of lane (meerkat-llm-core type change + populate site + refresh path)."
+ },
+ {
+  "id": 249,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/handlers/session.rs:784-785 builds AppendSystemContextRequest { text: params.text, ... } \u2014 still text-only at the seam. The prescribed repair changes AppendSystemContextRequest (meerkat-core) and InjectSystemContextParams (meerkat-contracts wire type) to carry a typed CoreRenderable content field, plus meerkat-core/src/lifecycle/run_primitive.rs:29 lowering, and requires schema freshness (regen-schemas). Out of lane (core type + contracts wire change + schema/SDK regen)."
+ },
+ {
+  "id": 338,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/session_runtime.rs:3930 live_interrupt_requested_for_runtime_primitive still falls back to scanning snapshot.inputs.admission_order for HandlingMode::Steer (:3951-3953) when the primitive's turn_metadata doesn't directly carry Steer. The prescribed repair has the admission/normalization transition emit a typed `live_interrupt_required` machine fact (no such fact exists in meerkat-runtime/src/meerkat_machine/dsl.rs) so live forwarding reads the machine-owned decision directly. Owner is MeerkatMachine admitted-input authority \u2014 requires machine DSL change + `make machine-codegen`; out of lane."
+ },
+ {
+  "id": 348,
+  "lane": "A-rpc",
+  "evidence": "meerkat-rpc/src/session_runtime.rs:6386 user_interrupt_public_result_to_rpc flattens UserInterruptPublicResult::Interrupted => Ok(()), and SessionRuntime::interrupt returns Result<(), RpcError> (:6250); handle_interrupt (handlers/turn.rs:342) fabricates {\"interrupted\": true} for every Ok(()). The row wants a typed result distinguishing interrupted vs staged_noop, but UserInterruptPublicResult (meerkat-runtime/src/interrupt_public_result.rs:15) has only Interrupted/NotFound/SessionBusy/Conflict \u2014 StagedNoop is collapsed into Interrupted INSIDE the generated machine (UserInterruptObservation::StagedNoop -> ... -> Interrupted). So the typed distinction does not exist and adding it requires a new variant in the runtime enum AND the generated UserInterruptPublicResultKind (meerkat-machine-schema:1031 + meerkat-machine-kernels generated:9674) via machine-codegen, plus SDK signature changes. Note: REST's interrupt_session (meerkat-rest/src/lib.rs:5018) also maps Interrupted => {\"interrupted\": true}, so even matching REST does not yield the staged_noop distinction without the enum/codegen change. Out of lane."
+ },
+ {
+  "id": 2,
+  "lane": "A-runtime",
+  "evidence": "Destroy arm at meerkat-runtime/src/meerkat_machine/dispatch_control.rs:575-648 still commits driver lifecycle cleanup (machine_commit_prepared_destroy, line 611) BEFORE the DSL persistence commit (commit_session_dsl_transition_preserving_committed_state, line 631), so the in-memory split window the row describes persists. It IS rollback-protected: persistent driver has commit_lifecycle_with_rollback + restore_rollback_snapshot (meerkat-runtime/src/driver/persistent.rs:136,87-88), and the arm syncs control projection from DSL authority on commit failure (line 619). The proper fold of driver-cleanup + DSL-persistence into one transition is coupled with row 3's lifecycle-dispatch restructuring (also-closes 3) and the destroy-failure split-commit test + persistent-driver rollback semantics; it touches DSL transition commit ordering. Lead-owned: restructure the Destroy commit ordering (or formally accept-as-bounded per the row's own option) and run the split-commit/destroy-failure gate alongside row 3."
+ },
+ {
+  "id": 3,
+  "lane": "A-runtime",
+  "evidence": "Both shell shadows are still live. (a) dispatch_session.rs:39-45 dispatch_user_interrupt still hand-checks `matches!(self.existing_session_runtime_state(session_id).await, Some(RuntimeState::Destroyed))` and returns RuntimeDriverError::Destroyed before staging the InterruptCurrentRun DSL transition (line 57). (b) session_management.rs:414-418 make_driver is seeded with the RuntimeState::Idle literal while recovered_authority (line 409, via fresh_registered_runtime_authority) is freshly built \u2014 phase should derive from authority (runtime_phase_from_authority exists at dsl_authority.rs:63). Both are RMAT-audited shell reads of runtime phase; the gate explicitly requires make rmat-audit (ForbiddenShellAuthorityReads) to pass and correctness depends on the DSL DestroyedShapeInvariant actually rejecting InterruptCurrentRun on a destroyed session (a machine-schema guard concern). Cannot verify the machine guard rejects without running the machine; deleting the preflight also changes the typed error (loses the distinct Destroyed). Lead-owned: confirm/strengthen the DSL guard, derive make_driver phase from recovered_authority, and re-run rmat-audit. (also-closes 2)"
+ },
+ {
+  "id": 24,
+  "lane": "A-runtime",
+  "evidence": "The shell normalizer idle_steer_execution_handling_mode (meerkat-runtime/src/policy_table.rs:63-86) is still live and post-processes the machine projection: it is invoked at policy_table.rs:168 AFTER the machine emits AdmissionResolved, and at driver/ephemeral.rs:2688, forcing HandlingMode::Queue for idle peer Steer/Immediate. The machine effect AdmissionResolved is defined in meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:4150 and does NOT emit execution_handling_mode (grep for it in meerkat-runtime/src/meerkat_machine/dsl.rs returns nothing). Folding the normalization into ResolveAdmissionPlan requires adding execution_handling_mode to the AdmissionResolved effect in the machine schema catalog, deriving it inside the generated transition, and make machine-codegen \u2014 all outside lane A-runtime. After codegen the shell would consume the machine field (no idle_steer_execution_handling_mode)."
+ },
+ {
+  "id": 25,
+  "lane": "A-runtime",
+  "evidence": "Genuinely live but owner is outside lane A-runtime. ExtractionState { result: Option<Value>, schema_warnings } and DEFAULT_EXTRACTION_PROMPT still live in meerkat-core/src/agent/extraction.rs:14,18-56, with the JSON parse/fence-strip/validate/retry-prompt logic in meerkat-core/src/agent/state.rs. The repair (lower extraction result/warning/retry-prompt ownership into the MeerkatMachine extraction-phase authority; validation failure becomes a typed input) requires both a meerkat-core edit and a machine-schema extraction-phase change + make machine-codegen \u2014 neither is in meerkat-runtime."
+ },
+ {
+  "id": 27,
+  "lane": "A-runtime",
+  "evidence": "Still live: meerkat-runtime/src/handles/turn_state.rs:214-222 FatalFailure passes `error: failure.message` as a free String (line 220) and RecoverableFailure passes `error: retry.failure.message` (line 211); source_kind is already lowered to typed RunFailureSourceKind (good). The FatalFailure/RecoverableFailure DSL inputs and their `error: String` field are declared in the machine schema catalog (meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:792 etc.), generated by the machine! macro. Adding a typed terminal-cause field (TurnFailureSource carries .source_kind: TurnFailureSourceKind + .message: String) requires editing the machine schema input definition + make machine-codegen \u2014 outside lane A-runtime."
+ },
+ {
+  "id": 106,
+  "lane": "A-runtime",
+  "evidence": "Still live: meerkat-runtime/src/handles/peer_comms.rs:232-242 builds MeerkatMachineSignal::ClassifyExternalEnvelope passing only `from_peer: facts.from_peer.clone()` (the display String, line 234); the typed canonical id facts.from_peer_id (PeerId, present in PeerIngressEnvelopeFacts at meerkat-core/src/interaction.rs:603) is dropped. The ClassifyExternalEnvelope signal in the machine schema (meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:4046-4048) declares only `from_peer: String` \u2014 no from_peer_id field \u2014 and the ClassifyExternalEnvelope* transition handlers (meerkat_machine.rs:10794+) destructure from_peer. Adding a typed from_peer_id: PeerId to the signal schema + all handlers + make machine-codegen is outside lane A-runtime. (also-closes 96)"
+ },
+ {
+  "id": 263,
+  "lane": "A-runtime",
+  "evidence": "Still live: meerkat-runtime/src/meerkat_machine/driver.rs:1728 passes recovered_observed_phase(seed.phase) into the NormalizeRecoveredInputLifecycle machine input. recovered_observed_phase (driver.rs:1622-1654) is a shell input-construction authority step that maps the durable InputLifecycleState to the DSL enum RecoveredInputObservedPhase (1:1 exhaustive, already fail-closed/total). The DSL input NormalizeRecoveredInputLifecycle is declared in the machine schema as `phase: Enum<RecoveredInputObservedPhase>` (meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:3368) and its guards key on RecoveredInputObservedPhase (e.g. meerkat_machine.rs:9119). The row's preferred fix (pass seed.phase raw / fold normalization into the DSL so recovered_observed_phase is deleted) requires changing the machine input type to accept the raw durable InputLifecycleState + make machine-codegen \u2014 outside lane A-runtime."
+ },
+ {
+  "id": 1,
+  "lane": "A-session",
+  "evidence": "Still live. CreateSessionRequest (meerkat-core/src/service/mod.rs:169) still carries separate render_metadata (:175) and skill_references (:183) siblings, NOT a single embedded StartTurnRuntimeSemantics carrier. The per-field merge fan-out persists in my lane at meerkat-session/src/ephemeral.rs:2585-2596: `initial_render_metadata = initial_turn_metadata...or(req.render_metadata)` (:2588) and `initial_skill_references = ...or(req.skill_references)` (:2596), composed into StartTurnRuntimeSemantics::new at :2600. StartTurnRuntimeSemantics exists (service/mod.rs:1104) but is not embedded in CreateSessionRequest. Fix requires changing CreateSessionRequest in meerkat-core to embed one carrier + deserialize/compose once at the surface boundary, then delete the ephemeral.rs:2585-2596 fan-out. The meerkat-core struct change cascades to every surface that constructs CreateSessionRequest (CLI/REST/RPC + RecoveredSessionBuild::into_deferred_create_request at session_recovery.rs:171-185). Outside my lane."
+ },
+ {
+  "id": 34,
+  "lane": "A-session",
+  "evidence": "Still live. The raw AtomicBool carrier persists: SessionHandle field `cancel_after_boundary_handle: Option<Arc<AtomicBool>>` at meerkat-session/src/ephemeral.rs:235 (also control struct :323), and the polled store at :2801 `cancel_after_boundary_handle.store(true, Ordering::SeqCst)`. The DSL already authorizes via `slot.authorize_cancel_after_boundary()` (:2799), but the cross-thread carrier is still the AtomicBool. The bool is OWNED by Agent in meerkat-core/src/agent.rs:1215 (`cancel_after_boundary_requested: Arc<AtomicBool>`), produced via runner.rs:464 `cancel_after_boundary_handle()`, and consumed in state.rs:1082-1084 `observe_cancel_after_boundary_request`. Replacing it with a typed notify/command channel (like interrupt_notify) and deleting the field requires the meerkat-core Agent/runner/state/builder change first; the ephemeral.rs producer-end cannot be cut in isolation. Outside my lane."
+ },
+ {
+  "id": 86,
+  "lane": "A-session",
+  "evidence": "Still live. persist_transcript_fork (meerkat-session/src/persistent.rs:2588) commits directly via `self.save_normalized_session(forked)` (:2593); persist_transcript_rewrite (:2602) commits via persist_normalized_transcript_rewrite -> persist_normalized_transcript_rewrite_chain (:2626) \u2014 neither routes admission/commit through a machine transition. The SessionDocumentMachine now EXISTS (meerkat-core/src/generated/session_document.rs) but its SessionDocumentInput enum (:172) has NO TranscriptEdit/AuthorizeTranscriptFork/AuthorizeTranscriptRewrite input (verified full input list :628-2335). Fix requires extending the machine DSL (meerkat-machine-schema) with a TranscriptEdit transition emitting a TranscriptRewriteCommitted commit effect + an RMAT route entry, then regenerating the machine, then driving it from persistent.rs as the effect handler. DSL/codegen + cross-crate. Outside my lane."
+ },
+ {
+  "id": 120,
+  "lane": "A-session",
+  "evidence": "Partially closed in my lane, residual outside it. The meerkat-session staging side is already correct: stage_runtime_system_context_for_active_turn gates appends on a boundary staging token (ephemeral.rs:1456-1460 `active_turn_boundary_staging_token...ok_or_else(NotRunning)`, token mismatch check :1486-1489) and stage_active_turn_appends_with_snapshot `?`-propagates a typed error (:1477-1483) \u2014 no warn-swallow here. The residual the row names is in meerkat-core, not meerkat-session: the two `tracing::warn!` swallows on system-context state serialization at meerkat-core/src/agent/runner.rs:687-689 (session_with_system_context_state) and :702-704 (sync_system_context_state_to_session). Changing those to typed `?` propagation is outside my lane."
+ },
+ {
+  "id": 225,
+  "lane": "A-session",
+  "evidence": "Residual Rule-1/3 concern is live but the prescribed fix is a non-mechanical cross-service refactor. Capacity admission is shell-local: EphemeralSessionService.active_session_capacity: Option<Arc<Semaphore>> (meerkat-session/src/ephemeral.rs:795), acquired via try_acquire_active_permit (:984) during create_session_with_admission (:2400-2403) and the handle inserted under a SEPARATE sessions RwLock write-lock at :2527-2531. The atomicity audit cleared crash-symmetry; the residual is that the capacity decision lives beside runtime/machine admission. The prescribed repair (make a `StagedSessionRegistry` the single owner of materialization status and consume the permit inside the same write-lock that flips `Promoting`) references a registry type and a Promoting status that DO NOT EXIST in this codebase \u2014 it is the projection-promotion audit's item-2 design. PersistentSessionService delegates the same admission to self.inner (persistent.rs:3283-3315), so the 'single admission seam' fold spans both services and the RuntimeContextAdmissionGuard/SessionActiveCapacityLease interplay. The only mechanical sub-task (document the Semaphore as a resource gate, not lifecycle authority) is doc-only; the substantive registry consolidation is an architectural change needing lead judgment. Outside a clean in-lane mechanical fix."
+ },
+ {
+  "id": 297,
+  "lane": "A-session",
+  "evidence": "Still live. The actual application of pending tool results is a direct mutation outside the turn machine: `agent.apply_pending_tool_results(flattened_tool_results)` at meerkat-session/src/ephemeral.rs:3660. Staging consults generated authority \u2014 slot.resolve_start_turn_disposition feeds the tool-results count (:3546-3554) and StageSessionToolResults exists as a SessionDocumentInput (generated/session_document.rs:777) \u2014 but there is NO ApplyPendingToolResults input/effect in the SessionDocumentInput enum (verified full list :628-2335), so the apply at :3660 is the decision point, not an effect handler. Fix requires extending the SessionDocument/turn machine DSL with an ApplyPendingToolResults input/effect (DSL coverage + RMAT route) and regenerating, then making :3660 the effect handler. DSL/codegen + cross-crate. Outside my lane."
+ },
+ {
+  "id": 310,
+  "lane": "A-session",
+  "evidence": "Still live \u2014 KEYSTONE. The recovery-source eligibility is still a shell predicate: runtime_backed_store_projection_can_recover_authority (meerkat-session/src/persistent.rs:308) returns `session.session_metadata().is_some() || session.build_state().is_some()` (:309). Its own doc-comment (:296-307) self-documents the canonical home as a SessionDocumentMachine recovery-source projection (planned LUC-524) and explicitly says 'Do NOT remove this predicate before that machine exists \u2014 store-only sessions would otherwise silently fail to load.' The SessionDocumentMachine now exists (meerkat-core/src/generated/session_document.rs) and owns resume-override admission (session_recovery.rs:289 authorize_resume_overrides), but it has NO recovery-source/RecoverySource input (verified SessionDocumentInput list :628-2335). Fix requires extending the machine DSL with a recovery-source-projection transition, regenerating, moving the decision into a generated machine read, and only then deleting the shell predicate. DSL/codegen + cross-crate; also unblocks rows 4/86/297. Outside my lane."
+ },
+ {
+  "id": 231,
+  "lane": "A-skills-hooks",
+  "evidence": "Engine-side (in-lane) half is DONE and gate-satisfied: HookAdapterConfig tagged enum (meerkat-hooks/src/lib.rs:108-171) resolves each entry ONCE at the config/construction boundary via HookAdapterConfig::resolve (called from resolve_adapters at :525-533, invoked in DefaultHookEngine::new :469-482 and effective_entries :658). Malformed command/http payloads fail closed at config load into base_validation_error (:471-481), and the execute path reads typed `resolved.adapter()` variants (:1111) with NO serde_json::from_value in execute_one/invoke_runtime. The remaining cross-crate half (explicitly noted in the code at lib.rs:103-107) is OUTSIDE this lane: meerkat-core/src/config.rs:1849-1853 still holds `HookRuntimeConfig { kind, config: Option<Box<RawValue>> }`. Closing the row's part (a) \u2014 folding that opaque RawValue into a core-owned tagged `HookAdapterConfig { InProcess|Command|Http }` deserialized once at the config boundary \u2014 is a meerkat-core wire-type change (config.rs is #[derive(JsonSchema)] / serde) that cascades to schema regen and the hooks engine's adapter import, so the lead must do it + `make regen-schemas`."
+ },
+ {
+  "id": 140,
+  "lane": "A-store-memory",
+  "evidence": "The structured-carriage half of this row is still live but the fix is cross-crate (meerkat-core wire type). meerkat-memory/src/tool.rs:161 still stringifies the result array: `let payload = Value::Array(items).to_string(); ToolResult::new(call.id.to_string(), payload, false)`. The prescribed repair routes through a typed structured ToolResult content block 'same fix as row 78'. But ContentBlock (meerkat-core/src/types.rs:80-105) is #[non_exhaustive], Serialize/Deserialize, schema-gated, and has only Text/Image/Video \u2014 NO structured/JSON variant. Row 78 (its dependency, 'also-closes 140') is itself still live: meerkat-tools/src/builtin/composite.rs:552/562/605/615 still do serde_json::to_string(&value).unwrap_or_default(). Introducing a structured ContentBlock variant is a meerkat-core wire-type change cascading to meerkat-contracts + schema/SDK regen \u2014 outside my lane. NOTE: the 'fail-closed on serialization error' sub-clause is already moot for the memory tool: Value::to_string() is infallible (no unwrap_or_default), and every fallible step already maps to a typed error via memory_search_error (tool.rs:24-29, :134). So the only residual is the structured-block carriage, which the lead must land via ContentBlock + row 78."
+ },
+ {
+  "id": 288,
+  "lane": "A-store-memory",
+  "evidence": "Genuinely live, but the owner files are entirely in meerkat-runtime (meerkat-runtime/src/store/sqlite.rs and .../memory.rs) \u2014 OUTSIDE my lane (meerkat-store, meerkat-memory). The runtime store still reads sessions raw via serde_json::from_slice::<meerkat_core::Session> at sqlite.rs:302, :330, :345, :387, :414, and reads input states raw via serde_json::from_slice at sqlite.rs:478 (load_input_states, :452-485) \u2014 bypassing the migrators. The fix migrators already exist in meerkat-core and are used in MY-lane store (meerkat-store/src/sqlite_store.rs:137,190,362 call meerkat_core::session_migrations::deserialize_session_migrating). Prescribed mechanical fix for the lead: (1) route the three runtime-store session reads (sqlite.rs:330,345,387; also :302,:414) through meerkat_core::session_migrations::deserialize_session_migrating(&bytes); (2) route the load_input_states read (sqlite.rs:478) through migrate_input_state_value (parse to serde_json::Value -> migrate -> from_value::<StoredInputState>); (3) apply the same to the in-memory runtime store reads in meerkat-runtime/src/store/memory.rs for parity. No wire-type change; meerkat-runtime-local edits only."
+ },
+ {
+  "id": 64,
+  "lane": "A-tools",
+  "evidence": "Still live: meerkat-tools/src/builtin/image_generation.rs:225 declares `request: Value` and parse_generate_image_request (:587-655) discriminates a canonical `GenerateImageRequest` shape vs a documented ergonomic 'simple' shape (SimpleGenerateImageToolRequest, :269-299) inside the tool body, parsing intent/target/provider/model with aliases. The malformed-input paths are already fail-closed with typed BuiltinToolError::invalid_args (parse_intent_name :692-700, parse_simple_target :746-752, parse_simple_size/quality/format) \u2014 there is NO silent laundering left. The remaining residue is structural: the schema is `Value` and alias parsing lives in the tool body. The prescribed repair ('make the tool arg schema the typed GenerateImageRequest, deserialize-once at the boundary') cascades OUTSIDE this lane: GenerateImageRequest, ImageGenerationIntent, and ImageGenerationTargetPreference are owned by meerkat-core/src/image_generation.rs:231/272/320, and the simple shape is a deliberate LLM-facing contract documented in GENERATE_IMAGE_TOOL_DOCUMENTATION (:178-199). Folding it into the typed boundary requires either a custom Deserialize on the meerkat-core type to absorb the aliases (cross-crate type change) or removing the documented simple-shape contract. Lead action: decide whether to (a) add alias-absorbing Deserialize to meerkat-core GenerateImageRequest and make GenerateImageToolArgs.request the typed type, or (b) drop the simple shape and update the tool docs; both touch meerkat-core."
+ },
+ {
+  "id": 202,
+  "lane": "A-tools",
+  "evidence": "Still live: meerkat-tools/src/schema.rs:8 `serde_json::to_value(&schema).unwrap_or(Value::Null)` fails open to a null schema. The prescribed repair (make schema_for return Result / fail tool-def construction) cascades OUTSIDE this lane: schema_for is publicly re-exported (meerkat-tools/src/lib.rs:66 `pub use schema::{empty_object_schema, schema_for}`) and consumed directly as a ToolDef.input_schema value by meerkat/tests/sdk_agentfactory.rs:102 (`input_schema: schema_for::<EchoInput>()`). A Result-returning schema_for also forces BuiltinTool::def() (meerkat-tools/src/builtin/mod.rs:101, `fn def(&self) -> ToolDef`) and ~25 builtin implementors to become fallible, plus the registration boundary to fail closed on schema error. BuiltinTool has no external implementors (verified), so the trait cascade is in-lane, but the public-API signature change breaks the meerkat-crate test and the public re-export consumers. Lead action: change schema_for to `Result<Value, SchemaSerializationError>` in schema.rs, change BuiltinTool::def() to fallible (or add a fallible schema accessor), update all ~25 builtins + control_plane.rs:18 + registry tests, fail tool-def admission closed, and fix meerkat/tests/sdk_agentfactory.rs:102. Note: do NOT substitute a fallback empty-object schema \u2014 that is a different fail-open; the plan wants fail-closed rejection."
+ },
+ {
+  "id": 299,
+  "lane": "A-tools",
+  "evidence": "Still live: meerkat-tools/src/builtin/composite.rs:149 still has `.or_else(|| std::env::current_dir().ok())` in new_with_ops_lifecycle's project-root resolution (project_root.or(shell_config.project_root).or(current_dir).ok_or(ToolInitFailed)). Removing it in isolation regresses the meerkat crate: the agent-build path passes `self.project_root.clone()` (factory.rs:9092), and AgentBuildConfig.project_root defaults to None (factory.rs:1967, :2010). When shell is disabled and no explicit project_root is set, the composite currently relies on the CWD fallback; removing it makes that construction path fail closed with ToolInitFailed \u2014 a behavioral regression outside this lane. The plan itself names the owner as spanning meerkat/src/factory.rs -> CompositeDispatcher and requires making project-root 'a required typed authority threaded from AgentFactory'. Lead action: (1) remove composite.rs:149 `.or_else(|| std::env::current_dir().ok())` and keep the ToolInitFailed fail-closed; (2) in meerkat/src/factory.rs thread a concrete project-root authority into the composite (e.g. pass Some(self.shell_project_root()) unconditionally at factory.rs:9092 / build_builtin_dispatcher_with_skills_internal, or make AgentBuildConfig.project_root non-None-defaulting seeded from the store parent) so the composite never receives None."
+ },
+ {
+  "id": 9,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/connection.rs: WireBackendProfile has `provider: String` (153), `backend_kind: String` (154), `options: serde_json::Value` (158); WireAuthProfile has `provider: String`/`auth_method: String`/`source_kind: String` (183-188); LoginStartParams.provider: String (85). From impls re-derive via `value.provider.as_str().to_string()` (165,195) and `value.source.kind_label().to_string()` (197). The typed core enums (Provider, AuthMethod) exist but the wire still projects to bare strings. Fix = deserialize-once into the typed enums at the From impls + keep Display/serde alias, then `make regen-schemas && make verify-version-parity`. Wire-type change cascading to SDK codegen \u2014 lead owns regen."
+ },
+ {
+  "id": 15,
+  "lane": "V-contracts",
+  "evidence": "Still live. Typed owner exists in-lane (meerkat-contracts/src/wire/skills.rs:39 SkillListResponse) but is NOT emitted to generated TS (grep of sdks/typescript/src/generated/types.ts finds no SkillListResponse/WireSkill). TS sdks/typescript/src/client.ts:1086 `async listSkills(): Promise<Array<Record<string, unknown>>>` still returns untyped records. Fix = emit SkillListResponse via tools/sdk-codegen/generate.py, consume it in client.ts, extend verify-sdk-codegen-freshness. SDK codegen + gate, outside meerkat-contracts."
+ },
+ {
+  "id": 16,
+  "lane": "V-contracts",
+  "evidence": "Still live. sdks/web/src/generated/ contains auth.ts, events.ts, mob.ts but NO runtime.ts. sdks/web/src/types.ts still hand-defines RuntimeConfig (line 13) and InitResult (line 34). The maxSessions docstring sub-fix is already corrected (now 'Default: 100000' at types.ts:23, not the stale 'Default: 64'), but the core repair (emit generated/runtime.ts from the wire schema and import it) is undone. Fix = extend web SDK codegen in tools/sdk-codegen/generate.py + wire into verify-sdk-codegen-freshness. SDK codegen + gate, outside meerkat-contracts."
+ },
+ {
+  "id": 26,
+  "lane": "V-contracts",
+  "evidence": "Still live (partial migration only). meerkat-contracts/src/wire/mob.rs MobTurnStartParams (1783) still carries bare semantic set-fields: model (1796), provider (1798), max_tokens (1800), system_prompt (1802), output_schema (1804), structured_output_retries (1806) as `Option<T>` \u2014 only provider_params (1808) and auth_binding (1810) use WireTurnMetadataOverride. MobSpawnHelperParams.agent_identity/role_name (1723-1725) and MobForkHelperParams (1741-1743) remain `Option<String>`, not typed AgentIdentity/ProfileName. Fix = convert the bare fields to Option<WireTurnMetadataOverride<T>> + typed identity newtypes, deserialize legacy clear_* at the serde boundary, then `make regen-schemas`. Wire-type change + SDK regen (also touches meerkat-core SurfaceSessionRecoveryOverrides outside lane)."
+ },
+ {
+  "id": 54,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/mob.rs:1696 `MobFlowStatusResult { pub run: Value }` \u2014 typed contract erased into serde_json::Value. Fix = introduce a typed WireMobRun contract, replace MobRun::public_status_value -> Value (meerkat-mob/src/run.rs) with a single typed conversion, then `make regen-schemas`. Wire-type change + SDK regen + cross-crate (meerkat-mob)."
+ },
+ {
+  "id": 59,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/mob.rs:2069 `MobProfileLookupResult { ... profile: Option<Value> ... }` \u2014 typed profile shape erased into Value. Fix = define Option<WireProfile> mirroring meerkat-mob StoredRealmProfile.profile: Profile, serialize via a one-shot conversion, then `make regen-schemas` so the generated TS type drops `unknown`. Wire-type change + SDK regen + cross-crate (Profile lives in meerkat-mob)."
+ },
+ {
+  "id": 87,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/session.rs:90 ForkSessionReplaceParams.replacement still carries `#[cfg_attr(feature = \"schema\", schemars(with = \"serde_json::Value\"))]` over the typed `replacement: TranscriptReplacement` (91), so the emitted JSON schema is bare Value instead of the typed enum. Fix = delete the schemars(with=Value) attribute so JsonSchema derives from TranscriptReplacement, then `make regen-schemas && make verify-schema-freshness` to land the typed shape at params.json. The source edit is one line in-lane, but it is a schema-affecting change requiring regen of artifacts/schemas + SDK codegen \u2014 lead owns regen."
+ },
+ {
+  "id": 94,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/comms.rs CommsCommandRequest variants carry `body: String` AND independent `blocks: Option<Vec<ContentBlock>>` as separate co-existing truth: Input (183/185), PeerMessage (197/199), PeerRequest (213), PeerResponse (226). into_core_request (243) passes both through unmodified with no enforcement that body is a projection of blocks or that exactly one is set. Fix = make blocks the single content authority (derive body from text blocks, or require exactly-one and reject divergence at into_core_request). Wire-type change cascading to meerkat-comms SendMessageInput + meerkat-core CommsCommandRequest + regen."
+ },
+ {
+  "id": 96,
+  "lane": "V-contracts",
+  "evidence": "Still live. CommsPeerLifecycleParams has the typed `peer_spec: Option<BridgePeerSpec>` (wire/comms.rs:39) but the runtime ingress still ignores it: meerkat-runtime/src/handles/peer_comms.rs:106 `fn lifecycle_peer_param(params) { params.get(\"peer\").and_then(as_str)... }` extracts the subject from the inert presentation string (comms.rs:33), wired into the machine signal at peer_comms.rs:194/202. Fix = parse CommsPeerLifecycleParams typed at ingress, resolve the lifecycle subject from peer_spec (BridgePeerSpec), fail closed when absent. Outside lane (meerkat-runtime) + feeds the MeerkatMachine DSL signal."
+ },
+ {
+  "id": 101,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/comms.rs into_core_request validates typed intent (CommsPeerRequestIntent) + typed params then downgrades to the core compatibility shape: PeerRequest projects `intent: intent.as_str().to_string()` (299) + `params: params.into_json_value()` (300); PeerLifecycle params -> into_json_value() (280). The matches_intent check (292) is a runtime guard, not structural. Fix = promote meerkat_core::comms::CommsCommandRequest PeerRequest/PeerLifecycle to carry the typed enum + typed params so downstream routing branches on the type; drop as_str()/into_json_value(). Cross-crate type change in meerkat-core cascading through all comms routing."
+ },
+ {
+  "id": 135,
+  "lane": "V-contracts",
+  "evidence": "Still live (drift between doc claim and behavior). meerkat-contracts/src/wire/mob.rs:1354-1364 WireMemberRef docstring claims 'Server-resolved opaque handle ... callers treat as opaque', but it is reversible base64url JSON: encode() builds json!({m,a}) and base64-encodes it (1379-1380), decode() recovers (mob_id, agent_identity) (1398) \u2014 a client can forge or decode it. Fix = either (a) mint a server-issued opaque token into a server-side resolution table (cascades into RPC handlers that currently decode()), or (b) drop the opacity doc claim and document the encoded tuple honestly. The (a)/(b) choice is a cross-cutting design decision intertwined with #159 (making member_ref runtime-owned) and touches RPC handlers + SDKs \u2014 needs lead adjudication, not a unilateral in-lane doc edit."
+ },
+ {
+  "id": 158,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/emit.rs:753 `fn rest_manual_components() -> Map<String, Value>` still hand-builds REST OpenAPI component schemas as json! shadows (referenced_rest_components at 683, rest_operation_contract at 1207). The gate script scripts/verify_rest_surface_alignment.py + wrapper scripts/verify-rest-surface-alignment.sh EXIST but are NOT wired into `make ci` (no reference in Makefile or .github/workflows). Fix = drive OpenAPI components from schemars on the wire types + a typed RestRoute catalog, and wire verify_rest_surface_alignment.py into make ci. emit.rs edit is schema-affecting (needs regen) + Makefile/CI work outside lane + possibly meerkat-workgraph."
+ },
+ {
+  "id": 159,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/mob.rs:1898 MobMemberStatusResult has NO member_ref field (fields: status, output_preview, error, tokens_used, is_final, current_session_id, peer_connectivity, kickoff, external_member, resolved_capabilities). The Web SDK still fabricates the ref client-side (encodeMemberRef in sdks/web/src/mob.ts per plan). Fix = add `member_ref: WireMemberRef` to MobMemberStatusResult, populate it runtime-side in WASM mob_member_status (WireMemberRef::encode is already used for spawn at lib.rs:2215/2382), delete encodeMemberRef in the SDK, `make regen-schemas`. Wire-type change + WASM + web SDK."
+ },
+ {
+  "id": 190,
+  "lane": "V-contracts",
+  "evidence": "Still live. No WireCallbackPending typed contract exists in meerkat-contracts (the wire/mob.rs:757 CallbackPending is just an enum variant of MobSpawnManyFailureCause, not a payload contract). Both surfaces hand-roll the success-looking JSON: meerkat-cli/src/main.rs:349 `fn callback_pending_json_value` builds `status: \"pending_tool_call\"` (351) + pending_tool_calls (356); meerkat-mcp-server/src/lib.rs:1421 builds the same `status: \"pending_tool_call\"`. Fix = define a typed WireCallbackPending contract in meerkat-contracts carrying tool_name+args+session_ref, serialize it from AgentError::CallbackPending in both surfaces, `make regen-schemas`. New wire contract + regen + CLI/MCP edits outside lane."
+ },
+ {
+  "id": 193,
+  "lane": "V-contracts",
+  "evidence": "Still live. SDKs hand-reimplement the contract-version compat policy: TS sdks/typescript/src/client.ts:3271 `private static checkVersionCompatible(server, client)` (called at 593); Python sdks/python/meerkat/client.py _check_version_compatible per plan. The authority exists in-lane (meerkat-contracts ContractVersion::is_compatible_with) but the SDKs re-derive it. Fix = emit a compat helper/constant from contracts via tools/sdk-codegen/generate.py, delete the hand-rolled copies, add a drift gate to verify-sdk-codegen-freshness. SDK codegen + gate, outside meerkat-contracts."
+ },
+ {
+  "id": 197,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-mcp-server/src/main.rs:195 and :426 resolve lifecycle via the string-keyed `mcp_tool_request_lifecycle(&name)` against MCP_TOOL_REQUEST_LIFECYCLE_CATALOG (meerkat-contracts/src/request_lifecycle.rs:80), a standalone table that can drift from the actual tool roster. Fix = move request_lifecycle onto each MCP tool descriptor where name/description/schema are declared and have main.rs read it from the resolved descriptor, deleting/generating the string-keyed catalog. Owner is the typed MCP tool descriptor in meerkat-mcp-server (tool surface), outside meerkat-contracts."
+ },
+ {
+  "id": 204,
+  "lane": "V-contracts",
+  "evidence": "Still live. The lagged-item type is NOT generated from meerkat-contracts (grep for SubscriptionLagged/LaggedEvent in meerkat-contracts is empty). WASM has a local `struct SubscriptionLaggedItem` (meerkat-web-runtime/src/lib.rs:2799, used at 1886/2738) and the web SDK independently hand-models `SubscriptionLaggedEvent` (sdks/web/src/types.ts:466). Two handwritten copies on both sides. Fix = define a typed wire contract (typed EventEnvelope + Lagged fault variant) in meerkat-contracts, generate the @rkat/web type from it, cover it with verify-sdk-codegen-freshness. New wire contract + SDK codegen + cross-crate (web-runtime + web SDK)."
+ },
+ {
+  "id": 234,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/rpc_catalog.rs gives untyped `Value` result_type for live/send_input (546), live/commit_input (552), live/interrupt (558), live/truncate (564). Fix = define closed typed structs LiveSendInputResult/LiveCommitInputResult/LiveInterruptResult/LiveTruncateResult in meerkat-contracts, rename the four catalog result_types, replace the ad-hoc json!({\"sent\":true}) in meerkat-rpc/src/handlers/live.rs:83 with the typed structs (live/close is the in-tree typed reference). Wire-type addition + regen + rpc handler edit outside lane."
+ },
+ {
+  "id": 235,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/mob.rs:1538 MobReconcileFailureWire.error is `String` with the literal comment 'Stringified mob error.' (1537). Fix = replace with a typed WireMobError (code + stage + message) projected from runtime MobError, and at meerkat-rpc/src/handlers/mob.rs:2252 stop mapping f.error.to_string() into a success summary (carry the typed failure class instead). Wire-type change + regen + rpc handler terminality fix outside lane."
+ },
+ {
+  "id": 256,
+  "lane": "V-contracts",
+  "evidence": "Still live. sdks/typescript/src/client.ts:3915 `static parseWorkItem` re-checks `status` against an inline literal `[\"open\",\"in_progress\",\"blocked\",\"completed\",\"cancelled\",\"failed\"]` (3917) then casts `status as WorkGraphStatus` (3934) \u2014 a handwritten parser that can drift from the contract union. Fix = emit the WorkGraph status/priority closed unions + WorkItem/WorkGraphItemsResponse parsers via tools/sdk-codegen/generate.py, delete the handwritten types/parseWorkItem, import from generated/types.js, add a no-handwritten-parser drift gate. SDK codegen + gate, outside meerkat-contracts."
+ },
+ {
+  "id": 257,
+  "lane": "V-contracts",
+  "evidence": "Still live. The typed closed union exists in-lane (meerkat-contracts/src/wire/live.rs:522 WireLiveResponseModality Audio/Text/Unknown) but the SDK helpers widen it: TS sdks/typescript/src/live.ts:142 `commitInput(responseModality?: string)` casts `{ modality: responseModality } as WireLiveResponseModality` (148-149); Python sdks/python/meerkat/live.py:168 `commit_input(response_modality: str | None)` accepts a raw str. Fix = change the helper param type to the generated modality enum/literal union and parse-or-throw INVALID_ARGS on non-members. SDK source edits (TS + Python), outside meerkat-contracts."
+ },
+ {
+  "id": 305,
+  "lane": "V-contracts",
+  "evidence": "Still live. tools/sdk-codegen/generate.py emits SDK contract types from hand-maintained rosters: MOB_RPC_CONTRACT_TYPES (17), WORKGRAPH_RPC_CONTRACT_TYPES (173), iterated at 1027/1031 and 1494/1498. No verify_sdk_contract_parity.py exists. Fix = drive emission from the full public wire/RPC contract set in artifacts/schemas and add verify_sdk_contract_parity.py (mirroring verify_rpc_surface_alignment.py) wired into make ci so a new contract type without an SDK export fails the gate. generate.py + new gate script + make ci, outside meerkat-contracts."
+ },
+ {
+  "id": 313,
+  "lane": "V-contracts",
+  "evidence": "Still live. meerkat-contracts/src/wire/mob.rs:1909 MobMemberStatusResult.peer_connectivity is `Option<Value>` \u2014 a probe timeout (handle.rs maps Err(_)=>None per plan) is indistinguishable from 'no bridge session'. Fix = introduce a typed tri-state WirePeerConnectivity{Known(snapshot)|NotApplicable|ProbeTimedOut}, update the field, project it fail-closed in meerkat-mob/src/runtime/handle.rs and parse it fail-closed in sdks/web/src/mob.ts (mirror parseWireHandlingMode), then `make regen-schemas && make verify-version-parity`. Wire-type change + regen + handle.rs + web SDK."
+ },
+ {
+  "id": 321,
+  "lane": "V-contracts",
+  "evidence": "Still live (advertise-vs-deliver drift). meerkat-rpc/src/handlers/initialize.rs:34 hardcodes `skills_enabled: true` unconditionally, and rpc_catalog.rs:509 emits skills/list whenever options.skills_enabled \u2014 but handlers/skills.rs errors when skill_runtime is None. The contracts-side gating field (RpcMethodCatalogOptions.skills_enabled) is correct; the live defect is the surface hardcoding the value instead of deriving it from actual skill_runtime presence. Fix = derive skills_enabled (and advertised skills methods/tools) from the skill_runtime capability seam across RPC/REST/MCP so advertise==deliver. Cross-crate capability-seam change in meerkat-rpc (+REST/MCP), outside meerkat-contracts."
+ },
+ {
+  "id": 339,
+  "lane": "V-contracts",
+  "evidence": "Still live (all three drifts present). (1) docs/concepts/providers.mdx:204-210 still describes prefix inference ('claude-* models use Anthropic', 'gpt-*, chatgpt-* use OpenAI', 'gemini-* use Gemini', 'before prefix inference'), but meerkat-core/src/provider.rs:50 Provider::infer_from_model does an EXACT catalog-id match (`entry.id == model`) returning None for uncatalogued models \u2014 no prefix inference. (2) meerkat-contracts/src/wire/models.rs:134 docstring still says 'the compiled-in model catalog'. (3) meerkat/src/surface.rs:292-296 docstring claims 'pure function with no config dependency ... static data compiled into the binary' yet build_models_catalog_response takes &Config and calls config.model_registry() (300). Fix = rewrite the docs section (exact-match + self-hosted-alias, no prefix inference), fix both docstrings, add a content-drift gate binding the docs to ModelRegistry. Spans docs + meerkat/surface.rs + meerkat-contracts docstring + CI gate, cross-crate."
+ },
+ {
+  "id": 343,
+  "lane": "V-contracts",
+  "evidence": "Still live (pure theater). meerkat-contracts/src/wire/supervisor_bridge.rs:877 BridgeDeliveryResponse.completion: Option<BridgeDeliveryCompletion> (883) is advertised and emitted to schemas + SDKs (emit.rs:282; generated TS/Python carry it), but BridgeDeliveryCompletion has ZERO constructors anywhere in non-test code: meerkat-mob/src/runtime/local_bridge.rs sets `completion: None` at 156/167/179/191 and comms_drain.rs never references it. Fix (plan prefers deletion) = either populate completion from the real CompletionOutcome the producers already have, or delete the field + BridgeDeliveryCompletion type entirely + `make regen-schemas && make verify-schema-freshness`. Wire-type change + regen + meerkat-mob producer edits, outside lane."
+ },
+ {
+  "id": 38,
+  "lane": "V-sdks",
+  "evidence": "Stream IDs still leak helper-local registries on all three surfaces. RPC: meerkat-rpc/src/router.rs:455,567,744 still key on HashMap<Uuid, StreamForwarder> (struct StreamForwarder at :319). WASM (out of lane): meerkat-web-runtime/src/lib.rs:2597-2608 SubscriptionRegistry is a thread_local BTreeMap<u32, EventSubscription> with locally-minted next_handle (mint loop :2645-2659, :2682-2691). Web SDK (in lane): sdks/web/src/runtime.ts:141-143 mob_member_subscribe/mob_subscribe_events => Promise<number>, poll_subscription(handle: number). The plan's owner is a NEW MeerkatMachine-minted domain StreamRef newtype that the registries key on and that becomes the public handle \u2014 a machine DSL + meerkat-core/contracts type addition cascading across RPC, WASM, and the web SDK. Machine-codegen + cross-crate change, not SDK-local."
+ },
+ {
+  "id": 192,
+  "lane": "V-sdks",
+  "evidence": "TS side is closed (parseSessionHistory client.ts:4276-4291 and parseSessionTranscriptRevision :4293-4312 use requireStringField/requireNumberField/requireBooleanField). BUT Python _parse_session_history (sdks/python/meerkat/client.py:3627-3639) is STILL LIVE: session_id=data.get('session_id',''), message_count=data.get('message_count',0), offset=data.get('offset',0), has_more=bool(data.get('has_more',False)) \u2014 the empty/zero coercion the row targets. _parse_session_transcript_revision (client.py:3641-3658) has the same coercion for session_id/message_count/offset/has_more. Fix is mechanical and SDK-local (replace .get(...) coercions with the existing _require_string_field [client.py:3444], _require_number_field [:3451], _require_bool_field [:3466]; keep limit/session_ref optional), but per the verify-only lane I did not edit. Mark FIXED-equivalent SDK-local change to lead."
+ },
+ {
+  "id": 216,
+  "lane": "V-sdks",
+  "evidence": "WASM half closed: mob_lifecycle (meerkat-web-runtime/src/lib.rs:1960-1985) now returns Result<JsValue,JsValue> carrying the canonical meerkat_contracts::MobLifecycleResult with destroy_report (serialized at :1974-1983) instead of discarding _destroy_report and returning Ok(()). BUT the web SDK half is STILL LIVE: sdks/web/src/mob.ts:1084-1089 lifecycle() is still Promise<void> and discards the returned JSON (await this.bindings.mob_lifecycle(...) with no parse/return); an inline comment defers it to 'Wave 2c (#216)'. The plan requires changing the binding to Promise<MobDestroyReport> and parsing through the generated report type \u2014 but there is NO generated MobDestroyReport/MobLifecycleResult type in sdks/web/src/generated/ (grep empty). Proper fix needs tools/sdk-codegen/generate.py to emit the report type into sdks/web/src/generated + regen, then mob.ts consumes it. Codegen-generator + generated-artifact work."
+ },
+ {
+  "id": 222,
+  "lane": "V-sdks",
+  "evidence": "Web SDK normalizeSessionEvent (sdks/web/src/session.ts:114-125) only requires a non-empty string raw.type then casts 'return raw as unknown as SessionEvent' (line 124) \u2014 it does NOT validate against the already-generated isKnownEvent / KNOWN_AGENT_EVENT_TYPES guard (which exists at sdks/web/src/types.ts:585-589). WASM half also live: poll_events (meerkat-web-runtime/src/lib.rs:1869-1892) emits serde_json::to_value(&envelope.payload) (line 1880) \u2014 payload-only, not the typed EventEnvelope. Row is 'after 283' and reuses the event-inventory keystone; the SDK guard exists but the WASM envelope change is out of lane and the gate has a wasm32 component. Web SDK guard wiring is SDK-local but envelope cascade + 283 dependency make this lead-coordinated."
+ },
+ {
+  "id": 246,
+  "lane": "V-sdks",
+  "evidence": "TS side closed: handleLine (sdks/typescript/src/client.ts:2918-2934) now calls this.failTransport(new MeerkatError('PROTOCOL_ERROR', 'Corrupted JSON-RPC frame ...')) on a JSON.parse catch instead of catch { return; }. BUT Python _read_loop (sdks/python/meerkat/streaming.py:112-115) is STILL LIVE: 'try: data = json.loads(line) except json.JSONDecodeError: continue' silently drops the corrupted frame. Fix is mechanical and SDK-local (replace continue with self._fail_all('PROTOCOL_ERROR'/'CONNECTION_CORRUPT', ...) \u2014 _fail_all exists at streaming.py:250), but verify-only lane: not edited. SDK-local change to lead."
+ },
+ {
+  "id": 247,
+  "lane": "V-sdks",
+  "evidence": "TS registerTool post-connect path (sdks/typescript/src/client.ts:513-519) still swallows the failure with this.request('tools/register', ...).catch(() => {}) \u2014 'Best-effort'. Python _register_tool_with_server (sdks/python/meerkat/client.py:410-444) was partially reworked (records the typed fault in _tool_registration_errors[name] and re-raises) but the tool is NOT removed from / marked unconfirmed in _tool_registry, so it is still reported as available via definitions() \u2014 the plan's 'NOT reported as available' requirement is unmet. Fix is SDK-local (TS: await + propagate + remove from toolHandlers/mark unconfirmed; Python: remove from _tool_registry or add confirmed-state), but verify-only lane: not edited. SDK-local change to lead."
+ },
+ {
+  "id": 248,
+  "lane": "V-sdks",
+  "evidence": "Both SDKs still enforce the process-local singleton pending-stream guard. TS createSessionStreaming (sdks/typescript/src/client.ts:733-738): 'if (this.pendingStreamQueue) throw new MeerkatError(\"INVALID_STATE\", \"Only one createSessionStreaming request can be pending at a time\")'. Python subscribe_pending_stream (sdks/python/meerkat/streaming.py:87-88): 'if self._pending_stream_queue is not None: raise RuntimeError(\"Only one pending stream at a time\")'. Plan repair: replace the singleton flag with per-request_id stream subscription so concurrent creates are correlated by request_id, or surface a typed server-admission error. This is a non-trivial streaming-correlation redesign (medium effort, after 247); SDK-local but verify-only lane prohibits editing. Lead to implement."
+ },
+ {
+  "id": 283,
+  "lane": "V-sdks",
+  "evidence": "TS parseEvent (sdks/typescript/src/events.ts:1000) uses a handwritten switch whose default (line 1252-1254) fabricates 'return { type, ...raw } as UnknownEvent'. Python parse_event (sdks/python/meerkat/events.py:1142-1145) uses a handwritten _EVENT_MAP (events.py:609) and returns UnknownEvent(type=event_type, data=raw) on unknown. The generator emits KNOWN_AGENT_EVENT_TYPES ONLY for web (tools/sdk-codegen/generate.py: generate_web_event_types at :1757, output sdks/web/src/generated, KNOWN_AGENT_EVENT_TYPES emitted :1815-1822). Keystone fix requires extending generate.py to ALSO emit a TS+Python event inventory/registry, driving events.ts/events.py off it, raising a typed unknown fault, plus a verify-sdk-codegen-freshness drift gate. Codegen-generator + generated-artifact + CI-gate work (regen-schemas territory)."
+ },
+ {
+  "id": 306,
+  "lane": "V-sdks",
+  "evidence": "scripts/verify_sdk_wrapper_freshness.py is exactly the substring-parity gate the row describes: it regexes catalog method names from meerkat-contracts/src/rpc_catalog.rs (lines 24-32) and checks 'if m not in ts_blob/py_blob' over concatenated raw source (lines 52-53), ignoring whether a wrapper actually calls the method or parses params/results, and ignoring sdks/web entirely (only ts_root/py_root at :19-20). Owner is scripts/verify_sdk_wrapper_freshness.py which is OUTSIDE my lane (sdks, tools/sdk-codegen); proper fix derives an RPC surface descriptor at regen time (touches generate.py + a generated descriptor artifact) plus the gate rewrite and web parity. Lead/CI-owned."
+ },
+ {
+  "id": 330,
+  "lane": "V-sdks",
+  "evidence": "Stale contract-version mirrors persist. SDK READMEs (in lane): sdks/python/README.md:5 'Contract version: 0.6.23'; sdks/typescript/README.md:5,390,397 '0.6.23'. docs/api/rpc.mdx (out of lane):286,288,1256,1314 '0.6.23'. Authority artifacts/schemas/version.json = '0.7.0-alpha.0'. Plan requires regenerating these from version.json (or marking them generated via regen-schemas) AND adding a make ci content-drift gate that fails when any published contract-version != version.json. The docs/api/rpc.mdx change is out of lane and the make-ci drift gate is lead/CI-owned; proper fix wires the READMEs into regen-schemas/version.json rather than hand-editing. Lead-coordinated."
+ },
+ {
+  "id": 353,
+  "lane": "V-sdks",
+  "evidence": "Python _parse_attributed_mob_event (sdks/python/meerkat/client.py:2524-2532) is STILL LIVE: source=str(raw.get('source','')), role=str(raw.get('role','')), envelope coalesced to {} on non-dict, and source_fence_token is DROPPED entirely. The AttributedEvent dataclass (sdks/python/meerkat/types.py) has source: str = '', role: str = '', envelope default and NO source_fence_token field, while the Rust wire requires typed source/source_fence_token/role/envelope. Fix (require all four, raise INVALID_RESPONSE on absence, add source_fence_token to the dataclass) is SDK-local mechanical, but verify-only lane prohibits editing; the plan also wants the SDK type generated from the wire + a drift gate (codegen-owned). Lead to implement."
+ },
+ {
+  "id": 17,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. xtask/src/seam_inventory.rs:91-2021 `known_classifications()` is still the manually-curated authority; classify_effect (2025-2061) checks the hand-table first and only falls back to a disposition heuristic; run_seam_inventory (2096) calls known_classifications() and strict mode (2178-2181) bails with 'add entries to known_classifications()'. The prescribed repair derives classification from a typed schema field, but EffectDispositionRule (meerkat-machine-schema/src/machine.rs:365-374) carries only `disposition` + `handoff_protocol: Option<ProtocolId>` \u2014 there is NO NoOwnerRealization/OwnerRealizationOnly/OwnerRealizationPlusFeedback/SurfaceResultAlignment classification field. Fix: add a typed seam-classification field to EffectDispositionRule (or EffectDisposition) in meerkat-machine-schema, run `make machine-codegen`, then drive seam_inventory classification from that schema field and make strict mode fail on any schema effect the schema itself does not classify. Cross-crate schema + machine-codegen \u2014 outside scripts/xtask lane."
+ },
+ {
+  "id": 19,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE and a confirmed false zero. The owner-realization-plus-feedback Summary count at seam_inventory.rs:2406-2409 (printed at 2420) is computed from `entries` classified via known_classifications(), but that hand-table contains ZERO OwnerRealizationPlusFeedback rows (awk over lines 91-2021 = 0 matches; the only 3 references to the variant are the enum decl:32, Display:43, and filters at 2142/2408). So the reported count is a guaranteed false zero exactly as the row warns. The 'Declared Handoff Obligation Pairs' section (2444-2474) DOES read composition.handoff_protocols/allowed_feedback_inputs, but that is a separate report, not the OwnerRealizationPlusFeedback category. Fix is the same schema-derived classification path as #17 (#17 also-closes 19): derive the feedback category from the typed composition handoff-protocol graph / a schema classification field rather than the hand-table. Needs meerkat-machine-schema field + machine-codegen."
+ },
+ {
+  "id": 20,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. xtask/src/machines.rs source-token scanners persist: collect_authority_language_mismatches (630-648) uses `contents.contains(token)` at :639 over banned strings; collect_peer_response_terminal_projection_mismatches (651-775) uses `line.contains(token)` at :691 and :764; collect_direct_flow_reducer_transition_mismatches uses `.contains` at :1106 and projection-field token matches at :1118/:1127/:1136. The drift fact comes from `.contains(token)` over file text, not a typed AST/schema relationship. Fix (in-lane, machines.rs): replace these with syn AST visitors (syn already imported at :30; collect_peer_response_terminal_core_fact_mismatches at :777 is the existing AST-based model to follow) so a token rename that keeps the banned semantic relationship still fails. This is a Medium/large AST-rewrite, not a mechanical edit \u2014 verify-only lane forbids the change; lead should implement."
+ },
+ {
+  "id": 22,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. xtask/src/rmat_policy.rs:196-226 `default_consumer_input()` is still a hard-coded `match (producer, effect_variant, consumer)` table with a fallback string at :224 (`format!(\"{producer}:{effect_variant}->{consumer}\")`); the lock-step comment at :197-202 still admits it must mirror the typed routes. default_routed_effect_realizations (:169-194) iterates schema dispositions and calls default_consumer_input at :182. Fix (in-lane): the typed Route is available \u2014 Route{from_machine, effect_variant, to: RouteTarget{machine, input_variant}} (meerkat-machine-schema/src/composition.rs:2017-2036) and canonical_composition_schemas() is already imported/used in this same file (:291,:341,:363). Replace the match by looking up the matching Route in canonical_composition_schemas() (resolving MachineInstanceId->machine name via composition.machines) and taking to.input_variant, erroring when no route exists (no fallback string). Self-contained in rmat_policy.rs but verify-only lane forbids editing; lead should implement."
+ },
+ {
+  "id": 23,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. xtask/src/ownership_ledger.rs validate only emptiness-checks owner_shell (:494) and anchor (:502); the only resolution against discovered boundaries is for the entry's own (path,symbol) key (OwnershipExtraOperationEntry at :579, boundary-kind at :590). The owner_shell value (e.g. \"MeerkatMachine\", SemanticOperationEntry def at :153-163) is never resolved against the discovered boundary symbol set, and a Closed entry against a stale owner is not failed. grep confirms owner_shell/anchor have no other validation use (lines 494,499,502,611,761,778,1184,1204 are emptiness-check + render only). Fix (in-lane): resolve owner_shell (type-name) against the discovered boundary symbol set built at :460-472 and emit an error finding for any Closed semantic-operation entry whose owner no longer resolves to a live symbol; gate the generated finite-ownership-ledger.md authoritative claim on resolution passing. Behavioral hardening \u2014 verify-only lane forbids editing; lead should implement."
+ },
+ {
+  "id": 162,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. xtask/src/rmat_audit.rs CompositionDispatchIsThePath still uses `source.contains(banned)` text scan at :619 over BANNED_LEGACY_HELPERS (:596), with the comment/import false-positive hack at :609-614 (skips /composition/ files). GuardedApplyVisitor (:637-682) correctly visits via visit_expr_if (AST), but the decision at :655-671 stringifies cond/body with `to_token_stream().to_string()` and does substring matching (`body_text.matches(\".apply\")`, cond_text.contains over a stateish needle list). Fix (in-lane): for CompositionDispatchIsThePath, add a syn visitor detecting the banned helper CALL (path/method-call expr), not a substring; for GuardedApplyVisitor, match AST node kinds (method-call ident == apply; if-cond ExprMethodCall/ExprField referencing a state field) instead of stringified tokens, so detection survives token renames and ignores string-literal/comment occurrences. AST-rewrite, Medium/large \u2014 verify-only lane forbids editing; lead should implement."
+ },
+ {
+  "id": 251,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. scripts/machine-posters/generate-machine-posters.mjs MACHINE_SPECS (:36) still covers only two machines: id 'meerkat_machine' (:38) and id 'mob_machine' (:375), each with a hand-authored catalogPath pointing at meerkat-machine-schema/src/catalog/*.rs. canonical_machine_schemas() (meerkat-machine-schema/src/catalog/mod.rs:39-52) lists 10 machines (meerkat, mob, schedule_lifecycle, occurrence_lifecycle, auth, approval_lifecycle, session_document, session_turn_admission, workgraph_lifecycle, work_attention_lifecycle). The .mjs has no process.argv/--check handling and there is no poster/machine-posters make target (grep of Makefile empty). Fix (in-lane, scripts + Makefile): either drive the generator from the catalog to cover all 10 machines or demote posters to clearly-internal non-authoritative docs, and add a `poster --check` drift gate. Non-mechanical JS generator change + new CI gate; verify-only lane forbids editing. Low severity (no production reads posters)."
+ },
+ {
+  "id": 327,
+  "lane": "V-ci",
+  "evidence": "STILL LIVE. scripts/verify_rpc_surface_alignment.py is source-string NAME-SET parity only: it regexes router match-arm method literals (:31-36), catalog RpcMethodDescriptor names \u2014 capturing only the first \"([^\"]+)\" arg (:38-44) \u2014 and the docs overview table (:66-72), then diffs the name sets (:74-87), plus the retired-handler-export scan (:101-121). It verifies NO param/result signatures even though RpcMethodDescriptor already carries params_type (meerkat-contracts/src/rpc_catalog.rs:41) and result_type (:43). Fix per row: emit a generated rpc_surface descriptor (methods + param/result type refs) FROM rpc_catalog.rs and diff router/docs against it so changing a method's param type in the catalog without updating the router signature/docs fails the gate. The descriptor emission is a meerkat-contracts change + schema/regen pipeline (outside scripts/xtask); only the diff step is in-lane. A regex-the-router-params alternative would still be the banned source-string parity. Needs lead (contracts + regen)."
+ }
+]

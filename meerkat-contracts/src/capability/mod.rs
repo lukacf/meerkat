@@ -9,8 +9,9 @@ pub mod query;
 
 pub use meerkat_capabilities::{
     BrowserMobpackCapabilityDecision, CapabilityId, CapabilityProtocol, CapabilityRegistration,
-    CapabilityScope, CapabilityStatus, FeatureCapabilityPolicy, HostProcessCapabilityId,
-    MobpackCapabilityId, MobpackCapabilityRequirement, available_capabilities,
-    browser_mobpack_capability_decision, build_capabilities, resolve_capabilities,
+    CapabilityScope, CapabilityStatus, DeploySurfaceCapabilityId, FeatureCapabilityPolicy,
+    HostProcessCapabilityId, MobpackCapabilityId, MobpackCapabilityRequirement,
+    available_capabilities, browser_mobpack_capability_decision, build_capabilities,
+    resolve_capabilities,
 };
 pub use query::{CapabilitiesResponse, CapabilityEntry};

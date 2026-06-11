@@ -2,13 +2,13 @@ import { Mob, parseMobStatusResult } from './mob.js';
 import { Session } from './session.js';
 import type {
   RuntimeConfig,
-  InitResult,
   SessionConfig,
   MobDefinition,
   JsonSchema,
   ToolCallback,
   MobStatus,
 } from './types.js';
+import { parseInitResult } from './generated/runtime.js';
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
@@ -29,6 +29,16 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
     anthropic_base_url: config.anthropicBaseUrl,
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,
+    // Host-supplied mobpack trust store (strict + empty when omitted, so
+    // pack ingress fails closed on unsigned/unknown-signer packs).
+    mobpack_trust: config.mobpackTrust
+      ? {
+          policy: config.mobpackTrust.policy,
+          trusted_signers: config.mobpackTrust.trustedSigners
+            ? { signers: config.mobpackTrust.trustedSigners }
+            : undefined,
+        }
+      : undefined,
   };
 }
 
@@ -113,16 +123,14 @@ export interface WasmModule {
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_list: () => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
-  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_wire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
-  mob_unwire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -138,16 +146,10 @@ export interface WasmModule {
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
-  wire_cross_mob: (
-    mobA: string,
-    meerkatA: string,
-    mobB: string,
-    meerkatB: string,
-  ) => Promise<void>;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (streamId: string) => string;
+  close_subscription: (streamId: string) => void;
 }
 
 /** Entry point for the Meerkat WASM runtime in the browser. */
@@ -194,7 +196,8 @@ export class MeerkatRuntime {
 
     const configJson = JSON.stringify(toWasmConfig(config));
     const resultJson = wasm.init_runtime_from_config(configJson);
-    const result = JSON.parse(resultJson) as InitResult;
+    // K19: parse via the generated fail-closed guard — no blind cast.
+    const result = parseInitResult(resultJson);
 
     if (result.status !== 'initialized') {
       throw new Error(`Runtime initialization failed: ${resultJson}`);
@@ -227,7 +230,8 @@ export class MeerkatRuntime {
 
     const credentialsJson = JSON.stringify(toWasmConfig(config));
     const resultJson = wasm.init_runtime(mobpackBytes, credentialsJson);
-    const result = JSON.parse(resultJson) as InitResult;
+    // K19: parse via the generated fail-closed guard — no blind cast.
+    const result = parseInitResult(resultJson);
 
     if (result.status !== 'initialized') {
       throw new Error(`Runtime initialization failed: ${resultJson}`);
@@ -270,11 +274,14 @@ export class MeerkatRuntime {
    *
    * Runtime state must already be initialized.
    *
-   * When the agent calls this tool, it receives `"acknowledged"` immediately
-   * and continues processing. The host should watch `ToolCallRequested` events
-   * in the event stream to capture args and act on them. Any response (e.g.
-   * human approval) comes back through the normal session or mob member send
-   * APIs.
+   * When the agent calls this tool, the real work is deferred to the host: the
+   * dispatch records a typed *detached* async op (it does not block the turn
+   * boundary) and the agent sees a transcript result explicitly marked
+   * **deferred/pending**, not a fabricated success. The tool call has NOT
+   * completed when the agent continues. The host watches `ToolCallRequested`
+   * events in the event stream to capture args and act on them; any response
+   * (e.g. human approval) comes back through the normal session or mob member
+   * send APIs — never through this tool result.
    *
    * @param wasm - The WASM module (same one passed to init).
    * @param name - Tool name the agent will call.
@@ -339,8 +346,8 @@ export class MeerkatRuntime {
       mob_retire: this.wasm.mob_retire,
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
-      mob_wire_target: this.wasm.mob_wire_target,
-      mob_unwire_target: this.wasm.mob_unwire_target,
+      mob_wire_peer: this.wasm.mob_wire_peer,
+      mob_unwire_peer: this.wasm.mob_unwire_peer,
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,
       mob_member_send: this.wasm.mob_member_send,
@@ -366,16 +373,6 @@ export class MeerkatRuntime {
   async listMobs(): Promise<MobStatus[]> {
     const json = await this.wasm.mob_list();
     return parseMobListResult(parseJsonPayload(json, 'Invalid mob/list response'));
-  }
-
-  /** Wire two agents across different mobs for cross-mob comms. */
-  async wireCrossMob(
-    mobA: string,
-    meerkatA: string,
-    mobB: string,
-    meerkatB: string,
-  ): Promise<void> {
-    await this.wasm.wire_cross_mob(mobA, meerkatA, mobB, meerkatB);
   }
 
   /** Create a direct session façade backed by a real runtime session identity. */

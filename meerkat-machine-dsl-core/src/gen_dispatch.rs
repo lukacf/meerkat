@@ -790,11 +790,13 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             value,
             enum_name,
             variant,
-            tuple_variant,
+            data_variant,
         } => {
             let value = gen_expr(value, prefix);
-            if *tuple_variant {
-                quote! { matches!(#value, #enum_name::#variant(..)) }
+            if *data_variant {
+                // Braced rest pattern matches both tuple and struct payload
+                // variants, so `is_data_variant` is payload-shape agnostic.
+                quote! { matches!(#value, #enum_name::#variant { .. }) }
             } else {
                 quote! { matches!(#value, #enum_name::#variant) }
             }

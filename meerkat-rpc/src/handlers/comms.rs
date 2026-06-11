@@ -10,50 +10,53 @@ use crate::session_runtime::SessionRuntime;
 
 use super::{parse_params, parse_session_id_for_runtime};
 
+use meerkat_contracts::{
+    CommsPeerUnreachableReason, CommsPeersResult, CommsSendErrorData, CommsSendResult,
+};
 pub use meerkat_contracts::{CommsPeersParams, CommsSendParams};
-use meerkat_contracts::{CommsPeersResult, CommsSendResult};
 
+/// Project a typed comms `SendError` into the generated wire error-data
+/// contract. The error taxonomy is owned by `meerkat-contracts`
+/// (`CommsSendErrorData`), not hand-shaped JSON (K17).
 fn normalize_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
-) -> serde_json::Value {
+) -> CommsSendErrorData {
     match error {
-        meerkat_core::comms::SendError::PeerNotFound(peer) => serde_json::json!({
-            "code": "peer_not_found_or_not_trusted",
-            "peer": peer,
-            "message": format!("peer '{peer}' is not found or not trusted"),
-        }),
+        meerkat_core::comms::SendError::PeerNotFound(peer) => {
+            CommsSendErrorData::PeerNotFoundOrNotTrusted {
+                peer: peer.clone(),
+                message: format!("peer '{peer}' is not found or not trusted"),
+            }
+        }
         meerkat_core::comms::SendError::PeerOffline => {
             let peer = peer_name.unwrap_or("<unknown>");
-            serde_json::json!({
-                "code": "peer_unreachable",
-                "peer": peer,
-                "reason": "offline_or_no_ack",
-                "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
-            })
+            CommsSendErrorData::PeerUnreachable {
+                peer: peer.to_string(),
+                reason: CommsPeerUnreachableReason::OfflineOrNoAck,
+                message: format!("peer '{peer}' is unreachable: offline_or_no_ack"),
+                details: None,
+            }
         }
         meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
             let peer = peer_name.unwrap_or("<unknown>");
-            serde_json::json!({
-                "code": "peer_unreachable",
-                "peer": peer,
-                "reason": "transport_error",
-                "message": format!("peer '{peer}' is unreachable: transport_error"),
-                "details": details,
-            })
+            CommsSendErrorData::PeerUnreachable {
+                peer: peer.to_string(),
+                reason: CommsPeerUnreachableReason::TransportError,
+                message: format!("peer '{peer}' is unreachable: transport_error"),
+                details: Some(details.clone()),
+            }
         }
-        other => serde_json::json!({
-            "code": "send_failed",
-            "message": other.to_string(),
-        }),
+        other => CommsSendErrorData::SendFailed {
+            message: other.to_string(),
+        },
     }
 }
 
-pub(crate) fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    serde_json::to_value(CommsSendResult::from(receipt)).unwrap_or_else(|error| {
-        tracing::error!(?error, "failed to serialize CommsSendResult");
-        serde_json::Value::Object(serde_json::Map::new())
-    })
+pub(crate) fn send_receipt_json(
+    receipt: meerkat_core::comms::SendReceipt,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(CommsSendResult::from(receipt))
 }
 
 /// Handle `comms/send` — dispatch a canonical comms command.
@@ -87,28 +90,45 @@ pub async fn handle_send(
     let cmd = match params.into_command().into_command(&session_id) {
         Ok(cmd) => cmd,
         Err(err) => {
-            return RpcResponse::error_with_data(
-                id,
-                error::INVALID_PARAMS,
-                "Command validation failed",
-                serde_json::json!({
-                    "code": "invalid_command",
-                    "message": err.to_string(),
-                }),
-            );
+            let data = CommsSendErrorData::InvalidCommand {
+                message: err.to_string(),
+            };
+            return match serde_json::to_value(&data) {
+                Ok(data) => RpcResponse::error_with_data(
+                    id,
+                    error::INVALID_PARAMS,
+                    "Command validation failed",
+                    data,
+                ),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize comms error data: {serialize_error}"),
+                ),
+            };
         }
     };
 
     match comms.send(cmd).await {
-        Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
+        Ok(receipt) => match send_receipt_json(receipt) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize comms send receipt: {serialize_error}"),
+            ),
+        },
         Err(e) => {
             let normalized = normalize_send_error(peer_name.as_deref(), &e);
-            let message = normalized
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Comms send failed")
-                .to_string();
-            RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
+            let message = normalized.message().to_string();
+            match serde_json::to_value(&normalized) {
+                Ok(data) => RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, data),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize comms error data: {serialize_error}"),
+                ),
+            }
         }
     }
 }
@@ -267,7 +287,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("well-formed receipt serializes");
 
         assert_eq!(
             payload["request_id"],
@@ -276,6 +297,36 @@ mod tests {
         assert_eq!(
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
+        );
+    }
+
+    // Gate (#62): `send_receipt_json` returns a typed `Result` and no longer
+    // launders a serialization failure into a fabricated empty `{}` object.
+    // A well-formed receipt serializes to a real payload; the contract change
+    // (Result, not a `{}` fallback) is what lets `handle_send` surface a typed
+    // JSON-RPC error instead of a success-with-{} on serialize failure.
+    #[test]
+    fn gate_send_receipt_json_returns_result_not_empty_object_fallback() {
+        let envelope_id = uuid::Uuid::new_v4();
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+
+        let result = send_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved: true,
+        });
+
+        let payload = result.expect("well-formed receipt serializes");
+        // The success payload must be the real receipt, never the old `{}`
+        // fallback that the OLD `unwrap_or_else` would have produced.
+        assert_ne!(
+            payload,
+            serde_json::Value::Object(serde_json::Map::new()),
+            "send_receipt_json must not fall back to an empty object"
+        );
+        assert_eq!(
+            payload["request_id"],
+            serde_json::json!(envelope_id.to_string())
         );
     }
 

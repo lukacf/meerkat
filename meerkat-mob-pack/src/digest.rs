@@ -1,4 +1,4 @@
-use crate::exec_bits::normalize_executable_bit;
+use crate::vocabulary::{CanonicalPath, ExecPolicy};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -94,63 +94,37 @@ impl<'de> Deserialize<'de> for MobpackDigest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalEntry {
-    pub path: String,
-    pub bytes: Vec<u8>,
-}
-
 pub fn sha256_bytes(input: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input);
     hasher.finalize().into()
 }
 
-pub fn canonical_digest(entries: &[CanonicalEntry]) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = entries
-        .iter()
-        .map(|entry| {
-            (
-                normalize_path(&entry.path),
-                sha256_bytes(&entry.bytes),
-                normalize_executable_bit(&entry.path, &entry.bytes),
-            )
-        })
-        .filter(|(path, _, _)| path != "signature.toml")
-        .collect();
-
-    index.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = Sha256::new();
-    for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
-        hasher.update([0]);
-        hasher.update(hex::encode(file_digest).as_bytes());
-        hasher.update([0]);
-        hasher.update([if executable_bit { b'1' } else { b'0' }]);
-        hasher.update([b'\n']);
-    }
-
-    MobpackDigest(hasher.finalize().into())
-}
-
 pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = files
+    let index: Vec<(CanonicalPath, [u8; 32], bool)> = files
         .iter()
         .map(|(path, bytes)| {
             (
-                normalize_path(path),
+                CanonicalPath::new(path),
                 sha256_bytes(bytes),
-                normalize_executable_bit(path, bytes),
+                ExecPolicy::classify(path, bytes).is_executable(),
             )
         })
-        .filter(|(path, _, _)| path != "signature.toml")
+        .filter(|(path, _, _)| !path.is_signature())
         .collect();
+
+    hash_canonical_index(index)
+}
+
+/// Hash the canonicalized `(path, content digest, exec bit)` index into the
+/// final mobpack digest. Entries are sorted by their typed canonical path so
+/// the digest is independent of input order.
+fn hash_canonical_index(mut index: Vec<(CanonicalPath, [u8; 32], bool)>) -> MobpackDigest {
     index.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
     for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
+        hasher.update(path.as_str().as_bytes());
         hasher.update([0]);
         hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update([0]);
@@ -158,21 +132,12 @@ pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDi
         hasher.update([b'\n']);
     }
     MobpackDigest(hasher.finalize().into())
-}
-
-fn normalize_path(path: &str) -> String {
-    let replaced = path.replace('\\', "/");
-    replaced
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_string()
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_digest_display_fromstr_roundtrip() {
@@ -202,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_canonical_digest_deterministic() {
-        let mut a = HashMap::new();
+        let mut a = BTreeMap::new();
         a.insert(
             "hooks/run.sh".to_string(),
             b"#!/bin/sh\necho run\n".to_vec(),
@@ -210,7 +175,7 @@ mod tests {
         a.insert("skills/review.md".to_string(), b"review skill".to_vec());
         a.insert("config/defaults.toml".to_string(), b"timeout=30".to_vec());
 
-        let mut b = HashMap::new();
+        let mut b = BTreeMap::new();
         b.insert("config/defaults.toml".to_string(), b"timeout=30".to_vec());
         b.insert("skills/review.md".to_string(), b"review skill".to_vec());
         b.insert(
@@ -218,78 +183,60 @@ mod tests {
             b"#!/bin/sh\necho run\n".to_vec(),
         );
 
-        let entries_a: Vec<CanonicalEntry> = a
-            .into_iter()
-            .map(|(path, bytes)| CanonicalEntry { path, bytes })
-            .collect();
-        let entries_b: Vec<CanonicalEntry> = b
-            .into_iter()
-            .map(|(path, bytes)| CanonicalEntry { path, bytes })
-            .collect();
-
-        assert_eq!(canonical_digest(&entries_a), canonical_digest(&entries_b));
+        assert_eq!(canonical_digest_from_map(&a), canonical_digest_from_map(&b));
     }
 
     #[test]
     fn test_canonical_digest_excludes_signature() {
-        let entries_without_signature = vec![
-            CanonicalEntry {
-                path: "manifest.toml".to_string(),
-                bytes: b"[mobpack]\nname=\"x\"\nversion=\"1\"".to_vec(),
-            },
-            CanonicalEntry {
-                path: "definition.json".to_string(),
-                bytes: b"{\"id\":\"x\"}".to_vec(),
-            },
-        ];
+        let without_signature = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname=\"x\"\nversion=\"1\"".to_vec(),
+            ),
+            ("definition.json".to_string(), b"{\"id\":\"x\"}".to_vec()),
+        ]);
 
-        let mut entries_with_signature = entries_without_signature.clone();
-        entries_with_signature.push(CanonicalEntry {
-            path: "signature.toml".to_string(),
-            bytes: b"signature = \"ignored\"".to_vec(),
-        });
+        let mut with_signature = without_signature.clone();
+        with_signature.insert(
+            "signature.toml".to_string(),
+            b"signature = \"ignored\"".to_vec(),
+        );
 
         assert_eq!(
-            canonical_digest(&entries_without_signature),
-            canonical_digest(&entries_with_signature)
+            canonical_digest_from_map(&without_signature),
+            canonical_digest_from_map(&with_signature)
         );
     }
 
     #[test]
     fn test_digest_from_normalized_content_is_platform_independent() {
-        let windows_style = vec![
-            CanonicalEntry {
-                path: ".\\hooks\\run.sh".to_string(),
-                bytes: b"#!/bin/sh\necho run\n".to_vec(),
-            },
-            CanonicalEntry {
-                path: ".\\skills\\review.md".to_string(),
-                bytes: b"# Review\n".to_vec(),
-            },
-            CanonicalEntry {
-                path: "manifest.toml".to_string(),
-                bytes: b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
-            },
-        ];
+        let windows_style = BTreeMap::from([
+            (
+                ".\\hooks\\run.sh".to_string(),
+                b"#!/bin/sh\necho run\n".to_vec(),
+            ),
+            (".\\skills\\review.md".to_string(), b"# Review\n".to_vec()),
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+        ]);
 
-        let unix_style_reordered = vec![
-            CanonicalEntry {
-                path: "/manifest.toml".to_string(),
-                bytes: b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
-            },
-            CanonicalEntry {
-                path: "skills/review.md".to_string(),
-                bytes: b"# Review\n".to_vec(),
-            },
-            CanonicalEntry {
-                path: "./hooks/run.sh".to_string(),
-                bytes: b"#!/bin/sh\necho run\n".to_vec(),
-            },
-        ];
+        let unix_style = BTreeMap::from([
+            (
+                "/manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+            ("skills/review.md".to_string(), b"# Review\n".to_vec()),
+            (
+                "./hooks/run.sh".to_string(),
+                b"#!/bin/sh\necho run\n".to_vec(),
+            ),
+        ]);
 
         assert_eq!(
-            canonical_digest(&windows_style),
-            canonical_digest(&unix_style_reordered)
+            canonical_digest_from_map(&windows_style),
+            canonical_digest_from_map(&unix_style)
         );
     }
 }

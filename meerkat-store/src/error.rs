@@ -50,6 +50,18 @@ pub enum StoreError {
     #[error("unsupported realm backend for '{realm_id}': '{backend}'")]
     UnsupportedRealmBackend { realm_id: String, backend: String },
 
+    /// The requested realm id sanitizes to the same on-disk path as an
+    /// existing manifest that pins a *different* realm identity (e.g. the
+    /// raw slugs `a.b` and `a_b` both sanitize to the `a_b` directory).
+    /// Two distinct realm identities must never silently share one
+    /// manifest, so the path-aliased open is rejected fail-closed rather
+    /// than handing back the wrong realm's manifest.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "realm identity mismatch: requested '{requested}' aliases existing manifest '{existing}'"
+    )]
+    RealmIdentityMismatch { requested: String, existing: String },
+
     /// Persisted manifest carried a realm id that fails the typed
     /// slug validator (wave-c C-12 sibling retype — the on-disk form
     /// is free-string but the domain type is `RealmId` which enforces

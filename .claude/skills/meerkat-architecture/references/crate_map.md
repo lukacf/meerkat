@@ -65,7 +65,7 @@ There are no separate public reduced-surface binaries in 0.6.23. Reduced-surface
 | `AgentToolDispatcher` | Tool routing and dispatch | `CompositeDispatcher` (meerkat-tools), `DynamicToolComposite` / `ToolGateway` (meerkat-core), `AgentMobToolSurface` (meerkat-mob-mcp), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Agent-loop-facing persistence adapter | `StoreAdapter<S>` (meerkat-store) |
 | `SessionStore` | Canonical session persistence contract for backend authors | `MemoryStore`, `JsonlStore`, `SqliteSessionStore` (meerkat-store) |
-| `SessionService` | Full substrate lifecycle; runtime-backed surfaces layer canonical runtime semantics on top | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
+| `SessionService` | Full substrate lifecycle; the runtime control plane (`MeerkatMachine`, meerkat-runtime) layers canonical runtime semantics on top | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
 | `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` (meerkat-skills) |
@@ -161,8 +161,10 @@ start_turn(id, prompt, handling_mode) → RunResult
 interrupt(id) → set interrupt flag, notify session task
 archive(id) → remove handle, drop session task
 
-`keep_alive` is runtime-owned session behavior. Direct substrate usage does not
-own runtime drain semantics; runtime-backed surfaces do.
+`keep_alive` is runtime-owned session behavior: `MeerkatMachine`
+(meerkat-runtime) owns keep-alive and drain semantics. Direct substrate usage
+does not carry them; runtime-backed surfaces get them by lowering into the
+runtime control plane, never by implementing them surface-side.
 
 Detached background ops now wake idle keep_alive sessions through the
 completion feed and runtime loop via `ContinuationInput`; surface-local waker

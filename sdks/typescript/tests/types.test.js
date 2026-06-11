@@ -24,6 +24,7 @@ import {
   Session,
   DeferredSession,
   liveWebrtcMediaConstraints,
+  parseWorkItem,
 } from "../dist/index.js";
 
 /**
@@ -90,7 +91,7 @@ describe("Contract Version", () => {
 describe("Transcript Rewrite Serialization", () => {
   it("serializes edited parsed messages over their preserved raw payload", () => {
     const parsed = MeerkatClient.parseSessionMessage({
-      role: "assistant",
+      role: "user",
       content: "old",
       created_at: "2026-05-26T10:00:00Z",
       provider_trace_id: "trace-1",
@@ -102,7 +103,7 @@ describe("Transcript Rewrite Serialization", () => {
     });
 
     assert.deepEqual(serialized, {
-      role: "assistant",
+      role: "user",
       content: "new",
       created_at: "2026-05-26T10:00:00Z",
       provider_trace_id: "trace-1",
@@ -112,6 +113,7 @@ describe("Transcript Rewrite Serialization", () => {
   it("serializes parsed block assistant messages back to wire-shaped blocks", () => {
     const parsed = MeerkatClient.parseSessionMessage({
       role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
       created_at: "2026-05-26T10:00:00Z",
       blocks: [
         {
@@ -132,6 +134,7 @@ describe("Transcript Rewrite Serialization", () => {
 
     assert.deepEqual(serialized, {
       role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
       created_at: "2026-05-26T10:00:00Z",
       blocks: [
         {
@@ -587,13 +590,13 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
     });
     const malformed = parseEvent({
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
       is_error: "false",
     });
 
@@ -708,8 +711,6 @@ describe("Typed Events", () => {
         reason_type: "not_found",
         key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
       },
-      reference: `${sourceUuid}/email-extractor`,
-      error: `skill not found: ${sourceUuid}/email-extractor`,
     });
 
     assert.equal(event.type, "skill_resolution_failed");
@@ -725,8 +726,8 @@ describe("Typed Events", () => {
           skillName: "email-extractor",
         });
       }
-      assert.equal(event.reference, `${sourceUuid}/email-extractor`);
-      assert.equal(event.error, `skill not found: ${sourceUuid}/email-extractor`);
+      assert.equal("reference" in event, false);
+      assert.equal("error" in event, false);
     }
   });
 
@@ -741,8 +742,8 @@ describe("Typed Events", () => {
     if (event.type === "skill_resolution_failed") {
       assert.equal(event.skillKey, undefined);
       assert.equal(event.reason, undefined);
-      assert.equal(event.reference, "legacy/ref");
-      assert.equal(event.error, "missing");
+      assert.equal("reference" in event, false);
+      assert.equal("error" in event, false);
     }
   });
 
@@ -794,15 +795,23 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should return UnknownEvent for unrecognised types", () => {
-    const event = parseEvent({ type: "future_event_v2", data: "something" });
-    // Unknown events have the raw type string
-    assert.equal(event.type, "future_event_v2");
+  it("fails closed (throws) on an unrecognised type not in the schema inventory", () => {
+    // An event whose `type` is not in the generated KNOWN_AGENT_EVENT_TYPES
+    // inventory is a contract violation for a version-matched client and must
+    // be rejected with a typed error, not laundered into a fabricated
+    // UnknownEvent. (Version skew is handled separately.)
+    assert.throws(
+      () => parseEvent({ type: "future_event_v2", data: "something" }),
+      (err) => err instanceof MeerkatError && err.code === "UNKNOWN_EVENT_TYPE",
+    );
   });
 
-  it("should handle missing type field", () => {
+  it("preserves a frame missing the type discriminant as malformed_event", () => {
+    // A frame with no `type` is a malformed wire shape — preserved as a
+    // `malformed_event` frame (not fabricated into a typed event, and not a hard
+    // throw that would crash a streaming consumer on a control/keepalive frame).
     const event = parseEvent({ delta: "oops" });
-    assert.equal(event.type, "");
+    assert.equal(event.type, "malformed_event");
   });
 
   it("should parse scoped wrapper events", () => {
@@ -832,7 +841,6 @@ describe("Typed Events", () => {
       payload: {
         operation: "remove",
         target: "filesystem",
-        status: "staged",
         status_info: {
           kind: "boundary_applied",
           base_changed: true,
@@ -847,7 +855,6 @@ describe("Typed Events", () => {
     if (event.type === "tool_config_changed") {
       assert.equal(event.payload.operation, "remove");
       assert.equal(event.payload.target, "filesystem");
-      assert.equal(event.payload.status, "staged");
       assert.deepEqual(event.payload.status_info, {
         kind: "boundary_applied",
         base_changed: true,
@@ -868,15 +875,21 @@ describe("Typed Events", () => {
       limit: 2,
       has_more: true,
       messages: [
-        { role: "system", content: "rules" },
+        { role: "system", content: "rules", created_at: "2026-01-01T00:00:00Z" },
         {
-          role: "assistant",
-          content: "working",
-          tool_calls: [{ id: "tc_1", name: "search", args: { q: "rust" } }],
+          role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+          blocks: [
+            {
+              block_type: "tool_use",
+              data: { id: "tc_1", name: "search", args: { q: "rust" } },
+            },
+          ],
           stop_reason: "tool_use",
         },
         {
           role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
           blocks: [
             {
               block_type: "tool_use",
@@ -892,7 +905,7 @@ describe("Typed Events", () => {
     assert.equal(history.sessionRef, "ref-1");
     assert.equal(history.limit, 2);
     assert.equal(history.hasMore, true);
-    assert.equal(history.messages[1].toolCalls[0].name, "search");
+    assert.equal(history.messages[1].blocks[0].name, "search");
     assert.equal(history.messages[2].blocks[0].name, "lookup");
   });
 
@@ -905,6 +918,7 @@ describe("Typed Events", () => {
       messages: [
         {
           role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
           blocks: [
             {
               block_type: "image",
@@ -943,6 +957,7 @@ describe("Typed Events", () => {
       messages: [
         {
           role: "user",
+          created_at: "2026-01-01T00:00:00Z",
           content: [
             {
               type: "video",
@@ -1087,7 +1102,6 @@ describe("Typed Events", () => {
       type: "background_job_completed",
       job_id: "j_123",
       display_name: "sleep 2",
-      status: "completed",
       terminal_status: "failed",
       detail: "exit_code: 1",
     });
@@ -1096,42 +1110,8 @@ describe("Typed Events", () => {
     if (event.type === "background_job_completed") {
       assert.equal(event.jobId, "j_123");
       assert.equal(event.displayName, "sleep 2");
-      assert.equal(event.legacyStatus, "completed");
       assert.equal(event.terminalStatus, "failed");
       assert.equal(event.detail, "exit_code: 1");
-    }
-  });
-
-  it("should parse background_job_completed without legacy status mirror", () => {
-    const event = parseEvent({
-      type: "background_job_completed",
-      job_id: "j_123",
-      display_name: "sleep 2",
-      terminal_status: "failed",
-      detail: "exit_code: 1",
-    });
-
-    assert.equal(event.type, "background_job_completed");
-    if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
-      assert.equal(event.terminalStatus, "failed");
-    }
-  });
-
-  it("should ignore malformed background_job_completed legacy status mirror", () => {
-    const event = parseEvent({
-      type: "background_job_completed",
-      job_id: "j_123",
-      display_name: "sleep 2",
-      status: 0,
-      terminal_status: "failed",
-      detail: "exit_code: 1",
-    });
-
-    assert.equal(event.type, "background_job_completed");
-    if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
-      assert.equal(event.terminalStatus, "failed");
     }
   });
 
@@ -1220,7 +1200,6 @@ describe("Typed Events", () => {
         type: "session",
         session_id: "00000000-0000-4000-8000-000000000001",
       },
-      source_id: "session:not-a-uuid",
       payload: { type: "text_delta", delta: "hi" },
     });
 
@@ -1228,7 +1207,6 @@ describe("Typed Events", () => {
       type: "session",
       sessionId: "00000000-0000-4000-8000-000000000001",
     });
-    assert.equal(envelope.sourceId, "session:not-a-uuid");
   });
 
   it("should not classify source from legacy session strings", () => {
@@ -1237,8 +1215,10 @@ describe("Typed Events", () => {
       payload: { type: "text_delta", delta: "hi" },
     });
 
+    // The legacy envelope-level string never classifies a typed source and is
+    // no longer surfaced on the typed envelope.
     assert.equal(envelope.source, undefined);
-    assert.equal(envelope.sourceId, "session:00000000-0000-4000-8000-000000000001");
+    assert.equal(envelope.sourceId, undefined);
   });
 });
 
@@ -1269,86 +1249,61 @@ describe("WorkGraph parsers", () => {
     evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
   };
 
-  it("parses typed owners, claims, and read-only snapshots", () => {
-    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
-      realm_id: "homecore",
-      namespace: "family/appointments",
-      all_namespaces: false,
-      captured_at: timestamp,
-      event_high_water_mark: 42,
-      items: [claimedItem],
-      edges: [
-        {
-          realm_id: "homecore",
-          namespace: "family/appointments",
-          kind: "blocks",
-          from_id: "notice-car-change",
-          to_id: "prep-dentist-ride",
-          created_at: timestamp,
-        },
-      ],
-      attention: [],
-      ready_item_ids: ["prep-dentist-ride"],
-    });
+  it("parses typed owners and claims", () => {
+    const item = parseWorkItem(claimedItem);
 
-    assert.equal(snapshot.realmId, "homecore");
-    assert.equal(snapshot.items[0].owner?.key.kind, "agent");
-    assert.equal(snapshot.items[0].claim?.owner.key.id, "homecore-kapellmeister");
-    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "host_confirmed" });
-    assert.equal(snapshot.edges[0].kind, "blocks");
-    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+    assert.equal(item.realm_id, "homecore");
+    assert.equal(item.owner?.key.kind, "agent");
+    assert.equal(item.claim?.owner.key.id, "homecore-kapellmeister");
+    assert.deepEqual(item.completion_policy, { kind: "host_confirmed" });
   });
 
   it("rejects malformed WorkGraph lifecycle truth", () => {
     assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          namespace: "family/appointments",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [{ ...claimedItem, status: undefined }],
-          edges: [],
-          attention: [],
-          ready_item_ids: [],
-        }),
+      () => parseWorkItem({ ...claimedItem, status: undefined }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("Invalid workgraph item"),
+        String(error.message).includes("WorkItem"),
     );
   });
 
   it("requires typed WorkGraph claim owners", () => {
     assert.throws(
       () =>
-        MeerkatClient.parseWorkItem({
+        parseWorkItem({
           ...claimedItem,
           claim: { claimed_at: timestamp },
         }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("missing owner"),
+        String(error.message).includes("owner"),
     );
   });
 
-  it("defaults WorkGraph fields added after 0.6.23 for compatible older payloads", () => {
-    const { completion_policy: _completionPolicy, ...legacyItem } = claimedItem;
-    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
-      realm_id: "homecore",
-      all_namespaces: false,
-      captured_at: timestamp,
-      items: [legacyItem],
-      edges: [],
-      ready_item_ids: [],
-    });
-
-    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "self_attest" });
-    assert.deepEqual(snapshot.attention, []);
+  it("rejects payloads missing the required completion policy (no silent default)", () => {
+    const { completion_policy: _completionPolicy, ...truncatedItem } = claimedItem;
+    assert.throws(
+      () => parseWorkItem(truncatedItem),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("completion_policy"),
+    );
   });
 
-  it("rejects malformed WorkGraph attention authority enums", () => {
+  it("rejects unknown completion-policy kinds (fail-closed union parse)", () => {
+    assert.throws(
+      () => parseWorkItem({ ...claimedItem, completion_policy: { kind: "vibes" } }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("kind"),
+    );
+  });
+
+  it("rejects malformed WorkGraph attention authority enums", async () => {
     const attention = {
       binding_id: "attention-1",
       target: { kind: "session", session_id: "session-1" },
@@ -1364,63 +1319,51 @@ describe("WorkGraph parsers", () => {
       updated_at: timestamp,
     };
 
-    assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [claimedItem],
-          edges: [],
-          attention: [{ ...attention, mode: "not_a_mode" }],
-          ready_item_ids: [],
-        }),
+    const clientFor = (entry) => {
+      const client = new MeerkatClient();
+      client.request = async () => ({ attention: [entry] });
+      return client;
+    };
+
+    await assert.rejects(
+      clientFor({ ...attention, mode: "not_a_mode" }).listWorkGraphAttention(),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("invalid mode"),
+        String(error.message).includes("WorkAttentionMode"),
     );
-    assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [claimedItem],
-          edges: [],
-          attention: [{ ...attention, delegated_authority: "not_authority" }],
-          ready_item_ids: [],
-        }),
+    await assert.rejects(
+      clientFor({ ...attention, delegated_authority: "not_authority" }).listWorkGraphAttention(),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("delegated_authority"),
+        String(error.message).includes("AttentionDelegatedAuthority"),
     );
   });
 
-  it("parses WorkGraph attention lifecycle events", () => {
-    const result = MeerkatClient.parseWorkGraphEventArray([
-      {
-        seq: 43,
-        realm_id: "homecore",
-        namespace: "family/appointments",
-        item_id: "prep-dentist-ride",
-        kind: "attention_created",
-        at: timestamp,
-        payload: { attention: { binding_id: "attention-1" } },
-      },
-      {
-        realm_id: "homecore",
-        namespace: "family/appointments",
-        item_id: "prep-dentist-ride",
-        kind: "attention_updated",
-        at: timestamp,
-      },
-    ]);
+  it("fails closed when WorkGraph list collections are not arrays", async () => {
+    const clientFor = (response) => {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    };
+    const invalidResponse = (error) =>
+      error instanceof MeerkatError && error.code === "INVALID_RESPONSE";
 
-    assert.equal(result[0].kind, "attention_created");
-    assert.equal(result[0].payload.attention.binding_id, "attention-1");
-    assert.equal(result[1].kind, "attention_updated");
+    await assert.rejects(
+      clientFor({ items: "oops" }).listWorkGraphItems({ realm_id: "homecore" }),
+      invalidResponse,
+    );
+    await assert.rejects(
+      clientFor({ items: { not: "a list" } }).listReadyWorkGraphItems({
+        realm_id: "homecore",
+      }),
+      invalidResponse,
+    );
+    await assert.rejects(
+      clientFor({ events: 42 }).listWorkGraphEvents({ realm_id: "homecore" }),
+      invalidResponse,
+    );
   });
 });
 
@@ -1627,11 +1570,16 @@ describe("Session wrappers", () => {
     assert.deepEqual(calls, [
       {
         method: "session/inject_context",
-        params: { session_id: "s1", text: "ctx", source: "test", idempotency_key: "k1" },
+        params: {
+          session_id: "s1",
+          content: { type: "text", text: "ctx" },
+          source: "test",
+          idempotency_key: "k1",
+        },
       },
       {
         method: "session/inject_context",
-        params: { session_id: "s2", text: "ctx2" },
+        params: { session_id: "s2", content: { type: "text", text: "ctx2" } },
       },
     ]);
   });
@@ -1921,8 +1869,13 @@ describe("Comms methods", () => {
         limit: params.limit,
         has_more: false,
         messages: [
-          { role: "user", content: "hello" },
-          { role: "assistant", content: "ok", stop_reason: "end_turn" },
+          { role: "user", content: "hello", created_at: "2026-01-01T00:00:00Z" },
+          {
+            role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+            blocks: [{ block_type: "text", data: { text: "ok" } }],
+            stop_reason: "end_turn",
+          },
         ],
       };
     };
@@ -1933,7 +1886,7 @@ describe("Comms methods", () => {
     assert.equal(history.sessionRef, "history-ref");
     assert.equal(history.offset, 1);
     assert.equal(history.limit, 2);
-    assert.equal(history.messages[1].role, "assistant");
+    assert.equal(history.messages[1].role, "block_assistant");
     assert.deepEqual(calls, [
       {
         method: "session/history",
@@ -2396,36 +2349,42 @@ describe("Parity wrappers", () => {
       realmId: "homecore",
       namespace: "family/appointments",
     });
-    const listed = await client.listWorkGraphItems({ realmId: "homecore", limit: 5 });
+    const listed = await client.listWorkGraphItems({ realm_id: "homecore", limit: 5 });
     const ready = await client.listReadyWorkGraphItems({
       namespace: "family/appointments",
       limit: 3,
     });
     const snapshot = await client.getWorkGraphSnapshot({
-      realmId: "homecore",
+      realm_id: "homecore",
       namespace: "family/appointments",
     });
-    const events = await client.listWorkGraphEvents({ realmId: "homecore", limit: 10 });
+    const events = await client.listWorkGraphEvents({ realm_id: "homecore", limit: 10 });
     const goal = await client.getWorkGraphGoalStatus({
-      realmId: "homecore",
+      binding_id: "attention-1",
+      realm_id: "homecore",
       namespace: "family/appointments",
-      bindingId: "attention-1",
     });
     const attentionList = await client.listWorkGraphAttention({
-      realmId: "homecore",
+      realm_id: "homecore",
       status: { state: "active" },
-      target: { kind: "session", sessionId: "session-1" },
+      target: { kind: "session", session_id: "session-1" },
     });
 
     assert.equal(fetched.id, "prep-dentist-ride");
+    assert.equal(fetched.claim, undefined);
+    assert.deepEqual(fetched.evidence_refs, [{ kind: "message_draft", id: "draft-1" }]);
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
-    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
-    assert.equal(snapshot.attention[0].bindingId, "attention-1");
+    assert.deepEqual(snapshot.ready_item_ids, ["prep-dentist-ride"]);
+    assert.equal(snapshot.attention[0].binding_id, "attention-1");
     assert.equal(events.events[0].kind, "created");
     assert.equal(goal.item.id, "prep-dentist-ride");
-    assert.equal(goal.attention.bindingId, "attention-1");
-    assert.equal(attentionList.attention[0].bindingId, "attention-1");
+    assert.equal(goal.attention.binding_id, "attention-1");
+    assert.equal(attentionList.attention[0].binding_id, "attention-1");
+    assert.deepEqual(attentionList.attention[0].target, {
+      kind: "session",
+      session_id: "session-1",
+    });
     assert.deepEqual(calls.map((c) => c.method), [
       "workgraph/get",
       "workgraph/list",
@@ -2452,6 +2411,16 @@ describe("Parity wrappers", () => {
       status: { state: "active" },
       target: { kind: "session", session_id: "session-1" },
     });
+  });
+
+  it("fails closed on malformed WorkGraph list entries (generated parsers)", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ items: [{ id: "only-an-id" }] });
+    await assert.rejects(
+      client.listWorkGraphItems({ realm_id: "homecore" }),
+      (error) =>
+        error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
   });
 
   it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {
@@ -2558,8 +2527,11 @@ describe("Parity wrappers", () => {
         systemPrompt: "system",
         outputSchema: { type: "object" },
         structuredOutputRetries: 2,
-        providerParams: { temperature: 0.2 },
-        authBinding: { realm: "dev", binding: "default_openai" },
+        providerParams: { action: "set", value: { temperature: 0.2 } },
+        authBinding: {
+          action: "set",
+          value: { realm: "dev", binding: "default_openai" },
+        },
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
@@ -2656,7 +2628,7 @@ describe("Parity wrappers", () => {
     assert.equal(calls[4].params.limit, 5);
   });
 
-  it("lowers mob_turn_start clear_* overrides to the tagged tri-state", async () => {
+  it("passes mob_turn_start tri-state overrides through unchanged", async () => {
     const client = new MeerkatClient();
     const calls = [];
     client.request = async (method, params) => {
@@ -2664,10 +2636,10 @@ describe("Parity wrappers", () => {
       return { status: "started" };
     };
 
-    // Clear coverage: `clear*` lowers to the tagged `clear` override.
+    // Clear coverage: the tagged `clear` override passes through unchanged.
     await client.mobTurnStart("mob-1", "worker-1", "continue", {
-      clearProviderParams: true,
-      clearAuthBinding: true,
+      providerParams: { action: "clear" },
+      authBinding: { action: "clear" },
     });
     assert.deepEqual(calls[0].params, {
       mob_id: "mob-1",
@@ -2677,21 +2649,10 @@ describe("Parity wrappers", () => {
       auth_binding: { action: "clear" },
     });
 
-    // Inherit coverage: neither value nor clear -> the field is omitted.
+    // Inherit coverage: omitted -> the field is omitted on the wire.
     await client.mobTurnStart("mob-1", "worker-1", "continue");
     assert.equal(calls[1].params.provider_params, undefined);
     assert.equal(calls[1].params.auth_binding, undefined);
-
-    // The illegal set + clear combination is rejected at the wrapper boundary,
-    // mirroring the wire serde boundary.
-    await assert.rejects(
-      () =>
-        client.mobTurnStart("mob-1", "worker-1", "continue", {
-          providerParams: { temperature: 0.2 },
-          clearProviderParams: true,
-        }),
-      (error) => error instanceof MeerkatError && error.code === "INVALID_ARGS",
-    );
   });
 
   it("rejects malformed mob spawn_many result envelopes", async () => {
@@ -3028,6 +2989,26 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
           error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
       );
     });
+
+    it("rejects a missing mobs envelope instead of coalescing to empty success", async () => {
+      const client = mobListClient({});
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /mob\/list/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a non-array mobs envelope", async () => {
+      const client = mobListClient({ mobs: "nope" });
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
   });
 
   // SITE 2 — mobStatus: require record + non-empty status + non-empty mob_id;
@@ -3138,6 +3119,60 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
           /invalid member status/.test(String(error.message)),
       );
     });
+
+    it("rejects malformed (non-object) member entries instead of skipping them", async () => {
+      const client = membersClient(["not-an-object"]);
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a missing members collection instead of returning empty success", async () => {
+      const client = new MeerkatClient();
+      client.request = async () => ({});
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /expected array/.test(String(error.message)),
+      );
+    });
+  });
+
+  // Malformed kickoff/ready member collections are contract violations and
+  // must raise — never be silently collapsed into empty success.
+  describe("waitMobKickoff/waitMobReady malformed collections", () => {
+    for (const [label, invoke] of [
+      ["waitMobKickoff", (client) => client.waitMobKickoff("mob-1")],
+      ["waitMobReady", (client) => client.waitMobReady("mob-1")],
+    ]) {
+      it(`${label} rejects a missing members collection`, async () => {
+        const client = new MeerkatClient();
+        client.request = async () => ({});
+        await assert.rejects(
+          () => invoke(client),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE" &&
+            /expected array/.test(String(error.message)),
+        );
+      });
+
+      it(`${label} rejects malformed member entries`, async () => {
+        const client = new MeerkatClient();
+        client.request = async () => ({ members: [42] });
+        await assert.rejects(
+          () => invoke(client),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE",
+        );
+      });
+    }
   });
 
   // SITE 4 — respawnMobMember: status must be present and in the closed set;
@@ -3404,7 +3439,7 @@ describe("Live wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
-      return { status: "closed", closed: true };
+      return { status: "closed" };
     };
 
     const result = await client.liveClose({ channel_id: "live_channel_41" });
@@ -3412,14 +3447,13 @@ describe("Live wrappers", () => {
     assert.deepEqual(calls, [
       { method: "live/close", params: { channel_id: "live_channel_41" } },
     ]);
-    assert.deepEqual(result, { status: "closed", closed: true });
+    assert.deepEqual(result, { status: "closed" });
   });
 
   it("rejects missing or unknown live/close generated status", async () => {
     const malformedResponses = [
       { closed: true },
-      { status: "closed" },
-      { status: "already_closed", closed: true },
+      { status: "already_closed" },
     ];
 
     for (const response of malformedResponses) {
@@ -3444,7 +3478,7 @@ describe("Live wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
-      return { status: "queued", refresh_enqueued: true };
+      return { status: "queued" };
     };
 
     const result = await client.liveRefresh({ channel_id: "live_channel_42" });
@@ -3452,14 +3486,13 @@ describe("Live wrappers", () => {
     assert.deepEqual(calls, [
       { method: "live/refresh", params: { channel_id: "live_channel_42" } },
     ]);
-    assert.deepEqual(result, { status: "queued", refresh_enqueued: true });
+    assert.deepEqual(result, { status: "queued" });
   });
 
   it("rejects missing or unknown live/refresh generated status", async () => {
     const malformedResponses = [
       { refresh_enqueued: true },
-      { status: "queued" },
-      { status: "applied_sync", refresh_enqueued: true },
+      { status: "applied_sync" },
     ];
 
     for (const response of malformedResponses) {
@@ -3534,6 +3567,368 @@ describe("Mob member host ingress", () => {
     await assert.rejects(
       () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
       /missing member_ref/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SDK fail-closed parse boundaries (DOGMA remediation rows 55/88/161/192/246/357)
+// ---------------------------------------------------------------------------
+
+describe("Member-send handling-mode parse boundary (row 357)", () => {
+  it("returns the runtime-reported handling mode without substitution", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      handling_mode: "queue",
+    });
+
+    // Client requested "steer"; runtime receipt says "queue" — the receipt wins.
+    const receipt = await new Mob(client, "mob-1").member("reviewer-1").send("hi", {
+      handlingMode: "steer",
+    });
+    assert.equal(receipt.handlingMode, "queue");
+  });
+
+  it("throws INVALID_RESPONSE on a missing handling_mode instead of substituting the requested mode", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      // handling_mode intentionally absent
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hi", { handlingMode: "queue" }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /handling_mode/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE on an unknown handling_mode variant", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      handling_mode: "interrupt",
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hi"),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Session fork result parse boundary (row 88)", () => {
+  it("parses a well-formed fork result", () => {
+    const result = MeerkatClient.parseSessionForkResult({
+      source_session_id: "src-1",
+      session_id: "fork-1",
+      session_ref: "ref-1",
+      message_count: 4,
+    });
+    assert.equal(result.sourceSessionId, "src-1");
+    assert.equal(result.sessionId, "fork-1");
+    assert.equal(result.sessionRef, "ref-1");
+    assert.equal(result.messageCount, 4);
+  });
+
+  it("throws INVALID_RESPONSE when session_id is missing instead of fabricating an empty handle", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionForkResult({
+          source_session_id: "src-1",
+          message_count: 4,
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /session_id/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE when message_count is malformed instead of coercing to zero", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionForkResult({
+          source_session_id: "src-1",
+          session_id: "fork-1",
+          message_count: "many",
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Session history parse boundary (row 192)", () => {
+  it("throws INVALID_RESPONSE when session_id is missing instead of returning an empty transcript", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionHistory({
+          message_count: 0,
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /session_id/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE when message_count is malformed instead of coercing to zero", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionHistory({
+          session_id: "s1",
+          message_count: null,
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE for transcript revisions missing required fields", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRevision({
+          session_id: "s1",
+          // revision/head_revision/message_count missing
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Capability status parse boundary (row 161)", () => {
+  it("parses a bare-string capability status", () => {
+    const cap = MeerkatClient.parseWireCapabilityEntry({
+      id: "memory",
+      description: "Semantic memory",
+      status: "Available",
+    });
+    assert.deepEqual(cap, {
+      id: "memory",
+      description: "Semantic memory",
+      status: "Available",
+    });
+  });
+
+  it("parses an externally-tagged capability status object without fabricating 'Unknown'", () => {
+    const cap = MeerkatClient.parseWireCapabilityEntry({
+      id: "memory",
+      description: "Semantic memory",
+      status: { DisabledByPolicy: { description: "blocked" } },
+    });
+    assert.equal(cap.status, "DisabledByPolicy");
+  });
+
+  it("throws INVALID_RESPONSE on a missing capability status instead of coalescing to 'Available'/'Unknown'", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          id: "memory",
+          description: "Semantic memory",
+          // status absent
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE on an unparseable (numeric) capability status", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          id: "memory",
+          description: "Semantic memory",
+          status: 7,
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE on a missing capability id instead of coercing to ''", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          description: "Semantic memory",
+          status: "Available",
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /id/.test(error.message),
+    );
+  });
+});
+
+describe("Transport corrupted-frame fault (row 246)", () => {
+  it("surfaces a typed PROTOCOL_ERROR to pending callers instead of silently dropping a corrupted frame", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write: () => {}, destroy: () => {} }, kill: () => {} };
+
+    // Register a pending request through the real request bookkeeping.
+    const pending = client.registerRequest(client.requestId + 1);
+
+    // Feed a corrupted (non-JSON) frame into the read loop.
+    client.handleLine("this is not json{");
+
+    await assert.rejects(
+      () => pending,
+      (error) => error instanceof MeerkatError && error.code === "PROTOCOL_ERROR",
+    );
+  });
+
+  it("marks the client unusable after transport corruption: later calls reject with the recorded fault, process is torn down", async () => {
+    let killed = false;
+    const client = new MeerkatClient();
+    client.process = {
+      stdin: { write: () => {}, destroy: () => {} },
+      kill: () => {
+        killed = true;
+      },
+    };
+
+    client.handleLine("this is not json{");
+
+    // The condemned process must be torn down, not left writable.
+    assert.equal(killed, true);
+    assert.equal(client.process, null);
+
+    // A later SDK call must reject immediately with the recorded typed fault —
+    // never NOT_CONNECTED ambiguity, never a write into the dead stream.
+    await assert.rejects(
+      async () => client.request("ping", {}),
+      (error) => error instanceof MeerkatError && error.code === "PROTOCOL_ERROR",
+    );
+  });
+});
+
+describe("Callback tool result content type (row 55)", () => {
+  it("delivers a multimodal block array to the runtime as blocks rather than a stringified blob", async () => {
+    const client = new MeerkatClient();
+    const blocks = [
+      { type: "text", text: "see image" },
+      { type: "image", media_type: "image/png", source: "blob", blob_id: "blob_1" },
+    ];
+    // Register the tool before attaching a process so the eager
+    // `tools/register` round-trip is skipped and only the callback response
+    // write is captured below.
+    client.registerTool("render", "Render", { type: "object" }, async () => blocks);
+
+    const writes = [];
+    client.process = { stdin: { write: (line) => writes.push(line) } };
+
+    client.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tool/execute",
+        params: { name: "render", arguments: {} },
+      }),
+    );
+
+    // Allow the handler promise + writeCallbackResponse microtask to settle.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(writes.length, 1);
+    const response = JSON.parse(writes[0]);
+    assert.equal(response.id, 42);
+    assert.equal(response.result.is_error, false);
+    assert.deepEqual(response.result.content, blocks);
+  });
+});
+
+describe("Session transcript fail-closed parsing", () => {
+  it("rejects messages missing identity facts instead of fabricating them", () => {
+    // Missing role.
+    assert.throws(
+      () => MeerkatClient.parseSessionMessage({ content: "no role" }),
+      /missing role/,
+    );
+    // Missing created_at (required on every WireSessionMessage variant).
+    assert.throws(
+      () => MeerkatClient.parseSessionMessage({ role: "user", content: "x" }),
+      /missing created_at/,
+    );
+    // Tool result missing tool_use_id.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "tool_results",
+          created_at: "2026-05-26T10:00:00Z",
+          results: [{ content: "missing tool_use_id" }],
+        }),
+      /missing tool_use_id/,
+    );
+    // Tool result missing mandatory content — must not be coalesced into
+    // an empty transcript string.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "tool_results",
+          created_at: "2026-05-26T10:00:00Z",
+          results: [{ tool_use_id: "tc_1", is_error: false }],
+        }),
+      /missing content/,
+    );
+    // Present-but-non-list blocks.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+          created_at: "2026-05-26T10:00:00Z",
+          blocks: "not-a-list",
+        }),
+      /blocks must be a list/,
+    );
+    // Block missing block_type.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+          created_at: "2026-05-26T10:00:00Z",
+          blocks: [{ data: { text: "missing block_type" } }],
+        }),
+      /missing block_type/,
+    );
+  });
+
+  it("rejects transcript rewrite results missing identity facts", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRewriteResult({
+          revision: "r2",
+          parent_revision: "r1",
+          message_count: 1,
+          commit: {},
+        }),
+      /missing session_id/,
+    );
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRewriteResult({
+          session_id: "s1",
+          revision: "r2",
+          parent_revision: "r1",
+          message_count: 1,
+        }),
+      /commit must be an object/,
     );
   });
 });

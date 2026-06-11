@@ -682,7 +682,7 @@ mod tests {
     use meerkat_core::ToolError;
     use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::{
-        HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
+        HookAdapterConfig, HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint,
         HookRuntimeKind,
     };
     use std::path::Path;
@@ -1022,11 +1022,11 @@ mod tests {
                 point: HookPoint::TurnBoundary,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
-                runtime: HookRuntimeConfig::new(
+                runtime: HookAdapterConfig::from_kind_and_value(
                     HookRuntimeKind::InProcess,
                     Some(serde_json::json!({"name":"sdk_hook"})),
                 )
-                .unwrap_or_default(),
+                .expect("in-process adapter config"),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1040,11 +1040,11 @@ mod tests {
             point: HookPoint::TurnBoundary,
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Observe,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::Command,
                 Some(serde_json::json!({ "command": command })),
             )
-            .unwrap_or_default(),
+            .expect("command adapter config"),
             ..Default::default()
         }
     }
@@ -1093,11 +1093,13 @@ mod tests {
         let ids: Vec<String> = resolved.entries.iter().map(|h| h.id.0.clone()).collect();
         assert_eq!(ids, vec!["dup", "a", "c", "u"]);
 
-        let first_runtime = resolved.entries[0]
-            .runtime
-            .config_value()
-            .expect("runtime config");
-        assert_eq!(first_runtime["command"], "echo active");
+        let first_runtime = &resolved.entries[0].runtime;
+        match first_runtime {
+            HookAdapterConfig::Command(command) => {
+                assert_eq!(command.command, "echo active");
+            }
+            other => panic!("expected command adapter, got {other:?}"),
+        }
     }
 
     #[tokio::test]

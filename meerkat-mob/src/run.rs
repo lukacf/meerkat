@@ -6,7 +6,7 @@ use crate::definition::{
 };
 use crate::error::MobError;
 use crate::ids::{
-    AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId,
+    AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MobId,
     ProfileName, RunId, StepId,
 };
 use crate::machines::mob_machine as mob_dsl;
@@ -447,6 +447,15 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
             | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. }
+            | mob_dsl::MobMachineInput::ProbeMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ComputeRespawnGeneration { .. }
+            | mob_dsl::MobMachineInput::ClassifyStepOutputFault { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisor { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisorNoEligibleTarget { .. }
+            | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
+            | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
+            | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
     };
 }
 
@@ -1601,7 +1610,16 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
-            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. } => {
+            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. }
+            | mob_dsl::MobMachineInput::ProbeMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ComputeRespawnGeneration { .. }
+            | mob_dsl::MobMachineInput::ClassifyStepOutputFault { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisor { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisorNoEligibleTarget { .. }
+            | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
+            | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
+            | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));
@@ -3004,7 +3022,7 @@ fn project_flow_run_target_success_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
 ) -> Result<flow_run::Outcome, MobError> {
     let count = projected_run_step_value(
         &machine_state.run_step_target_success_counts,
@@ -3056,7 +3074,7 @@ fn project_flow_run_target_canceled_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     required_machine_value(&machine_state.run_status, &run_key, "run_status")?;
@@ -3082,7 +3100,7 @@ fn project_flow_run_target_failure_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
     retry_key: &str,
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
@@ -4418,16 +4436,32 @@ pub struct MobRun {
 }
 
 impl MobRun {
-    pub fn public_flow_status_run_value(run: Option<&Self>) -> Result<serde_json::Value, MobError> {
-        match run {
-            Some(run) => run.public_status_value(),
-            None => Ok(serde_json::Value::Null),
+    /// Typed wire status for the run lifecycle.
+    fn wire_status(&self) -> meerkat_contracts::WireMobRunStatus {
+        match self.status {
+            MobRunStatus::Pending => meerkat_contracts::WireMobRunStatus::Pending,
+            MobRunStatus::Running => meerkat_contracts::WireMobRunStatus::Running,
+            MobRunStatus::Completed => meerkat_contracts::WireMobRunStatus::Completed,
+            MobRunStatus::Failed => meerkat_contracts::WireMobRunStatus::Failed,
+            MobRunStatus::Canceled => meerkat_contracts::WireMobRunStatus::Canceled,
         }
     }
 
-    /// Public flow-status projection. Store-local timestamps are deliberately
-    /// omitted because MobMachine does not own them as semantic flow facts.
-    pub fn public_status_value(&self) -> Result<serde_json::Value, MobError> {
+    pub fn public_flow_status_run_value(
+        run: Option<&Self>,
+    ) -> Result<Option<meerkat_contracts::WireMobRun>, MobError> {
+        match run {
+            Some(run) => run.public_status_value().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Public typed flow-status projection. The canonical identity/lifecycle
+    /// fields are lifted into the typed [`meerkat_contracts::WireMobRun`]; the
+    /// remaining kernel-owned step/loop projection rides along in `kernel`.
+    /// Store-local timestamps are deliberately omitted because MobMachine does
+    /// not own them as semantic flow facts.
+    pub fn public_status_value(&self) -> Result<meerkat_contracts::WireMobRun, MobError> {
         let mut value = serde_json::to_value(self).map_err(|error| {
             MobError::Internal(format!(
                 "public flow status projection failed to encode run '{}': {error}",
@@ -4465,7 +4499,28 @@ impl MobRun {
             }
         }
 
-        Ok(value)
+        // Lift the typed identity/lifecycle fields out of the kernel map so the
+        // wire shape carries them as closed typed fields rather than re-derived
+        // free-form values. The remaining object becomes the kernel projection.
+        object.remove("run_id");
+        object.remove("mob_id");
+        object.remove("flow_id");
+        object.remove("status");
+
+        let Some(kernel) = value.as_object().cloned() else {
+            return Err(MobError::Internal(format!(
+                "public flow status projection for run '{}' did not encode as an object",
+                self.run_id
+            )));
+        };
+
+        Ok(meerkat_contracts::WireMobRun {
+            run_id: self.run_id.to_string(),
+            mob_id: self.mob_id.to_string(),
+            flow_id: self.flow_id.to_string(),
+            status: self.wire_status(),
+            kernel,
+        })
     }
 
     /// Read-only access to the run's current status.
@@ -4877,11 +4932,7 @@ impl MobRun {
         }
         let config = FlowRunConfig {
             flow_id: flow_id.clone(),
-            flow_spec: FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
+            flow_spec: FlowSpec::new(None, steps, None),
             topology: None,
             supervisor: None,
             limits: None,
@@ -5374,11 +5425,7 @@ impl MobRun {
         }
         let config = FlowRunConfig {
             flow_id: FlowId::from("placeholder"),
-            flow_spec: FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
+            flow_spec: FlowSpec::new(None, steps, None),
             topology: None,
             supervisor: None,
             limits: None,
@@ -6337,7 +6384,9 @@ mod tests {
                     value: serde_json::json!(true),
                 }),
                 timeout_ms: Some(2000),
-                expected_schema_ref: Some("schema.json".to_string()),
+                expected_schema_ref: Some(crate::definition::FlowSchemaRef::Named(
+                    crate::definition::SchemaName::from("schema.json"),
+                )),
                 branch: Some(BranchId::from("branch-a")),
                 depends_on_mode: crate::definition::DependencyMode::All,
                 allowed_tools: None,
@@ -6349,18 +6398,19 @@ mod tests {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("flow-a"),
-            FlowSpec {
-                description: Some("demo flow".to_string()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("demo flow".to_string()), steps, None),
         );
 
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("lead"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "lead".to_string(),
@@ -6370,12 +6420,17 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -6385,7 +6440,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut definition = MobDefinition::explicit("mob");
@@ -6405,6 +6460,7 @@ mod tests {
         definition.supervisor = Some(SupervisorSpec {
             role: ProfileName::from("lead"),
             escalation_threshold: 3,
+            escalation_turn_timeout_ms: None,
         });
         definition.limits = Some(LimitsSpec {
             max_flow_duration_ms: Some(60_000),
@@ -6739,11 +6795,19 @@ mod tests {
             flow_authority_inputs: Vec::new(),
         };
 
-        let value = run.public_status_value().expect("public projection");
-        let object = value.as_object().expect("run projection is object");
+        let wire = run.public_status_value().expect("public projection");
+        // Typed identity/lifecycle fields are lifted out of the kernel map.
+        assert_eq!(wire.flow_id, "flow-a");
+        assert_eq!(wire.mob_id, "mob");
+        assert_eq!(wire.status, meerkat_contracts::WireMobRunStatus::Completed);
+        let object = &wire.kernel;
         assert!(!object.contains_key("created_at"));
         assert!(!object.contains_key("completed_at"));
-        assert_eq!(object.get("status"), Some(&serde_json::json!("completed")));
+        // The typed fields are no longer present as free-form kernel entries.
+        assert!(!object.contains_key("status"));
+        assert!(!object.contains_key("run_id"));
+        assert!(!object.contains_key("mob_id"));
+        assert!(!object.contains_key("flow_id"));
         assert!(object.contains_key("flow_state"));
 
         let step_entry = object["step_ledger"]
@@ -6811,11 +6875,7 @@ mod tests {
                 output_format: crate::definition::StepOutputFormat::Json,
             },
         );
-        let spec = FlowSpec {
-            description: None,
-            steps,
-            root: None,
-        };
+        let spec = FlowSpec::new(None, steps, None);
         let error = topological_steps(&spec).expect_err("self-dependency should be rejected");
         assert!(
             error.to_string().contains("self-dependency"),

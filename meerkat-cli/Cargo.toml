@@ -72,7 +72,6 @@ humantime = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
-nix = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }

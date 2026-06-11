@@ -1,21 +1,18 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
 use super::handle::MobHandle;
-use super::path::resolve_context_path;
+use super::path::{PathResolveError, resolve_context_path};
 use super::supervisor::Supervisor;
 use super::terminalization::{
-    FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
+    FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
 };
 use super::topology::{MobTopologyService, PolicyDecision};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
 use crate::definition::{
-    CollectionPolicy, DispatchMode, FlowNodeSpec, FlowStepSpec, FrameSpec, FrameStepSpec,
-    PolicyMode, StepOutputFormat,
+    CollectionPolicy, DispatchMode, FlowSchemaRef, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::ids::{
-    AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, ProfileName, RunId, StepId,
-};
+use crate::ids::{AgentIdentity, FlowId, FlowNodeId, FrameId, ProfileName, RunId, StepId};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
@@ -135,13 +132,7 @@ impl FlowEngine {
             .map(Duration::from_millis)
             .map(|limit| flow_started_at + limit);
 
-        let synthesized_root;
-        let root_spec = if let Some(root_spec) = &config.flow_spec.root {
-            root_spec
-        } else {
-            synthesized_root = legacy_flat_steps_as_root_frame(&config.flow_spec.steps);
-            &synthesized_root
-        };
+        let root_spec = &config.flow_spec.root;
         // All flow execution is routed through FlowFrameEngine so branch,
         // dependency, loop, and ready-queue decisions remain MobMachine-owned.
         {
@@ -325,6 +316,51 @@ impl FlowEngine {
         }
     }
 
+    /// Classify a typed step-output parse fault into the machine-owned
+    /// retry-vs-terminal disposition. The retry-vs-fail decision (attempt vs
+    /// max-retries) is MobMachine-owned; the shell only supplies the typed
+    /// fault and current attempt counters and mirrors the emitted disposition.
+    /// The failure-ledger reason text stays shell-side (rendered from the
+    /// fault `Display`).
+    async fn classify_step_output_fault(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        fault: &StepOutputFault,
+        attempt: usize,
+        max_retries: usize,
+    ) -> Result<mob_dsl::StepFaultDispositionKind, MobError> {
+        let fault_kind = match fault {
+            StepOutputFault::MalformedJson { .. } => mob_dsl::StepOutputFaultKind::MalformedJson,
+        };
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyStepOutputFault {
+                run_id: mob_dsl::RunId::from(run_id.to_string()),
+                step_id: mob_dsl::StepId::from(step_id.as_str()),
+                target_retry_key: format!("{step_id}:{target}"),
+                fault: fault_kind,
+                attempt: attempt as u32,
+                max_retries: max_retries as u32,
+            })
+            .await?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::StepOutputFaultClassified { disposition, .. } => {
+                    Some(disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted step-output fault observation but emitted no disposition"
+                        .into(),
+                )
+            })
+    }
+
     /// Resolve the flow-topology delegation-edge admission verdict for a
     /// `from_role -> to_role` edge under the configured enforcement `mode`.
     ///
@@ -336,15 +372,66 @@ impl FlowEngine {
     /// `DeniedAdvisory`); this method returns that machine-emitted verdict so
     /// the caller can mirror it. The shell never computes-and-enforces the
     /// admission itself: it only mirrors what the machine emitted.
+    /// Resolve the topology-edge allow/deny verdict from MobMachine.
+    ///
+    /// The shell supplies the *pure* rule-match projection (`None` when no rule
+    /// matched); MobMachine applies the machine-owned default policy to produce
+    /// the final verdict. The shell never applies an allow-by-default fallback.
+    async fn resolve_topology_edge_verdict(
+        &self,
+        from_role: &ProfileName,
+        to_role: &ProfileName,
+    ) -> Result<mob_dsl::PolicyDecision, MobError> {
+        let rule_match =
+            self.topology
+                .evaluate(from_role, to_role)
+                .map(|decision| match decision {
+                    PolicyDecision::Allow => mob_dsl::PolicyDecision::Allow,
+                    PolicyDecision::Deny => mob_dsl::PolicyDecision::Deny,
+                });
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::EvaluateTopologyEdge {
+                from_role: from_role.as_str().to_owned(),
+                to_role: to_role.as_str().to_owned(),
+                rule_match,
+            })
+            .await?;
+        let (effect_from_role, effect_to_role, verdict) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::TopologyEdgeVerdictResolved {
+                    from_role,
+                    to_role,
+                    verdict,
+                } => Some((from_role, to_role, verdict)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted topology edge rule-match but emitted no verdict".into(),
+                )
+            })?;
+        if effect_from_role != from_role.as_str() || effect_to_role != to_role.as_str() {
+            return Err(MobError::Internal(format!(
+                "MobMachine topology edge verdict drift: input=({from_role} -> {to_role}), effect=({effect_from_role} -> {effect_to_role})"
+            )));
+        }
+        Ok(verdict)
+    }
+
     async fn resolve_topology_edge_admission(
         &self,
         from_role: &ProfileName,
         to_role: &ProfileName,
         mode: &PolicyMode,
     ) -> Result<mob_dsl::MobFlowDelegationEdgeAdmissionKind, MobError> {
-        let rule_verdict = match self.topology.evaluate(from_role, to_role) {
-            PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
-            PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
+        let rule_verdict = match self
+            .resolve_topology_edge_verdict(from_role, to_role)
+            .await?
+        {
+            mob_dsl::PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
+            mob_dsl::PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
         };
         let dsl_mode = match mode {
             PolicyMode::Advisory => mob_dsl::MobFlowDelegationEdgeModeKind::Advisory,
@@ -428,14 +515,16 @@ impl FlowEngine {
         }
 
         // ── 1. Condition check ─────────────────────────────────────────────
-        if evaluate_condition_guard
-            && step
-                .condition
-                .as_ref()
-                .is_some_and(|cond| !evaluate_condition(cond, context))
-        {
-            let reason = "condition evaluated to false".to_string();
-            return Ok(StepGuardOutcome::Skipped { reason });
+        if evaluate_condition_guard && let Some(cond) = step.condition.as_ref() {
+            let condition_met =
+                evaluate_condition(cond, context).map_err(|error| MobError::ConditionEval {
+                    location: format!("step '{step_id}'"),
+                    reason: error.to_string(),
+                })?;
+            if !condition_met {
+                let reason = "condition evaluated to false".to_string();
+                return Ok(StepGuardOutcome::Skipped { reason });
+            }
         }
 
         // ── 2. Prompt rendering ────────────────────────────────────────────
@@ -478,7 +567,7 @@ impl FlowEngine {
         }
 
         // ── 4. Target selection ────────────────────────────────────────────
-        let mut targets: Vec<MeerkatId> = self
+        let mut targets: Vec<AgentIdentity> = self
             .handle
             .list_runnable_members()
             .await
@@ -612,7 +701,7 @@ impl FlowEngine {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        targets: &[MeerkatId],
+        targets: &[AgentIdentity],
         step: &FlowStepSpec,
         context: &FlowContext,
         config: &FlowRunConfig,
@@ -666,7 +755,7 @@ impl FlowEngine {
             });
         }
 
-        let mut successes: Vec<(MeerkatId, Value)> = Vec::new();
+        let mut successes: Vec<(AgentIdentity, Value)> = Vec::new();
         let mut failures: Vec<StepTargetFailure> = Vec::new();
 
         while let Some((target, result)) = in_flight.next().await {
@@ -733,7 +822,7 @@ impl FlowEngine {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         prompt: &ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
         output_format: StepOutputFormat,
@@ -814,28 +903,47 @@ impl FlowEngine {
                                 .await?;
                             return Ok(Ok(value));
                         }
-                        Err(reason) => {
-                            if attempt < max_retries {
-                                attempt += 1;
-                                self.emitter
-                                    .step_target_failed(
-                                        run_id.clone(),
-                                        step_id.clone(),
-                                        target.clone(),
-                                        reason.clone(),
-                                    )
-                                    .await?;
-                                continue;
-                            }
-                            self.emitter
-                                .step_target_failed(
-                                    run_id.clone(),
-                                    step_id.clone(),
-                                    target.clone(),
-                                    reason.clone(),
+                        Err(fault) => {
+                            // The parse boundary produced a typed `StepOutputFault`.
+                            // The emitter notice and (still string-shaped)
+                            // `StepTargetFailure` reason render it via `Display`;
+                            // MobMachine owns the retry-vs-terminal disposition.
+                            let reason = fault.to_string();
+                            let disposition = self
+                                .classify_step_output_fault(
+                                    run_id,
+                                    step_id,
+                                    target,
+                                    &fault,
+                                    attempt,
+                                    max_retries,
                                 )
                                 .await?;
-                            return Ok(Err(StepTargetFailure::unrecorded(reason)));
+                            match disposition {
+                                mob_dsl::StepFaultDispositionKind::Retry => {
+                                    attempt += 1;
+                                    self.emitter
+                                        .step_target_failed(
+                                            run_id.clone(),
+                                            step_id.clone(),
+                                            target.clone(),
+                                            reason,
+                                        )
+                                        .await?;
+                                    continue;
+                                }
+                                mob_dsl::StepFaultDispositionKind::Terminal => {
+                                    self.emitter
+                                        .step_target_failed(
+                                            run_id.clone(),
+                                            step_id.clone(),
+                                            target.clone(),
+                                            reason.clone(),
+                                        )
+                                        .await?;
+                                    return Ok(Err(StepTargetFailure::unrecorded(reason)));
+                                }
+                            }
                         }
                     }
                 }
@@ -932,6 +1040,9 @@ impl FlowEngine {
         config: &FlowRunConfig,
         error: MobError,
     ) -> Result<(), MobError> {
+        // Classify the typed error ONCE; the display string below is a
+        // projection of the same typed cause for ledger/escalation rendering.
+        let cause = FlowFailureCause::from_step_error(&error);
         let reason = error.to_string();
         let escalation_steps = self.fail_unfinished_steps(run_id, &reason).await?;
         if !escalation_steps.is_empty() {
@@ -944,7 +1055,7 @@ impl FlowEngine {
             supervisor.force_reset().await?;
         }
         let _ = self
-            .terminalize_failed(run_id.clone(), config.flow_id.clone(), reason)
+            .terminalize_failed(run_id.clone(), config.flow_id.clone(), cause)
             .await?;
         Ok(())
     }
@@ -1588,9 +1699,9 @@ impl FlowEngine {
         &self,
         run_id: RunId,
         flow_id: FlowId,
-        reason: String,
+        cause: FlowFailureCause,
     ) -> Result<TerminalizationOutcome, MobError> {
-        self.terminalize(run_id, flow_id, TerminalizationTarget::Failed { reason })
+        self.terminalize(run_id, flow_id, TerminalizationTarget::Failed { cause })
             .await
     }
 
@@ -1672,7 +1783,6 @@ impl FlowEngine {
         authority: MobMachineFlowAuthorityToken,
         machine_effects: Vec<mob_dsl::MobMachineEffect>,
     ) -> Result<TerminalizationOutcome, MobError> {
-        let next_status = target.status();
         let authority_input = input.authority_input(&run_id);
         self.verify_terminal_run_steps(&run_id).await?;
         for attempt in 0..5u32 {
@@ -1696,22 +1806,23 @@ impl FlowEngine {
                 &machine_effects,
             )?
             .next_state;
-            let transitioned = self
-                .run_store
-                .cas_run_snapshot_with_authority(
+            // Terminal status and terminal event commit through ONE store
+            // seam (a single SQLite transaction on durable storage) so they
+            // cannot split.
+            let committed = self
+                .terminalization
+                .commit_terminalization_with_snapshot(
                     &run_id,
+                    flow_id.clone(),
+                    target.clone(),
                     run.status.clone(),
                     &run.flow_state,
-                    next_status.clone(),
                     &next_state,
                     vec![authority_input.clone()],
                 )
                 .await?;
-            if transitioned {
-                return self
-                    .terminalization
-                    .record_persisted_terminalization(run_id, flow_id, target)
-                    .await;
+            if let Some(outcome) = committed {
+                return Ok(outcome);
             }
             if attempt < 4 {
                 tracing::debug!(attempt, "terminalize CAS contention, retrying");
@@ -1743,28 +1854,6 @@ impl FlowEngine {
         }
         Ok(())
     }
-}
-
-fn legacy_flat_steps_as_root_frame(steps: &IndexMap<StepId, FlowStepSpec>) -> FrameSpec {
-    let nodes = steps
-        .iter()
-        .map(|(step_id, step)| {
-            (
-                FlowNodeId::from(step_id.as_str()),
-                FlowNodeSpec::Step(FrameStepSpec {
-                    step_id: step_id.clone(),
-                    depends_on: step
-                        .depends_on
-                        .iter()
-                        .map(|dependency| FlowNodeId::from(dependency.as_str()))
-                        .collect(),
-                    depends_on_mode: step.depends_on_mode.clone(),
-                    branch: step.branch.clone(),
-                }),
-            )
-        })
-        .collect();
-    FrameSpec { nodes }
 }
 
 /// Outcome of canonical step execution via `execute_step_with_all_guards`.
@@ -1832,8 +1921,18 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
         return None;
     }
     Some(TurnToolOverlay {
-        allowed_tools: step.allowed_tools.clone(),
-        blocked_tools: step.blocked_tools.clone(),
+        allowed_tools: step.allowed_tools.clone().map(|names| {
+            names
+                .into_iter()
+                .map(meerkat_core::ToolName::from)
+                .collect()
+        }),
+        blocked_tools: step.blocked_tools.clone().map(|names| {
+            names
+                .into_iter()
+                .map(meerkat_core::ToolName::from)
+                .collect()
+        }),
         dispatch_context: Default::default(),
     })
 }
@@ -1898,7 +1997,7 @@ fn has_effect(
     effects: &[flow_run::Effect],
     expected: FlowRunEffectKind,
     expected_step_id: Option<&StepId>,
-    expected_target_id: Option<&MeerkatId>,
+    expected_target_id: Option<&AgentIdentity>,
 ) -> bool {
     effects.iter().any(|effect| {
         if FlowRunEffectKind::parse(effect) != Some(expected) {
@@ -1932,7 +2031,7 @@ fn effect_step_id(effect: &flow_run::Effect) -> Result<Option<StepId>, MobError>
     Ok(step_id)
 }
 
-fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobError> {
+fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<AgentIdentity>, MobError> {
     let target_id = match effect {
         flow_run::Effect::ProjectTargetSuccess(payload) => Some(payload.target_id.clone()),
         flow_run::Effect::ProjectTargetFailure(payload) => Some(payload.target_id.clone()),
@@ -1963,12 +2062,49 @@ fn step_status_from_flow_run(status: flow_run::StepRunStatus) -> StepRunStatus {
     }
 }
 
+/// Typed classification of why a step's raw output could not be turned into a
+/// usable [`Value`].
+///
+/// Parsing is a boundary: the step's transport text is normalized (code-fence
+/// stripping) and parsed exactly once here, and any failure is carried as a
+/// typed fault rather than a free-form string. The retry-vs-fail decision and
+/// the machine-owned terminal classification consume this typed fault; the
+/// `Display` form is only the human-readable rendering for emitter notices and
+/// the (still string-shaped) `StepTargetFailure` reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepOutputFault {
+    /// JSON output was expected but the (code-fence-normalized) text did not
+    /// parse as JSON.
+    MalformedJson {
+        step_id: StepId,
+        target: AgentIdentity,
+        error: String,
+        excerpt: String,
+    },
+}
+
+impl std::fmt::Display for StepOutputFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StepOutputFault::MalformedJson {
+                step_id,
+                target,
+                error,
+                excerpt,
+            } => write!(
+                f,
+                "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
+            ),
+        }
+    }
+}
+
 fn parse_output_value(
     raw: &str,
     step_id: &StepId,
-    target: &MeerkatId,
+    target: &AgentIdentity,
     format: &StepOutputFormat,
-) -> Result<Value, String> {
+) -> Result<Value, StepOutputFault> {
     if matches!(format, StepOutputFormat::Text) {
         return Ok(Value::String(raw.to_string()));
     }
@@ -1979,7 +2115,8 @@ fn parse_output_value(
     }
 
     // LLMs sometimes wrap JSON in markdown code fences (```json ... ```).
-    // Strip them and retry before reporting a parse error.
+    // Strip them and retry before reporting a parse error. Code-fence stripping
+    // is a parse normalization; its failure produces the typed fault below.
     let stripped = strip_code_fences(raw);
     serde_json::from_str(&stripped).map_err(|error| {
         let excerpt = if raw.chars().count() > 200 {
@@ -1987,9 +2124,12 @@ fn parse_output_value(
         } else {
             raw.to_string()
         };
-        format!(
-            "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
-        )
+        StepOutputFault::MalformedJson {
+            step_id: step_id.clone(),
+            target: target.clone(),
+            error: error.to_string(),
+            excerpt,
+        }
     })
 }
 
@@ -1997,9 +2137,9 @@ fn completed_output_value(
     raw: &str,
     structured_output: Option<Value>,
     step_id: &StepId,
-    target: &MeerkatId,
+    target: &AgentIdentity,
     format: &StepOutputFormat,
-) -> Result<Value, String> {
+) -> Result<Value, StepOutputFault> {
     match (format, structured_output) {
         (StepOutputFormat::Json, Some(value)) => Ok(value),
         _ => parse_output_value(raw, step_id, target, format),
@@ -2042,7 +2182,7 @@ fn strip_code_fences(raw: &str) -> String {
 fn aggregate_output(
     dispatch_mode: &DispatchMode,
     policy: &CollectionPolicy,
-    successes: &[(MeerkatId, Value)],
+    successes: &[(AgentIdentity, Value)],
 ) -> Value {
     if matches!(dispatch_mode, DispatchMode::FanIn) {
         return Value::Array(
@@ -2072,30 +2212,31 @@ fn aggregate_output(
 }
 
 async fn validate_schema_ref(
-    schema_ref: &str,
+    schema_ref: &FlowSchemaRef,
     step_id: &StepId,
     output: &Value,
 ) -> Result<(), MobError> {
-    let schema = match serde_json::from_str::<Value>(schema_ref) {
-        Ok(inline) => inline,
-        Err(_) => {
+    let schema = match schema_ref {
+        FlowSchemaRef::Inline(schema) => schema.as_value().clone(),
+        FlowSchemaRef::Named(name) => {
+            let name = name.as_str();
             #[cfg(not(target_arch = "wasm32"))]
-            let raw = tokio::fs::read_to_string(schema_ref)
-                .await
-                .map_err(|error| MobError::SchemaValidation {
+            let raw = tokio::fs::read_to_string(name).await.map_err(|error| {
+                MobError::SchemaValidation {
                     step_id: step_id.clone(),
-                    message: format!("failed to read schema ref '{schema_ref}': {error}"),
-                })?;
+                    message: format!("failed to read schema ref '{name}': {error}"),
+                }
+            })?;
             #[cfg(target_arch = "wasm32")]
             return Err(MobError::SchemaValidation {
                 step_id: step_id.clone(),
-                message: format!("file-based schema ref '{schema_ref}' is not supported on wasm32"),
+                message: format!("file-based schema ref '{name}' is not supported on wasm32"),
             });
             #[cfg(not(target_arch = "wasm32"))]
             {
                 serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {
                     step_id: step_id.clone(),
-                    message: format!("invalid schema JSON at '{schema_ref}': {error}"),
+                    message: format!("invalid schema JSON at '{name}': {error}"),
                 })?
             }
         }
@@ -2283,8 +2424,17 @@ fn render_template(template: &str, context: &FlowContext) -> Result<String, Stri
         match segment {
             TemplateSegment::Text(text) => rendered.push_str(&text),
             TemplateSegment::Placeholder(expression) => {
-                let replacement =
-                    resolve_template_value(&expression, context).map_or(Value::Null, Clone::clone);
+                // Mirror the condition-evaluator split: an absent context ROOT
+                // (a step/loop-iteration output not yet produced) is a definite
+                // "not present" and renders as null, while a STRUCTURAL fault
+                // (typo'd key inside a present root, unparsable reference,
+                // scalar walk) fails closed instead of silently rendering null
+                // into a prompt.
+                let replacement = match resolve_context_path(context, &expression) {
+                    Ok(value) => value.clone(),
+                    Err(PathResolveError::MissingRoot { .. }) => Value::Null,
+                    Err(error) => return Err(error.to_string()),
+                };
                 match replacement {
                     Value::String(text) => rendered.push_str(&text),
                     other => rendered.push_str(&other.to_string()),
@@ -2317,10 +2467,6 @@ fn render_content_input_template(
             Ok(ContentInput::Blocks(rendered))
         }
     }
-}
-
-fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Option<&'a Value> {
-    resolve_context_path(context, expression)
 }
 
 // ─── FlowTurnExecutorAdapter ────────────────────────────────────────────────
@@ -2620,6 +2766,42 @@ mod template_tests {
     }
 
     #[test]
+    fn test_render_template_structural_fault_fails_closed() {
+        // Regression: a typo'd key inside a PRESENT step output used to render
+        // silently as `null` into the prompt. It must now fail closed so the
+        // step surfaces a render fault instead of laundering folklore text
+        // into the member prompt.
+        let error = render_template("value: {{ steps.a.missing_key }}", &sample_context())
+            .expect_err("a missing key inside a present root must fail template rendering");
+        assert!(
+            error.contains("missing_key"),
+            "fault must name the offending segment: {error}"
+        );
+
+        // An unparsable reference likewise fails closed.
+        assert!(
+            render_template("{{ bogus.root.path }}", &sample_context()).is_err(),
+            "an unparsable context reference must fail template rendering"
+        );
+
+        // Walking into a scalar likewise fails closed.
+        assert!(
+            render_template("{{ steps.a.x.deeper }}", &sample_context()).is_err(),
+            "indexing into a scalar must fail template rendering"
+        );
+    }
+
+    #[test]
+    fn test_render_template_absent_root_renders_null() {
+        // An absent context ROOT (a step output not yet produced) is a
+        // definite "not present" — mirrored from the condition evaluator — and
+        // renders as null rather than faulting the step.
+        let rendered = render_template("prior: {{ steps.never_ran.output }}", &sample_context())
+            .expect("an absent step root must render as null, not fault");
+        assert_eq!(rendered, "prior: null");
+    }
+
+    #[test]
     fn test_render_content_input_template_preserves_non_text_blocks() {
         let rendered = render_content_input_template(
             &ContentInput::Blocks(vec![
@@ -2657,7 +2839,7 @@ mod template_tests {
 
 #[cfg(test)]
 mod completed_output_value_tests {
-    use super::{StepOutputFormat, completed_output_value};
+    use super::{StepOutputFault, StepOutputFormat, completed_output_value, parse_output_value};
     use crate::ids::{AgentIdentity, StepId};
 
     #[test]
@@ -2686,6 +2868,46 @@ mod completed_output_value_tests {
         .expect("text output should be accepted as raw text");
 
         assert_eq!(value, serde_json::json!("plain text"));
+    }
+
+    #[test]
+    fn malformed_json_output_yields_typed_fault_not_free_form_string() {
+        let step_id = StepId::from("step-1");
+        let target = AgentIdentity::from("worker-1");
+        let fault = parse_output_value(
+            "this is not json at all",
+            &step_id,
+            &target,
+            &StepOutputFormat::Json,
+        )
+        .expect_err("non-JSON output for a JSON-format step must fail");
+
+        // The fault is a typed, classifiable variant (not an opaque string),
+        // carrying the step/target identity so the machine-owned terminal
+        // classification can route retry-vs-fail without re-parsing prose.
+        match fault {
+            StepOutputFault::MalformedJson {
+                step_id: faulted_step,
+                target: faulted_target,
+                ..
+            } => {
+                assert_eq!(faulted_step, step_id);
+                assert_eq!(faulted_target, target);
+            }
+        }
+    }
+
+    #[test]
+    fn code_fence_normalization_recovers_fenced_json_before_faulting() {
+        let value = parse_output_value(
+            "```json\n{\"answer\": 42}\n```",
+            &StepId::from("step-1"),
+            &AgentIdentity::from("worker-1"),
+            &StepOutputFormat::Json,
+        )
+        .expect("fenced JSON should parse after code-fence normalization");
+
+        assert_eq!(value, serde_json::json!({"answer": 42}));
     }
 }
 

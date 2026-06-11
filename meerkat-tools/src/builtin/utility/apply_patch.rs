@@ -671,7 +671,71 @@ fn resolve_patch_path(project_root: &Path, relative: &Path) -> Result<PathBuf, A
             relative.display()
         )));
     }
+
+    // Lexical containment is not enough: a component of `resolved` may be a
+    // symlink that points outside `project_root`. Resolve the real path by
+    // canonicalizing the deepest existing ancestor (the target itself may not
+    // exist yet for an Add/Move), then re-appending the not-yet-existing tail,
+    // and re-check containment. Both sides MUST be canonicalized: `project_root`
+    // itself may be reached through symlinks (e.g. macOS `/var` -> `/private/var`),
+    // so comparing a canonical real path against a non-canonical root would both
+    // falsely reject legitimate in-root paths and could mis-judge escapes.
+    let canonical_root = canonicalize_existing_ancestor(project_root)?;
+    let real = canonicalize_existing_ancestor(&resolved)?;
+    if !real.starts_with(&canonical_root) {
+        return Err(ApplyPatchError::InvalidPath(format!(
+            "path '{}' escapes the project root via a symlink",
+            relative.display()
+        )));
+    }
+
     Ok(resolved)
+}
+
+/// Resolve `path` to its real (symlink-followed) location by canonicalizing the
+/// deepest ancestor that exists on disk and re-appending the components that do
+/// not yet exist. The target of an Add/Move need not exist; its existing parent
+/// chain is what must stay inside the project root.
+fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf, ApplyPatchError> {
+    let mut ancestor = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(canonical) => {
+                let mut real = canonical;
+                for segment in tail.iter().rev() {
+                    real.push(segment);
+                }
+                return Ok(real);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                match ancestor.file_name() {
+                    Some(name) => {
+                        tail.push(name.to_os_string());
+                        if !ancestor.pop() {
+                            return Err(ApplyPatchError::InvalidPath(format!(
+                                "path '{}' has no resolvable ancestor",
+                                path.display()
+                            )));
+                        }
+                    }
+                    None => {
+                        return Err(ApplyPatchError::InvalidPath(format!(
+                            "path '{}' has no resolvable ancestor",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            Err(source) => {
+                return Err(ApplyPatchError::Io {
+                    context: format!("failed to resolve real path for {}", ancestor.display()),
+                    source,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -770,5 +834,42 @@ mod tests {
         apply_patch(root, &patch).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_path() {
+        use std::os::unix::fs::symlink;
+
+        // Two separate canonical roots: `root` is the project root the patch is
+        // applied against; `outside` is forbidden territory.
+        let root_dir = tempdir().unwrap();
+        let outside_dir = tempdir().unwrap();
+        let root = root_dir.path();
+        let outside = outside_dir.path();
+
+        std::fs::create_dir(outside.join("secret")).unwrap();
+
+        // Inside the project root, plant a symlink that points OUTSIDE the root.
+        // A lexical containment check sees `root/link/loot.txt` as in-root, but
+        // the real path resolves under `outside/secret`.
+        symlink(outside.join("secret"), root.join("link")).unwrap();
+
+        let patch = wrap_patch("*** Add File: link/loot.txt\n+pwned");
+        let err = apply_patch(root, &patch).expect_err("symlink escape should fail");
+        assert!(
+            err.to_string().contains("escapes the project root"),
+            "expected typed containment rejection, got: {err}"
+        );
+        // The write must not have happened outside the root.
+        assert!(!outside.join("secret/loot.txt").exists());
+
+        // A normal in-root path through a real (non-escaping) directory still works.
+        let patch_ok = wrap_patch("*** Add File: nested/ok.txt\n+fine");
+        apply_patch(root, &patch_ok).expect("in-root path should succeed");
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/ok.txt")).unwrap(),
+            "fine\n"
+        );
     }
 }

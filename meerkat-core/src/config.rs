@@ -7,7 +7,7 @@ use crate::mcp_config::McpServerConfig;
 use crate::model_profile::catalog::ModelTier;
 use crate::{
     budget::BudgetLimits,
-    hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
+    hooks::{HookCapability, HookExecutionMode, HookId, HookPoint},
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
@@ -15,7 +15,6 @@ use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -489,6 +488,13 @@ impl Config {
             return;
         };
 
+        // Presence-based: a layer adopts `default_model` only when it declares
+        // one, otherwise the inherited explicit default is preserved (it is the
+        // typed self-hosted default owner, not a re-derived key-order artifact).
+        if self_hosted.contains_key("default_model") {
+            self.self_hosted.default_model = layer.default_model.clone();
+        }
+
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
             if servers.is_empty() {
                 self.self_hosted.servers.clear();
@@ -516,12 +522,6 @@ impl Config {
                     }
                     if server_table.contains_key("api_style") {
                         merged.api_style = server_layer.api_style;
-                    }
-                    if server_table.contains_key("bearer_token") {
-                        merged.bearer_token = server_layer.bearer_token.clone();
-                    }
-                    if server_table.contains_key("bearer_token_env") {
-                        merged.bearer_token_env = server_layer.bearer_token_env.clone();
                     }
                     merged_servers.insert(server_id.clone(), merged);
                 }
@@ -737,6 +737,13 @@ pub fn default_structured_output_retries() -> u32 {
     2
 }
 
+/// Default maximum number of agent-loop turns before a forced stop.
+///
+/// Canonical owner of the turn-cap default: the agent loop reads this when
+/// [`AgentConfig::max_turns`] is `None` rather than inventing a literal at the
+/// run-loop seam.
+pub const DEFAULT_MAX_TURNS: u32 = 100;
+
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -757,25 +764,25 @@ pub struct AgentConfig {
     pub budget_warning_threshold: f32,
     /// Maximum turns before forced stop
     pub max_turns: Option<u32>,
-    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
+    /// Typed provider parameter carrier (explicit overrides + build-derived
+    /// provider-native tool defaults).
     ///
-    /// This is a generic JSON bag that providers can extract provider-specific
-    /// options from. Each provider implementation is responsible for reading
-    /// and applying relevant parameters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
-    /// Provider-native tool defaults resolved at factory build time.
+    /// Parsed FAIL-CLOSED at config ingress: a malformed or unknown-keyed
+    /// provider-params shape is rejected when the config is read, never
+    /// deferred to the first LLM call. The explicit `params` half is
+    /// persisted; `tool_defaults` is `#[serde(skip)]` inside the carrier and
+    /// re-derived on every build (including resume) from
+    /// `Config.provider_tools` + `ModelProfile.supports_web_search`, so config
+    /// changes (e.g. disabling web search) take effect immediately on resumed
+    /// sessions. The per-turn effective params come from the carrier's typed
+    /// field-wise merge ([`ProviderParamsCarrier::effective_params`]).
     ///
-    /// **Intentionally non-persisted** (`#[serde(skip)]`): re-derived on every
-    /// build (including resume) from `Config.provider_tools` +
-    /// `ModelProfile.supports_web_search`. This means config changes (e.g.,
-    /// disabling web search) take effect immediately on resumed sessions without
-    /// requiring session recreation. Explicit per-request overrides live in
-    /// `provider_params` which IS persisted.
-    ///
-    /// Merged with `provider_params` per-turn via RFC 7396 merge-patch.
-    #[serde(skip)]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    /// [`ProviderParamsCarrier::effective_params`]: crate::lifecycle::run_primitive::ProviderParamsCarrier::effective_params
+    #[serde(
+        default,
+        skip_serializing_if = "crate::lifecycle::run_primitive::ProviderParamsCarrier::serializes_empty"
+    )]
+    pub provider_params: crate::lifecycle::run_primitive::ProviderParamsCarrier,
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
@@ -813,8 +820,7 @@ impl Default for AgentConfig {
                 .and_then(|cfg| cfg.budget_warning_threshold)
                 .unwrap_or_default(),
             max_turns: None,
-            provider_params: None,
-            provider_tool_defaults: None,
+            provider_params: crate::lifecycle::run_primitive::ProviderParamsCarrier::default(),
             output_schema: None,
             structured_output_retries: default_structured_output_retries(),
             extraction_prompt: None,
@@ -857,29 +863,75 @@ pub struct HtmlTemplateConfig {
     pub body: Option<String>,
 }
 
-/// Model defaults by provider.
+/// Model defaults by provider, plus user-defined custom model registry
+/// entries (`[models.<id>]` tables).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelDefaults {
     pub anthropic: String,
     pub openai: String,
     pub gemini: String,
+    /// User-defined model registry entries keyed by model id.
+    ///
+    /// TOML form: `[models.<id>]` tables alongside the per-provider default
+    /// strings. Each entry is merged into the effective [`crate::ModelRegistry`]
+    /// by `ModelRegistry::from_config`, the single owner that feeds provider
+    /// inference, compaction scaling, capability gates, and call timeouts.
+    #[serde(flatten)]
+    pub custom: BTreeMap<String, CustomModelConfig>,
 }
 
 impl Default for ModelDefaults {
     fn default() -> Self {
         Self {
-            anthropic: crate::model_profile::catalog::default_model("anthropic")
+            anthropic: crate::model_profile::catalog::default_model(crate::Provider::Anthropic)
                 .unwrap_or_default()
                 .to_string(),
-            openai: crate::model_profile::catalog::default_model("openai")
+            openai: crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
                 .unwrap_or_default()
                 .to_string(),
-            gemini: crate::model_profile::catalog::default_model("gemini")
+            gemini: crate::model_profile::catalog::default_model(crate::Provider::Gemini)
                 .unwrap_or_default()
                 .to_string(),
+            custom: BTreeMap::new(),
         }
     }
+}
+
+/// User-defined model registry entry (`[models.<id>]` in `config.toml` or a
+/// mob definition).
+///
+/// Declares an uncatalogued model that an API provider serves so a single
+/// definition feeds provider inference, compaction scaling, capability gates,
+/// and call timeouts through the effective [`crate::ModelRegistry`].
+///
+/// Capability flags are conservative when omitted: an undeclared capability is
+/// treated as absent rather than guessed from the model name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModelConfig {
+    /// Typed provider that serves this model. Parsed fail-closed at config
+    /// ingress: unknown provider names reject the entry.
+    pub provider: crate::Provider,
+    /// Human-readable display name. Defaults to the model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Model context window in tokens (drives compaction scaling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Maximum output tokens per call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// Whether the model accepts image input. Conservative default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    /// Whether the model supports provider-native web search tools.
+    /// Conservative default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
+    /// Default call timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
 }
 
 /// Default shell program
@@ -1039,16 +1091,20 @@ pub enum SelfHostedApiStyle {
     ChatCompletions,
 }
 
+/// Self-hosted server connection target.
+///
+/// Carries connection/transport facts only. Credentials have exactly one
+/// owner: the realm auth profile selected via `auth_binding` or a realm
+/// default binding. The legacy `bearer_token` / `bearer_token_env` fields are
+/// gone and `deny_unknown_fields` rejects them (and any other unknown key) at
+/// config parse with a typed [`ConfigError::Parse`] instead of silently
+/// tolerating dead credential material in config files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SelfHostedServerConfig {
     pub transport: SelfHostedTransport,
     pub base_url: String,
     pub api_style: SelfHostedApiStyle,
-    #[serde(default, skip_serializing)]
-    pub bearer_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearer_token_env: Option<String>,
 }
 
 impl Default for SelfHostedServerConfig {
@@ -1057,8 +1113,6 @@ impl Default for SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: String::new(),
             api_style: SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         }
     }
 }
@@ -1115,6 +1169,16 @@ impl Default for SelfHostedModelConfig {
 pub struct SelfHostedConfig {
     pub servers: BTreeMap<String, SelfHostedServerConfig>,
     pub models: BTreeMap<String, SelfHostedModelConfig>,
+    /// The model id (key into [`Self::models`]) that is the canonical
+    /// self-hosted default.
+    ///
+    /// The config owns its own default — it is a declared choice, never a
+    /// `BTreeMap` key-order artifact. When more than one model is configured
+    /// this MUST be set (and reference a configured model), otherwise the
+    /// registry fails closed. With exactly one configured model the default is
+    /// unambiguous and may be omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,8 +1187,9 @@ pub struct SelfHostedConfig {
 
 /// Per-provider defaults for provider-native tools (web search, etc.).
 ///
-/// These defaults are resolved at factory build time and injected as
-/// non-persisted `AgentConfig.provider_tool_defaults`. The `enabled` flags
+/// These defaults are resolved at factory build time and injected as the
+/// non-persisted `tool_defaults` half of `AgentConfig.provider_params`
+/// (a typed `ProviderTag`). The `enabled` flags
 /// here control whether the factory injects tool config for models whose
 /// `ModelProfile.supports_web_search` is `true`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1517,6 +1582,178 @@ impl CallTimeoutOverride {
     }
 }
 
+/// Typed per-request system-prompt policy.
+///
+/// **Dogma §10:** inherit, set, and disable are three distinct facts that an
+/// overloaded `Option<String>` cannot express — `None` collapses "inherit
+/// config/AGENTS/default" together with "no opinion", and there is no way to
+/// say "suppress every prompt source". This mirrors the `Inherit`/`Set`/`Clear`
+/// shape of `TurnMetadataOverride` and the `Inherit`/`Disabled`/`Value` shape
+/// of [`CallTimeoutOverride`].
+///
+/// This is the canonical type at every boundary that carries the decision:
+/// the wire `CreateSessionRequest`/`CoreCreateParams.system_prompt` field, the
+/// persisted `SessionBuildState.system_prompt` field, and
+/// `AgentBuildConfig.system_prompt`. Its serde implementation below IS the
+/// wire/persisted representation — there is no adapter pair:
+///
+/// - absent / `null` ⇔ `Inherit` (lossless with the retired `Option<String>`
+///   `None` shape)
+/// - JSON/TOML string ⇔ `Set` (lossless with the retired `Some(prompt)` shape)
+/// - `{"action": "disable"}` ⇔ `Disable`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SystemPromptOverride {
+    /// No per-request opinion: fall through to the config-file override, the
+    /// config inline override, then the default prompt + AGENTS.md files.
+    #[default]
+    Inherit,
+    /// Explicit per-request prompt. Wins outright, skipping the config and
+    /// AGENTS.md sources (dispatcher/tool/extra sections are still appended).
+    Set(String),
+    /// Explicitly suppress *every* prompt source: no config override, no
+    /// AGENTS.md, no default prompt. Only the appended sections
+    /// (extra/config-tool/dispatcher) remain.
+    Disable,
+}
+
+impl SystemPromptOverride {
+    /// Returns `true` when this override is `Inherit` (the default / absent
+    /// state). Used by `skip_serializing_if` at field sites.
+    #[must_use]
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+
+    /// Whether this override carries an explicit per-request decision (either a
+    /// `Set` prompt or an explicit `Disable`). Used to decide whether the
+    /// prompt must be (re)assembled even for a resumed session.
+    #[must_use]
+    pub fn is_explicit(&self) -> bool {
+        !matches!(self, Self::Inherit)
+    }
+
+    /// The explicit per-request prompt text, if any (`Set` only).
+    #[must_use]
+    pub fn as_set_prompt(&self) -> Option<&str> {
+        match self {
+            Self::Set(prompt) => Some(prompt.as_str()),
+            Self::Inherit | Self::Disable => None,
+        }
+    }
+}
+
+const SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION: &str = "disable";
+
+impl Serialize for SystemPromptOverride {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Inherit is the default; field sites pair this with
+            // `skip_serializing_if = "SystemPromptOverride::is_inherit"` so it
+            // is normally omitted entirely.
+            Self::Inherit => serializer.serialize_none(),
+            Self::Set(prompt) => serializer.serialize_str(prompt),
+            Self::Disable => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("action", SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemPromptOverride {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SystemPromptOverrideVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SystemPromptOverrideVisitor {
+            type Value = SystemPromptOverride;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(
+                    "a system prompt string, null (inherit), or {\"action\": \"disable\"}",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Set(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Set(value))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Inherit)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Inherit)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Self::Value, D2::Error> {
+                deserializer.deserialize_any(SystemPromptOverrideVisitor)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut action: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "action" => {
+                            if action.is_some() {
+                                return Err(serde::de::Error::duplicate_field("action"));
+                            }
+                            action = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(serde::de::Error::unknown_field(other, &["action"]));
+                        }
+                    }
+                }
+                let action = action.ok_or_else(|| serde::de::Error::missing_field("action"))?;
+                if action == SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION {
+                    Ok(SystemPromptOverride::Disable)
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "unknown system_prompt override action '{action}' (expected \"disable\")"
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SystemPromptOverrideVisitor)
+    }
+}
+
+impl JsonSchema for SystemPromptOverride {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SystemPromptOverride".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Per-request system-prompt policy: omit/null to inherit, a string to set an explicit prompt, or {\"action\": \"disable\"} to suppress every prompt source.",
+            "anyOf": [
+                { "type": "null", "description": "Inherit the configured/default prompt sources." },
+                { "type": "string", "description": "Explicit per-request system prompt." },
+                {
+                    "type": "object",
+                    "properties": { "action": { "const": "disable" } },
+                    "required": ["action"],
+                    "additionalProperties": false,
+                    "description": "Suppress every prompt source."
+                }
+            ]
+        })
+    }
+}
+
 /// Retry configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1677,22 +1914,8 @@ pub struct HookEntryConfig {
     pub capability: HookCapability,
     pub priority: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_policy: Option<HookFailurePolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    pub runtime: HookRuntimeConfig,
-}
-
-impl HookEntryConfig {
-    /// Legacy compatibility projection for persisted hook configs.
-    ///
-    /// Runtime hook admission no longer consults this value; foreground hook
-    /// runtime failures surface as typed `HookEngineError`s and terminal
-    /// classification is owned by the runtime machine policy.
-    pub fn effective_failure_policy(&self) -> HookFailurePolicy {
-        self.failure_policy
-            .unwrap_or_else(|| crate::hooks::default_failure_policy(self.capability))
-    }
+    pub runtime: HookAdapterConfig,
 }
 
 impl Default for HookEntryConfig {
@@ -1704,12 +1927,8 @@ impl Default for HookEntryConfig {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Observe,
             priority: 100,
-            failure_policy: None,
             timeout_ms: None,
-            runtime: HookRuntimeConfig::in_process("noop").unwrap_or(HookRuntimeConfig {
-                kind: HookRuntimeKind::InProcess,
-                config: None,
-            }),
+            runtime: HookAdapterConfig::in_process("noop"),
         }
     }
 }
@@ -1778,10 +1997,12 @@ impl Default for HookInProcessRuntimeConfig {
     }
 }
 
-/// Closed set of hook runtime adapters the engine can dispatch to.
+/// Discriminant naming the runtime adapter a [`HookAdapterConfig`] selects.
 ///
-/// Wire format uses snake_case (`in_process`, `command`, `http`) under the
-/// `type` field on [`HookRuntimeConfig`] for backwards compatibility.
+/// This is a pure derivation of the [`HookAdapterConfig`] variant
+/// ([`HookAdapterConfig::kind`]); it carries no payload and exists only for
+/// wire/logging labels and for the `(kind, value)` convenience constructor
+/// [`HookAdapterConfig::from_kind_and_value`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookRuntimeKind {
     InProcess,
@@ -1816,167 +2037,119 @@ impl std::fmt::Display for HookRuntimeKind {
     }
 }
 
-/// Runtime configuration used by hook adapters.
+/// Typed payload for a [`HookRuntimeKind::Command`] adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CommandRuntimeConfig {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+}
+
+fn default_http_method() -> String {
+    "POST".to_string()
+}
+
+/// Typed payload for a [`HookRuntimeKind::Http`] adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct HttpRuntimeConfig {
+    pub url: String,
+    #[serde(default = "default_http_method")]
+    pub method: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+}
+
+/// Closed, typed set of hook runtime adapters the engine can dispatch to.
 ///
-/// The dispatch kind is typed. In-process handlers use
-/// [`HookInProcessRuntimeConfig`]; command and HTTP runtimes keep their
-/// adapter-specific payloads opaque at this boundary.
-#[derive(Debug, Clone)]
-pub struct HookRuntimeConfig {
-    pub kind: HookRuntimeKind,
-    #[allow(clippy::box_collection)]
-    pub config: Option<Box<RawValue>>,
+/// This is the single typed owner of "which runtime adapter and its config".
+/// It is deserialized once at the config-layering boundary; the hook engine
+/// reads the typed variant directly rather than re-parsing an opaque JSON
+/// payload on every execution. A malformed command/HTTP payload therefore fails
+/// closed at config-deserialization time, not at hook-execution time.
+///
+/// Wire format is internally tagged on `type` (`in_process`, `command`,
+/// `http`), with the variant payload flattened alongside the tag, e.g.
+/// `{"type":"command","command":"sh","args":["-c","..."]}`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookAdapterConfig {
+    InProcess(HookInProcessRuntimeConfig),
+    Command(CommandRuntimeConfig),
+    Http(HttpRuntimeConfig),
 }
 
-impl PartialEq for HookRuntimeConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.config.as_ref().map(|raw| raw.get())
-                == other.config.as_ref().map(|raw| raw.get())
-    }
-}
-
-impl HookRuntimeConfig {
-    pub fn new(kind: HookRuntimeKind, config: Option<Value>) -> Result<Self, serde_json::Error> {
-        let config = match config {
-            Some(value) => Some(raw_json_from_value(value)?),
-            None => None,
-        };
-        Ok(Self { kind, config })
+impl HookAdapterConfig {
+    /// Build an in-process adapter referencing a registered handler id.
+    pub fn in_process(handler: impl Into<HookInProcessHandlerId>) -> Self {
+        Self::InProcess(HookInProcessRuntimeConfig::new(handler))
     }
 
-    pub fn in_process(
-        handler: impl Into<HookInProcessHandlerId>,
+    /// Build a command adapter.
+    pub fn command(
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self::Command(CommandRuntimeConfig {
+            command: command.into(),
+            args,
+            env,
+        })
+    }
+
+    /// Build an HTTP adapter.
+    pub fn http(
+        url: impl Into<String>,
+        method: impl Into<String>,
+        headers: HashMap<String, String>,
+    ) -> Self {
+        Self::Http(HttpRuntimeConfig {
+            url: url.into(),
+            method: method.into(),
+            headers,
+        })
+    }
+
+    /// Deserialize a `(kind, flattened-payload)` pair into the typed adapter.
+    ///
+    /// The payload is the variant's fields without the `type` tag (e.g.
+    /// `{"command":"sh"}` for [`HookRuntimeKind::Command`]); a `None`/`Null`
+    /// payload is treated as an empty object so defaulted fields apply. The
+    /// payload is validated here, at the config boundary, and fails closed on
+    /// an unknown/malformed shape.
+    pub fn from_kind_and_value(
+        kind: HookRuntimeKind,
+        config: Option<Value>,
     ) -> Result<Self, serde_json::Error> {
-        serde_json::to_value(HookInProcessRuntimeConfig::new(handler))
-            .and_then(|config| Self::new(HookRuntimeKind::InProcess, Some(config)))
+        let mut obj = match config {
+            Some(Value::Object(obj)) => obj,
+            Some(Value::Null) | None => Map::new(),
+            Some(other) => {
+                let mut obj = Map::new();
+                obj.insert("config".to_string(), other);
+                obj
+            }
+        };
+        obj.insert("type".to_string(), Value::String(kind.as_str().to_string()));
+        serde_json::from_value(Value::Object(obj))
     }
 
-    pub fn in_process_config(
-        &self,
-    ) -> Result<Option<HookInProcessRuntimeConfig>, serde_json::Error> {
-        if self.kind != HookRuntimeKind::InProcess {
-            return Ok(None);
-        }
-
-        self.config_value()
-            .and_then(serde_json::from_value::<HookInProcessRuntimeConfig>)
-            .map(Some)
-    }
-
-    pub fn config_value(&self) -> Result<Value, serde_json::Error> {
-        match &self.config {
-            Some(raw) => serde_json::from_str(raw.get()),
-            None => Ok(Value::Null),
+    /// Pure-derivation discriminant of this adapter.
+    pub fn kind(&self) -> HookRuntimeKind {
+        match self {
+            Self::InProcess(_) => HookRuntimeKind::InProcess,
+            Self::Command(_) => HookRuntimeKind::Command,
+            Self::Http(_) => HookRuntimeKind::Http,
         }
     }
 }
 
-impl Default for HookRuntimeConfig {
+impl Default for HookAdapterConfig {
     fn default() -> Self {
-        Self::in_process("noop").unwrap_or(Self {
-            kind: HookRuntimeKind::InProcess,
-            config: None,
-        })
+        Self::in_process("noop")
     }
-}
-
-impl Serialize for HookRuntimeConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = Map::new();
-        map.insert(
-            "type".to_string(),
-            Value::String(self.kind.as_str().to_string()),
-        );
-
-        if let Some(raw) = &self.config {
-            let parsed: Value =
-                serde_json::from_str(raw.get()).map_err(serde::ser::Error::custom)?;
-            match parsed {
-                Value::Object(obj) => {
-                    for (key, value) in obj {
-                        map.insert(key, value);
-                    }
-                }
-                other => {
-                    map.insert("config".to_string(), other);
-                }
-            }
-        }
-
-        Value::Object(map).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for HookRuntimeConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        let mut obj = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| serde::de::Error::custom("hook runtime must be an object"))?;
-
-        let kind_str = obj
-            .remove("type")
-            .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .ok_or_else(|| {
-                serde::de::Error::custom("hook runtime missing required field 'type'")
-            })?;
-        let kind = HookRuntimeKind::parse(&kind_str).ok_or_else(|| {
-            serde::de::Error::custom(format!("unsupported hook runtime '{kind_str}'"))
-        })?;
-
-        let config_value = if let Some(explicit) = obj.remove("config") {
-            if obj.is_empty() {
-                explicit
-            } else {
-                obj.insert("config".to_string(), explicit);
-                Value::Object(obj)
-            }
-        } else if obj.is_empty() {
-            Value::Null
-        } else {
-            Value::Object(obj)
-        };
-
-        let config = if config_value.is_null() {
-            None
-        } else {
-            Some(raw_json_from_value(config_value).map_err(serde::de::Error::custom)?)
-        };
-
-        Ok(Self { kind, config })
-    }
-}
-
-impl JsonSchema for HookRuntimeConfig {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "HookRuntimeConfig".into()
-    }
-
-    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-                "type": { "type": "string" },
-                "handler": { "type": "string" },
-                "name": { "type": "string", "deprecated": true },
-                "config": {}
-            },
-            "additionalProperties": true
-        })
-    }
-}
-
-fn raw_json_from_value(value: Value) -> Result<Box<RawValue>, serde_json::Error> {
-    RawValue::from_string(serde_json::to_string(&value)?)
 }
 
 /// Config scope for persisted settings.
@@ -2131,7 +2304,8 @@ mod tests {
         let config = Config::template().expect("template parses");
         assert_eq!(
             config.agent.model.as_str(),
-            crate::model_profile::catalog::default_model("openai").expect("openai catalog default")
+            crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
+                .expect("openai catalog default")
         );
     }
 
@@ -2302,7 +2476,7 @@ api_style = "responses"
             .merge_toml_str(
                 r#"
 [self_hosted.servers.local]
-bearer_token_env = "OLLAMA_TOKEN"
+transport = "openai_compatible"
 "#,
             )
             .expect("overlay server");
@@ -2314,7 +2488,7 @@ bearer_token_env = "OLLAMA_TOKEN"
             .expect("merged server");
         assert_eq!(server.base_url, "http://127.0.0.1:11434");
         assert_eq!(server.api_style, SelfHostedApiStyle::Responses);
-        assert_eq!(server.bearer_token_env.as_deref(), Some("OLLAMA_TOKEN"));
+        assert_eq!(server.transport, SelfHostedTransport::OpenAiCompatible);
     }
 
     #[test]
@@ -2323,6 +2497,9 @@ bearer_token_env = "OLLAMA_TOKEN"
         config
             .merge_toml_str(
                 r#"
+[self_hosted]
+default_model = "gemma-4-e4b"
+
 [self_hosted.servers.local]
 base_url = "http://127.0.0.1:11434"
 
@@ -2347,7 +2524,7 @@ family = "gemma-4"
             .merge_toml_str(
                 r#"
 [self_hosted.servers.local]
-bearer_token_env = "OLLAMA_TOKEN"
+api_style = "responses"
 "#,
             )
             .expect("overlay self-hosted config");
@@ -2399,22 +2576,64 @@ family = "gemma-4"
     }
 
     #[test]
-    fn test_self_hosted_bearer_token_is_not_serialized() {
-        let config: Config = toml::from_str(
+    fn test_self_hosted_legacy_bearer_token_rejected_at_parse() {
+        // Pre-1.0 clean break: server credentials live exclusively in realm
+        // auth profiles. The retired `bearer_token` carrier is rejected at
+        // config parse with a typed error, never tolerated.
+        let err = toml::from_str::<Config>(
             r#"
 [self_hosted.servers.local]
 base_url = "http://127.0.0.1:11434"
 bearer_token = "secret-token"
 "#,
         )
-        .expect("config");
-
-        let value = serde_json::to_value(&config).expect("serialize config");
-        let server = &value["self_hosted"]["servers"]["local"];
+        .expect_err("legacy bearer_token must be rejected at config parse");
         assert!(
-            server.get("bearer_token").is_none(),
-            "literal bearer tokens must be redacted from serialized config"
+            err.to_string().contains("bearer_token"),
+            "rejection must name the offending field: {err}"
         );
+    }
+
+    #[test]
+    fn test_self_hosted_legacy_bearer_token_env_rejected_at_parse() {
+        let err = toml::from_str::<Config>(
+            r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+        )
+        .expect_err("legacy bearer_token_env must be rejected at config parse");
+        assert!(
+            err.to_string().contains("bearer_token_env"),
+            "rejection must name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_self_hosted_legacy_bearer_token_rejected_in_layered_merge() {
+        // The layered merge path parses each overlay through the same typed
+        // Config deserializer, so a legacy credential field in any layer is
+        // rejected with the same typed parse error.
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+"#,
+            )
+            .expect("base server");
+        let err = config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+            )
+            .expect_err("legacy bearer_token_env overlay must be rejected");
+        assert!(matches!(err, ConfigError::Parse(_)));
+        assert!(err.to_string().contains("bearer_token_env"));
     }
 
     // Plan §6.10 deleted the ProviderSettings struct (and its api_keys /
@@ -2869,6 +3088,105 @@ event_address = "127.0.0.1:4201"
         );
     }
 
+    // ── SystemPromptOverride tests ──
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct SystemPromptWrapper {
+        #[serde(default, skip_serializing_if = "SystemPromptOverride::is_inherit")]
+        system_prompt: SystemPromptOverride,
+    }
+
+    #[test]
+    fn system_prompt_override_default_is_inherit() {
+        assert_eq!(
+            SystemPromptOverride::default(),
+            SystemPromptOverride::Inherit
+        );
+        assert!(SystemPromptOverride::default().is_inherit());
+        assert!(!SystemPromptOverride::default().is_explicit());
+        assert!(SystemPromptOverride::Set("p".to_string()).is_explicit());
+        assert!(SystemPromptOverride::Disable.is_explicit());
+        assert_eq!(
+            SystemPromptOverride::Set("p".to_string()).as_set_prompt(),
+            Some("p")
+        );
+        assert_eq!(SystemPromptOverride::Disable.as_set_prompt(), None);
+    }
+
+    #[test]
+    fn system_prompt_override_absent_field_parses_as_inherit() {
+        // Lossless with the retired `Option<String>` shape: an omitted field
+        // (old `None`) is `Inherit`.
+        let w: SystemPromptWrapper = serde_json::from_str("{}").unwrap();
+        assert_eq!(w.system_prompt, SystemPromptOverride::Inherit);
+    }
+
+    #[test]
+    fn system_prompt_override_null_parses_as_inherit() {
+        let w: SystemPromptWrapper = serde_json::from_str(r#"{"system_prompt": null}"#).unwrap();
+        assert_eq!(w.system_prompt, SystemPromptOverride::Inherit);
+    }
+
+    #[test]
+    fn system_prompt_override_string_round_trips_as_set() {
+        // Lossless with the retired `Some(prompt)` shape.
+        let w: SystemPromptWrapper =
+            serde_json::from_str(r#"{"system_prompt": "You are helpful."}"#).unwrap();
+        assert_eq!(
+            w.system_prompt,
+            SystemPromptOverride::Set("You are helpful.".to_string())
+        );
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"system_prompt":"You are helpful."}"#);
+        let back: SystemPromptWrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn system_prompt_override_disable_round_trips() {
+        // The suppression fact survives serialize → deserialize: no lossy
+        // Disable→Inherit collapse at any persist/wire boundary.
+        let w = SystemPromptWrapper {
+            system_prompt: SystemPromptOverride::Disable,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"system_prompt":{"action":"disable"}}"#);
+        let back: SystemPromptWrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.system_prompt, SystemPromptOverride::Disable);
+    }
+
+    #[test]
+    fn system_prompt_override_inherit_is_omitted_when_serialized() {
+        let w = SystemPromptWrapper {
+            system_prompt: SystemPromptOverride::Inherit,
+        };
+        assert_eq!(serde_json::to_string(&w).unwrap(), "{}");
+    }
+
+    #[test]
+    fn system_prompt_override_unknown_action_rejected() {
+        let err = serde_json::from_str::<SystemPromptWrapper>(
+            r#"{"system_prompt": {"action": "clear"}}"#,
+        )
+        .expect_err("unknown action must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unknown system_prompt override action")
+        );
+    }
+
+    #[test]
+    fn system_prompt_override_unknown_key_rejected() {
+        serde_json::from_str::<SystemPromptWrapper>(r#"{"system_prompt": {"disable": true}}"#)
+            .expect_err("object form must carry exactly the action key");
+    }
+
+    #[test]
+    fn system_prompt_override_non_string_rejected() {
+        serde_json::from_str::<SystemPromptWrapper>(r#"{"system_prompt": 42}"#)
+            .expect_err("numeric system_prompt must be rejected");
+    }
+
     #[test]
     fn retry_config_default_has_inherit_call_timeout() {
         let config = RetryConfig::default();
@@ -3015,20 +3333,69 @@ model = "custom-model"
         assert!(config.provider_tools.gemini.google_search);
     }
 
-    // ---- AgentConfig.provider_tool_defaults serialization test ----
+    // ---- AgentConfig.provider_params carrier serialization tests ----
 
     #[test]
     fn test_provider_tool_defaults_not_serialized() {
+        use crate::lifecycle::run_primitive::{
+            AnthropicProviderTag, OpaqueProviderBody, ProviderParamsCarrier, ProviderTag,
+        };
+
         let agent_config = AgentConfig {
-            provider_tool_defaults: Some(
-                serde_json::json!({"web_search": {"type": "web_search_20250305"}}),
-            ),
+            provider_params: ProviderParamsCarrier {
+                params: Default::default(),
+                tool_defaults: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                        "type": "web_search_20250305"
+                    }))),
+                    ..Default::default()
+                })),
+            },
             ..Default::default()
         };
         let json = serde_json::to_value(&agent_config).unwrap();
+        // The carrier is transparent over `params`; build-derived tool
+        // defaults never persist, and an empty params half serializes nothing.
         assert!(
-            json.get("provider_tool_defaults").is_none(),
-            "provider_tool_defaults must not be serialized: {json}"
+            json.get("provider_params").is_none(),
+            "build-derived tool defaults must not be serialized: {json}"
         );
+    }
+
+    /// K2 invariant: malformed provider params are rejected at CONFIG PARSE,
+    /// not deferred to the first LLM call.
+    #[test]
+    fn test_malformed_provider_params_rejected_at_config_parse() {
+        // Unknown key inside the typed override shape.
+        let unknown_key = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": { "not_a_known_knob": true }
+        });
+        assert!(
+            serde_json::from_value::<AgentConfig>(unknown_key).is_err(),
+            "unknown provider-params key must fail closed at config ingress"
+        );
+
+        // Wrong type for a known knob.
+        let wrong_type = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": { "temperature": "hot" }
+        });
+        assert!(
+            serde_json::from_value::<AgentConfig>(wrong_type).is_err(),
+            "mistyped provider-params knob must fail closed at config ingress"
+        );
+
+        // Well-formed typed shape parses.
+        let typed = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "provider_params": {
+                "temperature": 0.2,
+                "provider_tag": { "provider": "anthropic", "effort": "high" }
+            }
+        });
+        let parsed: AgentConfig =
+            serde_json::from_value(typed).expect("typed provider params parse");
+        assert_eq!(parsed.provider_params.params.temperature, Some(0.2));
     }
 }

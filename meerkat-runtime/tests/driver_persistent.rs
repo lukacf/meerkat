@@ -157,7 +157,10 @@ async fn persist_destroyed_runtime_lifecycle(
     let session_id = SessionId::new();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     meerkat_runtime::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
         .await
         .expect("generated destroy should persist lifecycle");
@@ -343,8 +346,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -362,8 +364,7 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: Some(vec![
+        content: meerkat_core::types::ContentInput::Blocks(vec![
             ContentBlock::Text {
                 text: text.to_string(),
             },
@@ -588,7 +589,9 @@ async fn durable_runtime_input_externalizes_inline_images_before_ack() {
         .expect("accepted durable input should be persisted");
     match persisted_input {
         Input::Prompt(prompt) => {
-            let blocks = prompt.blocks.expect("multimodal blocks should persist");
+            let meerkat_core::types::ContentInput::Blocks(blocks) = prompt.content else {
+                panic!("multimodal blocks should persist");
+            };
             assert!(
                 blocks.iter().any(|block| matches!(
                     block,
@@ -769,7 +772,6 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
-    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
     store
         .persist_input_state(
             &rid,
@@ -839,7 +841,6 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
     // by seeding the DSL-owned phase + run association alongside the shell.
     use meerkat_runtime::input_state::InputLifecycleState;
-    state.attempt_count = 1;
     stamp_runtime_semantics(&mut state);
     let stored = StoredInputState {
         state,
@@ -915,7 +916,6 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
     let mut canonical_state = InputState::new_accepted(input_id.clone());
     canonical_state.persisted_input = Some(input.clone());
     canonical_state.durability = Some(InputDurability::Durable);
-    canonical_state.attempt_count = 1;
     stamp_runtime_semantics(&mut canonical_state);
     let canonical_stored = StoredInputState {
         state: canonical_state.clone(),
@@ -990,7 +990,6 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
     let mut canonical_state = InputState::new_accepted(input_id.clone());
     canonical_state.persisted_input = Some(input.clone());
     canonical_state.durability = Some(InputDurability::Durable);
-    canonical_state.attempt_count = 1;
     stamp_runtime_semantics(&mut canonical_state);
     let canonical_stored = StoredInputState {
         state: canonical_state.clone(),
@@ -1059,7 +1058,6 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
-    state.attempt_count = 1;
     stamp_runtime_semantics(&mut state);
     inner
         .persist_input_state(
@@ -1121,7 +1119,6 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
-    state.attempt_count = 1;
     stamp_runtime_semantics(&mut state);
     store
         .persist_input_state(

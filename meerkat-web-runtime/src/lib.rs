@@ -30,7 +30,6 @@
 //! - `mob_retire(mob_id, agent_identity)`
 //! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
 //! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — low-level local-local wiring
-//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — low-level aliases
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, agent_identity, request_json)` → JSON
 //! - `mob_member_send(mob_id, agent_identity, request_json)` → JSON delivery receipt
@@ -44,10 +43,10 @@
 //! - `mob_cancel_flow(mob_id, run_id)`
 //!
 //! ### Event Streaming
-//! - `mob_member_subscribe(mob_id, agent_identity)` → handle (per-member)
-//! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
-//! - `poll_subscription(handle)` → JSON events
-//! - `close_subscription(handle)`
+//! - `mob_member_subscribe(mob_id, agent_identity)` → stream_id (per-member)
+//! - `mob_subscribe_events(mob_id)` → stream_id (mob-wide)
+//! - `poll_subscription(stream_id)` → JSON events
+//! - `close_subscription(stream_id)`
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -66,9 +65,7 @@ pub mod external_auth;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
 use std::sync::Arc;
-use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
@@ -191,6 +188,23 @@ fn default_max_tokens() -> u32 {
 // Credentials / Config for init_runtime
 // ═══════════════════════════════════════════════════════════
 
+/// Host-supplied mobpack trust configuration.
+///
+/// Native surfaces resolve trusted signers from the user/project trust stores
+/// (`meerkat_mob_pack::trust::load_trusted_signers`); the browser has no
+/// filesystem, so the embedding host supplies the same typed trust store
+/// in-band at bootstrap. The policy default stays
+/// [`meerkat_mob_pack::trust::TrustPolicy::Strict`] (fail-closed); accepting
+/// an unsigned/untrusted pack requires an explicit `permissive` opt-in from
+/// the host, never a fail-open default.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct MobpackTrustConfig {
+    #[serde(default)]
+    policy: meerkat_mob_pack::trust::TrustPolicy,
+    #[serde(default)]
+    trusted_signers: meerkat_mob_pack::trust::TrustedSigners,
+}
+
 #[derive(Debug, Deserialize)]
 struct Credentials {
     /// Per-provider API keys. At least one must be set.
@@ -200,7 +214,9 @@ struct Credentials {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    /// Optional explicit model override. When unset, the default is resolved
+    /// from the catalog for the highest-priority configured provider.
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -209,10 +225,13 @@ struct Credentials {
     openai_base_url: Option<String>,
     #[serde(default)]
     gemini_base_url: Option<String>,
-}
-
-fn default_model() -> Option<String> {
-    Some(meerkat_models::catalog::global_default_model().to_string())
+    /// Maximum concurrent sessions for the bootstrapped service.
+    #[serde(default = "default_max_sessions")]
+    max_sessions: usize,
+    /// Mobpack trust store + policy for this runtime (Strict + empty when
+    /// omitted, so an unsigned or unknown-signer pack fails closed).
+    #[serde(default)]
+    mobpack_trust: MobpackTrustConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +243,9 @@ struct RuntimeConfig {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    /// Optional explicit model override. When unset, the default is resolved
+    /// from the catalog for the highest-priority configured provider.
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -235,10 +256,39 @@ struct RuntimeConfig {
     gemini_base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+    /// Mobpack trust store + policy for this runtime (Strict + empty when
+    /// omitted). Consumed by `create_session` pack ingress.
+    #[serde(default)]
+    mobpack_trust: MobpackTrustConfig,
 }
 
 fn default_max_sessions() -> usize {
     MAX_SESSIONS
+}
+
+/// Build the bootstrap `Config` from this surface's actual inputs (explicit
+/// model override + configured API keys + base URLs) and resolve the default
+/// model through the canonical create-session ladder.
+///
+/// The browser bootstrap synthesizes its config from `credentials_json`
+/// alone: the embedded template's global agent model is an operator-file fact
+/// that does not exist on this surface, so `config.agent.model` carries only
+/// the caller's explicit override (or nothing). After
+/// [`populate_realm_from_api_keys`] makes the config truthful about which
+/// providers are configured, the model decision itself is owned by
+/// [`meerkat::resolve_create_session_default_model`] — this surface keeps no
+/// parallel default-model ladder.
+fn build_bootstrap_config(
+    explicit_model: Option<String>,
+    api_keys: &HashMap<String, String>,
+    base_urls: Option<&HashMap<String, String>>,
+) -> (meerkat_core::Config, String) {
+    let mut config = Config::default();
+    config.agent.model = explicit_model.unwrap_or_default();
+    populate_realm_from_api_keys(&mut config, api_keys, base_urls);
+    let model = meerkat::resolve_create_session_default_model(&config);
+    config.agent.model.clone_from(&model);
+    (config, model)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -272,8 +322,43 @@ struct RuntimeState {
     /// Opaque browser-local handles mapped to runtime-owned sessions.
     sessions: BTreeMap<u32, RuntimeHandleSession>,
     next_handle: u32,
+    /// Trust-verified bootstrap mobpack (definition id + skills), consumed when
+    /// `create_session_simple` builds a standalone session so the verified pack
+    /// contributes its system prompt rather than being discarded at init.
+    bootstrap_mobpack: Option<BootstrapMobpack>,
+    /// Host-supplied mobpack trust store, installed at bootstrap and consumed
+    /// by every later pack ingress (`create_session`). Single owner: trust is
+    /// a runtime-bootstrap fact, never a per-call argument.
+    mobpack_trust: MobpackTrustConfig,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
+}
+
+/// Verified bootstrap mobpack retained for standalone session system-prompt
+/// assembly. Built only after `verify_extracted_pack_trust` succeeds.
+struct BootstrapMobpack {
+    definition_id: String,
+    name: String,
+    skills: BTreeMap<String, String>,
+}
+
+impl BootstrapMobpack {
+    fn from_parsed(parsed: ParsedMobpack) -> Self {
+        Self {
+            definition_id: parsed.definition.id,
+            name: parsed.manifest.mobpack.name,
+            skills: parsed.skills,
+        }
+    }
+
+    fn compile_system_prompt(&self, user_system_prompt: Option<&str>) -> String {
+        compile_system_prompt(
+            &self.definition_id,
+            &self.name,
+            &self.skills,
+            user_system_prompt,
+        )
+    }
 }
 
 /// Populate `config.realm["default"]` with InlineSecret-backed bindings
@@ -294,12 +379,10 @@ fn populate_realm_from_api_keys(
     // Deterministic cross-provider order owned by the model catalog
     // (`provider_priority()` == [Anthropic, OpenAI, Gemini]). Each provider's
     // sort index is its position in that list; providers absent from the list
-    // (and unrecognized strings) sort last. The `google` alias normalizes to
-    // the Gemini identity before lookup.
-    let priority = meerkat_models::catalog::provider_priority();
+    // (and unrecognized strings) sort last.
+    let priority = meerkat_core::model_profile::catalog::provider_priority();
     let provider_rank = |key: &str| -> usize {
-        let canonical = if key == "google" { "gemini" } else { key };
-        match meerkat_core::Provider::parse_strict(canonical) {
+        match meerkat_core::Provider::parse_strict(key) {
             Some(provider) => priority
                 .iter()
                 .position(|p| *p == provider)
@@ -308,6 +391,28 @@ fn populate_realm_from_api_keys(
         }
     };
     entries.sort_by_key(|(k, _)| provider_rank(k));
+
+    // A per-provider default model is only a true config fact for providers
+    // that have a key-backed binding in this realm — but `Config::default()`
+    // pre-fills `config.models` for every catalog provider. Clear the
+    // unconfigured entries so the canonical create-session default-model
+    // ladder (which walks non-empty `config.models` entries in catalog
+    // priority order) sees only the providers this surface actually
+    // configured.
+    let configured = |provider: meerkat_core::Provider| {
+        api_keys
+            .keys()
+            .any(|key| meerkat_core::Provider::parse_strict(key) == Some(provider))
+    };
+    if !configured(meerkat_core::Provider::Anthropic) {
+        config.models.anthropic.clear();
+    }
+    if !configured(meerkat_core::Provider::OpenAI) {
+        config.models.openai.clear();
+    }
+    if !configured(meerkat_core::Provider::Gemini) {
+        config.models.gemini.clear();
+    }
 
     let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
     if let Some(urls) = base_urls {
@@ -441,9 +546,7 @@ thread_local! {
 
 fn clear_subscription_registry() {
     SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        registry.subscriptions.clear();
-        registry.next_handle = 1;
+        cell.borrow_mut().subscriptions.clear();
     });
 }
 
@@ -531,9 +634,20 @@ fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> 
 // Error helpers
 // ═══════════════════════════════════════════════════════════
 
+/// Host-safe structured error envelope (`{code, message}`). The wasm surface
+/// wraps it into a `JsValue` via [`js_from_value`]; keeping the typed envelope
+/// as the Rust-owned value lets non-wasm unit tests assert the typed `code`
+/// without constructing a `JsValue` (which panics outside wasm).
+fn err_value(code: &str, message: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({ "code": code, "message": message.to_string() })
+}
+
+fn js_from_value(value: serde_json::Value) -> JsValue {
+    JsValue::from_str(&value.to_string())
+}
+
 fn err_js(code: &str, message: &str) -> JsValue {
-    let json = serde_json::json!({ "code": code, "message": message });
-    JsValue::from_str(&json.to_string())
+    js_from_value(err_value(code, message))
 }
 
 fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
@@ -562,35 +676,55 @@ fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
     JsValue::from_str(&mob_destroy_error_value(e).to_string())
 }
 
-fn err_session(e: meerkat_core::SessionError) -> JsValue {
+/// Build the typed `{ code, message, ... }` error envelope for a
+/// [`meerkat_core::SessionError`]. Each variant carries its stable
+/// `SessionError::code()` so callers can classify the terminal fault — agent
+/// faults surface as `AGENT_ERROR`, never flattened to a generic
+/// `internal_error` and never laundered into an Ok-with-status payload.
+fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
     match e {
         meerkat_core::SessionError::NotFound { .. } => {
-            err_js("SESSION_NOT_FOUND", "session not found")
+            serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
         }
-        meerkat_core::SessionError::Busy { .. } => err_js("SESSION_BUSY", "session is busy"),
-        meerkat_core::SessionError::PersistenceDisabled => err_js(
-            "SESSION_PERSISTENCE_DISABLED",
-            "session persistence is disabled",
-        ),
-        meerkat_core::SessionError::CompactionDisabled => err_js(
-            "SESSION_COMPACTION_DISABLED",
-            "session compaction is disabled",
-        ),
+        meerkat_core::SessionError::Busy { .. } => {
+            serde_json::json!({ "code": "SESSION_BUSY", "message": "session is busy" })
+        }
+        meerkat_core::SessionError::PersistenceDisabled => serde_json::json!({
+            "code": "SESSION_PERSISTENCE_DISABLED",
+            "message": "session persistence is disabled",
+        }),
+        meerkat_core::SessionError::CompactionDisabled => serde_json::json!({
+            "code": "SESSION_COMPACTION_DISABLED",
+            "message": "session compaction is disabled",
+        }),
         meerkat_core::SessionError::NotRunning { .. } => {
-            err_js("SESSION_NOT_RUNNING", "session is not running")
+            serde_json::json!({ "code": "SESSION_NOT_RUNNING", "message": "session is not running" })
         }
-        meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
+        meerkat_core::SessionError::Unsupported(message) => {
+            serde_json::json!({ "code": "SESSION_UNSUPPORTED", "message": message })
+        }
         meerkat_core::SessionError::FailedWithData { message, data } => {
             let mut data = data;
             if let serde_json::Value::Object(map) = &mut data {
                 map.entry("message".to_string())
                     .or_insert_with(|| serde_json::Value::String(message));
             }
-            JsValue::from_str(&data.to_string())
+            data
         }
-        meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
-        meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::Store(_) => {
+            serde_json::json!({ "code": "SESSION_STORE_ERROR", "message": e.to_string() })
+        }
+        // Carry the typed `SessionError::code()` ("AGENT_ERROR") rather than
+        // flattening agent faults into a generic "internal_error", so callers
+        // can classify the terminal fault on the Err channel.
+        meerkat_core::SessionError::Agent(_) => {
+            serde_json::json!({ "code": e.code(), "message": e.to_string() })
+        }
     }
+}
+
+fn err_session(e: meerkat_core::SessionError) -> JsValue {
+    JsValue::from_str(&session_error_envelope(e).to_string())
 }
 
 fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
@@ -614,6 +748,31 @@ fn err_invalid_session_handle(handle: u32) -> JsValue {
         "invalid_session_handle",
         &format!("unknown browser session handle: {handle}"),
     )
+}
+
+/// Parse a caller-supplied prompt into typed [`meerkat_core::types::ContentInput`],
+/// failing closed on anything that is not the tagged prompt-input wire shape.
+///
+/// K19: content-bearing exports take the discriminated contract shape
+/// `{"text": "..."}` | `{"blocks": [...]}` (`WirePromptInput`); the tag is
+/// the discriminator, never JSON shape-sniffing of a raw string. A plain-text
+/// prompt whose body happens to be valid block-array JSON can therefore never
+/// be misread as structured blocks, and a malformed tagged payload surfaces
+/// `INVALID_PARAMS` instead of being downgraded to text.
+fn parse_prompt_content_input(
+    prompt: &str,
+) -> Result<meerkat_core::types::ContentInput, serde_json::Value> {
+    let wire: meerkat_contracts::WirePromptInput = serde_json::from_str(prompt).map_err(|e| {
+        err_value(
+            "INVALID_PARAMS",
+            format!(
+                "prompt must be the tagged content-input wire shape \
+                 {{\"text\": ...}} or {{\"blocks\": [...]}}: {e}"
+            ),
+        )
+    })?;
+    meerkat_core::types::ContentInput::try_from(wire)
+        .map_err(|e| err_value("INVALID_PARAMS", format!("invalid content blocks: {e}")))
 }
 
 async fn resolve_mob_member_bridge_session_id(
@@ -647,7 +806,34 @@ struct ParsedMobpack {
 fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     let files =
         extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+    parse_mobpack_from_files(&files)
+}
 
+/// Extract, trust-verify, and parse a mobpack for runtime bootstrap.
+///
+/// Rule 8 / browser-safety: the browser advertises "initialization from a
+/// mobpack", so it must run the canonical [`meerkat_mob_pack::trust`]
+/// verification — not just a local parser. Verification runs under
+/// [`TrustPolicy::Strict`] by default so an unsigned or untrusted pack fails
+/// closed. The verified [`ParsedMobpack`] (definition + skills) is then returned
+/// for the runtime build instead of being discarded.
+fn extract_verify_and_parse_mobpack(
+    bytes: &[u8],
+    trust_policy: meerkat_mob_pack::trust::TrustPolicy,
+    trusted_signers: &meerkat_mob_pack::trust::TrustedSigners,
+) -> Result<ParsedMobpack, serde_json::Value> {
+    let files = extract_targz_safe(bytes).map_err(|e| {
+        err_value(
+            "invalid_mobpack",
+            format!("failed to parse mobpack archive: {e}"),
+        )
+    })?;
+    meerkat_mob_pack::trust::verify_extracted_pack_trust(&files, trust_policy, trusted_signers)
+        .map_err(|e| err_value("untrusted_mobpack", e))?;
+    parse_mobpack_from_files(&files).map_err(|e| err_value("invalid_mobpack", e))
+}
+
+fn parse_mobpack_from_files(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedMobpack, String> {
     let manifest_text = std::str::from_utf8(
         files
             .get("manifest.toml")
@@ -666,20 +852,20 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     .map_err(|e| format!("invalid definition.json: {e}"))?;
 
     if let Some(requires) = &manifest.requires {
-        for capability in requires.typed_capabilities() {
-            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
+        for capability in &requires.capabilities {
+            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability.id())
                 .is_forbidden()
             {
                 return Err(format!(
                     "forbidden capability '{}' is not allowed in browser-safe mode",
-                    capability.raw()
+                    capability.token()
                 ));
             }
         }
     }
 
     let mut skills = BTreeMap::new();
-    for (path, content) in &files {
+    for (path, content) in files {
         if let Some(name) = path.strip_prefix("skills/") {
             let text = std::str::from_utf8(content)
                 .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
@@ -728,63 +914,10 @@ fn compile_system_prompt(
 // Archive Extraction
 // ═══════════════════════════════════════════════════════════
 
+/// Extract a mobpack tar.gz using the typed extraction owner in
+/// `meerkat-mob-pack` (single owner of archive path-safety semantics).
 fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let cursor = std::io::Cursor::new(bytes);
-    let decoder = flate2::read::GzDecoder::new(cursor);
-    let mut archive = tar::Archive::new(decoder);
-    let mut files = BTreeMap::new();
-    let entries = archive
-        .entries()
-        .map_err(|e| format!("failed to read archive entries: {e}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|e| format!("failed reading archive entry: {e}"))?;
-        let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
-            return Err("archive contains unsupported entry type".to_string());
-        }
-        let path = entry
-            .path()
-            .map_err(|e| format!("invalid archive path: {e}"))?;
-        if !kind.is_file() {
-            continue;
-        }
-        let normalized = normalize_for_archive(path.to_string_lossy().as_ref())?;
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|e| format!("failed reading archive file '{normalized}': {e}"))?;
-        files.insert(normalized, contents);
-    }
-    Ok(files)
-}
-
-fn normalize_for_archive(path: &str) -> Result<String, String> {
-    let replaced = path.replace('\\', "/");
-    if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
-        return Err("archive contains absolute path entry".to_string());
-    }
-    let mut parts = Vec::new();
-    for segment in replaced.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return Err("archive contains parent directory traversal entry".to_string());
-        }
-        parts.push(segment);
-    }
-    if parts.is_empty() {
-        return Err("archive contains empty path entry".to_string());
-    }
-    Ok(parts.join("/"))
-}
-
-fn looks_like_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
+    meerkat_mob_pack::targz::extract_targz_safe(bytes).map_err(|error| error.to_string())
 }
 
 // Plan §6.14 deleted the legacy flat-path `create_llm_client` helper.
@@ -1019,15 +1152,29 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         &self,
         call: meerkat_core::ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
-        // Fire-and-forget tools return immediately. The host watches
-        // ToolCallRequested events in the stream to act on the call.
+        // Fire-and-forget tools defer the real work to the host: the host
+        // watches ToolCallRequested events in the stream and acts on the call
+        // asynchronously. Rule 8: do NOT fabricate an `is_error:false`
+        // synchronous *success* (which would assert the host action completed
+        // before it happened). Instead, model it as a typed detached async op so
+        // the turn boundary does not block on (or assert) the deferred action,
+        // and label the transcript result as pending rather than completed.
         if Self::is_fire_and_forget(call.name) {
-            return Ok(meerkat_core::ToolResult::new(
+            let detached =
+                meerkat_core::ops::AsyncOpRef::detached(meerkat_core::ops::OperationId::new());
+            let pending = meerkat_core::ToolResult::new(
                 call.id.to_string(),
-                "acknowledged".to_string(),
+                "deferred to host: this tool call was dispatched to the host \
+                 asynchronously and has not completed; its result (if any) arrives \
+                 through a later session/mob message, not this tool result"
+                    .to_string(),
                 false,
-            )
-            .into());
+            );
+            return Ok(meerkat_core::ops::ToolDispatchOutcome::new(
+                pending,
+                vec![detached],
+                Vec::new(),
+            ));
         }
 
         let callback = Self::get_callback(call.name)
@@ -1048,23 +1195,61 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             })?;
         let result_str = result_val.as_string().unwrap_or_default();
 
-        // Parse JSON result: {"content": "...", "is_error": false}
-        #[derive(Deserialize)]
-        struct JsToolResult {
-            content: String,
-            #[serde(default)]
-            is_error: bool,
-        }
-        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
-            meerkat_core::error::ToolError::execution_failed(format!(
-                "invalid tool result JSON: {e}"
-            ))
-        })?;
+        Ok(parse_js_tool_result(call.id, &result_str)?.into())
+    }
+}
 
-        Ok(
-            meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
-                .into(),
-        )
+/// JSON shape returned by a JS tool callback.
+///
+/// `content` carries the canonical [`meerkat_contracts::WireToolResultContent`]
+/// typed owner — a `string | ContentBlock[]` union — so multimodal block
+/// content (images, video) survives as typed blocks rather than being narrowed
+/// to a string at the boundary.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct JsToolResult {
+    content: meerkat_contracts::WireToolResultContent,
+    #[serde(default)]
+    is_error: bool,
+}
+
+/// Parse a JS tool-callback JSON string into a typed [`meerkat_core::ToolResult`],
+/// preserving multimodal block content via [`meerkat_contracts::WireToolResultContent`].
+///
+/// Not wasm-gated so the typed-content conversion is unit-testable on the host.
+#[cfg(any(target_arch = "wasm32", test))]
+fn parse_js_tool_result(
+    call_id: &str,
+    result_str: &str,
+) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+    use meerkat_contracts::WireToolResultContent;
+
+    let parsed: JsToolResult = serde_json::from_str(result_str).map_err(|e| {
+        meerkat_core::error::ToolError::execution_failed(format!("invalid tool result JSON: {e}"))
+    })?;
+
+    match parsed.content {
+        WireToolResultContent::Text(text) => Ok(meerkat_core::ToolResult::new(
+            call_id.to_string(),
+            text,
+            parsed.is_error,
+        )),
+        WireToolResultContent::Blocks(blocks) => {
+            let blocks = blocks
+                .into_iter()
+                .map(meerkat_core::ContentBlock::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    meerkat_core::error::ToolError::execution_failed(format!(
+                        "invalid tool result content block: {e}"
+                    ))
+                })?;
+            Ok(meerkat_core::ToolResult::with_blocks(
+                call_id.to_string(),
+                blocks,
+                parsed.is_error,
+            ))
+        }
     }
 }
 
@@ -1093,10 +1278,19 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 // Bootstrap: init_runtime
 // ═══════════════════════════════════════════════════════════
 
-/// Primary bootstrap: parse a mobpack and create service infrastructure.
+/// Primary bootstrap: trust-verify a mobpack and create service infrastructure.
 ///
-/// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>" }`
+/// `mobpack_bytes`: tar.gz mobpack archive. Verified via the canonical
+/// [`meerkat_mob_pack::trust`] authority under the host-supplied
+/// `mobpack_trust` configuration ([`TrustPolicy::Strict`] + empty trust store
+/// when omitted) — an unsigned or unknown-signer pack fails closed with a
+/// typed error unless the host registered the signer (or explicitly opted in
+/// to `permissive`).
+/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...",
+/// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
+/// "max_sessions"?: 100000,
+/// "mobpack_trust"?: { "policy"?: "strict"|"permissive",
+///                     "trusted_signers"?: { "signers": { "<signer_id>": "<ed25519 pubkey hex>" } } } }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -1104,9 +1298,17 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
     patch_fetch_response_url();
-    let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
+    // Browser bootstrap must run canonical trust verification (Strict by
+    // default) over the host-supplied trust store, not a local parser. The
+    // verified pack is consumed below.
+    let parsed = extract_verify_and_parse_mobpack(
+        mobpack_bytes,
+        creds.mobpack_trust.policy,
+        &creds.mobpack_trust.trusted_signers,
+    )
+    .map_err(js_from_value)?;
 
     let api_keys = build_provider_api_keys(
         creds.anthropic_api_key.as_deref(),
@@ -1114,9 +1316,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
-    let model = creds
-        .model
-        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
+    let max_sessions = creds.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
     let base_urls = build_provider_base_urls(
@@ -1124,17 +1324,25 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.openai_base_url.as_deref(),
         creds.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    // The default model comes from the canonical
+    // `resolve_create_session_default_model` ladder over the bootstrap
+    // config, after the api-keys→realm population makes that config truthful
+    // about which providers are configured.
+    let (config, model) = build_bootstrap_config(creds.model, &api_keys, base_urls.as_ref());
 
-    let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
+    let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
+
+    let bootstrap_mobpack = BootstrapMobpack::from_parsed(parsed);
+    let mobpack_name = bootstrap_mobpack.name.clone();
+    let skill_count = bootstrap_mobpack.skills.len();
 
     install_runtime_state(RuntimeState {
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
+        bootstrap_mobpack: Some(bootstrap_mobpack),
+        mobpack_trust: creds.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1143,6 +1351,8 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         "status": "initialized",
         "model": model,
         "providers": providers,
+        "max_sessions": max_sessions,
+        "mobpack": { "name": mobpack_name, "skills": skill_count },
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -1153,7 +1363,9 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>", "max_sessions"?: 100000 }`
+/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...",
+/// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
+/// "max_sessions"?: 100000 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
@@ -1167,9 +1379,6 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
-    let model = rt_config
-        .model
-        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
@@ -1178,9 +1387,11 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.openai_base_url.as_deref(),
         rt_config.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    // The default model comes from the canonical
+    // `resolve_create_session_default_model` ladder over the bootstrap
+    // config, after the api-keys→realm population makes that config truthful
+    // about which providers are configured.
+    let (config, model) = build_bootstrap_config(rt_config.model, &api_keys, base_urls.as_ref());
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -1189,6 +1400,8 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
+        bootstrap_mobpack: None,
+        mobpack_trust: rt_config.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1246,12 +1459,13 @@ fn build_session_request_with_auth_binding(
     Ok(meerkat_core::service::CreateSessionRequest {
         model: config.model.clone(),
         prompt: "".into(),
-        render_metadata: None,
-        system_prompt,
+        system_prompt: match system_prompt {
+            Some(prompt) => meerkat_core::SystemPromptOverride::Set(prompt),
+            None => meerkat_core::SystemPromptOverride::Inherit,
+        },
         max_tokens: Some(config.max_tokens),
         event_tx: None,
 
-        skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_config.to_session_build_options()),
@@ -1304,9 +1518,18 @@ fn create_runtime_backed_session(
 ///
 /// Allocates a real session through the initialized runtime-backed session
 /// service, then returns a browser-local session handle for convenience.
+///
+/// The pack's skills/definition become session prompt truth here, so this
+/// ingress runs the same canonical [`meerkat_mob_pack::trust`] verification
+/// as `init_runtime` — never the local parse-only path. The trust store is
+/// the one the host installed at bootstrap (Strict + empty when none was
+/// supplied, so unsigned/unknown-signer packs fail closed).
 #[wasm_bindgen]
 pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
-    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    let trust = with_runtime_state(|state| Ok(state.mobpack_trust.clone()))?;
+    let parsed =
+        extract_verify_and_parse_mobpack(mobpack_bytes, trust.policy, &trust.trusted_signers)
+            .map_err(js_from_value)?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = compile_system_prompt(
@@ -1319,12 +1542,25 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 }
 
 /// Create a standalone session through initialized runtime state.
+///
+/// When the runtime was bootstrapped from a trust-verified mobpack
+/// (`init_runtime`), that pack's skills and definition are folded into the
+/// system prompt so the verified bootstrap pack is actually consumed rather
+/// than discarded.
 #[wasm_bindgen]
 pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
-    let system_prompt = config.system_prompt.clone();
-    create_runtime_backed_session(config, system_prompt, String::new())
+    let (system_prompt, mob_id) = with_runtime_state(|state| {
+        Ok(match &state.bootstrap_mobpack {
+            Some(pack) => (
+                Some(pack.compile_system_prompt(config.system_prompt.as_deref())),
+                pack.definition_id.clone(),
+            ),
+            None => (config.system_prompt.clone(), String::new()),
+        })
+    })?;
+    create_runtime_backed_session(config, system_prompt, mob_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1341,7 +1577,7 @@ fn system_context_request_from_append(
     append: &meerkat_core::PendingSystemContextAppend,
 ) -> meerkat_core::AppendSystemContextRequest {
     meerkat_core::AppendSystemContextRequest {
-        text: append.text.clone(),
+        content: append.content.clone(),
         source: append.source.clone(),
         idempotency_key: append.idempotency_key.clone(),
         source_kind: append.source_kind,
@@ -1409,7 +1645,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
         .append_system_context(
             &session_id,
             meerkat_core::AppendSystemContextRequest {
-                text: req.text,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(req.text),
                 source: req.source,
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
@@ -1433,11 +1669,16 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 
 /// Run a turn through the runtime-backed session service.
 ///
-/// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
+/// On success, resolves (Ok) with a JSON-serialized [`meerkat_contracts::WireRunResult`]
+/// — the same canonical wire shape RPC's `turn/start` returns — exposing
+/// `terminal_cause_kind` so callers read the runtime-owned terminal class
+/// instead of a fabricated status string.
 ///
-/// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
-/// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
-/// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
+/// On any [`meerkat_core::SessionError`] (including `Agent`), rejects (Err)
+/// with the typed error envelope (`{ code, message }`), carrying the stable
+/// `SessionError::code()`. Agent-level failures surface on the Err channel as
+/// `AGENT_ERROR`; they are NOT laundered into an Ok value with a `status`
+/// string.
 #[wasm_bindgen]
 pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     let (session_service, session_id) = with_runtime_state(|state| {
@@ -1449,10 +1690,10 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     })?;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
-    // and JSON-serialized content blocks from the Web SDK). Falls back to plain
-    // text when the prompt is not valid ContentInput JSON.
-    let content_input: meerkat_core::types::ContentInput =
-        serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
+    // and JSON-serialized content blocks from the Web SDK). Structured-but-
+    // malformed block JSON fails closed with INVALID_PARAMS instead of being
+    // silently misread as plain text.
+    let content_input = parse_prompt_content_input(prompt).map_err(js_from_value)?;
 
     let run_result = session_service
         .start_turn(
@@ -1468,30 +1709,14 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
 
     match run_result {
         Ok(result) => {
-            let result_json = serde_json::json!({
-                "text": result.text,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                },
-                "session_id": result.session_id.to_string(),
-                "status": "completed",
-                "turns": result.turns,
-                "tool_calls": result.tool_calls,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
+            let wire: meerkat_contracts::WireRunResult = result.into();
+            let result_json =
+                serde_json::to_string(&wire).map_err(|e| err_str("internal_error", e))?;
+            Ok(JsValue::from_str(&result_json))
         }
-        Err(meerkat_core::SessionError::Agent(err)) => {
-            let error_msg = format!("{err}");
-            let result_json = serde_json::json!({
-                "text": "",
-                "usage": { "input_tokens": 0, "output_tokens": 0 },
-                "session_id": session_id.to_string(),
-                "status": "failed",
-                "error": error_msg,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
-        }
+        // Agent-level failures (LLM failure, timeout, budget) reject on the Err
+        // channel carrying the typed `SessionError::code()`, mirroring how RPC's
+        // `turn/start` surfaces terminal faults. No Ok-with-status laundering.
         Err(err) => Err(err_session(err)),
     }
 }
@@ -1526,6 +1751,11 @@ pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
 }
 
 /// Inspect a mobpack without creating a session.
+///
+/// Read-only metadata projection: nothing from the pack is consumed as
+/// runtime/prompt authority here, so (matching `rkat mob inspect`) unsigned
+/// packs are inspectable and trust verification is deliberately not applied.
+/// Every consuming ingress (`init_runtime`, `create_session`) verifies trust.
 #[wasm_bindgen]
 pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
@@ -1553,6 +1783,12 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Remove a session.
+///
+/// The browser-local handle is retired on success: subsequent
+/// `get_session_state`/`start_turn`/`poll_events` on this handle fail closed
+/// with `invalid_session_handle` rather than returning an addressable archived
+/// projection. The handle is only removed after cleanup succeeds, so a failed
+/// destroy leaves the handle live for retry.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
     let (session_service, mob_state, session_id) = with_runtime_state(|state| {
@@ -1571,7 +1807,12 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
         mob_state,
         session_id,
     ))
-    .map_err(err_web_destroy_session)
+    .map_err(err_web_destroy_session)?;
+    // Fail-closed: retire the handle so it is no longer addressable.
+    with_runtime_state_mut(|state| {
+        state.sessions.remove(&handle);
+        Ok(())
+    })
 }
 
 #[derive(Debug)]
@@ -1634,11 +1875,17 @@ pub fn poll_events(handle: u32) -> Result<String, JsValue> {
                 ),
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                    events.push(serde_json::json!({
-                        "type": "lagged",
-                        "skipped": skipped,
-                    }));
+                Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(dropped)) => {
+                    // K19: the lag gap is the generated `StreamTruncated`
+                    // event (payload-shaped, matching this stream's items).
+                    events.push(
+                        serde_json::to_value(meerkat_core::event::AgentEvent::StreamTruncated {
+                            reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
+                                dropped,
+                            },
+                        })
+                        .map_err(|err| err_str("serialize_error", err))?,
+                    );
                 }
             }
         }
@@ -1667,18 +1914,18 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
 
 /// Get the status of a mob.
 ///
-/// Returns JSON with the generated mob status plus the legacy state projection.
+/// Returns the generated `MobStatusResult` JSON envelope.
 #[wasm_bindgen]
 pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
-    let result = serde_json::json!({
-        "mob_id": mob_id,
-        "status": state.as_str(),
-        "state": state.as_str(),
-    });
-    Ok(JsValue::from_str(&result.to_string()))
+    let result = meerkat_contracts::MobStatusResult {
+        mob_id: mob_id.to_string(),
+        status: meerkat_mob_mcp::wire_mob_lifecycle_status(state),
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// List all mobs.
@@ -1688,16 +1935,14 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mobs = mob_state.mob_list().await;
-    let rows: Vec<serde_json::Value> = mobs
+    let rows: Vec<meerkat_contracts::MobStatusResult> = mobs
         .into_iter()
-        .map(|(id, state)| {
-            serde_json::json!({
-                "mob_id": id.to_string(),
-                "status": state.as_str(),
-            })
+        .map(|(id, state)| meerkat_contracts::MobStatusResult {
+            mob_id: id.to_string(),
+            status: meerkat_mob_mcp::wire_mob_lifecycle_status(state),
         })
         .collect();
-    let result = serde_json::json!({ "mobs": rows });
+    let result = meerkat_contracts::MobListResult { mobs: rows };
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -1706,8 +1951,13 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 ///
 /// `action` is a compatibility string carrier that is immediately
 /// deserialized into the typed wire lifecycle action contract.
+///
+/// Returns the canonical [`meerkat_contracts::MobLifecycleResult`] envelope as
+/// JSON, mirroring the public MCP/RPC shape. For `destroy`, this carries the
+/// structured `MobDestroyReport` (destroyed bridge sessions, retained mobs,
+/// cleanup errors) instead of discarding it.
 #[wasm_bindgen]
-pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValue> {
     let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
         err_js(
             "invalid_action",
@@ -1716,14 +1966,22 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     })?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    // WASM lifecycle wrapper is `() on success`; the structured
-    // MobDestroyReport is available through public/RPC lifecycle result
-    // envelopes for consumers that need cleanup detail.
-    let _destroy_report = mob_state
+    // `WireMobLifecycleAction` is `Copy`; reuse it for the result envelope.
+    let destroy_report = mob_state
         .mob_lifecycle_action(&id, action)
         .await
         .map_err(err_mob_destroy)?;
-    Ok(())
+    let destroy_report = destroy_report
+        .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
+        .transpose()?;
+    let result = meerkat_contracts::MobLifecycleResult {
+        mob_id: mob_id.to_string(),
+        action,
+        ok: true,
+        destroy_report,
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 fn parse_mob_lifecycle_action_arg(
@@ -1736,18 +1994,40 @@ fn parse_mob_lifecycle_action_arg(
 ///
 /// Returns JSON array of mob events.
 ///
-/// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
-/// internally widened to u64. Cursors beyond 4B are not supported via this export.
+/// `after_cursor` is carried as an opaque string so the full u64 runtime cursor
+/// survives the JS boundary — JS numbers cannot represent all u64 values and the
+/// prior `u32` parameter both truncated and (on the SDK side) silently rewound
+/// the stream to position 0 for large/non-finite values. An empty string means
+/// "from the start" (cursor 0); a non-numeric cursor fails closed.
 #[wasm_bindgen]
-pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<JsValue, JsValue> {
+pub async fn mob_events(mob_id: &str, after_cursor: &str, limit: u32) -> Result<JsValue, JsValue> {
+    let after_cursor = parse_mob_event_cursor(after_cursor).map_err(js_from_value)?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let events = mob_state
-        .mob_events(&id, after_cursor as u64, limit as usize)
+        .mob_events(&id, after_cursor, limit as usize)
         .await
         .map_err(err_mob)?;
     let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
+}
+
+/// Parse an opaque mob-event cursor string into the runtime's u64 cursor.
+///
+/// An empty/whitespace cursor maps to 0 (stream start). Any other value must be
+/// a base-10 u64; a malformed cursor fails closed with `INVALID_PARAMS` rather
+/// than silently rewinding the stream.
+fn parse_mob_event_cursor(after_cursor: &str) -> Result<u64, serde_json::Value> {
+    let trimmed = after_cursor.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u64>().map_err(|e| {
+        err_value(
+            "INVALID_PARAMS",
+            format!("invalid mob event cursor '{after_cursor}': {e}"),
+        )
+    })
 }
 
 /// Spawn one or more members in a mob.
@@ -1797,7 +2077,6 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 #[serde(deny_unknown_fields)]
 struct SpawnSpecInput {
     profile: String,
-    #[serde(alias = "meerkat_id")]
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<meerkat_core::types::ContentInput>,
@@ -1811,10 +2090,6 @@ struct SpawnSpecInput {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default)]
     context: Option<serde_json::Value>,
-    /// Legacy 0.6 pre-release SDKs exposed `generation` even though the
-    /// runtime owns member generations. Accept and ignore it for raw JS callers.
-    #[serde(default, rename = "generation")]
-    _generation: Option<u64>,
     /// Additional instruction sections appended to the system prompt.
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
@@ -1842,12 +2117,6 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
         )
         .await
         .map_err(err_mob)
-}
-
-/// Wire a local member to a local or external peer target.
-#[wasm_bindgen]
-pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
-    mob_wire_peer(mob_id, local, target_json).await
 }
 
 /// Wire a local member to a local or external peer target.
@@ -1880,16 +2149,6 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
 
 /// Unwire a local member from a local or external peer target.
 #[wasm_bindgen]
-pub async fn mob_unwire_target(
-    mob_id: &str,
-    local: &str,
-    target_json: &str,
-) -> Result<(), JsValue> {
-    mob_unwire_peer(mob_id, local, target_json).await
-}
-
-/// Unwire a local member from a local or external peer target.
-#[wasm_bindgen]
 pub async fn mob_unwire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
@@ -1912,25 +2171,32 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     // Serialize through the domain shape, then splice in the server-resolved
     // `member_ref` and drop the binding-era `agent_runtime_id` / `fence_token`
     // fields so app code never reasons about incarnation counters.
-    let mut array = serde_json::to_value(&members)
-        .map_err(|e| err_str("serialize_error", e))?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for (entry, member) in array.iter_mut().zip(members.iter()) {
-        if let Some(obj) = entry.as_object_mut() {
-            obj.remove("agent_runtime_id");
-            obj.remove("fence_token");
-            let identity_str = member.agent_identity.to_string();
-            obj.insert(
-                "member_ref".to_string(),
-                serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
-                    id.as_str(),
-                    &identity_str,
-                ))
-                .unwrap_or(serde_json::Value::Null),
-            );
+    let serialized = serde_json::to_value(&members).map_err(|e| err_str("serialize_error", e))?;
+    let mut array = match serialized {
+        serde_json::Value::Array(entries) => entries,
+        _ => {
+            return Err(err_str(
+                "serialize_error",
+                "member roster must serialize to a JSON array",
+            ));
         }
+    };
+    for (entry, member) in array.iter_mut().zip(members.iter()) {
+        let obj = entry.as_object_mut().ok_or_else(|| {
+            err_str(
+                "serialize_error",
+                "member roster entry must be a JSON object",
+            )
+        })?;
+        obj.remove("agent_runtime_id");
+        obj.remove("fence_token");
+        let identity_str = member.agent_identity.to_string();
+        let member_ref = serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
+            id.as_str(),
+            &identity_str,
+        ))
+        .map_err(|e| err_str("serialize_error", e))?;
+        obj.insert("member_ref".to_string(), member_ref);
     }
     let json = serde_json::to_string(&array).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
@@ -1957,7 +2223,7 @@ pub async fn mob_append_system_context(
         .append_system_context(
             &bridge_session_id,
             meerkat_core::AppendSystemContextRequest {
-                text: req.text,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(req.text),
                 source: req.source,
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
@@ -1975,24 +2241,6 @@ pub async fn mob_append_system_context(
             "status": result.status,
         })
         .to_string(),
-    ))
-}
-
-/// Legacy cross-mob bidirectional wire convenience.
-///
-/// No generated composition authority currently owns the two-mob transaction,
-/// so this surface fails closed instead of hand-rolling partial rollback over
-/// two independent MobMachine `WireExternalPeer` commands.
-#[wasm_bindgen]
-pub async fn wire_cross_mob(
-    _mob_a: &str,
-    _agent_a: &str,
-    _mob_b: &str,
-    _agent_b: &str,
-) -> Result<(), JsValue> {
-    Err(err_js(
-        "wire_cross_mob_unsupported",
-        "wire_cross_mob requires generated cross-mob composition authority",
     ))
 }
 
@@ -2085,7 +2333,15 @@ pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsV
         .mob_member_status(&id, &mid)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&snapshot).map_err(|e| err_str("serialize", e))?;
+    // Project through the typed `MobMemberStatusResult` so the server-resolved
+    // `member_ref` and the peer-connectivity tri-state travel in-band as typed
+    // contract fields, rather than splicing `member_ref` into a free-form JSON
+    // object out-of-band. Same opaque handle the spawn/respawn paths mint.
+    let member_ref = meerkat_contracts::WireMemberRef::encode(id.as_str(), agent_identity);
+    let result = snapshot
+        .to_member_status_result(member_ref)
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
 
@@ -2101,45 +2357,44 @@ pub async fn mob_respawn(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
-    let initial_message = initial_message.map(|message| {
-        serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
-            .unwrap_or_else(|_| message.into())
-    });
-    match mob_state.mob_respawn(&id, mid, initial_message).await {
-        Ok(receipt) => {
-            let identity_str = receipt.identity.to_string();
-            let result = serde_json::json!({
-                "status": "completed",
-                "receipt": {
-                    "identity": identity_str,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
-                        id.as_str(),
-                        &identity_str,
-                    ),
-                },
-            });
-            Ok(JsValue::from_str(&result.to_string()))
+    let initial_message = initial_message
+        .map(|message| parse_prompt_content_input(&message))
+        .transpose()
+        .map_err(js_from_value)?;
+    fn respawn_receipt_wire(
+        mob_id: &MobId,
+        receipt: &meerkat_mob::MemberRespawnReceipt,
+    ) -> meerkat_contracts::MobRespawnReceipt {
+        let identity_str = receipt.identity.to_string();
+        meerkat_contracts::MobRespawnReceipt {
+            identity: identity_str.clone(),
+            member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         }
+    }
+
+    // K19: serialize the generated `MobRespawnResult` contract twin (the same
+    // shape RPC's `mob/respawn` returns) instead of a hand-shaped envelope.
+    let result = match mob_state.mob_respawn(&id, mid, initial_message).await {
+        Ok(receipt) => meerkat_contracts::MobRespawnResult {
+            status: meerkat_contracts::WireMobRespawnOutcome::Completed,
+            receipt: respawn_receipt_wire(&id, &receipt),
+            failed_peer_ids: Vec::new(),
+        },
         Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
             receipt,
             failed_peer_ids,
-        }) => {
-            let identity_str = receipt.identity.to_string();
-            let result = serde_json::json!({
-                "status": "topology_restore_failed",
-                "receipt": {
-                    "identity": identity_str,
-                    "member_ref": meerkat_contracts::WireMemberRef::encode(
-                        id.as_str(),
-                        &identity_str,
-                    ),
-                },
-                "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
-            });
-            Ok(JsValue::from_str(&result.to_string()))
-        }
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
-    }
+        }) => meerkat_contracts::MobRespawnResult {
+            status: meerkat_contracts::WireMobRespawnOutcome::TopologyRestoreFailed,
+            receipt: respawn_receipt_wire(&id, &receipt),
+            failed_peer_ids: failed_peer_ids
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        },
+        Err(e) => return Err(JsValue::from_str(&e.to_string())),
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Force-cancel an active mob member turn.
@@ -2158,11 +2413,17 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed rather than fabricating a synthetic
+    // `helper-{uuid}` on the runtime identity path — identity allocation is
+    // the mob substrate's responsibility.
+    let Some(agent_identity) = request.agent_identity else {
+        return Err(err_str(
+            "invalid_request",
+            "mob_spawn_helper requires agent_identity; the surface does not allocate member identity",
+        ));
+    };
+    let identity = AgentIdentity::from(agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
@@ -2189,11 +2450,15 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let source_member_id = AgentIdentity::from(request.source_member_id.as_str());
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity (no synthetic
+    // `fork-{uuid}` fallback).
+    let Some(agent_identity) = request.agent_identity else {
+        return Err(err_str(
+            "invalid_request",
+            "mob_fork_helper requires agent_identity; the surface does not allocate member identity",
+        ));
+    };
+    let identity = AgentIdentity::from(agent_identity);
     let fork_context = request
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
@@ -2280,8 +2545,14 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 
 /// Subscription inner type: per-member broadcast or mob-wide mpsc.
 enum SubscriptionInner {
-    /// Per-member session broadcast receiver.
-    Member(std::cell::RefCell<meerkat_session::BroadcastEventReceiver>),
+    /// Per-member session broadcast receiver, with the bridge session
+    /// identity retained so lag gaps surface as the generated
+    /// `AgentEvent::StreamTruncated` envelope (the same contract the RPC
+    /// event stream emits).
+    Member {
+        session_id: meerkat_core::SessionId,
+        rx: std::cell::RefCell<meerkat_session::BroadcastEventReceiver>,
+    },
     /// Mob-wide attributed event receiver from the event router.
     /// The entire handle is stored to keep the router task alive (Drop cancels it).
     MobWide(std::cell::RefCell<meerkat_mob::MobEventRouterHandle>),
@@ -2294,28 +2565,78 @@ struct EventSubscription {
     inner: SubscriptionInner,
 }
 
+/// Typed owner of a WASM subscription stream identity.
+///
+/// K19: mirrors the RPC router's `StreamRef` seam — a stream identity is
+/// minted once on subscribe (`StreamRef::mint`), parsed fail-closed from the
+/// untrusted wire `stream_id` on every poll/close (`StreamRef::parse`), and
+/// its canonical wire form is the `Display` string. There is no helper-local
+/// `u32` handle counter: the identity is unguessable and collision-free by
+/// construction, not by registry bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct StreamRef(uuid::Uuid);
+
+impl StreamRef {
+    /// Mint a fresh stream identity on subscribe.
+    fn mint() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Parse the untrusted wire `stream_id`, failing closed on malformed
+    /// values. The error is a typed message; callers at the wasm boundary
+    /// project it into a `JsValue` (`JsValue` construction aborts off
+    /// wasm32, so the parse itself stays host-testable).
+    fn parse(raw: &str) -> Result<Self, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|e| format!("malformed subscription stream id '{raw}': {e}"))
+    }
+
+    /// Boundary projection of a parse fault into the wasm error shape.
+    fn parse_js(raw: &str) -> Result<Self, JsValue> {
+        Self::parse(raw).map_err(|message| err_js("invalid_stream_id", &message))
+    }
+}
+
+impl std::fmt::Display for StreamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Default)]
 struct SubscriptionRegistry {
-    next_handle: u32,
-    subscriptions: BTreeMap<u32, EventSubscription>,
+    subscriptions: BTreeMap<StreamRef, EventSubscription>,
 }
 
 thread_local! {
     static SUBSCRIPTIONS: RefCell<SubscriptionRegistry> = const { RefCell::new(SubscriptionRegistry {
-        next_handle: 1,
         subscriptions: BTreeMap::new(),
     }) };
 }
 
+/// Register a subscription under a freshly minted [`StreamRef`] and return
+/// the canonical wire `stream_id`.
+fn register_subscription(inner: SubscriptionInner) -> String {
+    let stream_ref = StreamRef::mint();
+    SUBSCRIPTIONS.with(|cell| {
+        cell.borrow_mut()
+            .subscriptions
+            .insert(stream_ref, EventSubscription { inner });
+    });
+    stream_ref.to_string()
+}
+
 /// Subscribe to a mob member's session event stream.
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// `poll_subscription(stream_id)` to drain buffered events. Each call returns
+/// all events since the last poll.
 ///
 /// The subscription captures ALL agent activity: text deltas, tool calls
 /// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<u32, JsValue> {
+pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
@@ -2340,37 +2661,23 @@ pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<
         .await
         .map_err(|e| err_str("subscribe_error", e))?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-        registry.subscriptions.insert(
-            h,
-            EventSubscription {
-                inner: SubscriptionInner::Member(std::cell::RefCell::new(raw_rx)),
-            },
-        );
-        h
-    });
-
-    Ok(handle)
+    Ok(register_subscription(SubscriptionInner::Member {
+        session_id: bridge_session_id,
+        rx: std::cell::RefCell::new(raw_rx),
+    }))
 }
 
 /// Subscribe to mob-wide events (all members, continuously updated).
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// `poll_subscription(stream_id)` to drain buffered events. Each call returns
+/// all events since the last poll.
 ///
 /// Unlike `mob_member_subscribe` which streams a single member's agent events,
 /// this streams [`AttributedEvent`]s tagged with source runtime identity and role
 /// for every member in the mob, automatically tracking roster changes.
 #[wasm_bindgen]
-pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
+pub async fn mob_subscribe_events(mob_id: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
 
@@ -2379,25 +2686,9 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
         .await
         .map_err(err_mob)?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-        registry.subscriptions.insert(
-            h,
-            EventSubscription {
-                inner: SubscriptionInner::MobWide(std::cell::RefCell::new(router_handle)),
-            },
-        );
-        h
-    });
-
-    Ok(handle)
+    Ok(register_subscription(SubscriptionInner::MobWide(
+        std::cell::RefCell::new(router_handle),
+    )))
 }
 
 /// Poll a subscription for new events.
@@ -2408,37 +2699,42 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
 /// `serialize_error` instead of silently omitting the event.
 ///
 /// For per-member subscriptions (`mob_member_subscribe`), returns
-/// `EventEnvelope<AgentEvent>` objects. For mob-wide subscriptions
-/// (`mob_subscribe_events`), returns `AttributedEvent` objects with
-/// `source`, `profile`, and `envelope` fields.
+/// `EventEnvelope<AgentEvent>` objects — a lagging receiver yields the
+/// generated `AgentEvent::StreamTruncated` envelope, exactly like the RPC
+/// event stream. For mob-wide subscriptions (`mob_subscribe_events`), returns
+/// `AttributedEvent` objects with `source`, `profile`, and `envelope` fields.
 #[wasm_bindgen]
-pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
+pub fn poll_subscription(stream_id: &str) -> Result<String, JsValue> {
+    let stream_ref = StreamRef::parse_js(stream_id)?;
     SUBSCRIPTIONS.with(|cell| {
         let registry = cell.borrow();
-        let sub = registry.subscriptions.get(&handle).ok_or_else(|| {
+        let sub = registry.subscriptions.get(&stream_ref).ok_or_else(|| {
             err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
+                "invalid_stream_id",
+                &format!("unknown subscription stream id: {stream_id}"),
             )
         })?;
 
         let mut events: Vec<serde_json::Value> = Vec::new();
         match &sub.inner {
-            SubscriptionInner::Member(rx_cell) => {
+            SubscriptionInner::Member { session_id, rx } => {
                 use crate::tokio::sync::broadcast::error::TryRecvError;
-                let mut rx = rx_cell.borrow_mut();
+                let mut rx = rx.borrow_mut();
                 loop {
                     match rx.try_recv() {
                         Ok(event) => events.push(
                             serialize_subscription_item(&event, "subscription agent event")
                                 .map_err(|message| err_js("serialize_error", &message))?,
                         ),
-                        Err(TryRecvError::Lagged(n)) => {
-                            tracing::warn!(skipped = n, "subscription lagged");
-                            events.push(serde_json::json!({
-                                "type": "lagged",
-                                "skipped": n,
-                            }));
+                        Err(TryRecvError::Lagged(dropped)) => {
+                            tracing::warn!(skipped = dropped, "subscription lagged");
+                            events.push(
+                                serialize_subscription_item(
+                                    &stream_lagged_envelope(session_id.clone(), dropped),
+                                    "subscription lag marker",
+                                )
+                                .map_err(|message| err_js("serialize_error", &message))?,
+                            );
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2487,15 +2783,36 @@ fn serialize_subscription_item<T: Serialize + ?Sized>(
     serde_json::to_value(item).map_err(|e| format!("failed to serialize {projection}: {e}"))
 }
 
+/// Build the generated lag-gap marker for a lagging broadcast receiver.
+///
+/// K19: a lag gap is the generated `AgentEvent::StreamTruncated` envelope
+/// (`StreamTruncationReason::StreamLagged`), the same contract the RPC event
+/// stream emits — the handwritten `{type:"lagged"}` sentinel and the @rkat/web
+/// `SubscriptionLaggedEvent` hand twin are deleted.
+fn stream_lagged_envelope(
+    session_id: meerkat_core::SessionId,
+    dropped: u64,
+) -> meerkat_core::EventEnvelope<meerkat_core::event::AgentEvent> {
+    meerkat_core::EventEnvelope::new_session(
+        session_id,
+        0,
+        None,
+        meerkat_core::event::AgentEvent::StreamTruncated {
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+        },
+    )
+}
+
 /// Close a subscription and free resources.
 #[wasm_bindgen]
-pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
+pub fn close_subscription(stream_id: &str) -> Result<(), JsValue> {
+    let stream_ref = StreamRef::parse_js(stream_id)?;
     SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        registry.subscriptions.remove(&handle).ok_or_else(|| {
+        registry.subscriptions.remove(&stream_ref).ok_or_else(|| {
             err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
+                "invalid_stream_id",
+                &format!("unknown subscription stream id: {stream_id}"),
             )
         })?;
         Ok(())
@@ -2504,16 +2821,19 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
-        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        destroy_session_with_services, merge_runtime_system_context_state, mob_destroy_error_value,
-        parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
-        serialize_subscription_item,
+        StreamRef, SubscriptionInner, close_subscription, destroy_session_with_services,
+        merge_runtime_system_context_state, mob_destroy_error_value, parse_js_tool_result,
+        parse_mob_event_cursor, parse_mob_lifecycle_action_arg, parse_mobpack,
+        parse_prompt_content_input, poll_subscription, serialize_subscription_item,
+        session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
-        append_system_context, create_session_simple, destroy_session, get_session_state,
-        init_runtime_from_config,
+        append_system_context, clear_tool_callbacks, create_session_simple, destroy_session,
+        get_session_state, init_runtime_from_config, register_js_tool,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{build_service_infrastructure, populate_realm_from_api_keys};
@@ -2539,7 +2859,7 @@ mod tests {
         append: &PendingSystemContextAppend,
     ) -> meerkat_core::AppendSystemContextRequest {
         meerkat_core::AppendSystemContextRequest {
-            text: append.text.clone(),
+            content: append.content.clone(),
             source: append.source.clone(),
             idempotency_key: append.idempotency_key.clone(),
             source_kind: append.source_kind,
@@ -2682,8 +3002,13 @@ capabilities = [{capability_values}]
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -2693,7 +3018,7 @@ capabilities = [{capability_values}]
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let owner_session_id = meerkat_core::types::SessionId::parse(owner_session_id)
             .expect("valid owner bridge session id");
@@ -2714,7 +3039,7 @@ capabilities = [{capability_values}]
         let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
 
         let initial_pending = PendingSystemContextAppend {
-            text: "initial".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("initial"),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-initial".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -2722,7 +3047,7 @@ capabilities = [{capability_values}]
             peer_response_terminal: None,
         };
         let concurrent_pending = PendingSystemContextAppend {
-            text: "concurrent".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("concurrent"),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-concurrent".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -2762,13 +3087,17 @@ capabilities = [{capability_values}]
 
         let parsed = parse_mobpack(&bytes).expect("browser-safe mobpack should parse");
 
+        let tokens: Vec<String> = parsed
+            .manifest
+            .requires
+            .as_ref()
+            .expect("requires section")
+            .capabilities
+            .iter()
+            .map(|c| c.token().to_string())
+            .collect();
         assert_eq!(
-            parsed
-                .manifest
-                .requires
-                .as_ref()
-                .expect("requires section")
-                .capabilities,
+            tokens,
             vec![
                 "sessions".to_string(),
                 "comms".to_string(),
@@ -2852,7 +3181,9 @@ capabilities = [{capability_values}]
             .append_system_context(
                 &bridge_session_id,
                 meerkat_core::AppendSystemContextRequest {
-                    text: "Prioritize coordinating with the lead.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Prioritize coordinating with the lead.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-worker-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -2881,7 +3212,7 @@ capabilities = [{capability_values}]
             Some("ctx-worker-1")
         );
         assert_eq!(
-            system_context_state.pending()[0].text,
+            system_context_state.pending()[0].content.render_text(),
             "Prioritize coordinating with the lead."
         );
     }
@@ -2902,34 +3233,34 @@ capabilities = [{capability_values}]
         );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_accepts_legacy_meerkat_id_alias() {
+    fn spawn_spec_input_rejects_legacy_meerkat_id_field() {
         let payload = json!([{
             "profile": "worker",
             "meerkat_id": "worker-1",
             "runtime_mode": "turn_driven",
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy meerkat_id alias should deserialize");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "legacy meerkat_id field should be rejected as an unknown field"
+        );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_ignores_legacy_generation() {
+    fn spawn_spec_input_rejects_legacy_generation_field() {
         let payload = json!([{
             "profile": "worker",
             "agent_identity": "worker-1",
             "generation": 99,
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy generation should be ignored");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "legacy generation field should be rejected as an unknown field; the runtime owns member generations"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3100,11 +3431,9 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -3144,11 +3473,9 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -3237,7 +3564,7 @@ capabilities = [{capability_values}]
 
     #[cfg(target_arch = "wasm32")]
     #[test]
-    fn destroy_session_export_keeps_handle_as_canonical_projection() {
+    fn destroy_session_retires_handle_and_fails_closed() {
         init_test_runtime();
         let handle = create_session_simple(
             &json!({
@@ -3254,31 +3581,36 @@ capabilities = [{capability_values}]
         assert!(before["session_id"].as_str().is_some());
 
         destroy_session(handle).expect("destroy session");
-        let after = get_session_state(handle).expect("canonical archived state after destroy");
-        let after: serde_json::Value = serde_json::from_str(&after).expect("state json");
-        assert_eq!(after["handle"], handle);
-        assert_eq!(after["session_id"], before["session_id"]);
-        assert_eq!(after["is_active"], false);
+
+        // Row #215: a destroyed handle is retired, not left as an addressable
+        // archived projection. Subsequent reads fail closed with the typed
+        // invalid_session_handle code.
+        let after = get_session_state(handle)
+            .expect_err("destroyed handle must fail closed, not return archived JSON");
+        let after: serde_json::Value =
+            serde_json::from_str(&after.as_string().expect("typed error envelope string"))
+                .expect("typed error envelope json");
+        assert_eq!(after["code"], "invalid_session_handle");
+
+        // Re-destroy is idempotent at the typed-code level (still invalid_session_handle).
+        let redestroy = destroy_session(handle)
+            .expect_err("re-destroying a retired handle must surface invalid_session_handle");
+        let redestroy: serde_json::Value =
+            serde_json::from_str(&redestroy.as_string().expect("typed error envelope string"))
+                .expect("typed error envelope json");
+        assert_eq!(redestroy["code"], "invalid_session_handle");
     }
 
     #[test]
     fn poll_subscription_empty_success_is_clean_empty_array() {
         let (_tx, rx) = crate::tokio::sync::broadcast::channel(1);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
-                },
-            );
-            handle
+        let stream_id = super::register_subscription(SubscriptionInner::Member {
+            session_id: meerkat_core::SessionId::new(),
+            rx: std::cell::RefCell::new(rx),
         });
 
-        let payload = poll_subscription(handle).expect("empty poll should succeed");
+        let payload = poll_subscription(&stream_id).expect("empty poll should succeed");
         let parsed: serde_json::Value =
             serde_json::from_str(&payload).expect("empty poll should be json");
         assert_eq!(
@@ -3287,7 +3619,7 @@ capabilities = [{capability_values}]
             "clean empty poll must remain a successful empty array"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
     }
 
@@ -3354,25 +3686,493 @@ capabilities = [{capability_values}]
         assert_eq!(parsed["envelope"]["payload"]["delta"], "hello");
     }
 
+    // ── Row #39 / K19: content-bearing prompt ingress is the tagged
+    // contract shape, parsed fail-closed ────────────────────────────────────
+
+    #[test]
+    fn parse_prompt_content_input_tagged_text_is_text() {
+        let tagged = json!({ "text": "hello world" }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("tagged text parses");
+        assert_eq!(
+            parsed,
+            meerkat_core::types::ContentInput::Text("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_content_input_tagged_blocks_parse_to_blocks() {
+        let tagged = json!({ "blocks": [{ "type": "text", "text": "hi" }] }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("valid blocks parse");
+        let blocks = match parsed {
+            meerkat_core::types::ContentInput::Blocks(blocks) => blocks,
+            meerkat_core::types::ContentInput::Text(text) => {
+                unreachable!("expected blocks, got text: {text}")
+            }
+        };
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn parse_prompt_content_input_malformed_blocks_fail_closed() {
+        // Tagged block content that is NOT valid ContentInput must error with
+        // INVALID_PARAMS, never be misread as a single text block.
+        let malformed = json!({ "blocks": [{ "type": "image", "media_type": 12345 }] }).to_string();
+        let err = parse_prompt_content_input(&malformed)
+            .expect_err("malformed block JSON must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
+    }
+
+    /// K19 regression: a text prompt whose body is itself valid block-array
+    /// JSON stays TEXT — the tag is the discriminator, never shape-sniffing.
+    #[test]
+    fn parse_prompt_content_input_text_that_looks_like_blocks_stays_text() {
+        let sneaky_body = json!([{ "type": "text", "text": "hi" }]).to_string();
+        let tagged = json!({ "text": sneaky_body }).to_string();
+        let parsed = parse_prompt_content_input(&tagged).expect("tagged text parses");
+        assert_eq!(parsed, meerkat_core::types::ContentInput::Text(sneaky_body));
+    }
+
+    #[test]
+    fn parse_prompt_content_input_untagged_raw_string_fails_closed() {
+        // A bare untagged string is not the contract shape — fail closed
+        // rather than guessing text vs blocks from the payload's JSON shape.
+        let err = parse_prompt_content_input("hello world")
+            .expect_err("untagged raw prompt must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
+    }
+
+    // ── Row #40: provider-aware default model resolution ───────────────────
+    //
+    // The bootstrap default model is the OUTPUT of the canonical
+    // `meerkat::resolve_create_session_default_model` ladder over the
+    // bootstrap config; the surface keeps no parallel ladder. Each test pins
+    // both the expected value AND that the value is exactly the canonical
+    // ladder over the produced config.
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bootstrap_default_model_for_only_openai_is_openai_catalog_default() {
+        let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
+        let expected =
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+                .expect("openai catalog default")
+                .to_string();
+        assert_eq!(model, expected);
+        // Must NOT hardcode the anthropic global default when anthropic is absent.
+        assert_ne!(
+            model,
+            meerkat_core::model_profile::catalog::global_default_model()
+        );
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+        assert_eq!(config.agent.model, model);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bootstrap_default_model_prefers_highest_priority_configured_provider() {
+        // openai + gemini configured (no anthropic): priority picks openai.
+        let keys = HashMap::from([
+            ("gemini".to_string(), "g".to_string()),
+            ("openai".to_string(), "o".to_string()),
+        ]);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
+        assert_eq!(
+            model,
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+                .expect("openai catalog default")
+        );
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bootstrap_default_model_unrecognized_key_falls_back_to_global_default() {
+        let keys = HashMap::from([("notaprovider".to_string(), "x".to_string())]);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
+        assert_eq!(
+            model,
+            meerkat_core::model_profile::catalog::global_default_model()
+        );
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bootstrap_explicit_model_outranks_configured_provider_defaults() {
+        // An explicit caller model is the bootstrap config's global agent
+        // default — ladder tier 1 — and outranks every provider default.
+        let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        let (config, model) = build_bootstrap_config(Some("custom-model".to_string()), &keys, None);
+        assert_eq!(model, "custom-model");
+        assert_eq!(config.agent.model, "custom-model");
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+    }
+
+    // ── Row #60: realm binding order pinned to catalog provider_priority ────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn default_realm_binding_order_equals_provider_priority() {
+        // Insertion order intentionally reversed vs catalog priority to prove
+        // the surface sorts by provider_priority(), not by HashMap iteration.
+        let mut config = Config::default();
+        let api_keys = HashMap::from([
+            ("gemini".to_string(), "g".to_string()),
+            ("openai".to_string(), "o".to_string()),
+            ("anthropic".to_string(), "a".to_string()),
+        ]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+
+        // The highest-priority configured provider (anthropic) seeds the
+        // per-realm default_binding.
+        let top = meerkat_core::model_profile::catalog::provider_priority()
+            .first()
+            .expect("at least one provider in priority");
+        let expected_binding = format!("default_{}", top.as_str());
+        assert_eq!(
+            section.default_binding.as_deref(),
+            Some(expected_binding.as_str())
+        );
+
+        // Each backend's provider identity round-trips through Provider::parse_strict.
+        for backend in section.backend.values() {
+            assert!(
+                meerkat_core::Provider::parse_strict(&backend.provider).is_some(),
+                "backend provider '{}' must be a typed catalog identity",
+                backend.provider
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unrecognized_realm_key_sorts_last_and_does_not_seed_default() {
+        let mut config = Config::default();
+        let api_keys = HashMap::from([
+            ("notaprovider".to_string(), "x".to_string()),
+            ("anthropic".to_string(), "a".to_string()),
+        ]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+        // A recognized provider (anthropic) wins the default over the
+        // unrecognized key, which sorts last.
+        assert_eq!(
+            section.default_binding.as_deref(),
+            Some("default_anthropic")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_openai_seeds_single_openai_binding_via_catalog_priority() {
+        // With only openai configured, the per-realm default binding is the
+        // openai binding (its catalog-priority position is irrelevant when it
+        // is the sole provider — it is the only entry, so it seeds the default).
+        // No binding for any other provider is invented.
+        let mut config = Config::default();
+        let api_keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+
+        // Exactly one backend, whose provider is the typed `openai` identity
+        // (round-trips through Provider::parse_strict — no stringly invention).
+        assert_eq!(section.backend.len(), 1);
+        let backend = section.backend.values().next().expect("openai backend");
+        assert_eq!(backend.provider, "openai");
+        assert_eq!(
+            meerkat_core::Provider::parse_strict(&backend.provider),
+            Some(meerkat_core::Provider::OpenAI),
+        );
+
+        // The single configured provider seeds the per-realm default binding,
+        // and no anthropic/gemini binding is conjured into existence.
+        assert_eq!(section.default_binding.as_deref(), Some("default_openai"));
+        assert!(!section.backend.contains_key("default_anthropic"));
+        assert!(!section.backend.contains_key("default_gemini"));
+
+        // The default binding string is owned by the catalog provider list:
+        // its `default_<provider>` form names a provider that is itself a typed
+        // catalog identity, never an arbitrary key.
+        let default_provider = section
+            .default_binding
+            .as_deref()
+            .and_then(|id| id.strip_prefix("default_"))
+            .expect("default binding uses default_<provider> form");
+        assert!(
+            meerkat_core::model_profile::catalog::provider_priority()
+                .iter()
+                .any(|p| p.as_str() == default_provider),
+            "default binding provider '{default_provider}' must be catalog-owned"
+        );
+    }
+
+    // ── Row #186: Credentials carries max_sessions ─────────────────────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn credentials_deserialize_threads_max_sessions() {
+        let creds: Credentials = serde_json::from_str(
+            &json!({ "anthropic_api_key": "sk-test", "max_sessions": 7 }).to_string(),
+        )
+        .expect("credentials parse");
+        assert_eq!(creds.max_sessions, 7);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn credentials_max_sessions_defaults_to_runtime_constant() {
+        let creds: Credentials =
+            serde_json::from_str(&json!({ "anthropic_api_key": "sk-test" }).to_string())
+                .expect("credentials parse");
+        assert_eq!(creds.max_sessions, super::MAX_SESSIONS);
+    }
+
+    // ── Row #163: mobpack init runs canonical trust verification ───────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unsigned_mobpack_fails_closed_under_strict_policy() {
+        // test_mobpack_bytes produces an unsigned pack (no signature.toml).
+        let bytes = test_mobpack_bytes(&["sessions"]);
+        let err = extract_verify_and_parse_mobpack(
+            &bytes,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect_err("unsigned pack must fail closed under Strict policy");
+        assert_eq!(err["code"], "untrusted_mobpack");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unsigned_mobpack_accepted_under_permissive_and_definition_consumed() {
+        let bytes = test_mobpack_bytes(&["sessions"]);
+        let parsed = extract_verify_and_parse_mobpack(
+            &bytes,
+            meerkat_mob_pack::trust::TrustPolicy::Permissive,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect("permissive policy accepts unsigned pack");
+        // The verified definition is consumed, not discarded.
+        assert_eq!(parsed.definition.id, "browser-test");
+    }
+
+    /// Build a trusted, signer-registered mobpack via the canonical
+    /// `meerkat_mob_pack::pack` signing authority and return both the signed
+    /// archive bytes and a `TrustedSigners` that recognizes the embedded key.
+    ///
+    /// The pack is signed through `pack_directory`'s real signing path (key file
+    /// → Ed25519 signature over the canonical digest), so the produced archive
+    /// is verifiable under `TrustPolicy::Strict`. The embedded public key is read
+    /// back out of the produced `signature.toml` to seed the trust store, which
+    /// keeps the test free of a direct `ed25519_dalek` dependency.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trusted_signed_mobpack() -> (Vec<u8>, meerkat_mob_pack::trust::TrustedSigners) {
+        use std::str::FromStr;
+
+        // Unique on-disk pack directory (no `tempfile` dep needed in this crate).
+        let dir = std::env::temp_dir().join(format!(
+            "rkat-web-runtime-signed-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create pack dir");
+
+        // Minimal valid pack: manifest (name + version, no [trust]) and a
+        // definition whose `id` the browser header reads back.
+        std::fs::write(
+            dir.join("manifest.toml"),
+            b"[mobpack]\nname = \"browser-test\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(dir.join("definition.json"), br#"{"id":"browser-test"}"#)
+            .expect("write definition");
+
+        // 32-byte Ed25519 secret as 64 hex chars (the signing key file format).
+        let key_path = dir.join("signing.key");
+        std::fs::write(
+            &key_path,
+            "0909090909090909090909090909090909090909090909090909090909090909",
+        )
+        .expect("write signing key");
+
+        let packed = meerkat_mob_pack::pack::pack_directory(
+            &dir,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci",
+                key_path: &key_path,
+            }),
+        )
+        .expect("sign pack");
+
+        // Read the embedded public key back out of the produced signature so the
+        // trust store recognizes the very signer that signed this pack.
+        let files = super::extract_targz_safe(&packed.archive_bytes).expect("extract signed pack");
+        let signature_bytes = files.get("signature.toml").expect("signature.toml present");
+        let signature: meerkat_mob_pack::signing::PackSignature =
+            toml::from_str(std::str::from_utf8(signature_bytes).expect("signature utf8"))
+                .expect("parse signature");
+
+        let trusted_key = meerkat_mob_pack::vocabulary::Ed25519PublicKeyHex::from_str(
+            signature.public_key.as_hex(),
+        )
+        .expect("public key hex");
+        let signer_id = meerkat_mob_pack::vocabulary::SignerId::from_str("ci").expect("signer id");
+
+        let mut trusted = meerkat_mob_pack::trust::TrustedSigners::default();
+        trusted.signers.insert(signer_id, trusted_key);
+
+        std::fs::remove_dir_all(&dir).ok();
+        (packed.archive_bytes, trusted)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn trusted_signed_mobpack_succeeds_under_strict_and_is_consumed() {
+        let (archive, trusted) = trusted_signed_mobpack();
+        let parsed = extract_verify_and_parse_mobpack(
+            &archive,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &trusted,
+        )
+        .expect("trusted-signed pack must pass Strict verification");
+        // The verified pack is threaded forward (consumed), not dropped: the
+        // definition id and manifest name survive into the runtime bootstrap
+        // material via `BootstrapMobpack::from_parsed`.
+        assert_eq!(parsed.definition.id, "browser-test");
+        let bootstrap = super::BootstrapMobpack::from_parsed(parsed);
+        assert_eq!(bootstrap.name, "browser-test");
+    }
+
+    #[test]
+    fn mobpack_trust_config_defaults_to_strict_and_empty_store() {
+        // Omitted `mobpack_trust` must fail closed: Strict policy, no signers.
+        let creds: super::Credentials =
+            serde_json::from_str(r#"{"anthropic_api_key":"sk-test"}"#).expect("creds parse");
+        assert_eq!(
+            creds.mobpack_trust.policy,
+            meerkat_mob_pack::trust::TrustPolicy::Strict
+        );
+        assert!(creds.mobpack_trust.trusted_signers.signers.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn host_supplied_trust_store_admits_signed_pack_under_strict() {
+        // The embedding host registers the signer in-band (the browser
+        // analogue of the native user/project trust stores); Strict
+        // verification then admits the signed pack without a permissive
+        // opt-out.
+        let (archive, trusted) = trusted_signed_mobpack();
+        let creds_json = serde_json::json!({
+            "anthropic_api_key": "sk-test",
+            "mobpack_trust": {
+                "policy": "strict",
+                "trusted_signers": serde_json::to_value(&trusted).expect("signers serialize"),
+            },
+        });
+        let creds: super::Credentials =
+            serde_json::from_value(creds_json).expect("creds with trust parse");
+        let parsed = extract_verify_and_parse_mobpack(
+            &archive,
+            creds.mobpack_trust.policy,
+            &creds.mobpack_trust.trusted_signers,
+        )
+        .expect("host-trusted signed pack must pass Strict verification");
+        assert_eq!(parsed.definition.id, "browser-test");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn signed_mobpack_with_untrusted_signer_fails_closed_under_strict() {
+        // The pack is validly signed but the signer is NOT in the trust store;
+        // Strict policy must reject it (fail closed), proving signing alone is
+        // insufficient — trust is required.
+        let (archive, _trusted) = trusted_signed_mobpack();
+        let err = extract_verify_and_parse_mobpack(
+            &archive,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect_err("unknown signer must fail closed under Strict");
+        assert_eq!(err["code"], "untrusted_mobpack");
+    }
+
+    // ── Row #204 / K19: lag gaps are the generated StreamTruncated event ───
+
+    #[test]
+    fn lag_marker_is_generated_stream_truncated_envelope() {
+        // A drop count beyond u32::MAX proves the count is carried as u64.
+        let dropped = u64::from(u32::MAX) + 5;
+        let envelope = stream_lagged_envelope(meerkat_core::SessionId::new(), dropped);
+        let value = serde_json::to_value(&envelope).expect("generated lag envelope serializes");
+        assert_eq!(value["payload"]["type"], "stream_truncated");
+        assert_eq!(value["payload"]["reason"]["kind"], "stream_lagged");
+        assert_eq!(
+            value["payload"]["reason"]["dropped"].as_u64(),
+            Some(dropped)
+        );
+    }
+
+    // ── K19: stream ids are minted StreamRefs, parsed fail-closed ──────────
+
+    #[test]
+    fn stream_ref_round_trips_and_rejects_malformed_ids() {
+        let minted = StreamRef::mint();
+        let wire = minted.to_string();
+        let parsed = StreamRef::parse(&wire).expect("canonical wire form parses back");
+        assert_eq!(parsed, minted);
+        assert!(
+            StreamRef::parse("42").is_err(),
+            "legacy numeric handles are not stream ids"
+        );
+        assert!(StreamRef::parse("not-a-uuid").is_err());
+    }
+
+    // ── Row #217: mob event cursor round-trips u64 / fails closed ──────────
+
+    #[test]
+    fn mob_event_cursor_round_trips_beyond_u32() {
+        let cursor = u64::from(u32::MAX) + 17;
+        let parsed = parse_mob_event_cursor(&cursor.to_string()).expect("large cursor parses");
+        assert_eq!(parsed, cursor);
+    }
+
+    #[test]
+    fn mob_event_cursor_empty_is_stream_start() {
+        assert_eq!(parse_mob_event_cursor("").expect("empty cursor"), 0);
+        assert_eq!(parse_mob_event_cursor("   ").expect("blank cursor"), 0);
+    }
+
+    #[test]
+    fn mob_event_cursor_malformed_fails_closed() {
+        let err = parse_mob_event_cursor("not-a-number")
+            .expect_err("non-numeric cursor must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     #[allow(clippy::expect_used)]
     fn poll_subscription_fails_closed_when_projection_serialization_fails() {
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::InjectedProjectionFailure,
-                },
-            );
-            handle
-        });
+        let stream_id = super::register_subscription(SubscriptionInner::InjectedProjectionFailure);
 
         let error =
-            poll_subscription(handle).expect_err("projection failure must fail public poll");
+            poll_subscription(&stream_id).expect_err("projection failure must fail public poll");
         let error_json = error.as_string().expect("typed error json");
         let parsed: serde_json::Value =
             serde_json::from_str(&error_json).expect("typed error should be json");
@@ -3385,7 +4185,7 @@ capabilities = [{capability_values}]
             "projection failure should surface the serialization cause"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
     }
 
@@ -3412,20 +4212,12 @@ capabilities = [{capability_values}]
         ))
         .unwrap_or(0);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-            registry.subscriptions.insert(
-                handle,
-                EventSubscription {
-                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
-                },
-            );
-            handle
+        let stream_id = super::register_subscription(SubscriptionInner::Member {
+            session_id: meerkat_core::SessionId::new(),
+            rx: std::cell::RefCell::new(rx),
         });
 
-        let payload_result = poll_subscription(handle);
+        let payload_result = poll_subscription(&stream_id);
         assert!(payload_result.is_ok());
         let payload = match payload_result {
             Ok(payload) => payload,
@@ -3443,12 +4235,179 @@ capabilities = [{capability_values}]
             Some(items) => items,
             None => unreachable!(),
         };
-        assert_eq!(items[0]["type"], "lagged");
-        assert_eq!(items[0]["skipped"], 1);
+        // K19: the lag gap is the generated StreamTruncated envelope — the
+        // same wire contract the RPC event stream emits for a lagged stream.
+        assert_eq!(items[0]["payload"]["type"], "stream_truncated");
+        assert_eq!(items[0]["payload"]["reason"]["kind"], "stream_lagged");
+        assert_eq!(items[0]["payload"]["reason"]["dropped"], 1);
         assert_eq!(items[1]["payload"]["type"], "text_delta");
         assert_eq!(items[1]["payload"]["delta"], "second");
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&stream_id);
         assert!(close_result.is_ok());
+    }
+
+    // ── ROW #83: WASM direct turn must NOT launder agent faults into an Ok
+    // status string. The Err channel (built by `session_error_envelope`, which
+    // `err_session`/`start_turn` use) carries the typed `SessionError::code()`.
+    #[test]
+    fn start_turn_agent_error_carries_typed_code_on_err_channel() {
+        let err = meerkat_core::SessionError::Agent(meerkat_core::error::AgentError::tool(
+            meerkat_core::ToolError::execution_failed("boom"),
+        ));
+        // The typed code that `start_turn`'s Err arm now surfaces.
+        assert_eq!(err.code(), "AGENT_ERROR");
+
+        // The Err envelope must carry that typed code — not a fabricated
+        // "completed"/"failed" status string and not a flattened
+        // "internal_error".
+        let envelope = session_error_envelope(err);
+        assert_eq!(envelope["code"], "AGENT_ERROR");
+        assert_ne!(
+            envelope["code"], "internal_error",
+            "agent fault must not be flattened into a generic internal_error code"
+        );
+        assert!(
+            envelope.get("status").is_none(),
+            "agent fault must not be laundered into an in-band status string"
+        );
+    }
+
+    // ── ROW #83: success path returns the canonical WireRunResult — exposing
+    // `terminal_cause_kind` — with no fabricated in-band `status` string.
+    #[test]
+    fn start_turn_success_exposes_terminal_cause_kind_no_status_string() {
+        let run = meerkat_core::RunResult {
+            text: "hello".to_string(),
+            session_id: meerkat_core::SessionId::new(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+        let wire: meerkat_contracts::WireRunResult = run.into();
+        let json = serde_json::to_value(&wire).expect("wire result should serialize");
+        // Canonical terminal-class field is present (None serializes as absent,
+        // but the field is the typed owner, not a hand-rolled status literal).
+        assert!(
+            json.get("status").is_none(),
+            "success path must not fabricate an in-band status string"
+        );
+        assert_eq!(json["text"], "hello");
+        // terminal_cause_kind is the runtime-owned terminal class surfaced to JS.
+        assert!(wire.terminal_cause_kind.is_none());
+    }
+
+    // ── ROW #138: JS tool callback returning block content must reach
+    // `ToolResult` as typed multimodal blocks, NOT a stringified scalar.
+    #[test]
+    fn js_tool_callback_block_content_reaches_tool_result_as_typed_blocks() {
+        let result_json = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "see image" },
+                { "type": "image", "media_type": "image/png", "source": "inline", "data": "QUJD" }
+            ],
+            "is_error": false
+        })
+        .to_string();
+
+        let tool_result =
+            parse_js_tool_result("call_1", &result_json).expect("block content should parse");
+
+        assert_eq!(tool_result.tool_use_id, "call_1");
+        assert!(!tool_result.is_error);
+        assert_eq!(
+            tool_result.content.len(),
+            2,
+            "both blocks must survive as typed content blocks"
+        );
+        assert!(
+            matches!(
+                tool_result.content[0],
+                meerkat_core::ContentBlock::Text { .. }
+            ),
+            "first block should be typed Text"
+        );
+        assert!(
+            matches!(
+                tool_result.content[1],
+                meerkat_core::ContentBlock::Image { .. }
+            ),
+            "image block must reach ToolResult as a typed Image, not stringified"
+        );
+        assert!(
+            tool_result.has_images(),
+            "typed image content must be detectable as an image"
+        );
+    }
+
+    // ── ROW #138: plain-string tool result still parses through the typed
+    // `WireToolResultContent::Text` arm.
+    #[test]
+    fn js_tool_callback_string_content_parses_as_text() {
+        let result_json = serde_json::json!({ "content": "ok", "is_error": true }).to_string();
+        let tool_result =
+            parse_js_tool_result("call_2", &result_json).expect("string content should parse");
+        assert!(tool_result.is_error);
+        assert_eq!(tool_result.text_content(), "ok");
+    }
+
+    // ── ROW #173: a fire-and-forget JS tool dispatch must model the deferred
+    // host action as a typed DETACHED async op (which does not gate the turn
+    // boundary) and must NOT fabricate a completed `is_error:false` success
+    // transcript that asserts the host action finished before it did.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    #[allow(clippy::expect_used)]
+    async fn fire_and_forget_dispatch_emits_detached_async_op_not_synchronous_success() {
+        use meerkat_core::AgentToolDispatcher;
+
+        init_test_runtime();
+        register_js_tool(
+            "request_approval".to_string(),
+            "fire-and-forget approval".to_string(),
+            json!({ "type": "object" }).to_string(),
+        )
+        .expect("register fire-and-forget tool");
+
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = meerkat_core::ToolCallView {
+            id: "call_ff",
+            name: "request_approval",
+            args: &args,
+        };
+
+        let outcome = super::JsToolDispatcher
+            .dispatch(call)
+            .await
+            .expect("fire-and-forget dispatch should not error");
+
+        // The deferred host action is recorded as a typed detached async op so
+        // the turn boundary is not blocked on (or asserting) the host action.
+        assert_eq!(outcome.async_ops.len(), 1, "exactly one deferred async op");
+        assert_eq!(
+            outcome.async_ops[0].wait_policy,
+            meerkat_core::ops::WaitPolicy::Detached,
+            "deferred host action must be DETACHED, not a turn-blocking barrier"
+        );
+
+        // The transcript result is NOT a fabricated completed success: it is
+        // explicitly labeled deferred/pending so the model is not told the host
+        // action succeeded before it happened.
+        assert_eq!(outcome.result.tool_use_id, "call_ff");
+        assert!(
+            !outcome.result.text_content().contains("acknowledged"),
+            "result must not assert a completed 'acknowledged' success"
+        );
+        assert!(
+            outcome.result.text_content().contains("deferred"),
+            "result must describe the deferred/pending host action"
+        );
+
+        clear_tool_callbacks();
     }
 }

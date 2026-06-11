@@ -52,7 +52,7 @@ impl Pack for ImplementPack {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("implementer"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: resolve_model(overrides, "implementer", "claude-sonnet-4-6"),
                 skills: vec!["implementer-skill".to_string()],
                 tools: tools.clone(),
@@ -63,11 +63,11 @@ impl Pack for ImplementPack {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: pp.cloned(),
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("reviewer"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: resolve_model(overrides, "reviewer", "gpt-5.5"),
                 skills: vec!["gate-reviewer-skill".to_string()],
                 tools: tools.clone(),
@@ -79,7 +79,7 @@ impl Pack for ImplementPack {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: pp.cloned(),
-            }),
+            })),
         );
 
         let mut skills = BTreeMap::new();

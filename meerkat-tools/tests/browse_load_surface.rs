@@ -178,16 +178,19 @@ impl SkillSource for HarnessSkillSource {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<meerkat_core::skills::SkillFunctionOutput, SkillError> {
         self.require_key(key)?;
-        if function_name != "echo" {
+        if function_name.as_str() != "echo" {
             return Err(SkillError::Load(
                 format!("missing function: {function_name}").into(),
             ));
         }
-        Ok(serde_json::json!({ "received": arguments }))
+        meerkat_core::skills::SkillFunctionOutput::from_serialize(
+            &serde_json::json!({ "received": arguments.as_value() }),
+        )
+        .map_err(|err| SkillError::Load(format!("serialize echo output: {err}").into()))
     }
 }
 
@@ -507,7 +510,61 @@ async fn invoke_function_passes_typed_key_and_default_arguments() {
     let json = output.into_json().unwrap();
 
     assert_eq!(json["function_name"].as_str().unwrap(), "echo");
-    assert!(json["output"]["received"].is_null());
+    // Default arguments are the canonical empty object — the typed
+    // `ToolCallArguments` ingress never fabricates `null` arguments.
+    assert_eq!(
+        json["output"]["received"],
+        serde_json::json!({}),
+        "default arguments must be the empty object, got {json}"
+    );
+}
+
+/// K1 regression: non-object `arguments` are rejected fail-closed at the tool
+/// ingress (typed `ToolCallArguments` parse), never ferried to the engine.
+#[tokio::test]
+async fn invoke_function_rejects_non_object_arguments() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillInvokeFunctionTool::new(runtime);
+
+    let err = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "function_name": "echo",
+            "arguments": "not-an-object",
+        }))
+        .await
+        .unwrap_err();
+    match &err {
+        meerkat_tools::BuiltinToolError::InvalidArgs(msg) => {
+            assert!(
+                msg.contains("object"),
+                "rejection must name the object-shape contract; got {msg:?}"
+            );
+        }
+        other => panic!("expected InvalidArgs for non-object arguments; got {other:?}"),
+    }
+}
+
+/// K1 regression: degenerate function identity is rejected at ingress by the
+/// typed `SkillFunctionName` parse.
+#[tokio::test]
+async fn invoke_function_rejects_empty_function_name() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillInvokeFunctionTool::new(runtime);
+
+    let err = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "function_name": "  ",
+        }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, meerkat_tools::BuiltinToolError::InvalidArgs(_)),
+        "whitespace function_name must fail typed at ingress; got {err:?}"
+    );
 }
 
 #[tokio::test]

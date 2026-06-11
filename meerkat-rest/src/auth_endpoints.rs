@@ -28,14 +28,14 @@ use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
     AuthBindingRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
 };
+use meerkat_providers::NormalizedAuthMethod;
 use meerkat_providers::auth_oauth::{
     DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code_with_state,
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
-    credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-    persisted_auth_mode_is_oauth_login,
+    credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
     OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_binding,
@@ -352,30 +352,6 @@ async fn mark_token_commit_lifecycle_published_unlocked(
         };
         return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
     }
-    Ok(())
-}
-
-fn publish_resolved_auth_lease(
-    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
-    connection: &meerkat_providers::ResolvedConnection,
-) -> Result<(), meerkat_core::handles::DslTransitionError> {
-    if matches!(
-        connection.auth_lease.kind(),
-        meerkat_core::ResolvedAuthKind::None
-    ) {
-        return Ok(());
-    }
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
-    if auth_lease.snapshot(&lease_key).credential_present {
-        return Ok(());
-    }
-    let expires_at = connection
-        .auth_lease
-        .expires_at()
-        .map(|ts| ts.timestamp().max(0) as u64)
-        .unwrap_or(u64::MAX);
-    auth_lease.acquire_lease(&lease_key, expires_at)?;
     Ok(())
 }
 
@@ -730,16 +706,8 @@ pub async fn list_auth_profiles(
     }
 }
 
-#[derive(serde::Deserialize)]
-pub struct CreateAuthProfileBody {
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-    pub provider: String,
-    pub auth_method: String,
-    pub secret: String,
-}
+/// K20: canonical wire contract for `POST /auth/profiles`.
+pub use meerkat_contracts::wire::RestAuthProfileCreateRequest as CreateAuthProfileBody;
 
 /// Create an auth credential entry by writing the secret into the
 /// TokenStore under the binding-scoped `AuthBindingRef`. The resolved
@@ -800,7 +768,9 @@ pub async fn create_auth_profile(
     // predicate are owned by the typed enum (canonical table + createability),
     // not a hand-maintained literal allowlist. OAuth-login-lifecycle modes and
     // authorizer-backed methods (no persisted secret) are rejected here.
-    let auth_mode = match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+    let auth_mode = match NormalizedAuthMethod::from_auth_profile(&auth_profile)
+        .and_then(NormalizedAuthMethod::persisted_auth_mode)
+    {
         Some(mode) if meerkat_core::persisted_auth_mode_is_directly_creatable(mode) => mode,
         _ => {
             return (
@@ -930,12 +900,8 @@ pub async fn delete_auth_profile(
         .into_response()
 }
 
-#[derive(serde::Deserialize)]
-pub struct TestBindingBody {
-    pub realm_id: RealmId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/bindings/{binding_id}/test`.
+pub use meerkat_contracts::wire::RestAuthBindingTestRequest as TestBindingBody;
 
 pub async fn test_auth_binding(
     State(state): State<AppState>,
@@ -959,6 +925,12 @@ pub async fn test_auth_binding(
                 .await
             {
                 Ok(conn) => {
+                    // Validation surface: a successful resolution is sufficient
+                    // proof the binding is usable. Do NOT publish/acquire the
+                    // lease here — `test` is read-only and must not advance
+                    // AuthMachine lease freshness. Lease acquisition is owned by
+                    // the real credential write paths (login/save), not by a
+                    // dry-run validation probe.
                     let (auth_binding, binding, auth_profile) = match resolve_binding_identity(
                         &state,
                         &body.realm_id,
@@ -973,18 +945,6 @@ pub async fn test_auth_binding(
                                 .into_response();
                         }
                     };
-                    if let Err(e) =
-                        publish_resolved_auth_lease(&state.auth_lease, &auth_binding, &conn)
-                    {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "state": "error",
-                                "error": format!("AuthMachine lifecycle acquire failed: {e}"),
-                            })),
-                        )
-                            .into_response();
-                    }
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -1019,22 +979,44 @@ pub async fn test_auth_binding(
 // The server owns the state -> PKCE verifier correlation. The client receives
 // only the authorize URL and state, then posts the provider code with that state.
 
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginStartBody {
-    pub provider: String,
-    /// Client-provided redirect URI (typically a loopback binding that
-    /// the caller has already bound). The authorize URL will embed this.
-    pub redirect_uri: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
+/// Parse the wire identity triple into the typed owners at handler ingress
+/// (fail-closed; the wire params are the shared contracts shapes).
+fn parse_auth_identity_triple(
+    realm_id: &str,
+    binding_id: &str,
+    profile_id: Option<&str>,
+) -> Result<(RealmId, BindingId, Option<ProfileId>), String> {
+    let realm_id = RealmId::parse(realm_id).map_err(|e| format!("invalid realm_id: {e}"))?;
+    let binding_id =
+        BindingId::parse(binding_id).map_err(|e| format!("invalid binding_id: {e}"))?;
+    let profile_id = profile_id
+        .map(|p| ProfileId::parse(p).map_err(|e| format!("invalid profile_id: {e}")))
+        .transpose()?;
+    Ok((realm_id, binding_id, profile_id))
 }
+
+/// K20: canonical wire contract for `POST /auth/login/start` (shared with
+/// the RPC `auth/login/start` method).
+pub use meerkat_contracts::wire::LoginStartParams as LoginStartBody;
 
 pub async fn start_login(
     State(state): State<AppState>,
     Json(body): Json<LoginStartBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -1048,9 +1030,9 @@ pub async fn start_login(
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1103,22 +1085,27 @@ pub async fn start_login(
         .into_response()
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginCompleteBody {
-    pub provider: String,
-    pub code: String,
-    pub state: String,
-    pub redirect_uri: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/complete`.
+pub use meerkat_contracts::wire::LoginCompleteParams as LoginCompleteBody;
 
 pub async fn complete_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCompleteBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -1133,9 +1120,9 @@ pub async fn complete_login(
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1307,19 +1294,27 @@ pub async fn complete_login(
         .into_response()
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DeviceStartBody {
-    pub provider: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/device/start`.
+pub use meerkat_contracts::wire::DeviceStartParams as DeviceStartBody;
 
 pub async fn start_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceStartBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
         Err(e) => {
@@ -1345,9 +1340,9 @@ pub async fn start_device_login(
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1409,15 +1404,8 @@ pub async fn start_device_login(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DeviceCompleteBody {
-    pub provider: String,
-    pub device_code: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
+/// K20: canonical wire contract for `POST /auth/login/device/complete`.
+pub use meerkat_contracts::wire::DeviceCompleteParams as DeviceCompleteBody;
 
 /// Device-code flow completion leg. Single-poll semantics — the caller
 /// runs the outer retry loop using the `interval` returned from
@@ -1431,6 +1419,20 @@ pub async fn complete_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceCompleteBody>,
 ) -> impl IntoResponse {
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
     let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
         Err(e) => {
@@ -1457,9 +1459,9 @@ pub async fn complete_device_login(
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -1670,7 +1672,8 @@ pub async fn get_auth_status(
             .into_response();
     }
     let mut snapshot = state.auth_lease.snapshot(&lease_key);
-    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
+    let expected_mode = NormalizedAuthMethod::from_auth_profile(&auth_profile)
+        .and_then(NormalizedAuthMethod::persisted_auth_mode);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
@@ -1678,26 +1681,54 @@ pub async fn get_auth_status(
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let mut stored = None;
     if source_uses_store {
-        if phase == meerkat_core::AuthStatusPhase::Unknown
-            && let Some(expected_mode) = expected_mode
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
-                state.token_store.as_ref(),
-                &state.auth_lease,
-                &auth_binding,
-                expected_mode,
-                now,
-            )
-            .await
-        {
-            stored = Some(rehydrated);
-            snapshot = state.auth_lease.snapshot(&lease_key);
-        } else if phase != meerkat_core::AuthStatusPhase::Unknown {
-            stored = state
+        if phase.is_no_live_lease() {
+            if let Some(expected_mode) = expected_mode {
+                // A store fault during rehydration is a real error, not
+                // absent credentials: collapsing it would report a store
+                // failure as "no credentials"/Unknown status.
+                match meerkat_core::rehydrate_marked_tokens_for_status(
+                    state.token_store.as_ref(),
+                    &state.auth_lease,
+                    &auth_binding,
+                    expected_mode,
+                    now,
+                )
+                .await
+                {
+                    Ok(Some(rehydrated)) => {
+                        stored = Some(rehydrated);
+                        snapshot = state.auth_lease.snapshot(&lease_key);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": format!("TokenStore rehydration failed: {err}")
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        } else {
+            // A store-load fault is a real error, not absent credentials.
+            stored = match state
                 .token_store
                 .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(stored) => stored,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("TokenStore load failed: {err}")
+                        })),
+                    )
+                        .into_response();
+                }
+            };
         }
     }
     if stored
@@ -2293,7 +2324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_test_auth_binding_publishes_resolved_lease_to_auth_machine() {
+    async fn rest_test_auth_binding_is_read_only_and_does_not_advance_lease() {
         use meerkat_providers::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
             ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
@@ -2381,12 +2412,25 @@ mod tests {
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
+        // `test` is a validation probe, not a credential write: a successful
+        // resolution must NOT advance AuthMachine lease freshness. The lease
+        // must remain untouched (no phase, no credential, no expiry) so the
+        // validation surface cannot launder lease truth.
         let snapshot = state
             .auth_lease
             .snapshot(&LeaseKey::from_auth_binding(&auth_binding));
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert!(snapshot.credential_present);
-        assert_eq!(snapshot.expires_at, Some(expires_at.timestamp() as u64));
+        assert_eq!(
+            snapshot.phase, None,
+            "test surface must not transition the AuthMachine lease into any phase"
+        );
+        assert!(
+            !snapshot.credential_present,
+            "test surface must not mark the lease credential as present"
+        );
+        assert_eq!(
+            snapshot.expires_at, None,
+            "test surface must not stamp lease freshness/expiry"
+        );
     }
 
     #[tokio::test]
@@ -2422,8 +2466,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2479,8 +2523,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2521,8 +2565,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2566,8 +2610,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2606,8 +2650,8 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2645,8 +2689,8 @@ mod tests {
             State(state.clone()),
             Json(DeviceStartBody {
                 provider: "google".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2684,8 +2728,8 @@ mod tests {
             State(state.clone()),
             Json(DeviceStartBody {
                 provider: "google".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2726,8 +2770,8 @@ mod tests {
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2764,8 +2808,8 @@ mod tests {
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2800,8 +2844,8 @@ mod tests {
             Json(DeviceCompleteBody {
                 provider: "google".to_string(),
                 device_code: "missing-device-code".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -2836,8 +2880,8 @@ mod tests {
             Json(DeviceCompleteBody {
                 provider: "google".to_string(),
                 device_code: "missing-device-code".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_google").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_google".to_string(),
                 profile_id: None,
             }),
         )
@@ -3238,7 +3282,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3302,7 +3349,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3374,7 +3424,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3601,7 +3654,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            detail.state,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert_eq!(detail.expires_at, None);
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
@@ -3894,7 +3950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_reports_lease_phase_when_token_load_fails() {
+    async fn rest_auth_status_fails_closed_when_token_load_fails() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3924,23 +3980,27 @@ mod tests {
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
-        let detail = auth_status_detail(
-            get_auth_status(
-                State(state),
-                Path(BindingId::parse("default_openai").unwrap()),
-                Query(RealmQuery {
-                    realm_id: RealmId::parse("dev").unwrap(),
-                    profile_id: None,
-                }),
-            )
-            .await,
+        let response = get_auth_status(
+            State(state),
+            Path(BindingId::parse("default_openai").unwrap()),
+            Query(RealmQuery {
+                realm_id: RealmId::parse("dev").unwrap(),
+                profile_id: None,
+            }),
         )
-        .await;
+        .await
+        .into_response();
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
-        assert!(detail.expires_at.is_some());
-        assert_eq!(detail.account_id, None);
-        assert!(!detail.has_refresh_token);
+        // A token-store load fault is auth truth the surface cannot vouch
+        // for: it must propagate as a typed failure, never be laundered into
+        // a lease-phase success.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("TokenStore load failed"),
+            "error body must carry the token-store fault, got: {body}"
+        );
     }
 
     #[tokio::test]

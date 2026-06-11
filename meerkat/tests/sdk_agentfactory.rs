@@ -149,8 +149,8 @@ impl AgentLlmClient for ImageAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
     }
 
     fn model(&self) -> &'static str {
@@ -180,8 +180,8 @@ impl AgentLlmClient for CustomAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "custom-provider"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &'static str {
@@ -387,7 +387,7 @@ async fn public_agentbuilder_matches_factory_session_runtime_invariants() {
         .build_agent(
             AgentBuildConfig {
                 max_tokens: Some(64),
-                system_prompt: Some(prompt.to_string()),
+                system_prompt: meerkat::SystemPromptOverride::Set(prompt.to_string()),
                 llm_client_override: Some(factory_client),
                 tool_dispatcher_override: Some(factory_tools),
                 session_store_override: Some(factory_store),
@@ -450,11 +450,17 @@ async fn public_agentbuilder_matches_factory_session_runtime_invariants() {
     );
 
     assert!(
-        factory_agent.execution_snapshot().is_some(),
+        factory_agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .is_some(),
         "factory path wires runtime turn-state"
     );
     assert!(
-        public_agent.execution_snapshot().is_some(),
+        public_agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .is_some(),
         "public AgentBuilder must wire the same runtime turn-state default"
     );
 }

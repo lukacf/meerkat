@@ -22,7 +22,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u64`
 - `pending_op_refs`: `Set<String>`
-- `barrier_operation_ids`: `Set<String>`
+- `barrier_operation_ids`: `Set<OperationId>`
 - `has_barrier_ops`: `Bool`
 - `barrier_satisfied`: `Bool`
 - `boundary_count`: `u64`
@@ -34,6 +34,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `runtime_completion_result_run_id`: `Option<RunId>`
 - `extraction_attempts`: `u64`
 - `max_extraction_retries`: `u64`
+- `extraction_active`: `Bool`
 - `llm_retry_attempt`: `u64`
 - `llm_retry_max_retries`: `u64`
 - `llm_retry_selected_delay_ms`: `u64`
@@ -105,17 +106,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `staged_filter`: `ToolFilter`
 - `active_visibility_revision`: `u64`
 - `staged_visibility_revision`: `u64`
-- `active_deferred_names`: `Set<String>`
-- `staged_deferred_names`: `Set<String>`
-- `requested_visibility_witnesses`: `Map<String, ToolVisibilityWitness>`
-- `filter_visibility_witnesses`: `Map<String, ToolVisibilityWitness>`
-- `active_deferred_authorities`: `Map<String, ToolVisibilityWitness>`
-- `staged_deferred_authorities`: `Map<String, ToolVisibilityWitness>`
-- `deferred_visibility_authority_catalog`: `Map<String, ToolVisibilityWitness>`
-- `filter_visibility_authority_catalog`: `Map<String, ToolVisibilityWitness>`
+- `active_deferred_names`: `Set<ToolName>`
+- `staged_deferred_names`: `Set<ToolName>`
+- `requested_visibility_witnesses`: `Map<ToolName, ToolVisibilityWitness>`
+- `filter_visibility_witnesses`: `Map<ToolName, ToolVisibilityWitness>`
+- `active_deferred_authorities`: `Map<ToolName, ToolVisibilityWitness>`
+- `staged_deferred_authorities`: `Map<ToolName, ToolVisibilityWitness>`
+- `deferred_visibility_authority_catalog`: `Map<ToolName, ToolVisibilityWitness>`
+- `filter_visibility_authority_catalog`: `Map<ToolName, ToolVisibilityWitness>`
 - `turn_tool_overlay_allow_active`: `Bool`
-- `turn_tool_overlay_allow_names`: `Set<String>`
-- `turn_tool_overlay_deny_names`: `Set<String>`
+- `turn_tool_overlay_allow_names`: `Set<ToolName>`
+- `turn_tool_overlay_deny_names`: `Set<ToolName>`
 - `input_phases`: `Map<String, InputPhase>`
 - `input_terminal_kind`: `Map<String, InputTerminalKind>`
 - `input_superseded_by`: `Map<String, String>`
@@ -145,9 +146,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completion_feed_sequences`: `Map<String, u64>`
 - `completion_feed_kinds`: `Map<String, OperationKind>`
 - `completion_feed_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
-- `completion_feed_terminal_payload`: `Map<String, String>`
+- `completion_feed_terminal_payload`: `Map<String, OpTerminalPayload>`
 - `op_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
-- `op_terminal_payload`: `Map<String, String>`
+- `op_terminal_payload`: `Map<String, OpTerminalPayload>`
 - `op_kinds`: `Map<String, OperationKind>`
 - `op_sources`: `Map<String, OperationSource>`
 - `op_peer_ready`: `Map<String, Bool>`
@@ -268,22 +269,65 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
-- `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
-- `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
-- `ClearSessionLlmState`
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
-- `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
-- `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
-- `InterruptCurrentRun`
-- `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
 - `CancelAfterBoundary`(reason: String)
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
+- `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<ToolName>, staged_requested_deferred_names: Set<ToolName>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
 - `Retire`(session_id: SessionId)
+- `Reset`
+- `StopRuntimeExecutor`(reason: String)
+- `Destroy`(session_id: SessionId)
+- `EnsureSessionWithExecutor`(session_id: SessionId)
+- `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
+- `ContainsSession`(session_id: SessionId)
+- `SessionHasExecutor`(session_id: SessionId)
+- `SessionHasComms`(session_id: SessionId)
+- `OpsLifecycleRegistry`(session_id: SessionId)
+- `InputState`(session_id: SessionId, input_id: InputId)
+- `ListActiveInputs`(session_id: SessionId)
+- `Abort`(session_id: SessionId)
+- `AbortAll`
+- `Wait`(session_id: SessionId)
+- `Ingest`(session_id: SessionId, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, work_id: WorkId, origin: WorkOrigin)
+- `PublishEvent`(kind: RuntimeEventKind)
+- `RuntimeState`(runtime_id: String)
+- `AdmitModelRoutingAssistantTurn`
+- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
+- `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
+- `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
+- `ClassifyImageOperationTerminal`(operation_id: String, observation: RoutingImageTerminalObservation, http_status_code: Option<u64>, error_code: RoutingImageProviderErrorCode, provider_text: RoutingProviderTextDisposition)
+- `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
+- `RestoreImageOperationOverride`(operation_id: String)
+- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
+- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AcceptWithoutWake`(input_id: InputId)
+- `Recycle`
+- `ServiceTurnCommitted`(run_id: RunId)
+- `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
+
+## Surface-only Inputs
+- `ContainsSession`
+- `SessionHasExecutor`
+- `SessionHasComms`
+- `OpsLifecycleRegistry`
+- `InputState`
+- `ListActiveInputs`
+- `RuntimeState`
+- `ModelRoutingStatus`
+- `LoadBoundaryReceipt`
+
+## Runtime-Internal Inputs
+- `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
+- `ClearSessionLlmState`
+- `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
+- `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
+- `InterruptCurrentRun`
+- `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
 - `UpdateDeferredSessionKeepAlive`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool)
 - `UpdateDeferredSessionLlmIdentity`(session_id: SessionId, llm_identity: SessionLlmIdentity)
@@ -302,43 +346,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetMobOperatorCreateAuthority`(allowed: Bool)
 - `GrantMobOperatorManageMob`(mob_id: String)
 - `SetMobOperatorSpawnProfilesInMob`(mob_id: String, profiles: Set<String>)
-- `Reset`
-- `StopRuntimeExecutor`(reason: String)
 - `RuntimeExecutorExited`
 - `ResolveRuntimeCompletionResult`(run_id: Option<RunId>, terminal: RuntimeCompletionTerminalObservation, finalization: RuntimeCompletionFinalizationObservation)
 - `ResolveRuntimeCompletionCleanup`(session_id: SessionId, observation_session_id: SessionId, observation_agent_runtime_id: Option<AgentRuntimeId>, observation_fence_token: Option<FenceToken>, observation_runtime_generation: Option<Generation>, observation_runtime_epoch_id: Option<RuntimeEpochId>, outcome: RuntimeCompletionObservedOutcome, archived_by_authority: Bool, live_session: RuntimeCompletionLiveSessionObservation)
 - `ResolveRuntimeCompletionWaitFailure`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation)
-- `Destroy`(session_id: SessionId)
 - `RecoverRuntimeAuthority`(session_id: SessionId, state: RuntimeLifecycleObservedState, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, silent_intent_overrides: Set<String>)
-- `EnsureSessionWithExecutor`(session_id: SessionId)
-- `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
-- `ContainsSession`(session_id: SessionId)
-- `SessionHasExecutor`(session_id: SessionId)
-- `SessionHasComms`(session_id: SessionId)
-- `OpsLifecycleRegistry`(session_id: SessionId)
-- `InputState`(session_id: SessionId, input_id: InputId)
-- `ListActiveInputs`(session_id: SessionId)
-- `Abort`(session_id: SessionId)
-- `AbortAll`
-- `Wait`(session_id: SessionId)
-- `Ingest`(session_id: SessionId, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, work_id: WorkId, origin: WorkOrigin)
-- `PublishEvent`(kind: String)
-- `RuntimeState`(runtime_id: String)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
 - `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
-- `AdmitModelRoutingAssistantTurn`
-- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
-- `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
-- `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
-- `ClassifyImageOperationTerminal`(operation_id: String, observation: RoutingImageTerminalObservation, http_status_code: Option<u64>, error_code: RoutingImageProviderErrorCode, provider_text: RoutingProviderTextDisposition)
-- `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
-- `RestoreImageOperationOverride`(operation_id: String)
-- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
-- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
-- `AcceptWithoutWake`(input_id: InputId)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
@@ -351,6 +368,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyTurnTerminalCauseClass`(cause_kind: Option<TurnTerminalCauseKind>)
 - `ClassifyTurnTerminality`
+- `ClassifyAssistantOutput`(has_visible_or_actionable: Bool)
+- `ClassifyCallTimeout`(source: CallTimeoutSource, timeout_ms: u64)
 - `ClassifyLlmFailureRecovery`(failure_kind: Option<LlmRetryFailureKind>, retry_attempt: u64, max_retries: u64)
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
 - `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
@@ -363,16 +382,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Fail`(run_id: RunId)
 - `CancelRun`(run_id: RunId)
 - `RollbackRun`(run_id: RunId)
-- `Recycle`
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
 - `StartImmediateAppend`(run_id: RunId)
 - `StartImmediateContext`(run_id: RunId)
 - `PrimitiveApplied`(run_id: RunId)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u64)
 - `LlmReturnedTerminal`(run_id: RunId)
-- `RegisterPendingOps`(run_id: RunId, op_refs: Set<String>, barrier_operation_ids: Set<String>)
+- `RegisterPendingOps`(run_id: RunId, op_refs: Set<String>, barrier_operation_ids: Set<OperationId>)
 - `ToolCallsResolved`(run_id: RunId)
-- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Set<String>)
+- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Set<OperationId>)
 - `BoundaryContinue`(run_id: RunId)
 - `BoundaryComplete`(run_id: RunId)
 - `EnterExtraction`(run_id: RunId, max_extraction_retries: u64)
@@ -392,7 +410,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
-- `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
@@ -413,20 +430,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SupersedeInput`(input_id: String, superseded_by: String)
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
-- `RecordBoundarySeq`(input_id: String, seq: u64)
+- `RecordBoundarySeq`(input_id: String, run_id: RunId)
 - `RegisterOp`(operation_id: String, kind: OperationKind, source: Option<OperationSource>, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)
-- `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `CancelOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `AbortOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `CancelOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `AbortOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `PeerReadyOp`(operation_id: String)
 - `ProgressReportedOp`(operation_id: String)
 - `RetireRequestedOp`(operation_id: String)
-- `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `ResolveOpLifecycleTransitionRejection`(operation_id: String, action: OpLifecycleActionKind)
-- `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, source: Option<OperationSource>, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<String>, completion_sequence: Option<u64>)
+- `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, source: Option<OperationSource>, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<OpTerminalPayload>, completion_sequence: Option<u64>)
 - `ClassifyOperationTerminality`(operation_id: String, status: OperationStatus)
 - `ClassifyOperationPublicResult`(operation_id: String, status: OperationStatus)
 - `ClassifyOperationTransitionIdempotence`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
@@ -434,7 +451,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyOperationCompletionWake`(operation_id: String, kind: OperationKind)
 - `ClassifyOperationDurability`(operation_id: String, kind: OperationKind)
 - `ClassifyRecoveredOperationRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, terminal_outcome_present: Bool, terminal_payload_present: Bool, completion_sequence_present: Bool)
-- `RecoverCompletionFeedEntry`(operation_id: String, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: String, completion_sequence: u64)
+- `RecoverCompletionFeedEntry`(operation_id: String, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: OpTerminalPayload, completion_sequence: u64)
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
 - `RecoverCompletionConsumerCursors`(agent_applied_cursor: u64, runtime_observed_cursor: u64, runtime_injected_cursor: u64)
 - `AdvanceAgentCompletionCursor`(cursor: u64)
@@ -473,16 +490,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
-- `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `ReplaceFilterToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
+- `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
+- `ReplaceFilterToolAuthorityCatalog`(catalog: Map<ToolName, ToolVisibilityWitness>)
 - `CommitVisibilityFilter`(filter: ToolFilter, revision: u64)
-- `StageDeferredNames`(names: Set<String>)
-- `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
-- `ReplaceDeferredToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
-- `CommitDeferredNames`(authorities: Map<String, ToolVisibilityWitness>)
-- `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<String>, deny_names: Set<String>)
+- `StageDeferredNames`(names: Set<ToolName>)
+- `ReplaceDeferredToolAuthorityCatalog`(catalog: Map<ToolName, ToolVisibilityWitness>)
+- `CommitDeferredNames`(authorities: Map<ToolName, ToolVisibilityWitness>)
+- `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<ToolName>, deny_names: Set<ToolName>)
 - `ClearTurnToolOverlay`
-- `SyncVisibilityRevisions`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<String>, staged_deferred_names: Set<String>, requested_witnesses: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>)
+- `ReplaceVisibilityState`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SurfaceRegister`(surface_id: String)
 - `SurfaceSetRemovalTimeout`(timeout_ms: u64)
 - `SurfaceStageAdd`(surface_id: String, now_ms: u64)
@@ -502,11 +518,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `McpServerFailed`(server_id: McpServerId, error: String)
 - `McpServerDisconnected`(server_id: McpServerId)
 - `McpServerReload`(server_id: McpServerId)
-- `PeerRequestSent`(corr_id: PeerCorrelationId, to: String)
+- `PeerRequestSent`(corr_id: PeerCorrelationId)
 - `PeerResponseProgressArrived`(corr_id: PeerCorrelationId)
 - `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
 - `PeerResponseRejected`(corr_id: PeerCorrelationId)
 - `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
+- `PeerRequestSendFailed`(corr_id: PeerCorrelationId)
 - `PeerRequestReceived`(corr_id: PeerCorrelationId, handling_mode: InputLane)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `AdvanceSessionContext`(updated_at_ms: u64)
@@ -538,22 +555,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSupervisorMobPeerOverlay`(supervisor_peer_id: String, supervisor_epoch: u64, recipient_peer_id: String, overlay_epoch: u64, endpoints: Set<PeerEndpoint>, endpoint_count: u64, command_peer_id: String, command_endpoint: PeerEndpoint, command_kind: MobPeerOverlayCommandKind)
 - `ApplyMobPeerOverlay`(epoch: u64, endpoints: Set<PeerEndpoint>)
 
-## Surface-only Inputs
-- `ContainsSession`
-- `SessionHasExecutor`
-- `SessionHasComms`
-- `OpsLifecycleRegistry`
-- `InputState`
-- `ListActiveInputs`
-- `RuntimeState`
-- `ModelRoutingStatus`
-- `LoadBoundaryReceipt`
-
 ## Signals
 - `Initialize`
 - `BoundaryApplied`(revision: u64)
 - `DrainQueuedRun`(run_id: RunId)
-- `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer_param: Option<String>, response_status: PeerIngressResponseStatus, in_reply_to: String)
+- `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, request_intent_class: PeerIngressRequestClass, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer_param: Option<String>, response_status: PeerIngressResponseStatus, in_reply_to: String)
 - `ClassifyPeerResponseReply`(status: PeerIngressResponseStatus)
 - `ClassifyPlainEvent`(source_name: String)
 - `EnsureDrainRunning`
@@ -595,7 +601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
-- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, execution_handling_mode: Option<InputLane>, live_interrupt_required: Bool)
 - `AdmissionValidationResolved`(input_id: String, result: AdmissionValidationResultKind, reject_reason: Option<AdmissionRejectReasonKind>)
 - `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
 - `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
@@ -605,6 +611,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
 - `TurnTerminalCauseClassResolved`(cause_kind: Option<TurnTerminalCauseKind>, cause_class: TerminalCauseClass)
 - `TurnTerminalityClassified`(terminal: Bool)
+- `AssistantOutputClassified`(empty_response_terminal: Bool)
+- `CallTimeoutClassified`(verdict: CallTimeoutVerdict, timeout_ms: u64)
 - `LlmFailureRecoveryClassified`(recovery: LlmFailureRecoveryKind)
 - `TurnSurfaceResultResolved`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass, surface_class: SurfaceResultClass)
 - `StoredInputStateSeedAuthorized`(input_id: String)
@@ -636,7 +644,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OperationTransitionIdempotentSuccess`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
 - `OperationTransitionNotIdempotent`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
 - `EvictCompletedRecord`(operation_id: String)
-- `CompletionFeedEntryRecovered`(operation_id: String, seq: u64, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: String)
+- `CompletionFeedEntryRecovered`(operation_id: String, seq: u64, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: OpTerminalPayload)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
 - `AgentCompletionCursorAdvanced`(cursor: u64)
 - `RuntimeObservedCompletionCursorAdvanced`(cursor: u64)
@@ -660,9 +668,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestCancelledBeforePublish`(request_key: String)
 - `SurfaceRequestCompleted`(request_key: String)
 - `SurfaceRequestSupersededByCancel`(request_key: String)
-- `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
-- `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, closed: Bool, sequence: u64, close_observation_sequence: u64)
-- `LiveCommandResultResolved`(channel_id: String, command: LiveCommandPublicKind, accepted: Bool, sequence: u64, command_acceptance_sequence: u64)
+- `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, sequence: u64, queue_acceptance_sequence: u64)
+- `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, sequence: u64, close_observation_sequence: u64)
+- `LiveCommandResultResolved`(channel_id: String, command: LiveCommandPublicKind, sequence: u64, command_acceptance_sequence: u64)
 - `LiveCommandRejectionResolved`(channel_id: String, command: LiveCommandPublicKind, rejection: LiveCommandRejectionReason, public_error_class: LiveCommandRejectionPublicErrorClass, sequence: u64)
 - `LiveChannelRequestRejectionResolved`(channel_id: String, request: LiveChannelRequestPublicKind, rejection: LiveChannelRequestRejectionReason, public_error_class: LiveChannelRequestRejectionPublicErrorClass, sequence: u64)
 - `LiveWebrtcTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
@@ -679,7 +687,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
-- `EnqueueClassifiedEntry`
+- `RealtimeTranscriptAppended`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind, sequence: u64)
 - `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
 - `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>, phase: PeerIngressAuthorityPhaseClass)
@@ -718,16 +726,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `operation_source_valid`(source: Option<OperationSource>) -> `Bool`
 - `op_lifecycle_transition_rejection_idempotent`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
 - `wait_operation_token_witness_valid`(operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>) -> `Bool`
-- `deferred_authorities_have_identity`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_names`(filter: ToolFilter) -> `Set<String>`
-- `meerkat_tool_visibility_filter_has_identity_witnesses`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_authorities_match_names`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>, authorities: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_authorities_are_catalog_backed`(authorities: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_has_catalog_witnesses`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_witnesses_are_catalog_backed`(witnesses: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_names_are_catalog_backed`(names: Set<String>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_publish_matches_catalog`(active_filter: ToolFilter, staged_filter: ToolFilter, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, deferred_authority_catalog: Map<String, ToolVisibilityWitness>, filter_authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_state_replacement_matches`(inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, requested_witnesses: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, deferred_authority_catalog: Map<String, ToolVisibilityWitness>, filter_authority_catalog: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64) -> `Bool`
+- `deferred_authorities_have_identity`(names: Set<ToolName>, witnesses: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_names`(filter: ToolFilter) -> `Set<ToolName>`
+- `meerkat_tool_visibility_filter_has_identity_witnesses`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_authorities_match_names`(names: Set<ToolName>, witnesses: Map<ToolName, ToolVisibilityWitness>, authorities: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_authorities_are_catalog_backed`(authorities: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_has_catalog_witnesses`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_witnesses_are_catalog_backed`(witnesses: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_names_are_catalog_backed`(names: Set<ToolName>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_publish_matches_catalog`(active_filter: ToolFilter, staged_filter: ToolFilter, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>, filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_state_replacement_matches`(inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<ToolName>, staged_requested_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>, filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64) -> `Bool`
 - `meerkat_session_llm_filter_has_view_image_only`(filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_capability_base_filter_matches`(target_capability_surface: SessionLlmCapabilitySurface, next_capability_base_filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_hydrated_capability_base_filter_matches`(current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter) -> `Bool`
@@ -764,26 +772,71 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RegisterSessionIdle`
 - From: `Idle`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Idle`
 
 ### `RegisterSessionAttached`
 - From: `Attached`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Attached`
 
 ### `RegisterSessionRunning`
 - From: `Running`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Running`
 
 ### `RegisterSessionRetired`
 - From: `Retired`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Retired`
 
 ### `RegisterSessionStopped`
 - From: `Stopped`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
+- To: `Stopped`
+
+### `RegisterSessionIdempotentIdle`
+- From: `Idle`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Idle`
+
+### `RegisterSessionIdempotentAttached`
+- From: `Attached`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Attached`
+
+### `RegisterSessionIdempotentRunning`
+- From: `Running`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Running`
+
+### `RegisterSessionIdempotentRetired`
+- From: `Retired`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Retired`
+
+### `RegisterSessionIdempotentStopped`
+- From: `Stopped`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
 - To: `Stopped`
 
 ### `StageDeferredSession`
@@ -3109,6 +3162,60 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `UserInterruptPublicResultResolved`
 - To: `Stopped`
 
+### `ResolveUserInterruptPublicResultStagedNoopInitializing`
+- From: `Initializing`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Initializing`
+
+### `ResolveUserInterruptPublicResultStagedNoopIdle`
+- From: `Idle`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Idle`
+
+### `ResolveUserInterruptPublicResultStagedNoopAttached`
+- From: `Attached`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Attached`
+
+### `ResolveUserInterruptPublicResultStagedNoopRunning`
+- From: `Running`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Running`
+
+### `ResolveUserInterruptPublicResultStagedNoopRetired`
+- From: `Retired`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Retired`
+
+### `ResolveUserInterruptPublicResultStagedNoopStopped`
+- From: `Stopped`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Stopped`
+
 ### `ResolveUserInterruptPublicResultDestroyedPresentInitializing`
 - From: `Initializing`
 - On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
@@ -5256,27 +5363,75 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`
 - To: `Running`
 
-### `ResolveAdmissionValidationDurabilityRejectedIdle`
+### `ResolveAdmissionValidationDurabilityMissingRejectedIdle`
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
 
-### `ResolveAdmissionValidationDurabilityRejectedAttached`
+### `ResolveAdmissionValidationDurabilityMissingRejectedAttached`
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
 
-### `ResolveAdmissionValidationDurabilityRejectedRunning`
+### `ResolveAdmissionValidationDurabilityMissingRejectedRunning`
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationDerivedKindRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationDerivedKindRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationDerivedKindRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
 
@@ -6599,416 +6754,442 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeMessageAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeMessageRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRetired`
 - From: `Retired`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredStopped`
 - From: `Stopped`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRetired`
 - From: `Retired`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredStopped`
 - From: `Stopped`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSilentAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSilentRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestActionableAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestActionableRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredRetired`
 - From: `Retired`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredStopped`
 - From: `Stopped`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredIdle`
 - From: `Idle`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredRetired`
 - From: `Retired`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredStopped`
 - From: `Stopped`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseAcceptedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseAcceptedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseCompletedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseCompletedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseFailedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseFailedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeAckAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeAckRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyPlainEventAttached`
@@ -7016,7 +7197,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyPlainEventRunning`
@@ -7024,7 +7205,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyPeerResponseReplyAcceptedInitializing`
@@ -8909,7 +9090,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqIdle`
 - From: `Idle`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -8917,7 +9098,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqAttached`
 - From: `Attached`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -8925,7 +9106,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqRunning`
 - From: `Running`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -8933,7 +9114,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqRetired`
 - From: `Retired`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -8941,7 +9122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqStopped`
 - From: `Stopped`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9508,6 +9689,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9517,6 +9700,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9526,6 +9711,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9535,6 +9722,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9544,6 +9733,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9553,6 +9744,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9562,6 +9755,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9571,6 +9766,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9580,6 +9777,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9589,6 +9788,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9598,6 +9799,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9607,6 +9810,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9616,6 +9821,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9625,6 +9832,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9634,6 +9843,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9643,6 +9854,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9652,6 +9865,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9661,6 +9876,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9670,6 +9887,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9679,6 +9898,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9833,6 +10054,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9842,6 +10065,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9851,6 +10076,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9860,6 +10087,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9869,6 +10098,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9878,6 +10109,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9887,6 +10120,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9896,6 +10131,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9905,6 +10142,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9914,6 +10153,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9929,6 +10170,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Idle`
 
@@ -9944,6 +10186,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Attached`
 
@@ -9959,6 +10202,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Running`
 
@@ -9974,6 +10218,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Retired`
 
@@ -9989,6 +10234,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Stopped`
 
@@ -10148,6 +10394,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Idle`
 
@@ -10160,6 +10407,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Attached`
 
@@ -10172,6 +10420,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Running`
 
@@ -10184,6 +10433,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Retired`
 
@@ -10196,6 +10446,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Stopped`
 
@@ -13420,9 +13671,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Stopped`
 
-### `SyncVisibilityRevisionsIdle`
+### `ReplaceVisibilityStateIdle`
 - From: `Idle`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13436,9 +13687,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Idle`
 
-### `SyncVisibilityRevisionsAttached`
+### `ReplaceVisibilityStateAttached`
 - From: `Attached`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13452,9 +13703,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Attached`
 
-### `SyncVisibilityRevisionsRunning`
+### `ReplaceVisibilityStateRunning`
 - From: `Running`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13468,9 +13719,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Running`
 
-### `SyncVisibilityRevisionsRetired`
+### `ReplaceVisibilityStateRetired`
 - From: `Retired`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13484,9 +13735,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Retired`
 
-### `SyncVisibilityRevisionsStopped`
+### `ReplaceVisibilityStateStopped`
 - From: `Stopped`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13702,7 +13953,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentIdle`
 - From: `Idle`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13710,7 +13961,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentAttached`
 - From: `Attached`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13718,7 +13969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentRunning`
 - From: `Running`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13726,7 +13977,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentRetired`
 - From: `Retired`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13734,7 +13985,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentStopped`
 - From: `Stopped`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13945,6 +14196,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `PeerRequestTimedOutStopped`
 - From: `Stopped`
 - On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
+### `PeerRequestSendFailedIdle`
+- From: `Idle`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerRequestSendFailedAttached`
+- From: `Attached`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerRequestSendFailedRunning`
+- From: `Running`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerRequestSendFailedRetired`
+- From: `Retired`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerRequestSendFailedStopped`
+- From: `Stopped`
+- On: `PeerRequestSendFailed`(corr_id)
 - Guards:
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -15831,6 +16122,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LlmFailureRecoveryClassified`
 - To: `Running`
 
+### `ClassifyAssistantOutputEmptyTerminalIdle`
+- From: `Idle`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Idle`
+
+### `ClassifyAssistantOutputEmptyTerminalAttached`
+- From: `Attached`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Attached`
+
+### `ClassifyAssistantOutputEmptyTerminalRunning`
+- From: `Running`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Running`
+
+### `ClassifyAssistantOutputProceedIdle`
+- From: `Idle`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Idle`
+
+### `ClassifyAssistantOutputProceedAttached`
+- From: `Attached`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Attached`
+
+### `ClassifyAssistantOutputProceedRunning`
+- From: `Running`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Running`
+
+### `ClassifyCallTimeoutRetryableIdle`
+- From: `Idle`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Idle`
+
+### `ClassifyCallTimeoutRetryableAttached`
+- From: `Attached`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Attached`
+
+### `ClassifyCallTimeoutRetryableRunning`
+- From: `Running`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Running`
+
+### `ClassifyCallTimeoutTerminalIdle`
+- From: `Idle`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Idle`
+
+### `ClassifyCallTimeoutTerminalAttached`
+- From: `Attached`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Attached`
+
+### `ClassifyCallTimeoutTerminalRunning`
+- From: `Running`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Running`
+
 ### `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
 - From: `Idle`
 - On: `ResolveTurnSurfaceResult`(outcome, cause_class)
@@ -15922,8 +16309,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, deferred session stage, deferred session keep-alive update, deferred session promotion, deferred session archive, deferred session drop, mob operator access resolution/restoration/profile mutation/create scope/manage scope/spawn-profile scope, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
-- `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
+- `meerkat_machine` (machine `MeerkatMachine`): `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, deferred session stage, deferred session keep-alive update, deferred session promotion, deferred session archive, deferred session drop, mob operator access resolution/restoration/profile mutation/create scope/manage scope/spawn-profile scope, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat_public_surface` (machine `MeerkatMachine`): `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 
 ### Scenarios
 - `bind-run-boundary-terminal` — runtime binds, runs work, applies a boundary, and reports a terminal outcome

@@ -262,6 +262,21 @@ else
   bad "BuildBuddy CI does not guard against transient remote/cache failures"
 fi
 
+if [[ -f .bazelversion ]] && grep -q -E '^[0-9]+\.[0-9]+\.[0-9]+$' .bazelversion; then
+  pass ".bazelversion pins the Bazel release for BuildBuddy lanes ($(tr -d '[:space:]' <.bazelversion))"
+else
+  bad ".bazelversion is missing or does not pin an exact Bazel release"
+fi
+
+if grep -Fq -- '--repo_contents_cache=' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'lane_output_base_has_stale_external_links' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'fetch_corruption_signature' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'clean --expunge' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy launcher disables the shared Bazel 9 repo contents cache and auto-repairs corrupt external-repo state"
+else
+  bad "BuildBuddy launcher does not guard against Bazel 9 repo contents cache corruption"
+fi
+
 if [[ -x scripts/run-surface-feature-matrix ]] &&
   grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
   grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&
@@ -575,14 +590,15 @@ if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &
   grep -Fq 'name = "machine_verify_all_tlc_test"' xtask/BUILD.bazel &&
   grep -Fq 'machine-verify --all --skip-cargo-tests' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'machine-check-drift --all' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin' xtask/BUILD.bazel &&
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' xtask/BUILD.bazel &&
   grep -Fq '"RUSTFMT": "$(rootpath tests/rustfmt_host.sh)"' xtask/BUILD.bazel &&
   grep -Fq 'export RUSTFMT' xtask/tests/machine_verify_all_tlc_test.sh; then
-  pass "BuildBuddy machine-authority lane runs hermetic machine-verify/TLC with hermetic rustfmt and leaves Cargo-backed tests to Bazel lanes"
+  pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt and fails closed when tlc is absent (no silent drift-only downgrade behind a TLC label)"
 else
-  bad "BuildBuddy machine-authority lane does not include hermetic machine-verify plus no-TLC drift fallback"
+  bad "BuildBuddy machine-authority lane does not run hermetic machine-verify or still launders a silent no-TLC drift fallback as TLC verification"
 fi
 
 if grep -Fq 'default_target="//:surface_feature_matrix_builds"' scripts/buildbuddy-bazel-poc &&

@@ -238,15 +238,6 @@ pub struct DslTransitionError {
 }
 
 impl DslTransitionError {
-    /// Construct a `NoMatchingTransition` error with the given context
-    /// and reason. Back-compat constructor used by legacy callers that
-    /// haven't adopted the typed `kind` field; new code paths should
-    /// prefer [`DslTransitionError::no_matching`] or
-    /// [`DslTransitionError::guard_rejected`] for clarity.
-    pub fn new(context: &'static str, reason: impl Into<String>) -> Self {
-        Self::no_matching(context, reason)
-    }
-
     /// Construct an error with `kind = NoMatchingTransition`.
     pub fn no_matching(context: &'static str, reason: impl Into<String>) -> Self {
         Self {
@@ -700,6 +691,12 @@ pub struct TurnStateSnapshot {
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
+    /// Machine-owned total answer to "is this turn inside the
+    /// structured-output extraction sub-flow" (dogma K9). Set by
+    /// `EnterExtraction`, cleared on every turn-terminal transition and on
+    /// run start. Consumers must read this — never derive in-extraction from
+    /// loop-local scratch like `extraction_state.primary_output`.
+    pub extraction_active: bool,
     pub llm_retry_attempt: u32,
     pub llm_retry_max_retries: u32,
     pub llm_retry_selected_delay_ms: u64,
@@ -832,13 +829,6 @@ pub trait CommsDrainHandle: Send + Sync {
 
     /// Fire the `StopDrain` input.
     fn stop_drain(&self) -> Result<(), DslTransitionError>;
-
-    /// Compatibility alias for reporting a non-failed drain exit.
-    fn drain_exited_clean(&self) -> Result<(), DslTransitionError>;
-
-    /// Compatibility alias for reporting a failed drain exit; generated
-    /// authority decides whether the current mode is respawnable.
-    fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError>;
 
     /// Fire the `NotifyDrainExited { reason }` input with a typed reason.
     fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError>;
@@ -1251,9 +1241,11 @@ pub trait PeerCommsInstallTarget: crate::agent::CommsRuntime {
 /// Session turn admission DSL handle.
 ///
 /// Covers the admission-adjacent inputs on the MeerkatMachine DSL: ingest an
-/// input into the session, accept it (with or without wake), prepare a run,
-/// and commit the run. Failed run return is owned by the runtime turn-state
-/// path after a typed terminal cause is recorded. These inputs manage the input-lifecycle
+/// input into the session, accept it (with or without wake), and prepare a
+/// run. Commit terminalization is owned by the runtime loop's
+/// `commit_runtime_loop_run` durable receipt path; failed run return is owned
+/// by the runtime turn-state path after a typed terminal cause is recorded.
+/// These inputs manage the input-lifecycle
 /// substate maps (`input_phases`, `input_run_associations`, etc.) and the
 /// top-level `current_run_id` / `pre_run_phase` fields.
 pub trait SessionAdmissionHandle: Send + Sync {
@@ -1293,10 +1285,6 @@ pub trait SessionAdmissionHandle: Send + Sync {
 
     /// Fire the `Prepare { session_id, run_id }` input — bound for the session this handle was prepared for.
     fn prepare(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
-
-    /// Observe a commit request. Runtime-backed implementations keep commit
-    /// terminalization on the machine-owned durable path.
-    fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,7 +1699,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         snapshot: &AuthLeaseRestoreSnapshot,
     ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
         let _ = snapshot;
-        Err(DslTransitionError::new(
+        Err(DslTransitionError::no_matching(
             "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
             "restoring auth lifecycle snapshots requires generated AuthMachine authority",
         ))
@@ -1730,7 +1718,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         publication: &crate::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let _ = (lease_key, publication);
-        Err(DslTransitionError::new(
+        Err(DslTransitionError::no_matching(
             "AuthLeaseHandle::restore_published_credential_lifecycle",
             "restoring durable auth lifecycle publications requires generated AuthMachine authority",
         ))
@@ -1754,7 +1742,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         intent: CredentialUseIntent,
     ) -> Result<CredentialUseDisposition, DslTransitionError> {
         let _ = (lease_key, intent);
-        Err(DslTransitionError::new(
+        Err(DslTransitionError::no_matching(
             "AuthLeaseHandle::resolve_credential_use_admission",
             "classifying credential-use admission requires generated AuthMachine authority",
         ))
@@ -1781,7 +1769,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         facts: OAuthLoginCredentialFacts,
     ) -> Result<CredentialUseDisposition, DslTransitionError> {
         let _ = (lease_key, facts);
-        Err(DslTransitionError::new(
+        Err(DslTransitionError::no_matching(
             "AuthLeaseHandle::resolve_oauth_login_credential_disposition",
             "classifying OAuth-login credential disposition requires generated AuthMachine authority",
         ))
@@ -1867,14 +1855,10 @@ pub enum PeerTerminalDisposition {
 /// are strict projections of DSL state, with the invariant "channel live
 /// iff `corr_id ∈ pending ∧ state ≠ terminal`" enforced by the effect.
 pub trait PeerInteractionHandle: Send + Sync {
-    /// Fire `PeerRequestSent { corr_id, to }`.
+    /// Fire `PeerRequestSent { corr_id }`.
     ///
     /// Guard: `corr_id` is not already in `pending_peer_requests`.
-    fn request_sent(
-        &self,
-        corr_id: PeerCorrelationId,
-        to: String,
-    ) -> Result<(), DslTransitionError>;
+    fn request_sent(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
     /// Fire `PeerResponseProgressArrived { corr_id }`.
     ///
@@ -1910,6 +1894,14 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// the map entry is removed on success and the `PeerInteractionCleanup`
     /// effect is emitted; subsequent fires fail the guard.
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerRequestSendFailed { corr_id }` (#291).
+    ///
+    /// Distinct from `request_timed_out`: the outbound request never reached the
+    /// peer (transport/send failure), versus a genuine elapsed-deadline timeout.
+    /// Emits `OutboundPeerRequestState::Failed` and removes the pending entry,
+    /// mirroring the `PeerResponseRejected` failure disposition.
+    fn request_send_failed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
     /// Fire `PeerRequestReceived { corr_id, handling_mode }` (inbound).
     ///
@@ -2027,13 +2019,7 @@ pub trait SessionContextHandle: Send + Sync {
     fn install_observer_with_baseline(
         &self,
         observer: Arc<dyn SessionContextAdvancedObserver>,
-    ) -> u64 {
-        // Default combines the two primitives for backwards compatibility
-        // with any external impls that do not yet override this method.
-        // Runtime impls override to provide the atomic guarantee.
-        self.install_observer(observer);
-        self.current_watermark_ms()
-    }
+    ) -> u64;
 }
 
 /// Observer invoked by [`SessionContextHandle`] when a DSL

@@ -333,43 +333,42 @@ impl SpecValidator {
             });
         }
 
-        // Validate root FrameSpec if present.
-        if let Some(root) = &flow.root {
-            let mut seen_loop_ids = BTreeSet::new();
-            let mut seen_step_ids = BTreeSet::new();
-            Self::validate_frame_spec(
-                definition,
-                flow_name,
-                flow,
-                &format!("flows.{flow_name}.root"),
-                root,
-                0,
-                &mut seen_loop_ids,
-                &mut seen_step_ids,
-                diagnostics,
-            );
+        // Validate the canonical root FrameSpec.
+        let root = &flow.root;
+        let mut seen_loop_ids = BTreeSet::new();
+        let mut seen_step_ids = BTreeSet::new();
+        Self::validate_frame_spec(
+            definition,
+            flow_name,
+            flow,
+            &format!("flows.{flow_name}.root"),
+            root,
+            0,
+            &mut seen_loop_ids,
+            &mut seen_step_ids,
+            diagnostics,
+        );
 
-            let omitted_steps: Vec<_> = flow
-                .steps
-                .keys()
-                .filter(|step_id| !seen_step_ids.contains(*step_id))
-                .cloned()
-                .collect();
-            if !omitted_steps.is_empty() {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::FlowUnknownStep,
-                    message: format!(
-                        "root frame for flow '{flow_name}' does not reference declared flow steps: {}",
-                        omitted_steps
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    location: Some(format!("flows.{flow_name}.root")),
-                    severity: DiagnosticSeverity::Error,
-                });
-            }
+        let omitted_steps: Vec<_> = flow
+            .steps
+            .keys()
+            .filter(|step_id| !seen_step_ids.contains(*step_id))
+            .cloned()
+            .collect();
+        if !omitted_steps.is_empty() {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::FlowUnknownStep,
+                message: format!(
+                    "root frame for flow '{flow_name}' does not reference declared flow steps: {}",
+                    omitted_steps
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                location: Some(format!("flows.{flow_name}.root")),
+                severity: DiagnosticSeverity::Error,
+            });
         }
     }
 }
@@ -490,6 +489,11 @@ mod tests {
     fn profile() -> Profile {
         Profile {
             model: "test".to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
             peer_description: "test".to_string(),
@@ -504,10 +508,13 @@ mod tests {
 
     fn base_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("lead"), ProfileBinding::Inline(profile()));
+        profiles.insert(
+            ProfileName::from("lead"),
+            ProfileBinding::Inline(Box::new(profile())),
+        );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(profile()),
+            ProfileBinding::Inline(Box::new(profile())),
         );
 
         let mut definition = MobDefinition::explicit("mob");
@@ -545,14 +552,8 @@ mod tests {
         b.depends_on = vec![StepId::from("a")];
         steps.insert(StepId::from("b"), b);
 
-        def.flows.insert(
-            FlowId::from("flow"),
-            FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
-        );
+        def.flows
+            .insert(FlowId::from("flow"), FlowSpec::new(None, steps, None));
 
         let diagnostics = SpecValidator::validate(&def);
         assert!(
@@ -583,14 +584,8 @@ mod tests {
             }
             steps.insert(StepId::from(format!("s{index}")), current);
         }
-        def.flows.insert(
-            FlowId::from("deep"),
-            FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
-        );
+        def.flows
+            .insert(FlowId::from("deep"), FlowSpec::new(None, steps, None));
 
         let diagnostics = SpecValidator::validate(&def);
         assert!(
@@ -638,14 +633,8 @@ mod tests {
         });
         steps.insert(StepId::from("lonely_branch"), lonely_branch);
 
-        def.flows.insert(
-            FlowId::from("flow"),
-            FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
-        );
+        def.flows
+            .insert(FlowId::from("flow"), FlowSpec::new(None, steps, None));
 
         let diagnostics = SpecValidator::validate(&def);
         assert!(
@@ -748,11 +737,7 @@ mod tests {
 
         def.flows.insert(
             FlowId::from("flow"),
-            FlowSpec {
-                description: None,
-                steps,
-                root: Some(FrameSpec { nodes: root_nodes }),
-            },
+            FlowSpec::new(None, steps, Some(FrameSpec { nodes: root_nodes })),
         );
 
         let diagnostics = SpecValidator::validate(&def);

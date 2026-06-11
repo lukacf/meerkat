@@ -143,6 +143,31 @@ is_rust_relevant_path() {
   esac
 }
 
+# Formal/governance artifacts (machine specs, RMAT/seam baselines, dogma
+# doctrine, the dogma-inquisition skill) are not Rust source, but changing them
+# must still route the formal/governance gate rather than exiting 0 with
+# "no build-relevant changes". These are matched separately from Rust paths so
+# they escalate to `make` governance targets instead of package-scoped nextest.
+is_governance_path() {
+  case "${1#./}" in
+    specs/machines/*|specs/compositions/*)
+      return 0
+      ;;
+    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs)
+      return 0
+      ;;
+    .claude/skills/meerkat-dogma-inquisition/*)
+      return 0
+      ;;
+    docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/architecture/dogma-audits/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 is_global_path() {
   case "$1" in
     Cargo.toml|Cargo.lock|.cargo/config.toml|.config/nextest.toml|scripts/repo-cargo|scripts/agent-gate|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh|Makefile)
@@ -189,6 +214,7 @@ while IFS= read -r path; do
 done < <(collect_changed_paths | awk 'NF' | sort -u)
 
 relevant=()
+governance=()
 global=0
 if [[ "${#changed[@]}" -gt 0 ]]; then
   for path in "${changed[@]}"; do
@@ -198,11 +224,34 @@ if [[ "${#changed[@]}" -gt 0 ]]; then
         global=1
       fi
     fi
+    if is_governance_path "${path}"; then
+      governance+=("${path}")
+    fi
   done
 fi
 
-if [[ "${#relevant[@]}" -eq 0 ]]; then
+if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 ]]; then
   echo "Cargo agent gate: no Rust build-relevant changes detected."
+  exit 0
+fi
+
+run_governance_gate() {
+  printf 'Cargo agent gate governance/spec paths:\n'
+  printf '  %s\n' "${governance[@]}"
+  echo "Formal/governance artifacts changed; running machine-check-drift, seam-inventory, and rmat-audit."
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "DRY-RUN make machine-check-drift seam-inventory rmat-audit"
+    return 0
+  fi
+  make machine-check-drift seam-inventory rmat-audit
+}
+
+if [[ "${#governance[@]}" -gt 0 ]]; then
+  run_governance_gate
+fi
+
+if [[ "${#relevant[@]}" -eq 0 ]]; then
+  echo "Cargo agent gate: no Rust build-relevant changes detected (governance checks ran above)."
   exit 0
 fi
 

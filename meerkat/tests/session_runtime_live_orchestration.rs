@@ -13,8 +13,6 @@
 //!   B18 branch.
 //! * `live_channel_requires_close_for_identity_change` — closes on
 //!   model swap, closes on provider swap, in-place refresh otherwise.
-//! * `extract_system_prompt_from_seed_messages_runtime` — surfaces the
-//!   first `System`/`SystemNotice` lead.
 //!
 //! Coverage of the load-bearing methods (`precheck_live_open`,
 //! `materialize_staged_session_for_realtime_open`,
@@ -27,11 +25,11 @@
 
 use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{
-    apply_precheck_gates, extract_system_prompt_from_seed_messages_runtime,
-    live_channel_requires_close_for_identity_change, should_apply_global_model_hot_swap,
-    should_fire_live_propagation,
+    LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
+    LiveHotSwapSkipReason, apply_precheck_gates, live_channel_requires_close_for_identity_change,
+    should_apply_global_model_hot_swap, should_fire_live_propagation,
 };
-use meerkat_core::types::{Message, SystemMessage, SystemNoticeKind, SystemNoticeMessage};
+use meerkat_core::types::SessionId;
 use meerkat_core::{Provider, SessionLlmIdentity};
 
 #[test]
@@ -122,15 +120,6 @@ fn live_channel_in_place_refresh_when_identity_unchanged() {
 //
 //   Skip when current_session_model == new_global_model (no-op);
 //   otherwise propagate.
-//
-// `prior_global_model` is no longer consulted — the original G5 (P1)
-// rule attempted to preserve "per-session overrides" by skipping when
-// `current` differed from `prior_global`, but that heuristic conflated
-// "user pinned at session/create" with "user reconfigured mid-session"
-// and broke the s72 e2e contract (a session created with an explicit
-// realtime model against a non-realtime global must still re-resolve
-// to the new non-realtime global so the next live/open precheck rejects
-// via B19).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -141,7 +130,6 @@ fn hot_swap_propagates_when_prior_global_unknown_and_models_differ() {
     // stranded; the new rule trusts the new global as authoritative.
     assert!(should_apply_global_model_hot_swap(
         "gpt-realtime-2",
-        None,
         "gpt-realtime-3"
     ));
 }
@@ -152,13 +140,11 @@ fn hot_swap_skips_when_session_already_matches_new_global() {
     // no-op; the per-channel Refresh fan-out below still runs.
     assert!(!should_apply_global_model_hot_swap(
         "gpt-realtime-3",
-        Some("gpt-realtime-2"),
         "gpt-realtime-3"
     ));
     // Same outcome regardless of prior-baseline knowledge.
     assert!(!should_apply_global_model_hot_swap(
         "gpt-realtime-3",
-        None,
         "gpt-realtime-3"
     ));
 }
@@ -168,7 +154,6 @@ fn hot_swap_propagates_when_session_was_tracking_prior_global() {
     // Session was tracking the prior global → safe to retarget.
     assert!(should_apply_global_model_hot_swap(
         "gpt-realtime-2",
-        Some("gpt-realtime-2"),
         "gpt-realtime-3"
     ));
 }
@@ -182,7 +167,6 @@ fn hot_swap_propagates_when_session_diverged_from_prior_global() {
     // new rule treats the global as authoritative for any value mismatch.
     assert!(should_apply_global_model_hot_swap(
         "gpt-realtime-prior-override",
-        Some("gpt-realtime-2"),
         "gpt-realtime-3"
     ));
 }
@@ -193,7 +177,6 @@ fn hot_swap_skips_when_session_already_matches_new_global_after_divergence() {
     // hot-swap is a no-op regardless of prior baseline.
     assert!(!should_apply_global_model_hot_swap(
         "gpt-realtime-3",
-        Some("gpt-realtime-2"),
         "gpt-realtime-3"
     ));
 }
@@ -266,36 +249,112 @@ fn should_fire_live_propagation_only_consults_agent_model_today() {
     assert!(!should_fire_live_propagation(&prior, &new));
 }
 
+// ---------------------------------------------------------------------------
+// `LiveConfigPropagationReport` is the typed aggregate that
+// `propagate_config_to_live_channels` returns to the config/patch caller.
+// It replaces the prior pure-logging fan-out: a per-channel refresh that
+// fails (open_config build / snapshot stamp / enqueue / queue acceptance)
+// or a per-session hot-swap that fails must be enumerated in the report so
+// the caller observes the failure instead of relying on tracing to notice a
+// propagation that silently completed. These tests pin that contract
+// independently of the host-backed fan-out (which lands richer coverage in
+// `orchestrator_e2e` once a fault-injecting host fixture exists).
+// ---------------------------------------------------------------------------
+
 #[test]
-fn extract_system_prompt_returns_system_message_content() {
-    let msgs = vec![
-        Message::System(SystemMessage::new("you are helpful")),
-        Message::User(meerkat_core::types::UserMessage::text("hi")),
-    ];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        Some("you are helpful".to_string())
-    );
+fn propagation_report_default_is_clean_and_empty() {
+    // No host / nothing to propagate → an empty report that reads clean.
+    let report = LiveConfigPropagationReport::default();
+    assert!(report.is_clean());
+    assert!(report.swapped.is_empty());
+    assert!(report.skipped.is_empty());
+    assert!(report.swap_failed.is_empty());
+    assert!(report.refreshed.is_empty());
+    assert!(report.closed.is_empty());
+    assert!(report.refresh_failed.is_empty());
 }
 
 #[test]
-fn extract_system_prompt_returns_rendered_notice_text() {
-    let notice = SystemNoticeMessage::new(SystemNoticeKind::McpPending, "MCP servers connecting");
-    let rendered = notice.model_projection_text();
-    let msgs = vec![Message::SystemNotice(notice)];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        Some(rendered)
+fn propagation_report_with_forced_channel_failure_is_not_clean_and_enumerates_it() {
+    // Part 2 gate: a propagation run with a forced per-channel failure
+    // must return a report enumerating the failure rather than silently
+    // completing. A refresh that could not be enqueued is recorded as a
+    // typed `LiveChannelRefreshFailure::EnqueueFailed`, and `is_clean()`
+    // flips false so the caller can react.
+    let refreshed = SessionId::new();
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        refreshed: vec![refreshed.clone()],
+        refresh_failed: vec![(
+            failed.clone(),
+            LiveChannelRefreshFailure::EnqueueFailed("live channel closed".to_string()),
+        )],
+        ..Default::default()
+    };
+
+    assert!(
+        !report.is_clean(),
+        "a dropped per-channel refresh must not read as a clean propagation"
     );
+    assert_eq!(report.refreshed, vec![refreshed]);
+    assert_eq!(report.refresh_failed.len(), 1);
+    let (session, failure) = &report.refresh_failed[0];
+    assert_eq!(session, &failed);
+    match failure {
+        LiveChannelRefreshFailure::EnqueueFailed(detail) => {
+            assert_eq!(detail, "live channel closed");
+        }
+        other => panic!("expected EnqueueFailed, got {other:?}"),
+    }
 }
 
 #[test]
-fn extract_system_prompt_none_when_first_is_user() {
-    let msgs = vec![Message::User(meerkat_core::types::UserMessage::text("hi"))];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        None
-    );
+fn propagation_report_with_swap_failure_is_not_clean() {
+    // A per-session hot-swap reconfigure failure must also surface in the
+    // report (not be swallowed) and flip `is_clean()` false.
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        swap_failed: vec![(failed.clone(), "reconfigure rejected".to_string())],
+        ..Default::default()
+    };
+    assert!(!report.is_clean());
+    assert_eq!(report.swap_failed.len(), 1);
+    assert_eq!(report.swap_failed[0].0, failed);
+}
+
+#[test]
+fn propagation_report_deliberate_skip_and_close_stay_clean() {
+    // A deliberate no-op/override skip and an intentional channel close are
+    // expected outcomes, not faults: the report still reads clean so the
+    // caller does not treat a correct propagation as a failure.
+    let skipped = SessionId::new();
+    let closed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        skipped: vec![(skipped, LiveHotSwapSkipReason::NoOpOrOverride)],
+        closed: vec![closed],
+        ..Default::default()
+    };
+    assert!(report.is_clean());
+}
+
+#[test]
+fn propagation_report_with_close_failure_is_not_clean() {
+    // A config-rejection close that itself failed must surface as a typed
+    // `LiveChannelCloseFailure` in `close_failed` (NOT in `closed`) and flip
+    // `is_clean()` false — a failed close must never be laundered into a
+    // clean propagation.
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        close_failed: vec![(
+            failed.clone(),
+            LiveChannelCloseFailure::CommitHandoffMissing,
+        )],
+        ..Default::default()
+    };
+    assert!(!report.is_clean());
+    assert!(report.closed.is_empty());
+    assert_eq!(report.close_failed.len(), 1);
+    assert_eq!(report.close_failed[0].0, failed);
 }
 
 // Phase 4 R1: end-to-end coverage of the load-bearing methods now
@@ -422,8 +481,10 @@ mod orchestrator_e2e {
     async fn propagate_config_to_live_channels_no_host_is_noop() {
         let fx = build_fixture();
         let orch = orchestrator(&fx);
-        // Reaches the early-return branch and does not panic.
-        orch.propagate_config_to_live_channels(None).await;
+        // Reaches the early-return branch and returns an empty, clean report.
+        let report = orch.propagate_config_to_live_channels().await;
+        assert!(report.is_clean());
+        assert_eq!(report, Default::default());
     }
 
     /// `precheck_live_open` must reject a deferred staged session whose

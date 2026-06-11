@@ -47,9 +47,10 @@ pub use meerkat_core::{
     AgentSessionStore,
     AgentToolDispatcher,
     ArtifactRef,
-    AssistantMessage,
+    AssistantBlock,
     // Phase 3 provider-auth redesign — realm-scoped connection identity.
     AuthBindingRef,
+    BlockAssistantMessage,
     // Budget
     Budget,
     BudgetConfig,
@@ -65,6 +66,7 @@ pub use meerkat_core::{
     ContextStrategy,
     ForkBranch,
     ForkBudgetPolicy,
+    HookAdapterConfig,
     HookCapability,
     HookDecision,
     HookEngine,
@@ -72,17 +74,12 @@ pub use meerkat_core::{
     HookEntryConfig,
     HookExecutionMode,
     HookExecutionReport,
-    HookFailurePolicy,
     HookId,
     HookInvocation,
     HookOutcome,
-    HookPatch,
-    HookPatchEnvelope,
     HookPoint,
     HookReasonCode,
-    HookRevision,
     HookRunOverrides,
-    HookRuntimeConfig,
     HookRuntimeKind,
     HooksConfig,
     // Interaction types
@@ -136,6 +133,8 @@ pub use meerkat_core::{
     ToolDef,
     ToolGateway,
     ToolGatewayBuilder,
+    // Canonical typed tool identity (K8a fold)
+    ToolName,
     ToolResult,
     Usage,
     UserMessage,
@@ -176,7 +175,9 @@ pub use meerkat_core::{
 };
 
 // Re-export client types
-pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_client::{
+    FactoryError, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse,
+};
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,
@@ -229,6 +230,7 @@ mod factory;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
+    resolve_create_session_default_model, resolve_provider_catalog_default_model,
 };
 
 pub mod help;
@@ -287,6 +289,9 @@ pub use meerkat_session::{
 pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
+// Durable stored-event row (typed envelope identity) for replay surfaces.
+#[cfg(feature = "session-store")]
+pub use meerkat_session::event_store::StoredEvent;
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
@@ -315,7 +320,7 @@ pub use meerkat_store::SqliteSessionStore;
 
 // Re-export tools
 #[cfg(not(target_arch = "wasm32"))]
-pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
+pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolValidationError};
 
 // Embedded skill registration.
 //
@@ -402,11 +407,16 @@ pub use meerkat_contracts::{
 // Surface infrastructure
 pub mod surface;
 
+// Typed per-request system-prompt policy. Canonically owned by
+// `meerkat_core::config` (its serde IS the wire/persisted representation);
+// re-exported here for surface crates.
+pub use meerkat_core::config::SystemPromptOverride;
+
 // Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
 #[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;
 #[cfg(not(target_arch = "wasm32"))]
-pub use prompt_assembly::assemble_system_prompt;
+pub use prompt_assembly::{PromptAssemblyError, assemble_system_prompt};
 
 // SDK helpers (filesystem-dependent: .rkat dir, hook config files)
 #[cfg(not(target_arch = "wasm32"))]
@@ -460,10 +470,10 @@ pub use meerkat_llm_core::provider_runtime::{
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use super::{
-        AgentConfig, AgentError, AgentEvent, AssistantMessage, Budget, BudgetLimits, BudgetType,
-        Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message, RetryPolicy, RunResult,
-        Session, SessionFilter, SessionId, SessionMeta, SessionStore, StopReason, SystemMessage,
-        ToolCall, ToolDef, ToolResult, Usage, UserMessage,
+        AgentConfig, AgentError, AgentEvent, AssistantBlock, BlockAssistantMessage, Budget,
+        BudgetLimits, BudgetType, Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message,
+        RetryPolicy, RunResult, Session, SessionFilter, SessionId, SessionMeta, SessionStore,
+        StopReason, SystemMessage, ToolCall, ToolDef, ToolResult, Usage, UserMessage,
     };
 
     #[cfg(feature = "anthropic")]

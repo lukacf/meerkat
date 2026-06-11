@@ -10,6 +10,7 @@ use meerkat_core::retry::LlmRetrySchedule;
 #[cfg(test)]
 use meerkat_core::turn_execution_authority::TurnFailureSourceKind;
 use meerkat_core::turn_execution_authority::{
+    CallTimeoutSource as TurnCallTimeoutSource, CallTimeoutVerdict as TurnCallTimeoutVerdict,
     ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
     TurnFailureReason, TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
     TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
@@ -111,6 +112,25 @@ fn map_generated_turn_effect(
                 },
             }
         }
+        mm_dsl::MeerkatMachineEffect::AssistantOutputClassified {
+            empty_response_terminal,
+        } => TurnExecutionEffect::AssistantOutputClassified {
+            empty_response_terminal,
+        },
+        mm_dsl::MeerkatMachineEffect::CallTimeoutClassified {
+            verdict,
+            timeout_ms,
+        } => TurnExecutionEffect::CallTimeoutClassified {
+            verdict: match verdict {
+                mm_dsl::CallTimeoutVerdict::RetryableCallTimeout => {
+                    TurnCallTimeoutVerdict::RetryableCallTimeout
+                }
+                mm_dsl::CallTimeoutVerdict::TerminalTurnBudget => {
+                    TurnCallTimeoutVerdict::TerminalTurnBudget
+                }
+            },
+            timeout_ms,
+        },
         _ => return Ok(None),
     }))
 }
@@ -174,9 +194,14 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                     .iter()
                     .map(|op_ref| op_ref.operation_id.to_string())
                     .collect(),
+                // #354: barrier ids are now a typed `Set<OperationId>` in the
+                // DSL. The token repr stays the plain-UUID Display string that
+                // `parse_operation_id` round-trips (NOT the JSON `from_domain`
+                // form), so the projection back to domain `OperationId` is
+                // lossless.
                 barrier_operation_ids: barrier_operation_ids
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|id| mm_dsl::OperationId::from(id.to_string()))
                     .collect(),
             },
             TurnExecutionInput::ToolCallsResolved { run_id } => {
@@ -189,7 +214,11 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 operation_ids,
             } => mm_dsl::MeerkatMachineInput::OpsBarrierSatisfied {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                operation_ids: operation_ids.iter().map(ToString::to_string).collect(),
+                // #354: typed `Set<OperationId>`; same plain-UUID token repr.
+                operation_ids: operation_ids
+                    .iter()
+                    .map(|id| mm_dsl::OperationId::from(id.to_string()))
+                    .collect(),
             },
             TurnExecutionInput::BoundaryContinue { run_id } => {
                 mm_dsl::MeerkatMachineInput::BoundaryContinue {
@@ -236,6 +265,20 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 retry_attempt: u64::from(retry_attempt),
                 max_retries: u64::from(max_retries),
             },
+            TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            } => mm_dsl::MeerkatMachineInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            },
+            TurnExecutionInput::ClassifyCallTimeout { source, timeout_ms } => {
+                mm_dsl::MeerkatMachineInput::ClassifyCallTimeout {
+                    source: match source {
+                        TurnCallTimeoutSource::CallBudget => mm_dsl::CallTimeoutSource::CallBudget,
+                        TurnCallTimeoutSource::TurnBudget => mm_dsl::CallTimeoutSource::TurnBudget,
+                    },
+                    timeout_ms,
+                }
+            }
             TurnExecutionInput::CancelNow { run_id } => mm_dsl::MeerkatMachineInput::CancelNow {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
             },
@@ -580,7 +623,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         let barrier_operation_ids: BTreeSet<_> = state
             .barrier_operation_ids
             .iter()
-            .map(|id| parse_operation_id(id))
+            .map(|id| parse_operation_id(id.0.as_str()))
             .collect();
         let pending_op_refs = state
             .pending_op_refs
@@ -623,6 +666,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             terminal_cause_kind: state.terminal_cause_kind.map(Into::into),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
+            extraction_active: state.extraction_active,
             llm_retry_attempt: u32::try_from(state.llm_retry_attempt)
                 .expect("generated MeerkatMachine llm_retry_attempt must fit u32"),
             llm_retry_max_retries: u32::try_from(state.llm_retry_max_retries)

@@ -82,8 +82,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -133,7 +132,6 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     // The recovery path normalises these to a recovered phase based on the
     // persisted boundary receipt; the history chain is not material to
     // recovery.
-    state.attempt_count = 1;
     StoredInputState {
         state,
         seed: InputStateSeed {
@@ -433,7 +431,10 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
             let session_id = SessionId::new();
             let runtime_id = LogicalRuntimeId::for_session(&session_id);
             let seeder = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
-            seeder.register_session(session_id.clone()).await;
+            seeder
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             match recovered_state {
                 RuntimeState::Retired => {
                     meerkat_runtime::RuntimeControlPlane::retire(&seeder, &runtime_id)
@@ -456,13 +457,31 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
             drop(seeder);
 
             let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
-            machine.register_session(session_id.clone()).await;
-            assert_eq!(
-                machine.runtime_state(&session_id).await.unwrap(),
-                recovered_state,
-                "{}: recovered {recovered_state} projection must remain machine lifecycle truth",
-                harness.name
-            );
+            if recovered_state == RuntimeState::Destroyed {
+                // Destroyed is terminal machine truth: cold re-registration is
+                // rejected by the machine verdict instead of laundering the
+                // terminal state into a successful registration.
+                let err = machine
+                    .register_session(session_id.clone())
+                    .await
+                    .expect_err("destroyed runtime must reject cold re-registration");
+                assert!(
+                    err.to_string().contains("Runtime destroyed"),
+                    "{}: rejection must surface the destroyed terminal verdict, got {err:?}",
+                    harness.name
+                );
+            } else {
+                machine
+                    .register_session(session_id.clone())
+                    .await
+                    .expect("register session");
+                assert_eq!(
+                    machine.runtime_state(&session_id).await.unwrap(),
+                    recovered_state,
+                    "{}: recovered {recovered_state} projection must remain machine lifecycle truth",
+                    harness.name
+                );
+            }
             assert_eq!(
                 load_runtime_state(harness.store.as_ref(), &runtime_id)
                     .await
@@ -531,7 +550,6 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         );
 
         for input_id in [&first_id, &second_id] {
-            let recovered = driver.input_state(input_id).unwrap();
             assert_eq!(
                 driver.inner_ref().input_phase(input_id),
                 Some(InputLifecycleState::Consumed),
@@ -539,7 +557,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 harness.name
             );
             assert_eq!(
-                recovered.terminal_outcome().cloned(),
+                driver.inner_ref().input_terminal_outcome(input_id),
                 Some(InputTerminalOutcome::Consumed),
                 "{}: committed contributors should recover with a consumed terminal outcome",
                 harness.name

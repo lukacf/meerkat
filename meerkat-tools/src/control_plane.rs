@@ -4,7 +4,6 @@ use meerkat_core::ops::{SessionEffect, ToolDispatchOutcome};
 use meerkat_core::session::{
     DeferredToolLoadAuthority, SessionToolVisibilityState, ToolVisibilityWitness,
 };
-use meerkat_core::tool_catalog::stable_owner_key_from_provenance;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{
     AgentToolDispatcher, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
@@ -20,6 +19,27 @@ use crate::schema::schema_for;
 const SEARCH_TOOL_NAME: &str = "tool_catalog_search";
 const LOAD_TOOL_NAME: &str = "tool_catalog_load";
 const CONTROL_SOURCE_ID: &str = "control_plane";
+
+/// Typed refusal raised when the deferred tool-load control plane has no
+/// [`ToolScope`] bound.
+///
+/// Without a bound scope there is no visibility authority to consult, so the
+/// control plane refuses to act rather than fall back to default visibility and
+/// admit loads under truth it does not actually own. The deferred-load path
+/// fails closed on this marker (it emits no `RequestDeferredTools` effect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoToolScope;
+
+/// Visibility facts resolved from a *bound* [`ToolScope`] (or, in tests, an
+/// injected visibility-state override).
+///
+/// This is produced only when a scope authority is actually present; it replaces
+/// the prior `unwrap_or_default()` fallbacks that let the control plane serve
+/// default visibility as if it were authoritative.
+struct ResolvedLoadVisibility {
+    visibility_state: SessionToolVisibilityState,
+    visible_tool_names: BTreeSet<meerkat_core::ToolName>,
+}
 
 #[derive(Default)]
 pub struct CatalogControlVisibilityProvider {
@@ -50,25 +70,7 @@ impl CatalogControlVisibilityProvider {
         *guard = Some(visibility_state);
     }
 
-    fn visibility_state(&self) -> SessionToolVisibilityState {
-        #[cfg(test)]
-        if let Some(visibility_state) = self
-            .visibility_state_override
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            return visibility_state;
-        }
-        self.scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|scope| scope.visibility_state().ok())
-            .unwrap_or_default()
-    }
-
-    fn visible_tool_names(&self) -> Option<BTreeSet<String>> {
+    fn visible_tool_names(&self) -> Option<BTreeSet<meerkat_core::ToolName>> {
         self.scope
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -76,20 +78,71 @@ impl CatalogControlVisibilityProvider {
             .and_then(|scope| scope.visible_tool_names().ok())
     }
 
-    fn staged_session_filters_allow_name(&self, name: &str) -> bool {
-        self.scope
+    /// Resolve the visibility facts the deferred-load path needs from a *bound*
+    /// scope authority. Returns [`NoToolScope`] when no scope is present so the
+    /// caller fails closed instead of serving default visibility.
+    ///
+    /// In tests, an injected `visibility_state_override` stands in for a bound
+    /// scope (the override exists precisely to exercise control-plane behavior
+    /// without a live scope), so its presence resolves successfully.
+    fn resolve_load_visibility(&self) -> Result<ResolvedLoadVisibility, NoToolScope> {
+        #[cfg(test)]
+        if let Some(visibility_state) = self
+            .visibility_state_override
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|scope| scope.staged_session_filters_allow_name(name).ok())
-            .unwrap_or_else(|| {
-                let visibility_state = self.visibility_state();
-                ToolScope::compose(&[
-                    visibility_state.inherited_base_filter,
-                    visibility_state.staged_filter,
-                ])
-                .allows(name)
-            })
+            .clone()
+        {
+            return Ok(ResolvedLoadVisibility {
+                visibility_state,
+                visible_tool_names: BTreeSet::new(),
+            });
+        }
+
+        let guard = self
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scope = guard.as_ref().ok_or(NoToolScope)?;
+        // A bound scope whose visibility cannot be projected is treated as no
+        // authoritative visibility (fail closed), never as default visibility.
+        let visibility_state = scope.visibility_state().map_err(|_| NoToolScope)?;
+        let visible_tool_names = scope.visible_tool_names().unwrap_or_default();
+        Ok(ResolvedLoadVisibility {
+            visibility_state,
+            visible_tool_names,
+        })
+    }
+
+    /// Ask the bound scope authority whether staged session filters allow a
+    /// name. Fail-closed: an absent scope or a scope projection failure yields
+    /// [`NoToolScope`] so callers refuse instead of composing a local fallback
+    /// filter — the control plane is never a fallback visibility authority.
+    ///
+    /// In tests, an injected `visibility_state_override` stands in for a bound
+    /// scope, so the filter is composed from that injected state.
+    fn staged_session_filters_allow_name(&self, name: &str) -> Result<bool, NoToolScope> {
+        #[cfg(test)]
+        if let Some(visibility_state) = self
+            .visibility_state_override
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Ok(ToolScope::compose(&[
+                visibility_state.inherited_base_filter,
+                visibility_state.staged_filter,
+            ])
+            .allows(name));
+        }
+        let guard = self
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scope = guard.as_ref().ok_or(NoToolScope)?;
+        scope
+            .staged_session_filters_allow_name(name)
+            .map_err(|_| NoToolScope)
     }
 }
 
@@ -139,34 +192,28 @@ impl CatalogControlDispatcher {
 
     fn request_witness_matches_entry(
         witness: Option<&ToolVisibilityWitness>,
-        stable_owner_key: &str,
+        provenance: &ToolProvenance,
         tool: &ToolDef,
     ) -> bool {
         let Some(witness) = witness else {
             return false;
         };
-        if !witness.has_provenance_identity_witness() {
+        let Some(witness_provenance) = witness.last_seen_provenance.as_ref() else {
             return false;
-        }
-        if let Some(expected_owner) = witness.stable_owner_key.as_deref()
-            && expected_owner != stable_owner_key
-        {
-            return false;
-        }
-        witness.last_seen_provenance.as_ref() == tool.provenance.as_ref()
+        };
+        witness_provenance == provenance && Some(witness_provenance) == tool.provenance.as_ref()
     }
 
     fn deferred_authority_for_entry(
-        stable_owner_key: &str,
+        provenance: &ToolProvenance,
         tool: &ToolDef,
     ) -> Option<ToolVisibilityWitness> {
-        let provenance = tool.provenance.as_ref()?;
-        if stable_owner_key_from_provenance(provenance) != stable_owner_key {
+        let tool_provenance = tool.provenance.as_ref()?;
+        if tool_provenance != provenance {
             return None;
         }
         Some(ToolVisibilityWitness {
-            stable_owner_key: Some(stable_owner_key.to_string()),
-            last_seen_provenance: Some(provenance.clone()),
+            last_seen_provenance: Some(tool_provenance.clone()),
         })
     }
 
@@ -202,15 +249,21 @@ impl CatalogControlDispatcher {
                     .is_some_and(|names| names.contains(entry.tool.name.as_str()));
                 let visibility_status = if currently_loaded {
                     SearchVisibilityStatus::Loaded
-                } else if !self
-                    .visibility_provider
-                    .staged_session_filters_allow_name(&entry.tool.name)
-                {
-                    SearchVisibilityStatus::BlockedByFilter
-                } else if !entry.currently_callable() {
-                    SearchVisibilityStatus::TemporarilyUnavailable
                 } else {
-                    SearchVisibilityStatus::Deferred
+                    match self
+                        .visibility_provider
+                        .staged_session_filters_allow_name(&entry.tool.name)
+                    {
+                        // No bound scope authority: fail closed. Without
+                        // visibility truth the entry cannot honestly be
+                        // advertised as loadable or as filter-blocked.
+                        Err(NoToolScope) => SearchVisibilityStatus::TemporarilyUnavailable,
+                        Ok(false) => SearchVisibilityStatus::BlockedByFilter,
+                        Ok(true) if !entry.currently_callable() => {
+                            SearchVisibilityStatus::TemporarilyUnavailable
+                        }
+                        Ok(true) => SearchVisibilityStatus::Deferred,
+                    }
                 };
 
                 SearchResultItem {
@@ -260,11 +313,35 @@ impl CatalogControlDispatcher {
             );
         };
 
-        let visibility_state = self.visibility_provider.visibility_state();
-        let visible_tool_names = self
-            .visibility_provider
-            .visible_tool_names()
-            .unwrap_or_default();
+        // Fail closed: a deferred load requires a bound `ToolScope` to consult.
+        // Without one there is no visibility authority, so we refuse every name
+        // and emit no `RequestDeferredTools` effect rather than accepting loads
+        // under default visibility.
+        let Ok(ResolvedLoadVisibility {
+            visibility_state,
+            visible_tool_names,
+        }) = self.visibility_provider.resolve_load_visibility()
+        else {
+            let resolutions = args
+                .names
+                .into_iter()
+                .map(|name| ToolCatalogLoadResolution {
+                    name,
+                    accepted: false,
+                    accepted_noop: false,
+                    rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
+                })
+                .collect();
+            return (
+                LoadResponse {
+                    catalog_exact: true,
+                    accepted_names: Vec::new(),
+                    noop_names: Vec::new(),
+                    resolutions,
+                },
+                None,
+            );
+        };
         let mut accepted_authorities = BTreeMap::new();
         let mut noop_names = BTreeSet::new();
         let mut resolutions = Vec::new();
@@ -292,9 +369,9 @@ impl CatalogControlDispatcher {
                         rejected_reason: Some(ToolCatalogLoadRejectedReason::NotDeferredEligible),
                     });
                 }
-                ToolCatalogDeferredEligibility::DeferredEligible { stable_owner_key } => {
+                ToolCatalogDeferredEligibility::DeferredEligible { provenance } => {
                     let Some(authority) =
-                        Self::deferred_authority_for_entry(stable_owner_key, &entry.tool)
+                        Self::deferred_authority_for_entry(provenance, &entry.tool)
                     else {
                         resolutions.push(ToolCatalogLoadResolution {
                             name,
@@ -308,19 +385,19 @@ impl CatalogControlDispatcher {
                     };
                     let staged_or_accepted = visibility_state
                         .staged_requested_deferred_names
-                        .contains(&name)
+                        .contains(name.as_str())
                         || accepted_authorities.contains_key(&name);
                     let already_requested = staged_or_accepted
                         && (Self::request_witness_matches_entry(
-                            visibility_state.requested_witnesses.get(&name),
-                            stable_owner_key,
+                            visibility_state.requested_witnesses.get(name.as_str()),
+                            provenance,
                             &entry.tool,
                         ) || Self::request_witness_matches_entry(
                             accepted_authorities.get(&name),
-                            stable_owner_key,
+                            provenance,
                             &entry.tool,
                         ));
-                    let already_visible = visible_tool_names.contains(&name);
+                    let already_visible = visible_tool_names.contains(name.as_str());
                     if already_requested || already_visible {
                         noop_names.insert(name.clone());
                         resolutions.push(ToolCatalogLoadResolution {
@@ -331,17 +408,33 @@ impl CatalogControlDispatcher {
                         });
                         continue;
                     }
-                    if !self
+                    match self
                         .visibility_provider
                         .staged_session_filters_allow_name(&name)
                     {
-                        resolutions.push(ToolCatalogLoadResolution {
-                            name,
-                            accepted: false,
-                            accepted_noop: false,
-                            rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
-                        });
-                        continue;
+                        Ok(true) => {}
+                        Ok(false) => {
+                            resolutions.push(ToolCatalogLoadResolution {
+                                name,
+                                accepted: false,
+                                accepted_noop: false,
+                                rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
+                            });
+                            continue;
+                        }
+                        // The scope authority could not project filter truth:
+                        // fail closed, never compose a local fallback filter.
+                        Err(NoToolScope) => {
+                            resolutions.push(ToolCatalogLoadResolution {
+                                name,
+                                accepted: false,
+                                accepted_noop: false,
+                                rejected_reason: Some(
+                                    ToolCatalogLoadRejectedReason::TemporarilyUnavailable,
+                                ),
+                            });
+                            continue;
+                        }
                     }
                     if !entry.currently_callable() {
                         resolutions.push(ToolCatalogLoadResolution {
@@ -419,11 +512,15 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                             name: call.name.into(),
                             reason: err.to_string(),
                         })?;
-                let result = ToolResult::new(
-                    call.id.to_string(),
-                    serde_json::to_string(&self.search_results(args)).unwrap_or_default(),
-                    false,
-                );
+                // Serialization failure propagates as a typed ToolError; a
+                // structured success must never collapse into an empty
+                // successful result.
+                let content = serde_json::to_string(&self.search_results(args)).map_err(|err| {
+                    ToolError::ExecutionFailed {
+                        message: format!("failed to serialize tool_catalog_search result: {err}"),
+                    }
+                })?;
+                let result = ToolResult::new(call.id.to_string(), content, false);
                 Ok(ToolDispatchOutcome::sync_result(result))
             }
             LOAD_TOOL_NAME => {
@@ -434,9 +531,16 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                             reason: err.to_string(),
                         })?;
                 let (response, effect) = self.load_response(args);
+                // Serialization failure propagates as a typed ToolError; a
+                // structured success must never collapse into an empty
+                // successful result.
+                let content =
+                    serde_json::to_string(&response).map_err(|err| ToolError::ExecutionFailed {
+                        message: format!("failed to serialize tool_catalog_load result: {err}"),
+                    })?;
                 let mut outcome = ToolDispatchOutcome::sync_result(ToolResult::new(
                     call.id.to_string(),
-                    serde_json::to_string(&response).unwrap_or_default(),
+                    content,
                     false,
                 ));
                 if let Some(effect) = effect {
@@ -591,6 +695,13 @@ mod tests {
         }
     }
 
+    fn callback_provenance(source_id: &str) -> ToolProvenance {
+        ToolProvenance {
+            kind: ToolSourceKind::Callback,
+            source_id: source_id.into(),
+        }
+    }
+
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             name: name.into(),
@@ -624,7 +735,7 @@ mod tests {
 
     fn generated_visibility_scope(
         tools: Arc<[Arc<ToolDef>]>,
-        deferred_tool_names: HashSet<String>,
+        deferred_tool_names: HashSet<meerkat_core::ToolName>,
     ) -> ToolScope {
         let identity = meerkat_core::SessionLlmIdentity {
             model: "test-model".to_string(),
@@ -654,7 +765,7 @@ mod tests {
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_inline(Arc::clone(&inline), true),
             ]
@@ -665,7 +776,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         visibility_provider.set_scope(scope);
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
@@ -711,12 +822,12 @@ mod tests {
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred_two),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
             ]
             .into(),
@@ -751,7 +862,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -778,7 +889,7 @@ mod tests {
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred),
                     false,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_inline(Arc::clone(&inline), true),
             ]
@@ -789,18 +900,15 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
-                staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                    .into_iter()
-                    .collect(),
+                staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
                 staged_revision: 1,
                 requested_witnesses: [(
-                    "deferred_mcp_tool".to_string(),
+                    "deferred_mcp_tool".into(),
                     ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:test".to_string()),
                         last_seen_provenance: deferred.provenance.clone(),
                     },
                 )]
@@ -858,7 +966,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -866,9 +974,7 @@ mod tests {
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
-            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                .into_iter()
-                .collect(),
+            staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
             ..Default::default()
         });
 
@@ -907,7 +1013,6 @@ mod tests {
             &[DeferredToolLoadAuthority::new(
                 "deferred_mcp_tool",
                 ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:test".to_string()),
                     last_seen_provenance: deferred.provenance.clone(),
                 }
             )]
@@ -922,7 +1027,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -931,7 +1036,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_scope(generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         ));
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
@@ -952,9 +1057,148 @@ mod tests {
         );
         assert_eq!(effect["authorities"][0]["name"], "deferred_mcp_tool");
         assert_eq!(
-            effect["authorities"][0]["witness"]["stable_owner_key"],
-            "callback:test"
+            effect["authorities"][0]["witness"]["last_seen_provenance"]["kind"],
+            "callback"
         );
+        assert_eq!(
+            effect["authorities"][0]["witness"]["last_seen_provenance"]["source_id"],
+            "test"
+        );
+    }
+
+    /// Gate (#201): with NO `ToolScope` bound, the deferred-load control plane
+    /// fails closed — it refuses every requested name and emits NO
+    /// `RequestDeferredTools` effect, rather than accepting loads under default
+    /// visibility. (Fails-old: the prior `unwrap_or_default()` fallback admitted
+    /// the load and emitted the effect.)
+    #[tokio::test]
+    async fn load_without_scope_refuses_and_emits_no_effect() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                callback_provenance("test"),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        // No scope and no test-override is set on the provider: there is no
+        // visibility authority to consult.
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert!(
+            response.accepted_names.is_empty(),
+            "no name may be accepted without a bound ToolScope"
+        );
+        assert_eq!(
+            response.resolutions,
+            vec![ToolCatalogLoadResolution {
+                name: "deferred_mcp_tool".into(),
+                accepted: false,
+                accepted_noop: false,
+                rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
+            }]
+        );
+        assert!(
+            outcome.session_effects.is_empty(),
+            "no RequestDeferredTools effect may be emitted without a bound ToolScope"
+        );
+    }
+
+    /// Without a bound `ToolScope` the search surface must fail closed too:
+    /// a deferred-eligible entry reports `TemporarilyUnavailable`, never
+    /// `Deferred`/`BlockedByFilter` derived from a locally composed default
+    /// filter — the control plane is not a fallback visibility authority.
+    #[tokio::test]
+    async fn search_without_scope_reports_temporarily_unavailable() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                callback_provenance("test"),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+
+        let outcome = control
+            .dispatch(search_call(
+                SEARCH_TOOL_NAME,
+                json!({ "query": "deferred" }),
+            ))
+            .await
+            .unwrap();
+        let response: SearchResponse =
+            serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].visibility_status,
+            SearchVisibilityStatus::TemporarilyUnavailable,
+            "no bound scope means no visibility truth: fail closed"
+        );
+    }
+
+    /// Gate (#201): with a `ToolScope` bound, behavior is unchanged — a valid
+    /// deferred load is accepted and the `RequestDeferredTools` effect is
+    /// emitted as before.
+    #[tokio::test]
+    async fn load_with_scope_still_accepts_and_emits_effect() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                callback_provenance("test"),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(generated_visibility_scope(
+            vec![Arc::clone(&deferred)].into(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
+        ));
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert_eq!(
+            response.accepted_names,
+            vec!["deferred_mcp_tool".to_string()]
+        );
+        assert_eq!(outcome.session_effects.len(), 1);
+        assert!(matches!(
+            &outcome.session_effects[0],
+            SessionEffect::RequestDeferredTools { .. }
+        ));
     }
 
     #[tokio::test]
@@ -965,7 +1209,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -973,13 +1217,10 @@ mod tests {
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
-            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                .into_iter()
-                .collect(),
+            staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
             requested_witnesses: [(
-                "deferred_mcp_tool".to_string(),
+                "deferred_mcp_tool".into(),
                 ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:test".to_string()),
                     last_seen_provenance: None,
                 },
             )]
@@ -1015,7 +1256,6 @@ mod tests {
             &[DeferredToolLoadAuthority::new(
                 "deferred_mcp_tool",
                 ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:test".to_string()),
                     last_seen_provenance: deferred.provenance.clone(),
                 }
             )]
@@ -1030,7 +1270,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -1075,7 +1315,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:other".to_string(),
+                callback_provenance("other"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -1120,7 +1360,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 false,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -1162,7 +1402,7 @@ mod tests {
             catalog: vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                callback_provenance("test"),
             )]
             .into(),
             pending_sources: Arc::from([]),
@@ -1171,7 +1411,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
@@ -1180,9 +1420,8 @@ mod tests {
                 ),
                 staged_revision: 1,
                 filter_witnesses: [(
-                    "deferred_mcp_tool".to_string(),
+                    "deferred_mcp_tool".into(),
                     ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:test".to_string()),
                         last_seen_provenance: deferred.provenance.clone(),
                     },
                 )]
@@ -1278,22 +1517,22 @@ mod tests {
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&loaded),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&blocked),
                     true,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&unavailable),
                     false,
-                    "callback:test".to_string(),
+                    callback_provenance("test"),
                 ),
             ]
             .into(),
@@ -1309,26 +1548,25 @@ mod tests {
             ]
             .into(),
             [
-                "loaded_secret_lookup".to_string(),
-                "deferred_secret_lookup".to_string(),
-                "blocked_secret_lookup".to_string(),
-                "offline_secret_lookup".to_string(),
+                "loaded_secret_lookup".into(),
+                "deferred_secret_lookup".into(),
+                "blocked_secret_lookup".into(),
+                "offline_secret_lookup".into(),
             ]
             .into_iter()
             .collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
-                active_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                active_requested_deferred_names: ["loaded_secret_lookup".into()]
                     .into_iter()
                     .collect(),
-                staged_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                staged_requested_deferred_names: ["loaded_secret_lookup".into()]
                     .into_iter()
                     .collect(),
                 requested_witnesses: [(
-                    "loaded_secret_lookup".to_string(),
+                    "loaded_secret_lookup".into(),
                     meerkat_core::ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:test".to_string()),
                         last_seen_provenance: loaded.provenance.clone(),
                     },
                 )]
@@ -1341,9 +1579,8 @@ mod tests {
                     ["blocked_secret_lookup".to_string()].into_iter().collect(),
                 ),
                 filter_witnesses: [(
-                    "blocked_secret_lookup".to_string(),
+                    "blocked_secret_lookup".into(),
                     ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:test".to_string()),
                         last_seen_provenance: blocked.provenance.clone(),
                     },
                 )]

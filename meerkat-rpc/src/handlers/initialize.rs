@@ -1,26 +1,24 @@
 //! `initialize` / `initialized` handshake handlers.
 
-use serde::Serialize;
-
 use crate::protocol::{RpcId, RpcResponse};
 
-/// Capabilities returned by the server during the initialize handshake.
-#[derive(Debug, Clone, Serialize)]
-pub struct ServerCapabilities {
-    pub server_info: ServerInfo,
-    pub contract_version: String,
-    pub methods: Vec<String>,
-}
-
-/// Basic server identity.
-#[derive(Debug, Clone, Serialize)]
-pub struct ServerInfo {
-    pub name: String,
-    pub version: String,
-}
+/// Canonical wire contracts for the `initialize` handshake (K20).
+pub use meerkat_contracts::wire::{ServerCapabilities, ServerInfo};
 
 /// Handle the `initialize` method.
-pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
+///
+/// The advertised method catalog describes the *surface* this build speaks.
+/// `skills_enabled` is derived from the actual skill-runtime capability seam
+/// (`skill_runtime.is_some()`), not hardcoded: the deliver path
+/// (`skills/list`) returns a "skills not enabled" error when no skill runtime
+/// is bound, so advertising the method without a runtime would make
+/// advertise != deliver. Threading the runtime presence keeps the catalog
+/// honest — `skills/list` is advertised exactly when it can be served.
+pub fn handle_initialize(
+    id: Option<RpcId>,
+    runtime_available: bool,
+    skills_enabled: bool,
+) -> RpcResponse {
     let options = meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,
         mob_enabled: cfg!(feature = "mob"),
@@ -31,7 +29,8 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
         session_streams_enabled: true,
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: cfg!(feature = "workgraph"),
-        skills_enabled: true,
+        skills_enabled,
+        live_webrtc_enabled: cfg!(feature = "live-webrtc"),
     };
     let caps = ServerCapabilities {
         server_info: ServerInfo {

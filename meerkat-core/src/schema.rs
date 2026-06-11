@@ -78,6 +78,34 @@ pub struct CompiledSchema {
     pub warnings: Vec<SchemaWarning>,
 }
 
+/// The ONE infallible tool-input schema emission for a typed argument struct.
+///
+/// `schemars::Schema` is `#[repr(transparent)] struct Schema(Value)`;
+/// `Schema::to_value` hands back the schema's own inner JSON value directly.
+/// There is no serialization step to fail and therefore no fail-open path
+/// that could launder a failure into a `null`/`{"type":"object"}` placeholder
+/// schema. Every dispatcher/surface that advertises a tool input schema for a
+/// typed struct must derive it through this helper (directly or via the
+/// `meerkat-tools` re-export) — never through a fallible
+/// `serde_json::to_value(schema_for!(..)).unwrap_or_else(..)` round-trip.
+pub fn tool_input_schema_for<T: schemars::JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = schema.to_value();
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value
+        && obj.get("type").and_then(Value::as_str) == Some("object")
+    {
+        obj.entry("properties".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        obj.entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+
+    value
+}
+
 fn normalize_schema(value: &mut Value) {
     match value {
         Value::Object(obj) => {

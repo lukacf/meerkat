@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use meerkat_core::skills::{
     CapabilityId, ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection,
-    SkillDescriptor, SkillDocument, SkillEngine, SkillError, SkillFilter, SkillIntrospectionEntry,
-    SkillKey, SkillQuarantineDiagnostic, SkillRef, SkillSource, SourceHealthSnapshot,
-    SourceIdentityRecord, SourceIdentityRegistry,
+    SkillDescriptor, SkillDocument, SkillEngine, SkillError, SkillFilter, SkillFunctionName,
+    SkillFunctionOutput, SkillIntrospectionEntry, SkillKey, SkillQuarantineDiagnostic, SkillRef,
+    SkillSource, SourceHealthSnapshot, SourceIdentityRecord, SourceIdentityRegistry,
 };
 use meerkat_core::skills_config::default_source_identity_records;
 
@@ -227,9 +227,9 @@ where
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionOutput, SkillError>> + Send {
         async move {
             let canonical_key = self.resolve_key(key)?;
             self.source

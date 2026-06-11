@@ -21,7 +21,7 @@ name = "live_mcp_matrix"
 path = "tests/live_mcp_matrix.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule", "workgraph"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
@@ -42,6 +42,7 @@ tracing = { workspace = true }
 schemars = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+uuid = { workspace = true }
 
 [features]
 default = ["comms", "mob", "schedule", "workgraph"]

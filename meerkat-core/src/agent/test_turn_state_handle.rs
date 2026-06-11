@@ -28,9 +28,10 @@ use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
 use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use crate::turn_execution_authority::{
-    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
-    TurnFailureReason, TurnFailureSource, TurnFailureSourceKind, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    CallTimeoutVerdict, ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect,
+    TurnExecutionInput, TurnFailureReason, TurnFailureSource, TurnFailureSourceKind, TurnPhase,
+    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 
 fn field_id(slug: &str) -> FieldId {
@@ -182,6 +183,18 @@ fn retry_failure_variant(kind: LlmRetryFailureKind) -> &'static str {
 
 fn string_set(values: impl IntoIterator<Item = String>) -> KernelValue {
     KernelValue::Set(values.into_iter().map(KernelValue::String).collect())
+}
+
+/// #354: build a `Set<OperationId>` kernel value (each element wrapped in the
+/// `OperationId` Named token, mirroring how the generated kernel carries a
+/// typed-id set — NOT a bare string set).
+fn operation_id_set(values: impl IntoIterator<Item = String>) -> KernelValue {
+    KernelValue::Set(
+        values
+            .into_iter()
+            .map(|value| named_string("OperationId", value))
+            .collect(),
+    )
 }
 
 fn state_field<'a>(state: &'a KernelState, name: &str) -> Option<&'a KernelValue> {
@@ -376,6 +389,32 @@ fn state_string_set(
     }
 }
 
+/// #354: read a `Set<OperationId>` state field, unwrapping each member from its
+/// `OperationId` Named token to the inner string (the kernel projects typed-id
+/// set members as `KernelValue::Named`, NOT bare strings).
+fn state_operation_id_set(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<BTreeSet<String>, DslTransitionError> {
+    match required_state_field(state, name, context)? {
+        KernelValue::Set(values) => values
+            .iter()
+            .map(|value| match named_payload(value, "OperationId") {
+                Some(KernelValue::String(inner)) => Ok(inner.clone()),
+                _ => Err(generated_projection_error(
+                    context,
+                    format!("field `{name}` contained a non-OperationId set member"),
+                )),
+            })
+            .collect(),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not an OperationId set"),
+        )),
+    }
+}
+
 fn parse_run_id(
     value: &str,
     field_name: &str,
@@ -458,6 +497,20 @@ fn effect_string(
     }
 }
 
+fn effect_bool(
+    effect: &KernelEffect,
+    field_name: &str,
+    context: &'static str,
+) -> Result<bool, DslTransitionError> {
+    match required_effect_field(effect, field_name, context)? {
+        KernelValue::Bool(value) => Ok(*value),
+        _ => Err(generated_projection_error(
+            context,
+            format!("effect field `{field_name}` was not bool"),
+        )),
+    }
+}
+
 fn effect_enum_variant(
     effect: &KernelEffect,
     field_name: &str,
@@ -530,6 +583,25 @@ fn map_generated_effect(
                     ));
                 }
             },
+        }
+    } else if effect.variant == effect_id("AssistantOutputClassified") {
+        TurnExecutionEffect::AssistantOutputClassified {
+            empty_response_terminal: effect_bool(&effect, "empty_response_terminal", context)?,
+        }
+    } else if effect.variant == effect_id("CallTimeoutClassified") {
+        let verdict = effect_enum_variant(&effect, "verdict", "CallTimeoutVerdict", context)?;
+        TurnExecutionEffect::CallTimeoutClassified {
+            verdict: match verdict.as_str() {
+                "RetryableCallTimeout" => CallTimeoutVerdict::RetryableCallTimeout,
+                "TerminalTurnBudget" => CallTimeoutVerdict::TerminalTurnBudget,
+                other => {
+                    return Err(generated_projection_error(
+                        context,
+                        format!("unknown CallTimeoutVerdict variant `{other}`"),
+                    ));
+                }
+            },
+            timeout_ms: effect_u64(&effect, "timeout_ms", context)?,
         }
     } else {
         return Ok(None);
@@ -751,7 +823,9 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ),
                     (
                         "barrier_operation_ids",
-                        string_set(barrier_operation_ids.into_iter().map(|id| id.to_string())),
+                        operation_id_set(
+                            barrier_operation_ids.into_iter().map(|id| id.to_string()),
+                        ),
                     ),
                 ],
             ),
@@ -767,7 +841,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ("run_id", run_id_value(&run_id)),
                     (
                         "operation_ids",
-                        string_set(operation_ids.into_iter().map(|id| id.to_string())),
+                        operation_id_set(operation_ids.into_iter().map(|id| id.to_string())),
                     ),
                 ],
             ),
@@ -846,6 +920,35 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ),
                     ("retry_attempt", KernelValue::U64(u64::from(retry_attempt))),
                     ("max_retries", KernelValue::U64(u64::from(max_retries))),
+                ],
+            ),
+            TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            } => input(
+                "ClassifyAssistantOutput",
+                [(
+                    "has_visible_or_actionable",
+                    KernelValue::Bool(has_visible_or_actionable),
+                )],
+            ),
+            TurnExecutionInput::ClassifyCallTimeout { source, timeout_ms } => input(
+                "ClassifyCallTimeout",
+                [
+                    (
+                        "source",
+                        enum_value(
+                            "CallTimeoutSource",
+                            match source {
+                                crate::turn_execution_authority::CallTimeoutSource::CallBudget => {
+                                    "CallBudget"
+                                }
+                                crate::turn_execution_authority::CallTimeoutSource::TurnBudget => {
+                                    "TurnBudget"
+                                }
+                            },
+                        ),
+                    ),
+                    ("timeout_ms", KernelValue::U64(timeout_ms)),
                 ],
             ),
             TurnExecutionInput::CancelNow { run_id } => {
@@ -1198,10 +1301,11 @@ impl TurnStateHandle for TestTurnStateHandle {
                 &state_enum_variant(&state, "turn_phase", "TurnPhase", CONTEXT)?,
                 CONTEXT,
             )?;
-            let barrier_operation_ids = state_string_set(&state, "barrier_operation_ids", CONTEXT)?
-                .into_iter()
-                .map(|id| parse_operation_id(&id, "barrier_operation_ids", CONTEXT))
-                .collect::<Result<BTreeSet<_>, _>>()?;
+            let barrier_operation_ids =
+                state_operation_id_set(&state, "barrier_operation_ids", CONTEXT)?
+                    .into_iter()
+                    .map(|id| parse_operation_id(&id, "barrier_operation_ids", CONTEXT))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
             let pending_op_refs = state_string_set(&state, "pending_op_refs", CONTEXT)?
                 .into_iter()
                 .map(|id| {
@@ -1279,6 +1383,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                 .transpose()?,
                 extraction_attempts: state_u64(&state, "extraction_attempts", CONTEXT)?,
                 max_extraction_retries: state_u64(&state, "max_extraction_retries", CONTEXT)?,
+                extraction_active: state_bool(&state, "extraction_active", CONTEXT)?,
                 llm_retry_attempt: state_u32(&state, "llm_retry_attempt", CONTEXT)?,
                 llm_retry_max_retries: state_u32(&state, "llm_retry_max_retries", CONTEXT)?,
                 llm_retry_selected_delay_ms: state_u64(
@@ -1534,6 +1639,83 @@ mod tests {
         assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
         assert_eq!(snapshot.llm_retry_attempt, 3);
         assert_eq!(snapshot.llm_retry_max_retries, 3);
+    }
+
+    /// Dogma K9: "am I extracting" is a TOTAL machine-owned fact
+    /// (`extraction_active`), observable purely via the machine snapshot for
+    /// the whole extraction sub-flow — including the retry rounds where
+    /// `turn_phase` cycles back through `CallingLlm` / `DrainingBoundary`.
+    /// The shell must never re-derive it from loop-local scratch.
+    #[test]
+    fn extraction_active_is_total_through_retry_loop() {
+        let handle = TestTurnStateHandle::new();
+        let run_id = RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start run");
+        assert!(!handle.snapshot().extraction_active);
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("llm returned");
+        assert!(!handle.snapshot().extraction_active);
+
+        // Enter extraction: DrainingBoundary -> Extracting.
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("enter extraction");
+        assert!(handle.snapshot().extraction_active);
+
+        // Extraction LLM round: phase returns to CallingLlm, but the machine
+        // answer to "am I extracting" stays true (the former divergence
+        // window).
+        handle
+            .extraction_start(run_id.clone())
+            .expect("extraction start");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert!(snapshot.extraction_active);
+
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("extraction llm returned");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::DrainingBoundary);
+        assert!(snapshot.extraction_active);
+
+        // Failed validation with retries remaining: still extracting.
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("re-enter extraction");
+        handle
+            .extraction_validation_failed(run_id.clone(), "invalid".to_string())
+            .expect("validation failed retry");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert!(snapshot.extraction_active);
+
+        // Passing validation terminates the sub-flow and clears the fact.
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 0)
+            .expect("retry llm returned");
+        handle
+            .enter_extraction(run_id.clone(), 2)
+            .expect("final enter extraction");
+        handle
+            .extraction_validation_passed(run_id)
+            .expect("validation passed");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
+        assert!(!snapshot.extraction_active);
     }
 
     #[test]

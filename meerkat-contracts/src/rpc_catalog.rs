@@ -14,6 +14,10 @@ pub struct RpcMethodCatalogOptions {
     pub schedule_enabled: bool,
     pub workgraph_enabled: bool,
     pub skills_enabled: bool,
+    /// `live/webrtc/answer` is served only by builds with the non-default
+    /// `live-webrtc` feature; the catalog carries the same condition so
+    /// advertise == dispatch in every build lane.
+    pub live_webrtc_enabled: bool,
 }
 
 impl RpcMethodCatalogOptions {
@@ -29,6 +33,7 @@ impl RpcMethodCatalogOptions {
             schedule_enabled: true,
             workgraph_enabled: true,
             skills_enabled: true,
+            live_webrtc_enabled: true,
         }
     }
 }
@@ -46,16 +51,6 @@ pub struct RpcMethodDescriptor {
 }
 
 impl RpcMethodDescriptor {
-    const fn basic(name: &'static str, description: &'static str) -> Self {
-        Self {
-            name,
-            description,
-            params_type: None,
-            result_type: None,
-            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
-        }
-    }
-
     const fn typed(
         name: &'static str,
         description: &'static str,
@@ -93,7 +88,11 @@ impl RpcMethodDescriptor {
 
 pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDescriptor> {
     let mut methods = vec![
-        RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
+        RpcMethodDescriptor::result_only(
+            "initialize",
+            "Handshake, returns server capabilities",
+            "ServerCapabilities",
+        ),
         RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
@@ -166,12 +165,26 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "turn/interrupt",
             "Cancel in-flight turn",
             "InterruptParams",
-            "Value",
+            "InterruptResult",
         ),
-        RpcMethodDescriptor::basic("config/get", "Read config"),
-        RpcMethodDescriptor::basic("config/set", "Replace config"),
-        RpcMethodDescriptor::basic("config/patch", "Merge-patch config"),
-        RpcMethodDescriptor::basic("capabilities/get", "Get runtime capabilities"),
+        RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
+        RpcMethodDescriptor::typed(
+            "config/set",
+            "Replace config",
+            "ConfigSetParams",
+            "ConfigWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "config/patch",
+            "Merge-patch config",
+            "ConfigPatchParams",
+            "ConfigWriteResult",
+        ),
+        RpcMethodDescriptor::result_only(
+            "capabilities/get",
+            "Get runtime capabilities",
+            "CapabilitiesResponse",
+        ),
         RpcMethodDescriptor::result_only(
             "runtime/host_info",
             "Get read-only runtime host information",
@@ -471,13 +484,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/list",
                 "List WorkGraph items",
                 "WorkItemFilter",
-                "WorkGraphItemsResponse",
+                "WorkItemsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/ready",
                 "List ready WorkGraph items",
                 "ReadyWorkFilter",
-                "WorkGraphItemsResponse",
+                "WorkItemsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/snapshot",
@@ -489,7 +502,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/events",
                 "List WorkGraph events",
                 "WorkGraphEventFilter",
-                "WorkGraphEventsResponse",
+                "WorkEventsResult",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/goal/status",
@@ -507,9 +520,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.skills_enabled {
-        methods.extend([RpcMethodDescriptor::basic(
+        methods.extend([RpcMethodDescriptor::result_only(
             "skills/list",
             "List available skills",
+            "SkillListResponse",
         )]);
     }
 
@@ -520,12 +534,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Open a live audio/text channel for a session",
                 "LiveOpenParams",
                 "LiveOpenResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "live/webrtc/answer",
-                "Answer a browser WebRTC offer for an already-open live channel",
-                "LiveWebrtcAnswerParams",
-                "LiveWebrtcAnswerResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/status",
@@ -543,25 +551,25 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "live/send_input",
                 "Send an input chunk (audio/text) to a live channel",
                 "LiveSendInputParams",
-                "Value",
+                "LiveSendInputResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/commit_input",
                 "Commit any buffered input on a live channel",
                 "LiveCommitInputParams",
-                "Value",
+                "LiveCommitInputResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/interrupt",
                 "Interrupt the in-progress assistant turn on a live channel",
                 "LiveChannelParams",
-                "Value",
+                "LiveInterruptResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/truncate",
                 "Truncate the assistant output on a live channel at the client-tracked playback cursor",
                 "LiveTruncateParams",
-                "Value",
+                "LiveTruncateResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/refresh",
@@ -570,6 +578,15 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "LiveRefreshResult",
             ),
         ]);
+    }
+
+    if options.runtime_available && options.live_webrtc_enabled {
+        methods.extend([RpcMethodDescriptor::typed(
+            "live/webrtc/answer",
+            "Answer a browser WebRTC offer for an already-open live channel",
+            "LiveWebrtcAnswerParams",
+            "LiveWebrtcAnswerResult",
+        )]);
     }
 
     if options.mob_enabled {
@@ -941,7 +958,7 @@ pub fn rpc_notification_names(options: RpcMethodCatalogOptions) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use crate::{RequestLifecycle, mcp_tool_request_lifecycle, rpc_request_lifecycle};
+    use crate::{RequestLifecycle, rpc_request_lifecycle};
 
     #[test]
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
@@ -1024,26 +1041,6 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_catalog_owns_request_lifecycle_rules() {
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_help"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_run"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_resume"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_sessions"),
-            RequestLifecycle::LongRunningObservation
-        );
-    }
-
-    #[test]
     fn documented_surface_excludes_retired_auth_probe() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         assert!(
@@ -1116,6 +1113,53 @@ mod tests {
                 !methods.iter().any(|m| m == retired),
                 "mutating WorkGraph RPC method must not be advertised: {retired}"
             );
+        }
+    }
+
+    /// Catalog totality (Generated-Artifact Theater closure): every public
+    /// RPC method advertises a typed result contract. The schema-less
+    /// `basic` constructor was deleted — a new method cannot be added
+    /// without declaring its wire contract, so this test locks the
+    /// invariant against a constructor being reintroduced.
+    #[test]
+    fn every_method_advertises_a_typed_result_contract() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        let schema_light: Vec<&str> = methods
+            .iter()
+            .filter(|method| method.result_type.is_none())
+            .map(|method| method.name)
+            .collect();
+        assert!(
+            schema_light.is_empty(),
+            "RPC methods without a typed result contract: {schema_light:?}"
+        );
+    }
+
+    #[test]
+    fn config_capability_and_skills_methods_advertise_typed_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params, expected_result) in [
+            ("initialize", None, Some("ServerCapabilities")),
+            ("config/get", None, Some("ConfigEnvelope")),
+            (
+                "config/set",
+                Some("ConfigSetParams"),
+                Some("ConfigWriteResult"),
+            ),
+            (
+                "config/patch",
+                Some("ConfigPatchParams"),
+                Some("ConfigWriteResult"),
+            ),
+            ("capabilities/get", None, Some("CapabilitiesResponse")),
+            ("skills/list", None, Some("SkillListResponse")),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(descriptor.params_type, expected_params, "{name} params");
+            assert_eq!(descriptor.result_type, expected_result, "{name} result");
         }
     }
 

@@ -6,6 +6,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+/// The only JSON-RPC protocol version this server speaks.
+///
+/// Per the JSON-RPC 2.0 spec (and `docs/api/rpc.mdx`), every request and
+/// response envelope MUST carry `"jsonrpc": "2.0"`. The transport carries the
+/// field as a free `String`, so the version is validated at the dispatch
+/// boundary rather than trusted as ambient truth.
+pub const JSONRPC_VERSION: &str = "2.0";
+
 /// JSON-RPC request or notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest {
@@ -57,6 +65,16 @@ impl RpcRequest {
     /// Returns true if this is a notification (no id).
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
+    }
+
+    /// Returns true iff the envelope declares the supported JSON-RPC version.
+    ///
+    /// The version is validated at the dispatch boundary; a frame whose
+    /// `jsonrpc` is missing/empty (deserialized to a non-`"2.0"` string) or set
+    /// to any other value is rejected with the standard `INVALID_REQUEST` error
+    /// rather than dispatched.
+    pub fn has_supported_version(&self) -> bool {
+        self.jsonrpc == JSONRPC_VERSION
     }
 }
 
@@ -174,6 +192,29 @@ mod tests {
         let serialized = serde_json::to_string(&req).unwrap();
         let req2: RpcRequest = serde_json::from_str(&serialized).unwrap();
         assert_eq!(req2.id, Some(RpcId::Str("abc-123".to_string())));
+    }
+
+    #[test]
+    fn has_supported_version_accepts_2_0_only() {
+        let ok = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(1)),
+            method: "session/list".to_string(),
+            params: None,
+        };
+        assert!(ok.has_supported_version());
+
+        let wrong = RpcRequest {
+            jsonrpc: "1.0".to_string(),
+            ..ok.clone()
+        };
+        assert!(!wrong.has_supported_version());
+
+        let missing = RpcRequest {
+            jsonrpc: String::new(),
+            ..ok
+        };
+        assert!(!missing.has_supported_version());
     }
 
     #[test]

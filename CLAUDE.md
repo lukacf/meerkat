@@ -117,14 +117,11 @@ This is a large workspace (~25 crates). Careless builds waste minutes. Follow th
 - `meerkat-core` → rebuilds almost everything (~27s incremental)
 - `meerkat-runtime` → rebuilds mob, rpc, rest, cli, integration tests
 - `meerkat-mob` → rebuilds mob-mcp, rpc, rest, cli, integration tests
-- Leaf crates (`meerkat-models`, `meerkat-machine-schema`) → fast, minimal cascade
+- Leaf crates (`meerkat-machine-schema`) → fast, minimal cascade
 
 ## Architecture
 
 ```
-meerkat-models    → Curated model catalog and provider profile rules (leaf crate, no meerkat deps)
-                     Single source of truth for model defaults, allowlists, capability detection,
-                     and parameter schemas. Consumed by core, client, tools, and facade.
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
 meerkat-client    → LLM provider clients (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
@@ -221,7 +218,7 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 
 ## Mob Orchestration
 
-**Bridge rotation fails closed on partial remote failure.** If any remote member accepts an attempted supervisor rotation and a later remote rejects it, `handle_rotate_supervisor` leaves the persisted current supervisor authority at the pre-rotation epoch and returns `MobError::SupervisorRotationIncomplete`. When rollback cannot clear an already-accepted remote, the attempted authority is retained as explicit pending rotation metadata so retry can validate accepted peers, rotate the remaining peers, and commit only after every remote is confirmed. If a pending-accepted remote later rebinds to current authority, the accepted membership is cleared before retry can skip it. If recording pending metadata or clearing stale accepted metadata fails, the actor retains a process-local pending authority override for same-process retry rather than advancing current authority; restart retry still probes durable accepted peers before trusting them.
+**Bridge rotation fails closed on partial remote failure.** If any remote member accepts an attempted supervisor rotation and a later remote rejects it, `handle_rotate_supervisor` leaves the persisted current supervisor authority at the pre-rotation epoch and returns `MobError::SupervisorRotationIncomplete`. When rollback cannot clear an already-accepted remote, the attempted authority is retained as explicit pending rotation metadata so retry can validate accepted peers, rotate the remaining peers, and commit only after every remote is confirmed. If a pending-accepted remote later rebinds to current authority, the accepted membership is cleared before retry can skip it. If recording pending metadata or clearing stale accepted metadata fails, current authority is not advanced and the failure surfaces in the typed error; retry probes durably recorded accepted peers before trusting them.
 
 ## Key Files
 
@@ -240,8 +237,8 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-session/src/event_store.rs` - EventStore trait
 - `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
 - `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
-- `meerkat-models/src/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
-- `meerkat-models/src/profile/mod.rs` - Model profile rules (capability detection, param schemas)
+- `meerkat-core/src/model_profile/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
+- `meerkat-core/src/model_profile/mod.rs` - Model profile rules (capability detection, param schemas)
 - `meerkat-mcp/src/router.rs` - MCP tool routing
 - `meerkat-runtime/src/ops_lifecycle.rs` - RuntimeOpsLifecycleRegistry, PersistedOpsSnapshot, persistence channel
 - `meerkat-runtime/src/meerkat_machine.rs` - MeerkatMachine, prepare_bindings(), recover_or_create_ops_state()
@@ -425,7 +422,7 @@ Required GitHub Actions secrets for full release:
 ### Crate Publish Order
 
 The crates are published in dependency order:
-`meerkat-models` → `meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-providers` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
+`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-providers` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
 
 ### Key Rules for AI Agents
 
@@ -443,7 +440,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 |----------|------------|
 | OpenAI | `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.4-pro` or `gpt-5.3-codex` |
 | Gemini | `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite` or `gemini-3.1-flash-lite-preview` or `gemini-3.5-flash` |
-| Anthropic | `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
+| Anthropic | `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 

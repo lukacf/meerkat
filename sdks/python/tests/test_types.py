@@ -42,7 +42,6 @@ from meerkat import (
     SessionDetails,
     SessionMessage,
     SessionSummary,
-    SessionToolCall,
     SessionToolResult,
     SkillKey,
     SkillQuarantineDiagnostic,
@@ -191,10 +190,12 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 
     status = GeneratedMobMemberStatusResult(
         status="active",
+        member_ref="opaque-member-ref",
         tokens_used=0,
         is_final=False,
     )
     assert status.status == "active"
+    assert status.member_ref == "opaque-member-ref"
 
 
 def test_generated_mob_spawn_many_preserves_nested_contract_types():
@@ -555,7 +556,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         MobSpawnReceiptWire as GeneratedMobSpawnReceiptWire,
         MobSubmitWorkParams as GeneratedMobSubmitWorkParams,
         WireMemberRef as GeneratedWireMemberRef,
-        WireMemberState as GeneratedWireMemberState,
         WireMobMemberStatus as GeneratedWireMobMemberStatus,
         WireMobRuntimeMode as GeneratedWireMobRuntimeMode,
     )
@@ -565,7 +565,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         "autonomous_host",
         "turn_driven",
     )
-    assert get_args(GeneratedWireMemberState) == ("active", "retiring")
     assert get_args(GeneratedWireMobMemberStatus) == (
         "active",
         "retiring",
@@ -583,7 +582,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
     member_hints = get_type_hints(GeneratedMobMemberListEntryWire)
     assert member_hints["member_ref"] is GeneratedWireMemberRef
     assert member_hints["runtime_mode"] == GeneratedWireMobRuntimeMode
-    assert member_hints["state"] == GeneratedWireMemberState
     assert member_hints["status"] == GeneratedWireMobMemberStatus
 
     member_ref = _make_member_ref("mob-1", "worker-1")
@@ -592,7 +590,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         member_ref=member_ref,
         role="worker",
         runtime_mode="turn_driven",
-        state="active",
         status="active",
         is_final=False,
     )
@@ -773,16 +770,22 @@ def test_parse_session_history():
         "limit": 2,
         "has_more": True,
         "messages": [
-            {"role": "system", "content": "rules"},
+            {"role": "system", "content": "rules", "created_at": "2026-05-26T10:00:00Z"},
             {
-                "role": "assistant",
-                "content": "working",
-                "tool_calls": [{"id": "tc_1", "name": "search", "args": {"q": "rust"}}],
+                "role": "block_assistant",
+                "blocks": [
+                    {
+                        "block_type": "tool_use",
+                        "data": {"id": "tc_1", "name": "search", "args": {"q": "rust"}},
+                    }
+                ],
                 "stop_reason": "tool_use",
+                "created_at": "2026-05-26T10:00:01Z",
             },
             {
                 "role": "tool_results",
                 "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
+                "created_at": "2026-05-26T10:00:02Z",
             },
         ],
     }
@@ -790,7 +793,7 @@ def test_parse_session_history():
     assert history.session_id == "s1"
     assert history.limit == 2
     assert history.has_more is True
-    assert history.messages[1].tool_calls[0].name == "search"
+    assert history.messages[1].blocks[0].name == "search"
     assert history.messages[2].results[0].tool_use_id == "tc_1"
 
 
@@ -821,6 +824,7 @@ def test_parse_session_history_preserves_assistant_image_blocks():
                             },
                         }
                     ],
+                    "created_at": "2026-05-26T10:00:00Z",
                 }
             ],
         }
@@ -837,10 +841,98 @@ def test_parse_session_history_preserves_assistant_image_blocks():
     assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
 
 
+def test_parse_session_message_fails_closed_on_missing_identity_facts():
+    # Transcript truth is never fabricated: a message without role/created_at
+    # or with malformed collections raises INVALID_RESPONSE instead of
+    # coercing to ""/[] placeholder truth.
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message({"content": "no role"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message({"role": "user", "content": "no created_at"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [{"content": "missing tool_use_id"}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    # `WireToolResult.content` is mandatory on the wire — a tool result
+    # without it must raise instead of fabricating an empty transcript.
+    with pytest.raises(MeerkatError, match="missing content") as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [{"tool_use_id": "tc_1", "is_error": False}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    # An explicit `content: null` is equally malformed (the TypeScript and
+    # Rust surfaces reject it) — never coalesced into "" transcript truth.
+    with pytest.raises(MeerkatError, match="must not be null") as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [
+                    {"tool_use_id": "tc_1", "is_error": False, "content": None}
+                ],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "block_assistant",
+                "created_at": "2026-05-26T10:00:00Z",
+                "blocks": "not-a-list",
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "block_assistant",
+                "created_at": "2026-05-26T10:00:00Z",
+                "blocks": [{"data": {"text": "missing block_type"}}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+def test_parse_session_transcript_rewrite_result_fails_closed():
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(
+            {"revision": "r2", "parent_revision": "r1", "message_count": 1, "commit": {}}
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(
+            {
+                "session_id": "s1",
+                "revision": "r2",
+                "parent_revision": "r1",
+                "message_count": 1,
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
 def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
     parsed = MeerkatClient._parse_session_message(
         {
-            "role": "assistant",
+            "role": "user",
             "content": "old",
             "created_at": "2026-05-26T10:00:00Z",
             "provider_trace_id": "trace-1",
@@ -851,7 +943,7 @@ def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
     serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
 
     assert serialized == {
-        "role": "assistant",
+        "role": "user",
         "content": "new",
         "created_at": "2026-05-26T10:00:00Z",
         "provider_trace_id": "trace-1",
@@ -965,7 +1057,7 @@ def test_session_history_types():
         messages=[
             SessionMessage(role="system", content="rules"),
             SessionMessage(
-                role="assistant",
+                role="block_assistant",
                 blocks=[
                     SessionAssistantBlock(
                         block_type="tool_use",
@@ -974,7 +1066,6 @@ def test_session_history_types():
                         args={"q": "meerkat"},
                     )
                 ],
-                tool_calls=[SessionToolCall(id="tool-1", name="search", args={"q": "meerkat"})],
                 results=[SessionToolResult(tool_use_id="tool-1", content="done")],
             ),
         ],
@@ -1447,10 +1538,10 @@ def test_parse_scoped_mob_event_omits_runtime_binding_atoms():
     ]
 
 
-def test_parse_attributed_mob_event_omits_source_fence_token():
+def test_parse_attributed_mob_event_preserves_source_fence_token():
     event = MeerkatClient._parse_attributed_mob_event(
         {
-            "source": "writer",
+            "source": {"identity": "writer", "generation": 2},
             "source_fence_token": 7,
             "role": "worker",
             "envelope": {
@@ -1460,7 +1551,89 @@ def test_parse_attributed_mob_event_omits_source_fence_token():
     )
 
     assert event.source == "writer"
-    assert not hasattr(event, "source_fence_token")
+    assert event.role == "worker"
+    assert event.source_fence_token == 7
+
+
+def test_parse_attributed_mob_event_omitted_source_fence_token_is_none():
+    event = MeerkatClient._parse_attributed_mob_event(
+        {
+            "source": {"identity": "writer", "generation": 0},
+            "role": "worker",
+            "envelope": {
+                "payload": {"type": "text_delta", "delta": "hi"},
+            },
+        }
+    )
+
+    assert event.source_fence_token is None
+
+
+def test_parse_attributed_mob_event_fails_closed_on_missing_source():
+    with pytest.raises(MeerkatError, match="missing source"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_rejects_legacy_string_source():
+    # The wire source is the typed AgentRuntimeId record {identity, generation};
+    # a free-form string source is a malformed frame and must fail closed.
+    with pytest.raises(MeerkatError, match="missing source"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": "writer",
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_requires_generation():
+    with pytest.raises(MeerkatError, match="generation"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer"},
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_rejects_negative_generation():
+    with pytest.raises(MeerkatError, match="non-negative integer"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer", "generation": -1},
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_fails_closed_on_missing_envelope():
+    with pytest.raises(MeerkatError, match="missing envelope"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer", "generation": 0},
+                "role": "worker",
+            }
+        )
+
+
+def test_parse_attributed_mob_event_fails_closed_on_non_number_fence():
+    with pytest.raises(MeerkatError, match="source_fence_token must be number"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": {"identity": "writer", "generation": 0},
+                "role": "worker",
+                "source_fence_token": "7",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
 
 
 def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
@@ -1470,7 +1643,6 @@ def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
                 "type": "session",
                 "session_id": "00000000-0000-4000-8000-000000000001",
             },
-            "source_id": "session:not-a-uuid",
             "payload": {"type": "text_delta", "delta": "hi"},
         }
     )
@@ -1478,7 +1650,6 @@ def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
     assert event.source is not None
     assert event.source.type == "session"
     assert event.source.session_id == "00000000-0000-4000-8000-000000000001"
-    assert event.source_id == "session:not-a-uuid"
 
 
 def test_parse_event_envelope_does_not_classify_legacy_session_string():
@@ -1489,8 +1660,9 @@ def test_parse_event_envelope_does_not_classify_legacy_session_string():
         }
     )
 
+    # The legacy envelope-level string key no longer exists on the typed
+    # envelope and never classifies a typed source.
     assert event.source is None
-    assert event.source_id == "session:00000000-0000-4000-8000-000000000001"
 
 
 def test_parse_tool_config_changed():
@@ -1499,7 +1671,6 @@ def test_parse_tool_config_changed():
         "payload": {
             "operation": "remove",
             "target": "filesystem",
-            "status": "staged",
             "status_info": {
                 "kind": "boundary_applied",
                 "base_changed": True,
@@ -1514,7 +1685,6 @@ def test_parse_tool_config_changed():
     assert isinstance(event, ToolConfigChanged)
     assert event.payload.operation == "remove"
     assert event.payload.target == "filesystem"
-    assert event.payload.status == "staged"
     assert isinstance(event.payload.status_info, BoundaryAppliedToolConfigChangeStatus)
     assert event.payload.status_info.base_changed is True
     assert event.payload.status_info.visible_changed is False
@@ -1571,7 +1741,6 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
         "type": "background_job_completed",
         "job_id": "j_123",
         "display_name": "sleep 2",
-        "status": "completed",
         "terminal_status": "failed",
         "detail": "exit_code: 1",
     }
@@ -1579,38 +1748,8 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
     assert isinstance(event, BackgroundJobCompleted)
     assert event.job_id == "j_123"
     assert event.display_name == "sleep 2"
-    assert event.legacy_status == "completed"
     assert event.terminal_status == "failed"
     assert event.detail == "exit_code: 1"
-
-
-def test_parse_background_job_completed_allows_absent_legacy_status():
-    raw = {
-        "type": "background_job_completed",
-        "job_id": "j_123",
-        "display_name": "sleep 2",
-        "terminal_status": "failed",
-        "detail": "exit_code: 1",
-    }
-    event = parse_event(raw)
-    assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
-    assert event.terminal_status == "failed"
-
-
-def test_parse_background_job_completed_ignores_malformed_legacy_status():
-    raw = {
-        "type": "background_job_completed",
-        "job_id": "j_123",
-        "display_name": "sleep 2",
-        "status": 0,
-        "terminal_status": "failed",
-        "detail": "exit_code: 1",
-    }
-    event = parse_event(raw)
-    assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
-    assert event.terminal_status == "failed"
 
 
 def test_parse_background_job_completed_requires_typed_terminal_status():
@@ -1940,7 +2079,6 @@ def test_parse_tool_execution_completed():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": [
             {"type": "text", "text": "found it"},
             {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
@@ -1978,7 +2116,6 @@ def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": "not blocks",
         "is_error": False,
         "duration_ms": 42,
@@ -1994,13 +2131,13 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
     })
     malformed = parse_event({
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
         "is_error": "false",
     })
     assert isinstance(missing, ToolExecutionCompleted)
@@ -2014,18 +2151,23 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
 
 
 def test_parse_unknown_event_type():
+    # Fail CLOSED: a `type` not in the generated KNOWN_AGENT_EVENT_TYPES
+    # inventory is a contract violation for a version-matched client and must
+    # raise a typed error, not be laundered into a fabricated UnknownEvent.
     raw = {"type": "future_event_v2", "data": "something"}
-    event = parse_event(raw)
-    assert isinstance(event, UnknownEvent)
-    assert event.type == "future_event_v2"
-    assert event.data == raw
+    with pytest.raises(MeerkatError) as excinfo:
+        parse_event(raw)
+    assert excinfo.value.code == "UNKNOWN_EVENT_TYPE"
 
 
 def test_parse_missing_type():
+    # A frame with no `type` is a malformed wire shape — preserved as a
+    # `malformed_event` UnknownEvent (not fabricated into a typed event, and not
+    # a hard throw that would crash a streaming consumer on a control frame).
     raw = {"delta": "oops"}
     event = parse_event(raw)
     assert isinstance(event, UnknownEvent)
-    assert event.type == ""
+    assert event.type == "malformed_event"
 
 
 def test_parse_compaction_started():
@@ -2092,8 +2234,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
             "reason_type": "not_found",
             "key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
         },
-        "reference": f"{source_uuid}/email-extractor",
-        "error": f"skill not found: {source_uuid}/email-extractor",
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
@@ -2107,8 +2247,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
         source_uuid=source_uuid,
         skill_name="email-extractor",
     )
-    assert event.reference == f"{source_uuid}/email-extractor"
-    assert event.error == f"skill not found: {source_uuid}/email-extractor"
 
 
 def test_parse_legacy_skill_resolution_failed_payload():
@@ -2121,8 +2259,10 @@ def test_parse_legacy_skill_resolution_failed_payload():
     assert isinstance(event, SkillResolutionFailed)
     assert event.skill_key is None
     assert event.reason is None
-    assert event.reference == "legacy/ref"
-    assert event.error == "missing"
+    # Legacy display mirrors are ignored on ingest; the typed fields are
+    # the only carriers.
+    assert not hasattr(event, "reference")
+    assert not hasattr(event, "error")
 
 
 def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():
@@ -2229,8 +2369,13 @@ async def test_client_read_session_history_calls_expected_rpc_method():
             "limit": params.get("limit"),
             "has_more": False,
             "messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "ok", "stop_reason": "end_turn"},
+                {"role": "user", "content": "hello", "created_at": "2026-05-26T10:00:00Z"},
+                {
+                    "role": "block_assistant",
+                    "blocks": [{"block_type": "text", "data": {"text": "ok"}}],
+                    "stop_reason": "end_turn",
+                    "created_at": "2026-05-26T10:00:01Z",
+                },
             ],
         }
 
@@ -2244,7 +2389,7 @@ async def test_client_read_session_history_calls_expected_rpc_method():
     assert history.limit == 2
     assert [m for m, _ in calls] == ["session/history"]
     assert calls[0][1] == {"session_id": "s1", "offset": 1, "limit": 2}
-    assert history.messages[1].role == "assistant"
+    assert history.messages[1].role == "block_assistant"
 
 
 @pytest.mark.asyncio
@@ -2510,6 +2655,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "title": "Prep A for non-preferred dentist car",
         "status": "open",
         "priority": "high",
+        "completion_policy": {"kind": "self_attest"},
         "labels": ["autism-support", "dentist"],
         "revision": 1,
         "machine_state": {},
@@ -2517,6 +2663,23 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "updated_at": timestamp,
         "external_refs": [{"kind": "calendar_event", "id": "dentist-visit"}],
         "evidence_refs": [{"kind": "message_draft", "id": "draft-1"}],
+    }
+    attention_binding = {
+        "binding_id": "attn-1",
+        "work_ref": {
+            "realm_id": "homecore",
+            "namespace": "family/appointments",
+            "item_id": "prep-dentist-ride",
+        },
+        "target": {
+            "kind": "session",
+            "session_id": "019e63c2-0000-7000-8000-000000000030",
+        },
+        "mode": "pursue",
+        "status": {"state": "active"},
+        "delegated_authority": "request_closure",
+        "created_at": timestamp,
+        "updated_at": timestamp,
     }
 
     async def fake_request(method, params):
@@ -2552,9 +2715,9 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                 ]
             }
         if method == "workgraph/goal/status":
-            return {"item": item, "attention": {"binding_id": "attn-1"}}
+            return {"item": item, "attention": attention_binding}
         if method == "workgraph/attention/list":
-            return {"attention": [{"binding_id": "attn-1"}]}
+            return {"attention": [attention_binding]}
         raise AssertionError(f"unexpected method {method}")
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2586,13 +2749,22 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         }
     )
 
-    assert fetched["id"] == "prep-dentist-ride"
-    assert listed["items"][0]["priority"] == "high"
-    assert ready["items"][0]["status"] == "open"
-    assert snapshot["ready_item_ids"] == ["prep-dentist-ride"]
-    assert events["events"][0]["kind"] == "created"
-    assert goal["attention"]["binding_id"] == "attn-1"
-    assert attention["attention"][0]["binding_id"] == "attn-1"
+    # K21: every workgraph read flows through the generated fail-closed
+    # parsers (`from_wire`) and returns generated dataclasses, not raw dicts.
+    assert fetched.id == "prep-dentist-ride"
+    assert fetched.owner is None
+    assert fetched.evidence_refs[0].id == "draft-1"
+    assert listed.items[0].priority == "high"
+    assert ready.items[0].status == "open"
+    assert snapshot.ready_item_ids == ["prep-dentist-ride"]
+    assert events.events[0].kind == "created"
+    assert goal.attention.binding_id == "attn-1"
+    assert goal.item.id == "prep-dentist-ride"
+    assert attention.attention[0].binding_id == "attn-1"
+    assert attention.attention[0].target == {
+        "kind": "session",
+        "session_id": "019e63c2-0000-7000-8000-000000000030",
+    }
     assert [method for method, _ in calls] == [
         "workgraph/get",
         "workgraph/list",
@@ -2751,7 +2923,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    # Set coverage: a concrete value lowers to the tagged `set` override.
+    # Set coverage: the canonical tagged tri-state passes through unchanged.
     await client.mob_turn_start(
         "mob-1",
         "worker-1",
@@ -2771,8 +2943,11 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         system_prompt="system",
         output_schema={"type": "object"},
         structured_output_retries=2,
-        provider_params={"temperature": 0.2},
-        auth_binding={"realm": "dev", "binding": "default_openai"},
+        provider_params={"action": "set", "value": {"temperature": 0.2}},
+        auth_binding={
+            "action": "set",
+            "value": {"realm": "dev", "binding": "default_openai"},
+        },
     )
 
     assert calls == [
@@ -2813,14 +2988,14 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         )
     ]
 
-    # Clear coverage: `clear_*=True` lowers to the tagged `clear` override.
+    # Clear coverage: the tagged `clear` override passes through unchanged.
     calls.clear()
     await client.mob_turn_start(
         "mob-1",
         "worker-1",
         "continue",
-        clear_provider_params=True,
-        clear_auth_binding=True,
+        provider_params={"action": "clear"},
+        auth_binding={"action": "clear"},
     )
     assert calls == [
         (
@@ -2835,21 +3010,28 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         )
     ]
 
-    # Inherit coverage: neither value nor clear -> the field is omitted.
+    # Inherit coverage: omitted -> the field is omitted on the wire.
     calls.clear()
     await client.mob_turn_start("mob-1", "worker-1", "continue")
     assert "provider_params" not in calls[0][1]
     assert "auth_binding" not in calls[0][1]
 
-    # The illegal set + clear combination is rejected at the wrapper boundary,
-    # mirroring the wire serde boundary.
-    with pytest.raises(MeerkatError):
+    # The retired split `clear_*` keyword form is gone from the wrapper —
+    # callers carry the canonical tri-state directly.
+    with pytest.raises(TypeError):
         await client.mob_turn_start(
             "mob-1",
             "worker-1",
             "continue",
-            provider_params={"temperature": 0.2},
             clear_provider_params=True,
+        )
+
+    with pytest.raises(TypeError):
+        await client.mob_turn_start(
+            "mob-1",
+            "worker-1",
+            "continue",
+            clear_auth_binding=True,
         )
 
     with pytest.raises(TypeError):
@@ -3331,6 +3513,20 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_live_commit_input_rejects_unknown_response_modality():
+    """The live helper boundary must not widen ``response_modality`` beyond
+    the typed distinction the wire contract owns (``audio`` | ``text``).
+    Arbitrary strings fail closed client-side instead of being tunneled into
+    the generated union."""
+    from meerkat import MeerkatClient
+
+    client = MeerkatClient()
+    with pytest.raises(MeerkatError) as exc_info:
+        await client.live_commit_input("live_1", response_modality="speech")  # type: ignore[arg-type]
+    assert exc_info.value.code == "INVALID_ARGS"
+
+
 def test_generated_wire_live_channel_capabilities_exposes_typed_booleans():
     """CC5: SDK consumers must see typed access to every capability boolean.
 
@@ -3656,15 +3852,12 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
 @pytest.mark.asyncio
 async def test_client_live_refresh_returns_typed_result():
     """R4-5 (P3): `live_refresh` must return a typed
-    :class:`LiveRefreshResult` carrying both the typed ``status``
-    discriminator and the legacy ``refresh_enqueued`` boolean.
+    :class:`LiveRefreshResult` carrying the typed ``status`` discriminator.
 
     The wire payload mirrors the server-side `handle_live_refresh` Ok arm:
-    ``{"status": "queued", "refresh_enqueued": true}`` (from
-    `LiveRefreshResult::queued()`). Both fields must round-trip into the
-    typed dataclass at the SDK boundary so callers can route on
-    the generated ``status`` without dropping back-compat with
-    R7-era clients that pattern-match on ``refresh_enqueued``.
+    ``{"status": "queued"}`` (from `LiveRefreshResult::queued()`). The
+    typed dataclass round-trips at the SDK boundary so callers route on
+    the generated ``status``.
     """
     from meerkat.generated.types import LiveRefreshResult
 
@@ -3676,7 +3869,7 @@ async def test_client_live_refresh_returns_typed_result():
         captured.append((method, params))
         # Mirror exactly what `handle_live_refresh` ships on the wire after
         # host queue acceptance.
-        return {"status": "queued", "refresh_enqueued": True}
+        return {"status": "queued"}
 
     client._request = fake_request  # type: ignore[method-assign]
 
@@ -3684,18 +3877,15 @@ async def test_client_live_refresh_returns_typed_result():
 
     assert captured == [("live/refresh", {"channel_id": "live_channel_42"})]
     assert isinstance(result, LiveRefreshResult)
-    # New typed routing surface.
+    # Typed routing surface.
     assert result.status == "queued"
-    # Back-compat field for R7-era clients.
-    assert result.refresh_enqueued is True
 
 
 @pytest.mark.asyncio
 async def test_client_live_refresh_rejects_missing_or_unknown_generated_status():
     malformed_responses = [
         {"refresh_enqueued": True},
-        {"status": "queued"},
-        {"status": "applied_sync", "refresh_enqueued": True},
+        {"status": "applied_sync"},
     ]
 
     for response in malformed_responses:
@@ -3721,7 +3911,7 @@ async def test_client_live_close_returns_typed_result():
 
     async def fake_request(method, params):
         captured.append((method, params))
-        return {"status": "closed", "closed": True}
+        return {"status": "closed"}
 
     client._request = fake_request  # type: ignore[method-assign]
 
@@ -3730,15 +3920,13 @@ async def test_client_live_close_returns_typed_result():
     assert captured == [("live/close", {"channel_id": "live_channel_44"})]
     assert isinstance(result, LiveCloseResult)
     assert result.status == "closed"
-    assert result.closed is True
 
 
 @pytest.mark.asyncio
 async def test_client_live_close_rejects_missing_or_unknown_generated_status():
     malformed_responses = [
         {"closed": True},
-        {"status": "closed"},
-        {"status": "already_closed", "closed": True},
+        {"status": "already_closed"},
     ]
 
     for response in malformed_responses:
@@ -3877,3 +4065,390 @@ async def test_client_live_open_passes_provider_managed_turning_mode():
             {"session_id": "session-44", "turning_mode": "provider_managed"},
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #88 — session fork SDK result parser must fail closed, not fabricate
+# empty/zero handles from absent/malformed required wire fields.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fork_session_rejects_missing_session_id() -> None:
+    """A session/fork response missing `session_id` raises INVALID_RESPONSE
+    rather than returning a SessionForkResult with an empty handle."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # source_session_id present but the required session_id is absent.
+        return {"source_session_id": "src-1", "message_count": 3}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.fork_session_at("src-1", 0)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_fork_session_rejects_non_numeric_message_count() -> None:
+    """A malformed (non-numeric) required `message_count` raises INVALID_RESPONSE
+    instead of being coerced to zero."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "message_count": "not-a-number",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.fork_session_at("src-1", 0)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_fork_session_parses_valid_result() -> None:
+    """A well-formed fork response round-trips into a SessionForkResult."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "session_ref": None,
+            "message_count": 7,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = await client.fork_session_at("src-1", 0)
+    assert result.source_session_id == "src-1"
+    assert result.session_id == "fork-1"
+    assert result.message_count == 7
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #127 — WorkGraph list helpers must fail closed on a present-but-non-
+# list collection rather than collapsing a malformed envelope to empty success.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_items_rejects_non_list_items() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # `items` present but not a list — a contract violation.
+        return {"items": "oops"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_ready_workgraph_items_rejects_non_list_items() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"items": {"not": "a list"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_ready_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_events_rejects_non_list_events() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"events": 42}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_events({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# ---------------------------------------------------------------------------
+# K21 — generated fail-closed workgraph parsers: malformed entries and
+# mistyped fields raise instead of being passed through as raw dicts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_items_rejects_malformed_entry() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # Entry missing the machine-owned lifecycle truth (`status`,
+        # `machine_state`) — a contract violation, not an empty item.
+        return {"items": [{"id": "only-an-id"}]}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_get_workgraph_item_rejects_invalid_status_enum() -> None:
+    client = MeerkatClient()
+    timestamp = "2026-05-12T12:00:00Z"
+
+    async def fake_request(_method, _params):
+        return {
+            "id": "i1",
+            "realm_id": "r",
+            "namespace": "n",
+            "title": "t",
+            "status": "not_a_status",
+            "priority": "high",
+            "completion_policy": {"kind": "self_attest"},
+            "revision": 1,
+            "machine_state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_workgraph_item("i1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "status" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_get_workgraph_item_requires_typed_claim_owner() -> None:
+    client = MeerkatClient()
+    timestamp = "2026-05-12T12:00:00Z"
+
+    async def fake_request(_method, _params):
+        return {
+            "id": "i1",
+            "realm_id": "r",
+            "namespace": "n",
+            "title": "t",
+            "status": "in_progress",
+            "priority": "high",
+            "completion_policy": {"kind": "self_attest"},
+            "revision": 1,
+            "machine_state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            # Claim without its owner — attribution truth must not be
+            # fabricated by the parser.
+            "claim": {"claimed_at": timestamp},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_workgraph_item("i1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "owner" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_attention_rejects_invalid_authority_enums() -> None:
+    timestamp = "2026-05-12T12:00:00Z"
+    binding = {
+        "binding_id": "attn-1",
+        "work_ref": {"realm_id": "r", "namespace": "n", "item_id": "i1"},
+        "target": {"kind": "session", "session_id": "s1"},
+        "mode": "pursue",
+        "status": {"state": "active"},
+        "delegated_authority": "request_closure",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+    def client_for(entry):
+        client = MeerkatClient()
+
+        async def fake_request(_method, _params):
+            return {"attention": [entry]}
+
+        client._request = fake_request  # type: ignore[method-assign]
+        return client
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client_for({**binding, "mode": "not_a_mode"}).list_workgraph_attention()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "WorkAttentionMode" in str(excinfo.value)
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client_for(
+            {**binding, "delegated_authority": "not_authority"}
+        ).list_workgraph_attention()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "AttentionDelegatedAuthority" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #136 — mob collection helpers must fail closed on a present-but-non-
+# list outer collection rather than returning [].
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_mob_events_rejects_non_list_events() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"events": "not-a-list"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.read_mob_events("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_ready_rejects_non_list_members() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": {"agent_identity": "lead"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.wait_mob_ready("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_kickoff_rejects_non_list_members() -> None:
+    # Present-but-non-list `members` is a wire-contract violation: it must
+    # raise INVALID_RESPONSE, never collapse to empty success.
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": {"agent_identity": "lead"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.wait_mob_kickoff("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_mob_members_rejects_non_list_members() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": "not-a-list"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_mobs_rejects_non_list_mobs() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"mobs": {"mob_id": "mob-1"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_mobs()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #55 — callback tool handlers may return a typed ContentBlock list,
+# which must be delivered to the runtime as structured blocks rather than being
+# coerced to a stringified blob.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_passes_through_content_block_list() -> None:
+    from meerkat.tools import ToolRegistry
+
+    registry = ToolRegistry()
+
+    blocks = [
+        {"type": "text", "text": "hello"},
+        {
+            "type": "image",
+            "media_type": "image/png",
+            "source": "inline",
+            "data": "AAAA",
+        },
+    ]
+
+    async def handler(_arguments):
+        return blocks
+
+    registry.register("multimodal", handler)
+
+    content, is_error = await registry.handle("multimodal", {})
+    assert is_error is False
+    # The block list round-trips faithfully — NOT stringified.
+    assert content == blocks
+    assert isinstance(content, list)
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_keeps_string_results_as_strings() -> None:
+    from meerkat.tools import ToolRegistry
+
+    registry = ToolRegistry()
+
+    async def handler(_arguments):
+        return "plain text result"
+
+    registry.register("text", handler)
+
+    content, is_error = await registry.handle("text", {})
+    assert is_error is False
+    assert content == "plain text result"
+
+
+@pytest.mark.asyncio
+async def test_mob_collection_helpers_raise_on_malformed_entries() -> None:
+    # Malformed collection entries are contract violations and must raise
+    # INVALID_RESPONSE — never be silently skipped into an empty/partial
+    # success (Terminal-Truth: absence of members is a different fact than
+    # malformed members).
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        return {"members": ["not-an-object"]}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.wait_mob_kickoff("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError, match="must be an object") as excinfo:
+        await client.wait_mob_ready("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"

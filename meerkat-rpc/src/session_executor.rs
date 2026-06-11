@@ -198,29 +198,6 @@ impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
     }
 }
 
-fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::types::SystemNoticeMessage::with_blocks(
-                *kind,
-                body.clone(),
-                blocks.clone(),
-            )
-            .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod typed_context_append_tests {
     use super::*;
@@ -248,7 +225,7 @@ mod typed_context_append_tests {
         };
 
         assert_eq!(
-            render_context_append_text(&content),
+            content.render_text(),
             SystemNoticeMessage::with_blocks(
                 SystemNoticeKind::Comms,
                 Some("Peer terminal response context".to_string()),
@@ -266,7 +243,7 @@ fn pending_system_context_appends_from_primitive(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
@@ -398,11 +375,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 event_tx,
                 primitive
                     .turn_metadata()
-                    .and_then(|meta| meta.skill_references.clone()),
-                primitive
-                    .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
-                None,
                 turn_overrides,
                 pre_admission,
             ),
@@ -530,9 +503,6 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         });
 
         let turn_metadata = primitive.turn_metadata().cloned();
-        let skill_references = turn_metadata
-            .as_ref()
-            .and_then(|meta| meta.skill_references.clone());
         let flow_tool_overlay = turn_metadata
             .as_ref()
             .and_then(|meta| meta.flow_tool_overlay.clone());
@@ -552,9 +522,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         &primitive,
                         prompt,
                         event_tx,
-                        skill_references,
                         flow_tool_overlay,
-                        None,
                         turn_overrides,
                         Some(pre_admission),
                     )
@@ -568,9 +536,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                     system_prompt: None,
                     event_tx: Some(event_tx),
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        skill_references,
                         flow_tool_overlay,
                         pre_turn_context_appends,
                         turn_metadata,

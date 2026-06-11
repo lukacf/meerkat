@@ -93,7 +93,11 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     })?;
 
-                let provisional_work_id = uuid::Uuid::new_v4().to_string();
+                // Use the canonical admission input id (the id the `Input`
+                // already carries, which admission reports back verbatim as
+                // `AcceptOutcome::Accepted { input_id }`) rather than minting a
+                // disconnected provisional UUID. This keeps the work id the DSL
+                // observes identical to the committed admission id.
                 let ingest_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                     runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
@@ -102,21 +106,27 @@ impl MeerkatMachine {
                     fence_token: active_fence_token.unwrap_or_default(),
                     generation: active_runtime_generation,
                     runtime_epoch_id: active_runtime_epoch_id,
-                    work_id: crate::meerkat_machine::dsl::WorkId::from(provisional_work_id),
+                    work_id: crate::meerkat_machine::dsl::WorkId::from_domain(input.id()),
                     origin: crate::meerkat_machine::dsl::WorkOrigin::Ingest,
                 };
-                match self
+                // On a machine-rejected Ingest, surface the TYPED lifecycle
+                // state when the session has a known projected runtime state
+                // (e.g. Retired/Stopped) — `InvalidState { state }` is the most
+                // typed cause. Only when there is NO projected state (an unbound
+                // session) do we surface the machine-owned DSL rejection reason
+                // verbatim, rather than fabricating `InvalidState { Destroyed }`
+                // from a defaulted projection (#56: do not re-author the cause as
+                // a wrong state, but do not degrade a known typed state either).
+                if let Err(reason) = self
                     .preview_session_dsl_input(&session_id, ingest_input.clone(), "Ingest")
                     .await
                 {
-                    Ok(_) => {}
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeControlPlaneError::InvalidState { state });
-                    }
+                    return Err(
+                        match self.existing_session_runtime_state(&session_id).await {
+                            Some(state) => RuntimeControlPlaneError::InvalidState { state },
+                            None => RuntimeControlPlaneError::Internal(reason),
+                        },
+                    );
                 }
                 self.apply_session_dsl_input_with_dispatch_failure(
                     &session_id,
@@ -229,8 +239,29 @@ impl MeerkatMachine {
                     self.lookup_entry(&runtime_id).await?;
 
                 // DSL-first: stage PublishEvent before driver mutation.
-                // Compute event_kind before consuming the event.
-                let event_kind = format!("{:?}", std::mem::discriminant(&event.event));
+                // Classify the event into the typed RuntimeEventKind discriminant
+                // before consuming the event — the DSL carries the closed enum, not
+                // a Debug-derived discriminant string. Exhaustive match (RuntimeEvent
+                // is #[non_exhaustive] but defined in this crate, so a new variant is
+                // a compile error here rather than a silent fallthrough).
+                use crate::runtime_event::RuntimeEvent;
+                let event_kind = match &event.event {
+                    RuntimeEvent::InputLifecycle(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::InputLifecycle
+                    }
+                    RuntimeEvent::RunLifecycle(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::RunLifecycle
+                    }
+                    RuntimeEvent::RuntimeStateChange(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::RuntimeStateChange
+                    }
+                    RuntimeEvent::Topology(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::Topology
+                    }
+                    RuntimeEvent::Projection(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::Projection
+                    }
+                };
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -591,12 +622,17 @@ impl MeerkatMachine {
                 }
                 drop(drv);
 
+                // The durable destroy is already committed above, so a
+                // completion-classification failure must NOT early-return and
+                // skip the session DSL commit + waiter terminalization — that
+                // would leave staged driver-side state behind a committed
+                // terminal. Finish the commit/terminalize legs, then surface
+                // the typed fault.
                 let result_class =
                     crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
                         &driver,
                     )
-                    .await
-                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+                    .await;
                 let apply_result = self
                     .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
@@ -610,9 +646,26 @@ impl MeerkatMachine {
                     .sync_control_projection_from_dsl_authority();
 
                 let mut comp = completions.lock().await;
-                comp.resolve_all_runtime_terminated("runtime destroyed", result_class);
+                let result_class_err = match result_class {
+                    Ok(result_class) => {
+                        comp.resolve_all_runtime_terminated("runtime destroyed", result_class);
+                        None
+                    }
+                    Err(err) => {
+                        comp.fail_all_waiters(
+                            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                                "runtime destroyed without completion authority: {err}"
+                            )),
+                        );
+                        Some(RuntimeControlPlaneError::Internal(err.to_string()))
+                    }
+                };
+                drop(comp);
                 if let Err(reason) = apply_result {
                     return Err(RuntimeControlPlaneError::Internal(reason));
+                }
+                if let Some(err) = result_class_err {
+                    return Err(err);
                 }
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
@@ -1666,4 +1719,78 @@ fn project_model_routing_status(
         active_operation_override,
         pending_switch_turn,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn make_prompt(text: &str) -> Input {
+        Input::Prompt(crate::input::PromptInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            content: text.into(),
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        })
+    }
+
+    /// Row #56 gate: a machine-rejected direct `Ingest` must surface the
+    /// session's REAL typed lifecycle state, NOT a re-derived
+    /// `InvalidState { state: Destroyed }` fabricated from a defaulted
+    /// projection. A freshly registered session has no runtime binding (no
+    /// `PrepareBindings`), so the DSL preview rejects the `Ingest` transition;
+    /// the dispatcher surfaces the actual (non-`Destroyed`) state rather than
+    /// laundering the cause into a fabricated state.
+    #[tokio::test]
+    async fn rejected_direct_ingest_surfaces_machine_reason_not_invalid_state_destroyed() {
+        let machine = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+        let err = machine
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::Ingest {
+                    runtime_id,
+                    input: make_prompt("ingest before binding"),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::control_plane_error_from_command_error)
+            .expect_err("ingest on an unbound session must be rejected by the DSL preview");
+
+        // OLD behavior laundered the rejection into a re-derived
+        // `InvalidState { state: Destroyed }` from a defaulted projection. The
+        // fix surfaces the session's REAL typed lifecycle state when it is known
+        // (here, the unbound pre-binding state), which must never be the
+        // fabricated `Destroyed`. A typed `InvalidState { state }` is strictly
+        // more informative than an `Internal(reason)` string.
+        match err {
+            RuntimeControlPlaneError::InvalidState { state } => {
+                assert_ne!(
+                    state,
+                    RuntimeState::Destroyed,
+                    "ingest rejection must surface the real pre-binding state, \
+                     not a fabricated InvalidState{{Destroyed}}"
+                );
+            }
+            other => panic!(
+                "expected a typed InvalidState{{state}} for the unbound session, got {other:?}"
+            ),
+        }
+    }
 }

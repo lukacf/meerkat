@@ -2242,24 +2242,12 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Ok(())
     }
 
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        Err(SendError::Unsupported(
-            "add_trusted_peer requires apply_trust_mutation authority".to_string(),
-        ))
-    }
-
     async fn add_private_trusted_peer(
         &self,
         _peer: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
-        ))
-    }
-
-    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-        Err(SendError::Unsupported(
-            "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
         ))
     }
 
@@ -2337,7 +2325,12 @@ impl LocalSessionService {
             Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
                 self.runtime_adapter
                     .register_session(session_id.clone())
-                    .await;
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("machine archive register before retire failed: {error}"),
+                        ))
+                    })?;
                 meerkat_runtime::RuntimeControlPlane::retire(&*self.runtime_adapter, &runtime_id)
                     .await
                     .map(|_| ())
@@ -2388,7 +2381,14 @@ impl SessionService for LocalSessionService {
             }
             Some(meerkat_core::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral) | None => None,
         };
-        self.runtime_adapter.register_session(sid.clone()).await;
+        self.runtime_adapter
+            .register_session(sid.clone())
+            .await
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "machine register session failed: {error}"
+                )))
+            })?;
         let runtime = Arc::new(LocalCommsRuntime::new(&name));
         let bindings = match provided_bindings {
             Some(bindings) => bindings,
@@ -2451,8 +2451,8 @@ impl SessionService for LocalSessionService {
             let staged_sections = staged_context
                 .iter()
                 .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -2477,7 +2477,9 @@ impl SessionService for LocalSessionService {
                 None,
                 AgentEvent::RunStarted {
                     session_id: id.clone(),
-                    prompt: effective_prompt.clone(),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: effective_prompt.clone(),
+                    },
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new_session(
@@ -2751,13 +2753,12 @@ impl MobSessionService for LocalSessionService {
         let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
         Ok(
             meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary,
                     contributing_input_ids,
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 run_result,
@@ -3019,8 +3020,8 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
 }
 
 fn lifecycle_input_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(MobLifecycleParams))
-        .unwrap_or_else(|_| json!({ "type": "object" }))
+    // K1: ONE infallible schema generator — no fail-open null-schema arm.
+    meerkat_core::schema::tool_input_schema_for::<MobLifecycleParams>()
 }
 
 fn content_input_schema() -> serde_json::Value {
@@ -3218,7 +3219,7 @@ fn runtime_binding_from_wire(
                 peer_id: resolved.peer_id.to_string(),
                 address,
                 bootstrap_token,
-                pubkey: Some(resolved.pubkey),
+                pubkey: resolved.pubkey,
             })
         }
     }
@@ -3226,7 +3227,11 @@ fn runtime_binding_from_wire(
 
 /// Project the canonical mob lifecycle state into its wire mirror. Keeps the
 /// surface emitting a closed typed status rather than the bare `MobState` text.
-fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
+///
+/// Exported so sibling surfaces (e.g. the JSON-RPC `mob/list` / `mob/status`
+/// handlers) consume this single `MobState -> WireMobLifecycleStatus` owner
+/// rather than re-deriving the projection from `MobState::to_string()`.
+pub fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
     match state {
         MobState::Creating => WireMobLifecycleStatus::Creating,
         MobState::Running => WireMobLifecycleStatus::Running,
@@ -3443,7 +3448,14 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"run": run}))
+                let result = serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
+                    .map_err(|e| {
+                    ToolError::invalid_arguments(
+                        call.name,
+                        format!("failed to encode flow status: {e}"),
+                    )
+                })?;
+                encode(call, result)
             }
             "mob_cancel_flow" => {
                 let args: FlowStatusArgs = call
@@ -3610,15 +3622,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MeerkatStatusArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let mob_id = MobId::from(args.mob_id);
+                let identity = AgentIdentity::from(args.agent_identity);
                 let snapshot = self
                     .state
-                    .mob_member_status(
-                        &MobId::from(args.mob_id),
-                        &AgentIdentity::from(args.agent_identity),
-                    )
+                    .mob_member_status(&mob_id, &identity)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!(snapshot))
+                let member_ref =
+                    meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+                let result = snapshot.to_member_status_result(member_ref).map_err(|e| {
+                    ToolError::invalid_arguments(
+                        call.name,
+                        format!("failed to project mob member status: {e}"),
+                    )
+                })?;
+                encode(call, json!(result))
             }
             "mob_wait_kickoff" => {
                 let args: WaitKickoffArgs = call
@@ -3848,11 +3867,6 @@ mod tests {
         )
         .expect("valid peer descriptor");
 
-        let raw_add = runtime
-            .add_trusted_peer(peer.clone())
-            .await
-            .expect_err("raw add must fail closed");
-        assert!(matches!(raw_add, SendError::Unsupported(_)));
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
         let projection_authority = std::sync::Arc::new(std::sync::Mutex::new(
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
@@ -3934,11 +3948,6 @@ mod tests {
         assert_eq!(added, CommsTrustMutationResult::Added { created: true });
         assert!(runtime.trusted.read().await.contains_key(&peer_id));
 
-        let raw_remove = runtime
-            .remove_trusted_peer(&peer_id)
-            .await
-            .expect_err("raw remove must fail closed");
-        assert!(matches!(raw_remove, SendError::Unsupported(_)));
         let unwiring_transition = {
             let mut authority = projection_authority
                 .lock()
@@ -4066,7 +4075,7 @@ mod tests {
             peer_id,
             meerkat_core::comms::PeerId::from_ed25519_pubkey(&expected_pubkey).to_string()
         );
-        assert_eq!(pubkey, Some(expected_pubkey));
+        assert_eq!(pubkey, expected_pubkey);
     }
 
     #[test]
@@ -4447,27 +4456,12 @@ mod tests {
             Ok(())
         }
 
-        async fn add_trusted_peer(
-            &self,
-            _peer: meerkat_core::comms::TrustedPeerDescriptor,
-        ) -> Result<(), SendError> {
-            Err(SendError::Unsupported(
-                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
         async fn add_private_trusted_peer(
             &self,
             _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
             Err(SendError::Unsupported(
                 "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
-        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-            Err(SendError::Unsupported(
-                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
             ))
         }
 
@@ -4565,7 +4559,8 @@ mod tests {
                 Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
                     self.runtime_adapter
                         .register_session(session_id.clone())
-                        .await;
+                        .await
+                        .expect("register session");
                     meerkat_runtime::RuntimeControlPlane::retire(
                         &*self.runtime_adapter,
                         &runtime_id,
@@ -4857,13 +4852,12 @@ mod tests {
             let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
             Ok(
                 meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                         run_id,
                         boundary,
                         contributing_input_ids,
                         conversation_digest: None,
                         message_count: 0,
-                        sequence: 0,
                     },
                     None,
                     run_result,
@@ -4879,11 +4873,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -4897,7 +4889,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4920,11 +4914,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -4938,7 +4930,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4960,9 +4954,7 @@ mod tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         HandlingMode::Queue,
-                        None,
                         None,
                         Vec::new(),
                         None,
@@ -4974,8 +4966,11 @@ mod tests {
 
         let first = stream.next().await.expect("first event");
         match first.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let prompt = prompt.text_content();
+            AgentEvent::RunStarted { input, .. } => {
+                let prompt = input
+                    .content()
+                    .expect("content-bearing run input")
+                    .text_content();
                 assert!(prompt.contains("Remember the customer preference."));
                 assert!(prompt.contains("hello"));
             }
@@ -4995,11 +4990,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5013,7 +5006,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the picture.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the picture.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5045,8 +5040,8 @@ mod tests {
             let staged_sections = staged_context
                 .iter()
                 .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -5081,11 +5076,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5099,7 +5092,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5127,11 +5122,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -5153,9 +5146,7 @@ mod tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         HandlingMode::Queue,
-                        None,
                         None,
                         Vec::new(),
                         None,
@@ -5734,7 +5725,9 @@ mod tests {
         let turn_handle = state.handle_for(&mob_id).await.expect("handle");
         let in_flight_turn = tokio::spawn(async move {
             turn_handle
-                .internal_turn(AgentIdentity::from("worker-1"), "observe the mob")
+                .member(&AgentIdentity::from("worker-1"))
+                .await?
+                .internal_turn("observe the mob")
                 .await
         });
 
@@ -6430,8 +6423,13 @@ mod tests {
         let mut explicit_profiles = BTreeMap::new();
         explicit_profiles.insert(
             ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: meerkat_mob::profile::ToolConfig {
                     comms: true,
@@ -6444,7 +6442,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = MobDefinition::explicit(MobId::from(mob_id));
         definition.profiles = explicit_profiles;
@@ -6454,6 +6452,11 @@ mod tests {
     fn sample_realm_profile(model: &str) -> meerkat_mob::Profile {
         meerkat_mob::profile::Profile {
             model: model.to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: Vec::new(),
             tools: meerkat_mob::profile::ToolConfig::default(),
             peer_description: "realm worker".to_string(),
@@ -7175,11 +7178,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -7234,11 +7235,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
@@ -7317,11 +7316,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "test".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,

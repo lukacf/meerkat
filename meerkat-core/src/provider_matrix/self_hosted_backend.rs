@@ -1,5 +1,7 @@
 //! Self-hosted backend kinds (typed, provider-owned).
 
+use super::self_hosted_auth::SelfHostedAuthMethod;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelfHostedBackendKind {
     SelfHosted,
@@ -7,6 +9,8 @@ pub enum SelfHostedBackendKind {
 }
 
 impl SelfHostedBackendKind {
+    pub const ALL: &'static [Self] = &[Self::SelfHosted, Self::OpenAiCompatible];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "self_hosted" => Some(Self::SelfHosted),
@@ -21,6 +25,20 @@ impl SelfHostedBackendKind {
             Self::OpenAiCompatible => "openai_compatible",
         }
     }
+
+    /// The self-hosted auth methods this backend supports — the provider-owned
+    /// (backend, auth) compatibility policy that the provider-runtime
+    /// `supports()` seam delegates to (dogma rows #122/#178). Both backend
+    /// kinds accept the same minimal credential set.
+    pub fn supported_auth_methods(self) -> &'static [SelfHostedAuthMethod] {
+        match self {
+            Self::SelfHosted | Self::OpenAiCompatible => &[
+                SelfHostedAuthMethod::ApiKey,
+                SelfHostedAuthMethod::None,
+                SelfHostedAuthMethod::StaticBearer,
+            ],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -30,10 +48,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            SelfHostedBackendKind::SelfHosted,
-            SelfHostedBackendKind::OpenAiCompatible,
-        ] {
+        for v in SelfHostedBackendKind::ALL {
+            let v = *v;
             assert_eq!(SelfHostedBackendKind::parse(v.as_str()), Some(v));
         }
     }

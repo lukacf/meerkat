@@ -26,7 +26,8 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params:
+        Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
@@ -39,6 +40,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub budget_limits: Option<BudgetLimits>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
+    pub override_comms: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_schedule: Option<bool>,
     pub override_workgraph: Option<bool>,
@@ -51,11 +53,52 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub recoverable_tool_defs: Option<Vec<ToolDef>>,
 }
 
-/// Canonical name for resumed-turn semantic overrides.
+/// Typed session-store backend pinned by a realm.
 ///
-/// The older `SurfaceSessionRecoveryOverrides` name is kept as the public
-/// compatibility spelling for existing CLI/RPC callers.
-pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
+/// This is the one semantic owner of the realm-pinned storage backend value
+/// (the `"sqlite"`/`"jsonl"` literal carried by `SessionMetadata.backend`,
+/// `RealmConfig.backend_hint`, and the config envelopes). It is a pure,
+/// feature-independent value type so it is reachable from `meerkat-core`;
+/// `meerkat_store::RealmBackend` is the downstream, feature-gated store-layer
+/// twin and projects to/from these same wire literals via `as_str`/`parse`.
+///
+/// Recovery exists specifically so a *recovery-environment hint* cannot silently
+/// become durable session identity: the raw realm-context string is parsed into
+/// this typed enum at the [`RealmDefaults::from_recovery_context`] boundary
+/// (fail-closed — an unrecognized hint yields `None` rather than being ferried
+/// through as an opaque string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecoveryBackendKind {
+    /// JSONL append-only session store.
+    Jsonl,
+    /// SQLite session store.
+    Sqlite,
+}
+
+impl RecoveryBackendKind {
+    /// Parse a raw realm/config backend string into the typed kind.
+    ///
+    /// Fail-closed: any unrecognized literal returns `None`, so a malformed
+    /// recovery-environment hint is dropped at the boundary instead of becoming
+    /// durable session identity.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "jsonl" => Some(Self::Jsonl),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+
+    /// The canonical wire literal for this backend kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jsonl => "jsonl",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
 
 /// Realm/config defaults that can participate in semantic recovery.
 ///
@@ -65,7 +108,10 @@ pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
 pub struct RealmDefaults {
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
-    pub backend: Option<String>,
+    /// Typed realm-pinned storage backend. Parsed (fail-closed) from the raw
+    /// recovery-environment string at [`Self::from_recovery_context`] so a
+    /// hint cannot silently become durable session identity.
+    pub backend: Option<RecoveryBackendKind>,
     pub config_generation: Option<u64>,
 }
 
@@ -75,7 +121,14 @@ impl RealmDefaults {
         Self {
             realm_id: context.realm_id.clone(),
             instance_id: context.instance_id.clone(),
-            backend: context.backend.clone(),
+            // Parse-at-boundary: the realm-context backend hint is a raw string
+            // supplied by the host environment. It is interpreted into the typed
+            // owner here (fail-closed); an unrecognized hint is dropped rather
+            // than ferried through untyped into durable identity.
+            backend: context
+                .backend
+                .as_deref()
+                .and_then(RecoveryBackendKind::parse),
             config_generation: context.config_generation,
         }
     }
@@ -105,25 +158,52 @@ impl SessionDefaults {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
-    pub runtime_build_mode: Option<RuntimeBuildMode>,
-    pub require_runtime_build_mode: bool,
+    /// Runtime build mode supplied by the host.
+    ///
+    /// Required by construction: runtime-backed surfaces pass
+    /// `RuntimeBuildMode::SessionOwned(bindings)` and standalone/ephemeral
+    /// surfaces pass `RuntimeBuildMode::StandaloneEphemeral` explicitly. The
+    /// previous `(Option<RuntimeBuildMode>, require_runtime_build_mode)` pair
+    /// made "required but absent" representable and silently fell back to
+    /// `StandaloneEphemeral` on the optional path; both states are now
+    /// unrepresentable.
+    pub runtime_build_mode: RuntimeBuildMode,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
 }
 
+impl Default for SurfaceSessionRecoveryContext {
+    fn default() -> Self {
+        Self {
+            llm_client_override: None,
+            agent_llm_client_decorator: None,
+            external_tools: None,
+            checkpointer: None,
+            // Standalone/test surfaces own the default explicitly; runtime
+            // surfaces must overwrite with `SessionOwned(bindings)`.
+            runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        }
+    }
+}
+
 /// Resolved semantic config for the next recovered turn.
 ///
 /// This is the internal contract for:
 ///
-/// `EffectiveTurnConfig = RealmDefaults + SessionDefaults + TurnOverrides`
+/// `EffectiveTurnConfig = RealmDefaults + SessionDefaults +
+/// SurfaceSessionRecoveryOverrides`
 ///
 /// Non-semantic render/transport resources remain in
 /// [`SurfaceSessionRecoveryContext`] and are copied into `build` only as host
@@ -131,7 +211,7 @@ pub struct SurfaceSessionRecoveryContext {
 #[derive(Debug)]
 pub struct EffectiveTurnConfig {
     pub model: String,
-    pub system_prompt: Option<String>,
+    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -141,7 +221,7 @@ pub struct EffectiveTurnConfig {
 #[derive(Debug)]
 pub struct RecoveredSessionBuild {
     pub model: String,
-    pub system_prompt: Option<String>,
+    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -160,11 +240,9 @@ impl RecoveredSessionBuild {
         CreateSessionRequest {
             model: self.model,
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: self.system_prompt,
             max_tokens: self.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(self.build),
@@ -193,8 +271,6 @@ pub enum SurfaceSessionRecoveryError {
     #[error("persisted session {0} is missing session build state")]
     MissingSessionBuildState(String),
     #[error("{0}")]
-    MissingRuntimeBuildMode(String),
-    #[error("{0}")]
     InvalidOverride(String),
 }
 
@@ -217,6 +293,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.budget_limits.is_some()
         || overrides.override_builtins.is_some()
         || overrides.override_shell.is_some()
+        || overrides.override_comms.is_some()
         || overrides.override_memory.is_some()
         || overrides.override_schedule.is_some()
         || overrides.override_workgraph.is_some()
@@ -277,7 +354,7 @@ pub fn resolve_resume_llm_binding(
 fn authorize_resume_overrides(
     stored_provider: Provider,
     stored_self_hosted_server_id: Option<String>,
-    overrides: &TurnOverrides,
+    overrides: &SurfaceSessionRecoveryOverrides,
     first_turn_phase: crate::generated::session_document::SessionFirstTurnPhase,
 ) -> Result<ResumeLlmBinding, SurfaceSessionRecoveryError> {
     use crate::generated::session_document::{
@@ -367,7 +444,7 @@ pub fn build_recovered_session(
 pub fn resolve_effective_turn_config(
     session: Session,
     realm_defaults: RealmDefaults,
-    overrides: &TurnOverrides,
+    overrides: &SurfaceSessionRecoveryOverrides,
     context: SurfaceSessionRecoveryContext,
 ) -> Result<EffectiveTurnConfig, SurfaceSessionRecoveryError> {
     let SessionDefaults {
@@ -394,16 +471,6 @@ pub fn resolve_effective_turn_config(
         first_turn_phase,
     )?;
 
-    // Runtime-binding presence is host plumbing, not a session-document
-    // semantic: it asserts the caller supplied canonical SessionRuntimeBindings
-    // for a runtime-backed recovery. It stays a pure shell guard because there
-    // is no facts->verdict reduction over session-document state — it is a
-    // single presence assertion over caller-supplied transport context.
-    if context.require_runtime_build_mode && context.runtime_build_mode.is_none() {
-        return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
-            "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
-        ));
-    }
     let resume_override_mask = ResumeOverrideMask {
         model: overrides.model.is_some(),
         provider: llm_binding.provider_overridden,
@@ -414,6 +481,7 @@ pub fn resolve_effective_turn_config(
         auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
+        override_comms: overrides.override_comms.is_some(),
         override_memory: overrides.override_memory.is_some(),
         override_schedule: overrides.override_schedule.is_some(),
         override_workgraph: overrides.override_workgraph.is_some(),
@@ -431,12 +499,12 @@ pub fn resolve_effective_turn_config(
         .clone()
         .unwrap_or_else(|| metadata.model.clone());
     let system_prompt = if allows_first_turn_build_overrides {
-        overrides
-            .system_prompt
-            .clone()
-            .or(build_state.system_prompt.clone())
+        match overrides.system_prompt.clone() {
+            Some(prompt) => crate::config::SystemPromptOverride::Set(prompt),
+            None => build_state.system_prompt.clone(),
+        }
     } else {
-        None
+        crate::config::SystemPromptOverride::Inherit
     };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
     let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
@@ -448,6 +516,12 @@ pub fn resolve_effective_turn_config(
     let mut build = SessionBuildOptions {
         provider: llm_binding.provider,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
+        // Caller-scoped build inputs, not durable session facts: the owning
+        // surface (e.g. the mob runtime, which rebuilds from its definition)
+        // re-supplies these on resume.
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
         output_schema: overrides
             .output_schema
             .clone()
@@ -495,6 +569,10 @@ pub fn resolve_effective_turn_config(
             .override_shell
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.shell),
+        override_comms: overrides
+            .override_comms
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.comms),
         override_memory: overrides
             .override_memory
             .map(ToolCategoryOverride::from_effective)
@@ -527,7 +605,20 @@ pub fn resolve_effective_turn_config(
             .or_else(|| metadata.tooling.active_skills.clone()),
         realm_id: metadata.realm_id.clone().or(realm_defaults.realm_id),
         instance_id: metadata.instance_id.clone().or(realm_defaults.instance_id),
-        backend: metadata.backend.clone().or(realm_defaults.backend),
+        // Durable `metadata.backend` wins; the realm hint only fills an absent
+        // value. Both reach the build as the typed [`RecoveryBackendKind`]:
+        //   - durable session truth is parsed fail-closed here (an unparseable
+        //     persisted literal is dropped rather than ferried untyped), and
+        //   - the realm hint is already the typed owner, having round-tripped
+        //     through the same fail-closed boundary at
+        //     [`RealmDefaults::from_recovery_context`].
+        // A recovery-environment hint can therefore never silently become
+        // durable identity: it only fills when the durable value is absent.
+        backend: metadata
+            .backend
+            .as_deref()
+            .and_then(RecoveryBackendKind::parse)
+            .or(realm_defaults.backend),
         config_generation: metadata
             .config_generation
             .or(realm_defaults.config_generation),
@@ -552,6 +643,7 @@ pub fn resolve_effective_turn_config(
             .or_else(|| build_state.app_context.clone()),
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
+        initial_tool_filter: None,
         shell_env: overrides
             .shell_env
             .clone()
@@ -560,9 +652,7 @@ pub fn resolve_effective_turn_config(
         call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
-        runtime_build_mode: context
-            .runtime_build_mode
-            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
+        runtime_build_mode: context.runtime_build_mode,
         initial_turn_metadata: None,
     };
     if let Some(override_mob) = overrides.override_mob {
@@ -626,7 +716,10 @@ mod tests {
                 structured_output_retries: 3,
                 provider: Provider::Anthropic,
                 self_hosted_server_id: None,
-                provider_params: Some(json!({ "temperature": 0.1 })),
+                provider_params: Some(crate::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.1),
+                    ..Default::default()
+                }),
                 tooling: SessionTooling {
                     builtins: ToolCategoryOverride::Disable,
                     shell: ToolCategoryOverride::Enable,
@@ -656,7 +749,9 @@ mod tests {
             .expect("session metadata");
         session
             .set_build_state(SessionBuildState {
-                system_prompt: Some("persisted system prompt".to_string()),
+                system_prompt: crate::config::SystemPromptOverride::Set(
+                    "persisted system prompt".to_string(),
+                ),
                 output_schema: Some(
                     OutputSchema::from_json_value(
                         json!({"type":"object","properties":{"ok":{"type":"boolean"}}}),
@@ -725,10 +820,10 @@ mod tests {
             RealmDefaults {
                 realm_id: Some(crate::RealmId::parse("realm-fallback").unwrap()),
                 instance_id: Some("instance-fallback".to_string()),
-                backend: Some("jsonl".to_string()),
+                backend: Some(RecoveryBackendKind::Jsonl),
                 config_generation: Some(99),
             },
-            &TurnOverrides::default(),
+            &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext::default(),
         )
         .expect("effective turn config");
@@ -741,6 +836,7 @@ mod tests {
         assert_eq!(effective.build.auth_binding, Some(persisted_ref));
         assert_eq!(effective.build.override_builtins, metadata.tooling.builtins);
         assert_eq!(effective.build.override_shell, metadata.tooling.shell);
+        assert_eq!(effective.build.override_comms, metadata.tooling.comms);
         assert_eq!(effective.build.override_memory, metadata.tooling.memory);
         assert_eq!(effective.build.override_schedule, metadata.tooling.schedule);
         assert_eq!(
@@ -762,7 +858,9 @@ mod tests {
         );
         assert_eq!(effective.build.realm_id, metadata.realm_id);
         assert_eq!(effective.build.instance_id, metadata.instance_id);
-        assert_eq!(effective.build.backend, metadata.backend);
+        // Durable `metadata.backend` ("sqlite") reaches the build as the typed
+        // owner, parsed fail-closed from the persisted literal.
+        assert_eq!(effective.build.backend, Some(RecoveryBackendKind::Sqlite));
         assert_eq!(
             effective.build.config_generation,
             metadata.config_generation
@@ -788,7 +886,10 @@ mod tests {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some(Provider::OpenAI),
                 provider_params: Some(TurnMetadataOverride::Set(
-                    json!({ "reasoning": { "effort": "medium" } }),
+                    crate::lifecycle::run_primitive::ProviderParamsOverride {
+                        reasoning: Some(crate::lifecycle::run_primitive::ReasoningMode::Emit),
+                        ..Default::default()
+                    },
                 )),
                 max_tokens: Some(2048),
                 system_prompt: Some("override system prompt".to_string()),
@@ -803,7 +904,7 @@ mod tests {
 
         assert_eq!(recovered.model, "gpt-5.2");
         assert_eq!(
-            recovered.system_prompt.as_deref(),
+            recovered.system_prompt.as_set_prompt(),
             Some("override system prompt")
         );
         assert_eq!(recovered.max_tokens, Some(2048));
@@ -815,7 +916,10 @@ mod tests {
         assert_eq!(build.provider, Some(Provider::OpenAI));
         assert_eq!(
             build.provider_params,
-            Some(json!({ "reasoning": { "effort": "medium" } }))
+            Some(crate::lifecycle::run_primitive::ProviderParamsOverride {
+                reasoning: Some(crate::lifecycle::run_primitive::ReasoningMode::Emit),
+                ..Default::default()
+            })
         );
         assert_eq!(build.structured_output_retries, Some(9));
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));
@@ -824,7 +928,7 @@ mod tests {
             Some("realm-a")
         );
         assert_eq!(build.instance_id.as_deref(), Some("instance-a"));
-        assert_eq!(build.backend.as_deref(), Some("sqlite"));
+        assert_eq!(build.backend, Some(RecoveryBackendKind::Sqlite));
         assert_eq!(build.config_generation, Some(7));
         assert!(build.keep_alive);
         assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
@@ -972,6 +1076,7 @@ mod tests {
                 }),
                 override_builtins: Some(true),
                 override_shell: Some(false),
+                override_comms: Some(false),
                 override_memory: Some(false),
                 override_schedule: Some(false),
                 override_workgraph: Some(false),
@@ -1008,6 +1113,7 @@ mod tests {
         );
         assert_eq!(build.override_builtins, ToolCategoryOverride::Enable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_comms, ToolCategoryOverride::Disable);
         assert_eq!(build.override_memory, ToolCategoryOverride::Disable);
         assert_eq!(build.override_schedule, ToolCategoryOverride::Disable);
         assert_eq!(build.override_workgraph, ToolCategoryOverride::Disable);
@@ -1031,6 +1137,51 @@ mod tests {
         assert_eq!(recovered_tool_defs[0].name, "fresh_tool");
         assert_eq!(recovered.recoverable_tool_defs.len(), 1);
         assert_eq!(recovered.recoverable_tool_defs[0].name, "fresh_tool");
+    }
+
+    #[test]
+    fn build_recovered_session_comms_override_resolves_to_session_build_option() {
+        // Parity with the override_shell path: a recovery request that sets
+        // override_comms must surface as a typed comms tooling override on the
+        // resumed turn's build options (and flag the resume mask), rather than
+        // having no build/recovery authority seam at all.
+        let recovered = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                override_comms: Some(false),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session with comms override");
+
+        assert_eq!(
+            recovered.build.override_comms,
+            ToolCategoryOverride::Disable,
+            "override_comms=Some(false) must disable comms tooling on the resumed turn"
+        );
+        assert!(
+            recovered.build.resume_override_mask.override_comms,
+            "explicit comms override must set the resume mask bit so persisted comms tooling is not rehydrated over it"
+        );
+
+        // Absent override inherits the persisted comms tooling (Inherit in the
+        // sample session).
+        let inherited = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session without comms override");
+        assert_eq!(
+            inherited.build.override_comms,
+            ToolCategoryOverride::Inherit,
+            "absent comms override inherits persisted SessionTooling.comms"
+        );
+        assert!(
+            !inherited.build.resume_override_mask.override_comms,
+            "no explicit comms override must leave the resume mask bit clear"
+        );
     }
 
     #[test]
@@ -1070,8 +1221,85 @@ mod tests {
             recovered.build.instance_id.as_deref(),
             Some("instance-from-context")
         );
-        assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
+        assert_eq!(
+            recovered.build.backend,
+            Some(RecoveryBackendKind::Sqlite),
+            "a valid recovery-environment backend hint fills the absent durable value as the typed owner"
+        );
         assert_eq!(recovered.build.config_generation, Some(99));
+    }
+
+    #[test]
+    fn recovery_backend_kind_parses_known_literals_and_round_trips() {
+        assert_eq!(
+            RecoveryBackendKind::parse("sqlite"),
+            Some(RecoveryBackendKind::Sqlite)
+        );
+        assert_eq!(
+            RecoveryBackendKind::parse("jsonl"),
+            Some(RecoveryBackendKind::Jsonl)
+        );
+        assert_eq!(RecoveryBackendKind::Sqlite.as_str(), "sqlite");
+        assert_eq!(RecoveryBackendKind::Jsonl.as_str(), "jsonl");
+        for kind in [RecoveryBackendKind::Sqlite, RecoveryBackendKind::Jsonl] {
+            assert_eq!(RecoveryBackendKind::parse(kind.as_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn realm_defaults_parses_valid_backend_hint_into_typed_owner() {
+        let realm_defaults = RealmDefaults::from_recovery_context(&SurfaceSessionRecoveryContext {
+            backend: Some("sqlite".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            realm_defaults.backend,
+            Some(RecoveryBackendKind::Sqlite),
+            "a valid recovery-environment backend hint must parse into the typed owner"
+        );
+    }
+
+    #[test]
+    fn realm_defaults_drops_malformed_backend_hint_fail_closed() {
+        let realm_defaults = RealmDefaults::from_recovery_context(&SurfaceSessionRecoveryContext {
+            backend: Some("postgres".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            realm_defaults.backend, None,
+            "an unrecognized backend hint must be dropped at the parse boundary, not ferried through as an opaque string"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_does_not_launder_malformed_backend_hint_into_durable_identity() {
+        // A recovery-environment backend hint that does not name a known store
+        // must never reach the durable session-build backend identity. With no
+        // persisted `metadata.backend`, the malformed hint is dropped at the
+        // typed boundary and the recovered build carries no backend.
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.backend = None;
+        session
+            .set_session_metadata(metadata)
+            .expect("updated session metadata");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                backend: Some("not-a-real-backend".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("recovered session with malformed backend hint");
+
+        assert_eq!(
+            recovered.build.backend, None,
+            "a malformed recovery-environment hint must not become durable session identity"
+        );
     }
 
     #[test]
@@ -1092,24 +1320,26 @@ mod tests {
         );
     }
 
+    /// Row: recovery runtime mode is required by construction — the context
+    /// carries a non-optional `RuntimeBuildMode`, so "required but absent"
+    /// and "optional silent standalone fallback" are unrepresentable. The
+    /// explicit default is `StandaloneEphemeral`, and the recovered build
+    /// carries exactly the mode the caller supplied.
     #[test]
-    fn build_recovered_session_rejects_missing_runtime_build_mode_when_required() {
-        let error = build_recovered_session(
+    fn build_recovered_session_carries_explicit_runtime_build_mode() {
+        let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                require_runtime_build_mode: true,
-                ..Default::default()
-            },
+            SurfaceSessionRecoveryContext::default(),
         )
-        .expect_err("runtime-backed recovery must reject silent standalone fallback");
+        .expect("standalone recovery should succeed");
 
         assert!(
             matches!(
-                error,
-                SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
+                recovered.build.runtime_build_mode,
+                RuntimeBuildMode::StandaloneEphemeral
             ),
-            "missing runtime bindings should be called out explicitly"
+            "explicit standalone mode must flow through unchanged"
         );
     }
 
@@ -1243,7 +1473,7 @@ mod tests {
         .expect("recovered session without rewriting prompt");
 
         assert!(
-            recovered.system_prompt.is_none(),
+            recovered.system_prompt.is_inherit(),
             "consumed sessions must not re-emit a create-time system_prompt override"
         );
     }

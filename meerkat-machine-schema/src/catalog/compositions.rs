@@ -15,11 +15,12 @@ use crate::{
     CompositionSchema, CompositionStateLimits, CompositionTransactionPlan, CompositionWitness,
     CompositionWitnessField, CompositionWitnessInput, CompositionWitnessTransition,
     CompositionWitnessTransitionOrder, DriverDispatchRoute, DurableMarkerFieldBinding,
-    DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectHandoffProtocol, EntryInput, Expr,
-    FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding,
-    MachineInstance, ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
-    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
-    RouteVariantId, WatchedEffect,
+    DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectHandoffProtocol,
+    EffectTeardownClass, EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource,
+    FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
+    ProtocolHelperReturnShape, ProtocolRustBinding, Route, RouteBindingSource, RouteDelivery,
+    RouteFieldBinding, RouteTarget, RouteTargetKind, RouteVariantId, TeardownObligationClass,
+    WatchedEffect,
 };
 
 // Short-named typed-identity constructors used throughout this module.
@@ -172,12 +173,14 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                 "claim_due_occurrences",
                 "store-backed claim uses authoritative store time plus durable lease state",
                 "ScheduleStore::claim_due_occurrences",
+                &[],
             ),
             transaction_plan(
                 "revision_supersede_and_replan",
                 "update_schedule_revision",
                 "revision-affecting schedule updates supersede pending future occurrences before replanning",
                 "ScheduleStore::commit_schedule_mutation",
+                &[],
             ),
         ],
         actor_priorities: vec![],
@@ -310,6 +313,7 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
             "claim_and_runtime_handoff",
             "transactional claim establishes the durable lease before runtime delivery begins",
             "ScheduleStore::claim_due_occurrences",
+            &[],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -403,6 +407,7 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
             "claim_and_mob_handoff",
             "transactional claim establishes the durable lease before mob delivery begins",
             "ScheduleStore::claim_due_occurrences",
+            &[],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -522,15 +527,24 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "Retire",
                 &[bind("session_id", "session_id")],
             ),
-            route(
-                "destroy_request_reaches_meerkat",
-                "mob",
-                "RequestRuntimeDestroy",
-                "meerkat",
-                RouteTargetKind::Input,
-                "Destroy",
-                &[bind("session_id", "session_id")],
-            ),
+            // Typed C-F3 declaration: this is a request-side teardown route.
+            // The named `detach_obligation` protocol must declare
+            // `TeardownObligationClass::DetachBeforeDestroy` and ack the
+            // session-ingress detach before the destroy request is routed.
+            Route {
+                teardown: Some(EffectTeardownClass::DestroyRequest {
+                    detach_obligation: protocol_id("mob_destroying_session_ingress"),
+                }),
+                ..route(
+                    "destroy_request_reaches_meerkat",
+                    "mob",
+                    "RequestRuntimeDestroy",
+                    "meerkat",
+                    RouteTargetKind::Input,
+                    "Destroy",
+                    &[bind("session_id", "session_id")],
+                )
+            },
             route(
                 "runtime_bound_reaches_mob",
                 "meerkat",
@@ -555,18 +569,25 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                     bind("fence_token", "fence_token"),
                 ],
             ),
-            route(
-                "runtime_destroyed_reaches_mob",
-                "meerkat",
-                "RuntimeDestroyed",
-                "mob",
-                RouteTargetKind::Signal,
-                "ObserveRuntimeDestroyed",
-                &[
-                    bind("agent_runtime_id", "agent_runtime_id"),
-                    bind("fence_token", "fence_token"),
-                ],
-            ),
+            // Reply-signal teardown observation: the destroy already
+            // happened by the time this fires, so no paired detach
+            // obligation is required — declared typed instead of being
+            // excluded by a `starts_with("Request")` name filter.
+            Route {
+                teardown: Some(EffectTeardownClass::TeardownObservation),
+                ..route(
+                    "runtime_destroyed_reaches_mob",
+                    "meerkat",
+                    "RuntimeDestroyed",
+                    "mob",
+                    RouteTargetKind::Signal,
+                    "ObserveRuntimeDestroyed",
+                    &[
+                        bind("agent_runtime_id", "agent_runtime_id"),
+                        bind("fence_token", "fence_token"),
+                    ],
+                )
+            },
         ],
         route_target_selectors: vec![],
         // Wave-c C-6p: the mob→meerkat seam now declares a typed composition
@@ -703,6 +724,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                 owner_bind("expected_revision"),
             ],
             delivery: RouteDelivery::Immediate,
+            teardown: None,
         }],
         route_target_selectors: vec![],
         driver: None,
@@ -711,6 +733,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
             "close_work_item",
             "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
             "WorkGraphStore::update_item_and_attention_cas",
+            &["work_item_close_stops_attention"],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -823,6 +846,7 @@ fn route(
         to: RouteTarget::new(mi_id(to_machine), rv(target_kind, input_variant)),
         bindings: bindings.to_vec(),
         delivery: RouteDelivery::Immediate,
+        teardown: None,
     }
 }
 
@@ -948,6 +972,7 @@ fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffPr
             allowed_operations: spec.allowed_operations.to_vec(),
         }),
         durable_marker: None,
+        teardown: None,
         rust: effect_extractor_rust_binding(
             spec.module_path,
             spec.required_imports,
@@ -962,13 +987,19 @@ fn transaction_plan(
     trigger: &str,
     description: &str,
     store_primitive: &str,
+    route_names: &[&str],
 ) -> CompositionTransactionPlan {
     CompositionTransactionPlan {
         name: tx_plan_id(name),
         trigger: tx_trigger_id(trigger),
         description: description.into(),
         store_primitive: store_primitive_id(store_primitive),
-        route_names: vec![],
+        // Routes this plan's store primitive atomically realizes. An
+        // owner-provided route binding (which carries no producer-side type) is
+        // anchored by declaring its route here, satisfying the composition's
+        // OwnerProvided fail-closed check via an explicit synchronous-transaction
+        // contract rather than silent unconstrained owner trust.
+        route_names: route_names.iter().map(|r| route_id(r)).collect(),
         protocol_names: vec![],
     }
 }
@@ -997,15 +1028,6 @@ fn default_ci_limits() -> CompositionStateLimits {
         set_limit: 0,
         map_limit: 0,
     }
-}
-
-/// Compatibility composition registry.
-///
-/// All remaining handoff protocols are canonical: runtime/Mob protocols are
-/// hosted directly by `meerkat_mob_seam_composition`, and auth lease lifecycle
-/// publication is a canonical AuthMachine perimeter composition.
-pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
-    Vec::new()
 }
 
 /// Host composition for the `ops_barrier_satisfaction` handoff protocol.
@@ -1063,6 +1085,7 @@ fn mob_bundle_composition() -> CompositionSchema {
             ),
             comms_trust_authority: None,
             durable_marker: None,
+            teardown: None,
             rust: ProtocolRustBinding {
                 module_path: "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs"
                     .into(),
@@ -1219,6 +1242,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 ),
                 comms_trust_authority: None,
                 durable_marker: None,
+                teardown: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/protocol_surface_completion.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1292,6 +1316,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 ),
                 comms_trust_authority: None,
                 durable_marker: None,
+                teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs".into(),
@@ -1504,6 +1529,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 ),
                 comms_trust_authority: None,
                 durable_marker: None,
+                teardown: None,
                 rust: effect_extractor_rust_binding(
                     "meerkat-mob/src/generated/protocol_mob_member_peer_overlay.rs",
                     &member_overlay_imports,
@@ -1691,6 +1717,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     ],
                 }),
                 durable_marker: None,
+                teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
@@ -1750,6 +1777,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     allowed_operations: vec![CommsTrustAuthorityOperation::PrivateRemove],
                 }),
                 durable_marker: None,
+                teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
@@ -1944,6 +1972,10 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
             ),
             comms_trust_authority: None,
             durable_marker: None,
+            // C-F3: this protocol IS the detach-before-destroy obligation the
+            // `destroy_request_reaches_meerkat` route names as its paired
+            // `detach_obligation` — declared typed, not inferred from names.
+            teardown: Some(TeardownObligationClass::DetachBeforeDestroy),
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs"
@@ -2101,6 +2133,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                 },
                 relation: DurableMarkerRelationProtocol::AuthLeaseCredentialPublication,
             }),
+            teardown: None,
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"

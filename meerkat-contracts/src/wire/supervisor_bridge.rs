@@ -866,6 +866,16 @@ impl std::fmt::Display for BridgeDeliveryRejectionCause {
 }
 
 /// Full response to a delivery command.
+///
+/// The bridge delivery wire contract advertises only the accept-boundary
+/// outcome (`outcome`) and the canonical input id. There is deliberately no
+/// turn-completion payload here: a `DeliverMemberInput` command acknowledges
+/// admission of one logical input, not the eventual turn result. Turn
+/// completion is observed through the runtime completion seam
+/// (`CompletionFeed` / `CompletionOutcome`), never re-derived onto this
+/// delivery acknowledgement — advertising a completion field that every
+/// producer fills with `None` was pure schema theater and has been removed
+/// so the wire shape matches what is actually delivered.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -873,18 +883,6 @@ pub struct BridgeDeliveryResponse {
     pub input_id: String,
     pub canonical_input_id: Option<String>,
     pub outcome: BridgeDeliveryOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion: Option<BridgeDeliveryCompletion>,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BridgeDeliveryCompletion {
-    pub session_id: String,
-    pub text: String,
-    pub turns: u32,
-    pub tool_calls: u32,
 }
 
 /// Generated MobMachine peer overlay handoff carried with peer wiring commands.
@@ -1842,7 +1840,6 @@ mod tests {
                 input_id: "in-1".to_string(),
                 canonical_input_id: None,
                 outcome: BridgeDeliveryOutcome::Accepted,
-                completion: None,
             }),
             json!({
                 "result": "delivery",
@@ -1862,7 +1859,6 @@ mod tests {
                     },
                     reason: "derived durable input cannot be accepted".to_string(),
                 },
-                completion: None,
             }),
             json!({
                 "result": "delivery",

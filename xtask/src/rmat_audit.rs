@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -52,7 +51,7 @@ pub struct Baseline {
 
 pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     let root = repo_root()?;
-    let policy = AuditPolicy::load();
+    let policy = AuditPolicy::load()?;
     let findings = collect_findings(&root, &policy)?;
     let ownership_findings = ownership_ledger::collect_current_findings(&root)?;
     let ownership_doc_in_sync = ownership_ledger::ownership_doc_is_in_sync(&root)?;
@@ -201,6 +200,11 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
         let mut suspicion = SuspicionVisitor::new(&relative, &source);
         suspicion.visit_file(&parsed);
         findings.extend(suspicion.findings);
+
+        let mut typed_carrier =
+            crate::typed_carrier::TypedCarrierAdoptionVisitor::new(&relative, &source);
+        typed_carrier.visit_file(&parsed);
+        findings.extend(typed_carrier.findings);
 
         let applicable_forbidden_rules: Vec<&ForbiddenShellReadRule> = policy
             .forbidden_shell_reads
@@ -354,20 +358,6 @@ fn collect_dead_authority_wiring_findings(
         let mut visitor = DeadAuthorityItemVisitor::new(relative, source);
         visitor.visit_file(parsed);
         findings.extend(visitor.findings);
-    }
-
-    for symbol in &policy.required_live_symbols {
-        let ref_count = source.matches(symbol.symbol).count();
-        if ref_count == 0 {
-            let symbol_name = symbol.symbol;
-            findings.push(error_finding(
-                "NoDeadAuthorityWiring",
-                relative,
-                symbol.symbol,
-                format!("required live symbol `{symbol_name}` has zero production references in this file set"),
-                false,
-            ));
-        }
     }
 
     findings
@@ -605,33 +595,88 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
             continue;
         }
         for file in files {
-            let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
-            // Skip the wave-b composition module itself; banned tokens
-            // may appear there as the positive identity of the replacement
-            // path in module commentary / imports.
-            if rel.contains("/composition/") || rel.ends_with("/composition.rs") {
-                continue;
-            }
+            let rel = file
+                .strip_prefix(root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .to_string();
             let Ok(source) = fs::read_to_string(&file) else {
                 continue;
             };
-            for banned in BANNED_LEGACY_HELPERS {
-                if source.contains(banned) {
-                    findings.push(error_finding(
-                        "CompositionDispatchIsThePath",
-                        rel.as_ref(),
-                        banned,
-                        format!(
-                            "forbidden legacy helper `{banned}` reappeared; routed-effect dispatch must go through meerkat_runtime::composition::CompositionDispatcher + ConsumerSurface::apply_routed_input"
-                        ),
-                        false,
-                    ));
-                }
-            }
+            // AST-precise: flag a banned helper only when it is *called*
+            // (free-fn `composition_dispatch(..)` or method `.composition_dispatch(..)`).
+            // String literals, comments, and `use`/path imports that merely
+            // mention the name are not the forbidden dispatch fork, so the old
+            // `/composition/` skip hack (which masked the positive-identity
+            // references in the replacement module) is no longer needed.
+            let Ok(parsed) = syn::parse_file(&source) else {
+                continue;
+            };
+            let mut visitor = BannedHelperCallVisitor::new(&rel, &source, BANNED_LEGACY_HELPERS);
+            visitor.visit_file(&parsed);
+            findings.extend(visitor.findings);
         }
     }
 
     findings
+}
+
+/// Detect *calls* to a banned legacy helper (free function or method). Unlike
+/// the prior `source.contains(name)` byte scan, this ignores string-literal
+/// and comment occurrences of the name and only fires on a real call
+/// expression, so a rename that preserves the banned dispatch relationship
+/// still trips while a doc/import mention of the name does not.
+struct BannedHelperCallVisitor<'a> {
+    relative: &'a str,
+    source: &'a str,
+    banned: &'a [&'a str],
+    findings: Vec<Finding>,
+}
+
+impl<'a> BannedHelperCallVisitor<'a> {
+    fn new(relative: &'a str, source: &'a str, banned: &'a [&'a str]) -> Self {
+        Self {
+            relative,
+            source,
+            banned,
+            findings: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, name: &str, span: proc_macro2::Span) {
+        let suppressed = has_rmat_allow(self.source, span, "CompositionDispatchIsThePath");
+        self.findings.push(error_finding(
+            "CompositionDispatchIsThePath",
+            self.relative,
+            name,
+            format!(
+                "forbidden legacy helper `{name}` is called here; routed-effect dispatch must go through meerkat_runtime::composition::CompositionDispatcher + ConsumerSurface::apply_routed_input"
+            ),
+            suppressed,
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for BannedHelperCallVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = node.func.as_ref()
+            && let Some(segment) = path.path.segments.last()
+        {
+            let name = segment.ident.to_string();
+            if self.banned.contains(&name.as_str()) {
+                self.push(&name, node.span());
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let name = node.method.to_string();
+        if self.banned.contains(&name.as_str()) {
+            self.push(&name, node.span());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
 }
 
 struct GuardedApplyVisitor<'a> {
@@ -650,25 +695,69 @@ impl<'a> GuardedApplyVisitor<'a> {
     }
 }
 
+/// Field/method names that name a canonical authority state read. A guard
+/// condition that touches one of these and then conditionally calls `apply()`
+/// is a shell pre-check the authority must own instead.
+const STATE_READ_NAMES: &[&str] = &[
+    "current_state",
+    "phase",
+    "snapshot",
+    "state",
+    "terminal_outcome",
+    "is_terminal",
+];
+
+/// True when the expression subtree contains a method call or field access to
+/// a canonical authority state name — matched on AST node kinds, not on a
+/// stringified token soup, so a `// phase` comment or a `"phase"` string
+/// literal in the condition does not count.
+struct StateReadDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for StateReadDetector {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if STATE_READ_NAMES.contains(&node.method.to_string().as_str()) {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_field(&mut self, node: &'ast ExprField) {
+        if let Member::Named(ident) = &node.member
+            && STATE_READ_NAMES.contains(&ident.to_string().as_str())
+        {
+            self.found = true;
+        }
+        visit::visit_expr_field(self, node);
+    }
+}
+
+/// True when the block subtree contains an `.apply(...)` method call.
+struct ApplyCallDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for ApplyCallDetector {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == "apply" {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
 impl<'ast> Visit<'ast> for GuardedApplyVisitor<'_> {
     fn visit_expr_if(&mut self, node: &'ast ExprIf) {
-        let cond_text = node.cond.to_token_stream().to_string();
-        let body_text = node.then_branch.to_token_stream().to_string();
-        let apply_count =
-            body_text.matches(". apply").count() + body_text.matches(".apply").count();
+        let mut state_read = StateReadDetector { found: false };
+        state_read.visit_expr(&node.cond);
+
+        let mut apply_in_body = ApplyCallDetector { found: false };
+        apply_in_body.visit_block(&node.then_branch);
+
         let else_empty = node.else_branch.is_none();
-        let suppress = has_rmat_allow(self.source, node.span(), "NoGuardedApply");
-        let stateish = [
-            "current_state",
-            "phase",
-            "snapshot",
-            "state()",
-            "terminal_outcome",
-            "is_terminal",
-        ]
-        .iter()
-        .any(|needle| cond_text.contains(needle));
-        if stateish && apply_count > 0 && else_empty {
+        if state_read.found && apply_in_body.found && else_empty {
+            let suppress = has_rmat_allow(self.source, node.span(), "NoGuardedApply");
             self.findings.push(error_finding(
                 "NoGuardedApply",
                 self.relative,
@@ -828,6 +917,10 @@ impl<'a> SuspicionVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for SuspicionVisitor<'_> {
+    // The identifier-substring heuristics below operate on AST-resolved type
+    // and field names (never raw source text) and emit warn-severity
+    // suspicion reports only — they are review prompts, not governance
+    // decisions, so fuzzy name matching is acceptable here.
     fn visit_item(&mut self, node: &'ast Item) {
         match node {
             Item::Enum(item_enum) if item_enum.variants.len() >= 3 => {
@@ -1090,6 +1183,10 @@ fn attrs_allow_dead_code(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// Scan for the `// RMAT-ALLOW(<rule>)` suppression marker on or above the
+/// span's line. Necessarily textual: the marker is a comment convention and
+/// comments are not AST nodes — this asserts an authored suppression marker,
+/// not source structure.
 fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     let needle = format!("RMAT-ALLOW({rule})");
     let start_line = span.start().line;
@@ -1125,6 +1222,13 @@ fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     }
 
     false
+}
+
+/// Public wrapper over [`has_rmat_allow`] so sibling audit modules (e.g. the
+/// typed-carrier gate) can honor the same `// RMAT-ALLOW(<rule>)` suppression
+/// convention without duplicating the span/line scan.
+pub(crate) fn rmat_allow_at(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
+    has_rmat_allow(source, span, rule)
 }
 
 fn forbidden_shell_authority_read_suppressed(
@@ -1241,79 +1345,71 @@ fn collect_protocol_feedback_constraint_findings(
         Err(_) => return findings,
     };
 
-    for rule in &policy.protocol_feedback_constraints {
-        let variant_pattern = &rule.feedback_input_variant;
-        for file in &files {
-            let relative = file
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+    for file in &files {
+        let relative = file
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-            // Generated files are allowed to reference the feedback variant.
-            if relative.contains("/src/generated/") {
-                continue;
-            }
-            // Authority files are allowed — they are the machine truth.
-            if relative.contains("authority") {
-                continue;
-            }
-            // Schema/catalog files are allowed — they declare the variant.
-            if relative.contains("meerkat-machine-schema/") {
-                continue;
-            }
-            // xtask files are allowed — they generate/audit.
-            if relative.starts_with("xtask/") {
-                continue;
-            }
-            // These files are the typed authority/owner adapter implementations
-            // for their respective feedback surfaces. They may destructure or
-            // construct the local authority input while generated helpers remain
-            // the public handoff entrypoint for non-owner shell code.
-            if is_feedback_authority_implementation_path(&relative) {
-                continue;
-            }
-            // Unit tests exercise authority inputs directly; the production
-            // bypass rule is scoped to non-test files.
-            if is_test_source_path(&relative) {
-                continue;
-            }
+        // Generated files are allowed to reference the feedback variant.
+        if relative.contains("/src/generated/") {
+            continue;
+        }
+        // Authority files are allowed — they are the machine truth.
+        if relative.contains("authority") {
+            continue;
+        }
+        // Schema/catalog files are allowed — they declare the variant.
+        if relative.contains("meerkat-machine-schema/") {
+            continue;
+        }
+        // xtask files are allowed — they generate/audit.
+        if relative.starts_with("xtask/") {
+            continue;
+        }
+        // These files are the typed authority/owner adapter implementations
+        // for their respective feedback surfaces. They may destructure or
+        // construct the local authority input while generated helpers remain
+        // the public handoff entrypoint for non-owner shell code.
+        if is_feedback_authority_implementation_path(&relative) {
+            continue;
+        }
+        // Unit tests exercise authority inputs directly; the production
+        // bypass rule is scoped to non-test files.
+        if is_test_source_path(&relative) {
+            continue;
+        }
 
-            let source = match fs::read_to_string(file) {
-                Ok(s) => s,
-                Err(_) => continue,
+        let source = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // Every repo .rs file is parsed (and fails the run) earlier in
+        // `collect_findings`; an unparseable file here cannot silently pass.
+        let Ok(mut parsed) = syn::parse_file(&source) else {
+            continue;
+        };
+        // Inline `#[cfg(test)]` items are test code: the production bypass
+        // rule is scoped to non-test code, mirroring `is_test_source_path`.
+        strip_cfg_test_items(&mut parsed.items);
+
+        for rule in &policy.protocol_feedback_constraints {
+            let variant_pattern = &rule.feedback_input_variant;
+            // AST detection of feedback-variant *construction* (struct
+            // expression, call, or value path ending in `::<Variant>`).
+            // Replaces the prior line/text scan: match arms (patterns) are
+            // structurally not expressions, comments and string literals are
+            // not AST nodes, and word boundaries are ident equality — so a
+            // rename that keeps the relationship still fails and a substring
+            // in a longer identifier no longer false-positives. Companion
+            // `*InputVariant` metadata enums are excluded by the qualifying
+            // path segment, as before.
+            let mut visitor = FeedbackVariantConstructionVisitor {
+                variant: variant_pattern,
+                found: false,
             };
-
-            // Look for construction of the feedback variant (e.g., `Input::VariantName`)
-            // in non-generated, non-authority code. Check line-by-line to skip
-            // comments, and require the variant to appear at a word boundary to
-            // avoid false positives from substring matches in longer identifiers.
-            let construction_pattern = format!("::{variant_pattern}");
-            let has_non_comment_match = source.lines().any(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with("//")
-                    || trimmed.starts_with("/*")
-                    || trimmed.starts_with('*')
-                {
-                    return false;
-                }
-                if let Some(pos) = trimmed.find(&construction_pattern) {
-                    let prefix = trimmed[..pos].trim_end();
-                    // Companion input-variant enums are metadata facts, not feedback submissions.
-                    if prefix.ends_with("InputVariant") {
-                        return false;
-                    }
-                    if trimmed.contains("=>") {
-                        return false;
-                    }
-                    // Verify the variant name ends at a word boundary (not a substring
-                    // of a longer identifier like `::VariantNameExtra`).
-                    let end = pos + construction_pattern.len();
-                    end >= trimmed.len() || !trimmed.as_bytes()[end].is_ascii_alphanumeric()
-                } else {
-                    false
-                }
-            });
-            if has_non_comment_match {
+            visitor.visit_file(&parsed);
+            if visitor.found {
                 findings.push(error_finding(
                     "ProtocolFeedbackThroughGeneratedHelpers",
                     &relative,
@@ -1329,6 +1425,106 @@ fn collect_protocol_feedback_constraint_findings(
         }
     }
     findings
+}
+
+/// Structurally drop every `#[cfg(test)]` item (top-level, nested in `mod`,
+/// or impl member) so production-only audits never see test fixtures.
+fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+    fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let mut is_test = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                is_test = true;
+            }
+            Ok(())
+        });
+        is_test
+    }
+    fn item_is_cfg_test(item: &syn::Item) -> bool {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            _ => return false,
+        };
+        attrs.iter().any(attr_is_cfg_test)
+    }
+    items.retain(|item| !item_is_cfg_test(item));
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = module.content.as_mut() {
+                    strip_cfg_test_items(inner);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                item_impl.items.retain(|impl_item| {
+                    let attrs: &[syn::Attribute] = match impl_item {
+                        syn::ImplItem::Const(item) => &item.attrs,
+                        syn::ImplItem::Fn(item) => &item.attrs,
+                        syn::ImplItem::Type(item) => &item.attrs,
+                        _ => return true,
+                    };
+                    !attrs.iter().any(attr_is_cfg_test)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// AST visitor for value-position construction of a protocol feedback input
+/// variant: `…::<Variant> { .. }`, `…::<Variant>(..)`, or a bare
+/// `…::<Variant>` value path. Pattern positions (match arms, destructuring)
+/// are not expressions and are therefore not flagged.
+struct FeedbackVariantConstructionVisitor<'n> {
+    variant: &'n str,
+    found: bool,
+}
+
+impl FeedbackVariantConstructionVisitor<'_> {
+    fn path_constructs_variant(&self, path: &syn::Path) -> bool {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(last) = segments.last() else {
+            return false;
+        };
+        if last != self.variant || segments.len() < 2 {
+            return false;
+        }
+        // Companion mirror enums are metadata facts, not feedback
+        // submissions: `*InputVariant` (hand-declared companions) and
+        // `*CatalogInput` (generated parameterless variant-name mirrors used
+        // for classification records).
+        let qualifier = &segments[segments.len() - 2];
+        !qualifier.ends_with("InputVariant") && !qualifier.ends_with("CatalogInput")
+    }
+}
+
+impl<'a> Visit<'a> for FeedbackVariantConstructionVisitor<'_> {
+    fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+        if self.path_constructs_variant(&node.path) {
+            self.found = true;
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+        if self.path_constructs_variant(&node.path) {
+            self.found = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
 }
 
 fn is_feedback_authority_implementation_path(relative: &str) -> bool {
@@ -1360,6 +1556,9 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
             Ok(s) => s,
             Err(_) => continue,
         };
+        // Marker check stays textual by necessity: `// @generated` is the
+        // emitted generated-file marker contract and comments are not AST
+        // nodes. This asserts emitted text, not source structure.
         if !source.contains("// @generated") {
             findings.push(error_finding(
                 "TerminalMappingThroughGeneratedHelpers",
@@ -1373,13 +1572,19 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
                 false,
             ));
         }
-        if !source.contains("classify_terminal") {
+        // AST-precise: the generated terminal classifier must exist as a real
+        // `fn classify_terminal` item, not as a token mentioned in a comment
+        // or string literal.
+        let has_classifier = syn::parse_file(&source)
+            .map(|parsed| named_fn_exists(&parsed, "classify_terminal"))
+            .unwrap_or(false);
+        if !has_classifier {
             findings.push(error_finding(
                 "TerminalMappingThroughGeneratedHelpers",
                 path,
                 &rule.protocol_name,
                 format!(
-                    "generated terminal mapping for producer `{}` is missing `classify_terminal`; \
+                    "generated terminal mapping for producer `{}` declares no `fn classify_terminal`; \
                      the protocol/codegen surface must generate terminal classification for `{}`",
                     rule.producer_machine, rule.protocol_name
                 ),
@@ -1455,7 +1660,40 @@ fn runtime_external_event_projection_findings_for_sources(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    if !stdin_source.contains("StdinLineFormat::Text => serde_json::json!({ \"body\": body })") {
+    let stdin_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        stdin_path,
+        stdin_source,
+        &mut findings,
+    );
+    let bridge_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        bridge_path,
+        bridge_source,
+        &mut findings,
+    );
+    let input_parsed = parse_audited_source(
+        "RuntimeExternalEventProjectionAlignment",
+        input_path,
+        input_source,
+        &mut findings,
+    );
+
+    // stdin mode discipline, AST-resolved on the `StdinLineFormat` match arms
+    // inside `make_stdin_external_event_input`: the Text arm must not contain
+    // a `from_str` reparse call, and the Json arm must be the (only) arm that
+    // does.
+    let stdin_arms = stdin_parsed.as_ref().and_then(|file| {
+        find_named_fn(file, "make_stdin_external_event_input").map(|item| {
+            let mut detector = StdinFormatArmDetector::default();
+            detector.visit_item_fn(item);
+            detector
+        })
+    });
+    let text_arm_literal = stdin_arms
+        .as_ref()
+        .is_some_and(|arms| arms.text_arm_found && !arms.text_arm_reparses);
+    if !text_arm_literal {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             stdin_path,
@@ -1465,10 +1703,10 @@ fn runtime_external_event_projection_findings_for_sources(
             false,
         ));
     }
-
-    if !stdin_source
-        .contains("StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body)")
-    {
+    let json_arm_reparses = stdin_arms
+        .as_ref()
+        .is_some_and(|arms| arms.json_arm_found && arms.json_arm_reparses);
+    if !json_arm_reparses {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             stdin_path,
@@ -1479,7 +1717,11 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("let blocks = external_event_blocks(interaction);") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "classified_interaction_to_runtime_input",
+        "external_event_blocks",
+    ) {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1490,7 +1732,11 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("payload: external_event_payload(interaction),") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "classified_interaction_to_runtime_input",
+        "external_event_payload",
+    ) {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1501,7 +1747,7 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+    if !fn_has_message_arm_binding_blocks(bridge_parsed.as_ref(), "external_event_blocks") {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             bridge_path,
@@ -1512,13 +1758,28 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !input_source.contains("SystemNoticeBlock::ExternalEvent")
-        || !input_source.contains("content: event.blocks.clone().unwrap_or_default()")
-    {
+    // The runtime loop's typed external-event notice: an
+    // `SystemNoticeBlock::ExternalEvent { .. }` struct expression whose
+    // `content` field is derived from the event's `blocks` (with the
+    // empty-default fallback), resolved on the AST instead of a pinned line.
+    let notice_preserves_blocks = input_parsed.as_ref().is_some_and(|file| {
+        let mut detector = ExternalEventNoticeDetector::default();
+        detector.visit_file(file);
+        if !detector.found {
+            // `syn` does not descend into macro token streams; the notice is
+            // constructed inside `vec![...]`, so scan expression-shaped macro
+            // bodies as well.
+            for expr in collect_macro_body_exprs(file) {
+                detector.visit_expr(&expr);
+            }
+        }
+        detector.found
+    });
+    if !notice_preserves_blocks {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             input_path,
-            "input_to_append",
+            "external_event_notice_renderable",
             "runtime loop must preserve ExternalEvent blocks inside typed system notices instead of flattening them to text"
                 .to_string(),
             false,
@@ -1536,7 +1797,24 @@ fn runtime_comms_bridge_projection_findings_for_sources(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    if !contains_identifier_call(bridge_source, "classified_interaction_to_runtime_input") {
+    let bridge_parsed = parse_audited_source(
+        "RuntimeCommsBridgeProjectionAlignment",
+        bridge_path,
+        bridge_source,
+        &mut findings,
+    );
+    let drain_parsed = parse_audited_source(
+        "RuntimeCommsBridgeProjectionAlignment",
+        drain_path,
+        drain_source,
+        &mut findings,
+    );
+
+    let classified_seam_present = bridge_parsed.as_ref().is_some_and(|file| {
+        named_fn_exists(file, "classified_interaction_to_runtime_input")
+            || file_contains_call(file, "classified_interaction_to_runtime_input")
+    });
+    if !classified_seam_present {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1546,7 +1824,17 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("classified.class() == PeerInputClass::PlainEvent") {
+    // `classified.class() == PeerInputClass::PlainEvent`, resolved as an AST
+    // equality between a `.class()` method call and the typed
+    // `PeerInputClass::PlainEvent` path — not a pinned source line.
+    let plain_event_comparison = bridge_parsed.as_ref().is_some_and(|file| {
+        find_named_fn(file, "classified_interaction_to_runtime_input").is_some_and(|item| {
+            let mut detector = ClassComparisonDetector::default();
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    });
+    if !plain_event_comparison {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1556,9 +1844,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if contains_identifier_call(bridge_source, "interaction_to_peer_input")
-        || bridge_source.contains("pub fn interaction_to_peer_input")
-    {
+    let raw_peer_adapter = bridge_parsed.as_ref().is_some_and(|file| {
+        named_fn_exists(file, "interaction_to_peer_input")
+            || file_contains_call(file, "interaction_to_peer_input")
+    });
+    if raw_peer_adapter {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1569,7 +1859,12 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if bridge_source.contains(".starts_with(\"event:\")") {
+    let sender_prefix_classification = bridge_parsed.as_ref().is_some_and(|file| {
+        let mut detector = MethodCallWithStrLitDetector::new("starts_with", "event:");
+        detector.visit_file(file);
+        detector.found
+    });
+    if sender_prefix_classification {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1580,7 +1875,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("body: peer_rendered_body(interaction)") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "peer_input_from_ingress_fact",
+        "peer_rendered_body",
+    ) {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1591,7 +1890,16 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("interaction.rendered_text") {
+    // `peer_rendered_body` must read the classified ingress' rendered text:
+    // an AST field access named `rendered_text` inside that fn.
+    let reads_rendered_text = bridge_parsed.as_ref().is_some_and(|file| {
+        find_named_fn(file, "peer_rendered_body").is_some_and(|item| {
+            let mut detector = FieldReadDetector::new("rendered_text");
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    });
+    if !reads_rendered_text {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1602,7 +1910,11 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("blocks: peer_blocks(interaction)") {
+    if !fn_contains_call(
+        bridge_parsed.as_ref(),
+        "peer_input_from_ingress_fact",
+        "peer_blocks",
+    ) {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1613,7 +1925,7 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+    if !fn_has_message_arm_binding_blocks(bridge_parsed.as_ref(), "peer_blocks") {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
@@ -1624,7 +1936,10 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !contains_identifier_call(drain_source, "classified_interaction_to_runtime_input") {
+    let drain_routes_classified = drain_parsed
+        .as_ref()
+        .is_some_and(|file| file_contains_call(file, "classified_interaction_to_runtime_input"));
+    if !drain_routes_classified {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             drain_path,
@@ -1634,7 +1949,10 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if contains_identifier_call(drain_source, "interaction_to_runtime_input") {
+    let drain_calls_raw_adapter = drain_parsed
+        .as_ref()
+        .is_some_and(|file| file_contains_call(file, "interaction_to_runtime_input"));
+    if drain_calls_raw_adapter {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             drain_path,
@@ -1648,24 +1966,345 @@ fn runtime_comms_bridge_projection_findings_for_sources(
     findings
 }
 
-fn contains_identifier_call(source: &str, ident: &str) -> bool {
-    let pattern = format!("{ident}(");
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find(&pattern) {
-        let start = search_start + offset;
-        let boundary_ok = source[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
-        if boundary_ok {
-            return true;
+/// Parse an audited source file fail-closed: a file an alignment rule cannot
+/// parse cannot be certified, so the parse failure itself is a finding.
+fn parse_audited_source(
+    rule: &str,
+    path: &str,
+    source: &str,
+    findings: &mut Vec<Finding>,
+) -> Option<syn::File> {
+    match syn::parse_file(source) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            findings.push(error_finding(
+                rule,
+                path,
+                "<parse>",
+                format!("audited source failed to parse: {err}"),
+                false,
+            ));
+            None
         }
-        search_start = start + 1;
     }
-    false
 }
 
-fn error_finding(
+/// Walk every fn item in a file, including fns nested in inline modules.
+fn visit_file_fns<'a>(items: &'a [syn::Item], out: &mut Vec<&'a ItemFn>) {
+    for item in items {
+        match item {
+            Item::Fn(item_fn) => out.push(item_fn),
+            Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    visit_file_fns(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn find_named_fn<'a>(file: &'a syn::File, name: &str) -> Option<&'a ItemFn> {
+    let mut fns = Vec::new();
+    visit_file_fns(&file.items, &mut fns);
+    fns.into_iter().find(|item| item.sig.ident == name)
+}
+
+fn named_fn_exists(file: &syn::File, name: &str) -> bool {
+    find_named_fn(file, name).is_some()
+}
+
+/// True when the named fn exists in the file and contains a call (free fn or
+/// method) to `callee`.
+fn fn_contains_call(file: Option<&syn::File>, fn_name: &str, callee: &str) -> bool {
+    file.is_some_and(|file| {
+        find_named_fn(file, fn_name).is_some_and(|item| {
+            let mut detector = CallDetector::new(callee);
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    })
+}
+
+/// True when the file contains a call (free fn or method) to `callee`
+/// anywhere. Ident equality on the AST — a longer identifier that merely
+/// ends with the name does not match, and comments/strings are invisible.
+fn file_contains_call(file: &syn::File, callee: &str) -> bool {
+    let mut detector = CallDetector::new(callee);
+    detector.visit_file(file);
+    detector.found
+}
+
+/// True when the named fn exists and contains a match arm over
+/// `InteractionContent::Message { blocks, .. }` — the structural shape that
+/// preserves multimodal message blocks.
+fn fn_has_message_arm_binding_blocks(file: Option<&syn::File>, fn_name: &str) -> bool {
+    file.is_some_and(|file| {
+        find_named_fn(file, fn_name).is_some_and(|item| {
+            let mut detector = MessageArmBindsBlocksDetector::default();
+            detector.visit_item_fn(item);
+            detector.found
+        })
+    })
+}
+
+/// Collect expressions written inside macro bodies (e.g. `vec![...]`),
+/// recursively. `syn`'s visitor does not descend into macro token streams, so
+/// AST detectors that must see into expression-shaped macros scan these
+/// parsed bodies as a second pass. Macros whose bodies are not
+/// comma-separated expressions (`json!`, `format!` with a literal, …) simply
+/// fail the parse and contribute nothing.
+fn collect_macro_body_exprs(file: &syn::File) -> Vec<Expr> {
+    struct MacroExprCollector {
+        out: Vec<Expr>,
+    }
+    impl<'ast> Visit<'ast> for MacroExprCollector {
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if let Ok(exprs) = node.parse_body_with(
+                syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated,
+            ) {
+                self.out.extend(exprs);
+            }
+            visit::visit_macro(self, node);
+        }
+    }
+    let mut collector = MacroExprCollector { out: Vec::new() };
+    collector.visit_file(file);
+    let mut index = 0;
+    while index < collector.out.len() {
+        let expr = collector.out[index].clone();
+        let mut inner = MacroExprCollector { out: Vec::new() };
+        inner.visit_expr(&expr);
+        collector.out.extend(inner.out);
+        index += 1;
+    }
+    collector.out
+}
+
+fn path_ends_with(path: &syn::Path, suffix: &[&str]) -> bool {
+    let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segments.len() >= suffix.len()
+        && segments[segments.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(seg, expected)| seg == expected)
+}
+
+/// AST detector for a call expression (free fn path or method) whose callee
+/// ident equals `name`.
+struct CallDetector<'n> {
+    name: &'n str,
+    found: bool,
+}
+
+impl<'n> CallDetector<'n> {
+    fn new(name: &'n str) -> Self {
+        Self { name, found: false }
+    }
+}
+
+impl<'ast> Visit<'ast> for CallDetector<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = node.func.as_ref()
+            && let Some(segment) = path.path.segments.last()
+            && segment.ident == self.name
+        {
+            self.found = true;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == self.name {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST detector for a method call whose first argument is a specific string
+/// literal (e.g. `.starts_with("event:")`).
+struct MethodCallWithStrLitDetector<'n> {
+    method: &'n str,
+    literal: &'n str,
+    found: bool,
+}
+
+impl<'n> MethodCallWithStrLitDetector<'n> {
+    fn new(method: &'n str, literal: &'n str) -> Self {
+        Self {
+            method,
+            literal,
+            found: false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for MethodCallWithStrLitDetector<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == self.method && node.args.iter().any(|arg| {
+            matches!(
+                arg,
+                Expr::Lit(lit) if matches!(&lit.lit, syn::Lit::Str(s) if s.value() == self.literal)
+            )
+        }) {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST detector for a named field access (`<expr>.rendered_text`).
+struct FieldReadDetector<'n> {
+    name: &'n str,
+    found: bool,
+}
+
+impl<'n> FieldReadDetector<'n> {
+    fn new(name: &'n str) -> Self {
+        Self { name, found: false }
+    }
+}
+
+impl<'ast> Visit<'ast> for FieldReadDetector<'_> {
+    fn visit_expr_field(&mut self, node: &'ast ExprField) {
+        if let Member::Named(ident) = &node.member
+            && ident == self.name
+        {
+            self.found = true;
+        }
+        visit::visit_expr_field(self, node);
+    }
+}
+
+/// AST detector for the typed peer-class comparison: an equality whose one
+/// side is a `.class()` method call and whose other side is the
+/// `PeerInputClass::PlainEvent` path.
+#[derive(Default)]
+struct ClassComparisonDetector {
+    found: bool,
+}
+
+impl ClassComparisonDetector {
+    fn is_class_call(expr: &Expr) -> bool {
+        matches!(expr, Expr::MethodCall(call) if call.method == "class")
+    }
+
+    fn is_plain_event_path(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Path(path) if path_ends_with(&path.path, &["PeerInputClass", "PlainEvent"])
+        )
+    }
+}
+
+impl<'ast> Visit<'ast> for ClassComparisonDetector {
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_)) {
+            let (left, right) = (node.left.as_ref(), node.right.as_ref());
+            if (Self::is_class_call(left) && Self::is_plain_event_path(right))
+                || (Self::is_class_call(right) && Self::is_plain_event_path(left))
+            {
+                self.found = true;
+            }
+        }
+        visit::visit_expr_binary(self, node);
+    }
+}
+
+/// AST detector for a match arm whose pattern is
+/// `InteractionContent::Message { blocks, .. }` (the block-preserving shape).
+#[derive(Default)]
+struct MessageArmBindsBlocksDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MessageArmBindsBlocksDetector {
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        if let syn::Pat::Struct(pat) = &node.pat
+            && path_ends_with(&pat.path, &["InteractionContent", "Message"])
+            && pat
+                .fields
+                .iter()
+                .any(|field| matches!(&field.member, Member::Named(ident) if ident == "blocks"))
+        {
+            self.found = true;
+        }
+        visit::visit_arm(self, node);
+    }
+}
+
+/// AST detector for the stdin `StdinLineFormat` mode match: records whether
+/// the `Text` / `Json` arms exist and whether each arm's body contains a
+/// `from_str` reparse call.
+#[derive(Default)]
+struct StdinFormatArmDetector {
+    text_arm_found: bool,
+    text_arm_reparses: bool,
+    json_arm_found: bool,
+    json_arm_reparses: bool,
+}
+
+impl StdinFormatArmDetector {
+    fn arm_pattern_is(pat: &syn::Pat, variant: &str) -> bool {
+        match pat {
+            syn::Pat::Path(path) => path_ends_with(&path.path, &["StdinLineFormat", variant]),
+            syn::Pat::TupleStruct(pat) => path_ends_with(&pat.path, &["StdinLineFormat", variant]),
+            syn::Pat::Struct(pat) => path_ends_with(&pat.path, &["StdinLineFormat", variant]),
+            _ => false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for StdinFormatArmDetector {
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let mut reparse = CallDetector::new("from_str");
+        reparse.visit_expr(&node.body);
+        if Self::arm_pattern_is(&node.pat, "Text") {
+            self.text_arm_found = true;
+            self.text_arm_reparses |= reparse.found;
+        }
+        if Self::arm_pattern_is(&node.pat, "Json") {
+            self.json_arm_found = true;
+            self.json_arm_reparses |= reparse.found;
+        }
+        visit::visit_arm(self, node);
+    }
+}
+
+/// AST detector for the typed external-event notice: a
+/// `SystemNoticeBlock::ExternalEvent { .. }` struct expression whose
+/// `content` field expression derives from the event's `blocks` field with
+/// the empty-default fallback (`unwrap_or_default`).
+#[derive(Default)]
+struct ExternalEventNoticeDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for ExternalEventNoticeDetector {
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if path_ends_with(&node.path, &["SystemNoticeBlock", "ExternalEvent"]) {
+            for field in &node.fields {
+                let Member::Named(ident) = &field.member else {
+                    continue;
+                };
+                if ident != "content" {
+                    continue;
+                }
+                let mut blocks_read = FieldReadDetector::new("blocks");
+                blocks_read.visit_expr(&field.expr);
+                let mut default_fallback = CallDetector::new("unwrap_or_default");
+                default_fallback.visit_expr(&field.expr);
+                if blocks_read.found && default_fallback.found {
+                    self.found = true;
+                }
+            }
+        }
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+pub(crate) fn error_finding(
     rule: &str,
     path: &str,
     symbol: &str,
@@ -1705,7 +2344,84 @@ fn warn_finding(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
     use super::*;
+
+    fn feedback_variant_constructed(source: &str, variant: &str) -> bool {
+        let mut parsed = syn::parse_file(source).expect("test source parses");
+        strip_cfg_test_items(&mut parsed.items);
+        let mut visitor = FeedbackVariantConstructionVisitor {
+            variant,
+            found: false,
+        };
+        visitor.visit_file(&parsed);
+        visitor.found
+    }
+
+    #[test]
+    fn feedback_variant_detection_flags_value_position_construction() {
+        // Struct construction, call construction, and bare value path all flag.
+        assert!(feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfied { op_id }); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfied(op_id)); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(feedback_variant_constructed(
+            "fn f() -> Input { Input::OpsBarrierSatisfied }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_skips_patterns_comments_and_companions() {
+        // Match-arm patterns are not constructions.
+        assert!(!feedback_variant_constructed(
+            "fn f(i: Input) { match i { Input::OpsBarrierSatisfied { .. } => {} _ => {} } }",
+            "OpsBarrierSatisfied",
+        ));
+        // Comments and string literals are not AST constructions.
+        assert!(!feedback_variant_constructed(
+            "fn f() { // Input::OpsBarrierSatisfied\n let s = \"Input::OpsBarrierSatisfied\"; }",
+            "OpsBarrierSatisfied",
+        ));
+        // Companion metadata mirrors are excluded by qualifying segment.
+        assert!(!feedback_variant_constructed(
+            "fn f() { record(MeerkatInputVariant::OpsBarrierSatisfied); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(!feedback_variant_constructed(
+            "fn f() { record(MobMachineCatalogInput::SessionIngressDetachedForMobDestroy); }",
+            "SessionIngressDetachedForMobDestroy",
+        ));
+        // A longer identifier that merely contains the variant is not a match.
+        assert!(!feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfiedExtra); }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_evasion_via_match_wrapper_still_flags() {
+        // The retired line scanner skipped any line containing `=>`, so a
+        // `match () { () => Input::Variant }` wrapper dodged it. The AST
+        // detector sees the arm BODY as an expression and still flags it.
+        assert!(feedback_variant_constructed(
+            "const fn f() -> Input { match () { () => Input::OpsBarrierSatisfied } }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_skips_cfg_test_items() {
+        assert!(!feedback_variant_constructed(
+            "#[cfg(test)] mod tests { fn f() { submit(Input::OpsBarrierSatisfied { op_id }); } }",
+            "OpsBarrierSatisfied",
+        ));
+    }
 
     #[test]
     fn baseline_roundtrip() -> Result<()> {
@@ -1941,6 +2657,127 @@ mod tests {
         assert!(
             findings.len() >= 4,
             "expected multiple projection findings, got {findings:#?}"
+        );
+    }
+
+    fn guarded_apply_findings(source: &str) -> Vec<Finding> {
+        let parsed = syn::parse_file(source).expect("parse guarded-apply fixture");
+        let mut visitor = GuardedApplyVisitor::new("meerkat-mob/src/runtime/actor.rs", source);
+        visitor.visit_file(&parsed);
+        visitor.findings
+    }
+
+    #[test]
+    fn guarded_apply_flags_state_gated_apply_via_ast_not_token_soup() {
+        let flagged = guarded_apply_findings(
+            r"
+            fn drive(orch: &Orchestrator) {
+                if orch.phase().is_running() {
+                    authority.apply(input);
+                }
+            }
+        ",
+        );
+        assert_eq!(
+            flagged.len(),
+            1,
+            "state-read-gated apply must flag: {flagged:#?}"
+        );
+        assert_eq!(flagged[0].key.rule, "NoGuardedApply");
+    }
+
+    #[test]
+    fn guarded_apply_ignores_state_names_in_strings_and_comments() {
+        // `phase`/`apply` appear only inside a string literal and a comment in
+        // the condition; the AST carries no state-read method/field there, so
+        // the token-soup false positive is gone.
+        let clean = guarded_apply_findings(
+            r#"
+            fn drive(label: &str) {
+                // phase check used to live here; apply() now unconditional
+                if label == "phase" {
+                    authority.apply(input);
+                }
+            }
+        "#,
+        );
+        assert!(
+            clean.is_empty(),
+            "string/comment mentions must not flag: {clean:#?}"
+        );
+    }
+
+    #[test]
+    fn guarded_apply_ignores_apply_with_else_branch() {
+        let clean = guarded_apply_findings(
+            r"
+            fn drive(orch: &Orchestrator) {
+                if orch.phase().is_running() {
+                    authority.apply(input);
+                } else {
+                    record_skip();
+                }
+            }
+        ",
+        );
+        assert!(
+            clean.is_empty(),
+            "an else branch is not a silent gate: {clean:#?}"
+        );
+    }
+
+    fn banned_helper_findings(rel: &str, source: &str) -> Vec<Finding> {
+        let parsed = syn::parse_file(source).expect("parse banned-helper fixture");
+        let mut visitor = BannedHelperCallVisitor::new(
+            rel,
+            source,
+            &["composition_dispatch", "recompute_mob_peer_overlay"],
+        );
+        visitor.visit_file(&parsed);
+        visitor.findings
+    }
+
+    #[test]
+    fn banned_helper_flags_call_not_string_or_comment() {
+        let flagged = banned_helper_findings(
+            "meerkat-mob/src/runtime/actor.rs",
+            r"
+            fn run(&self) {
+                self.composition_dispatch(effect);
+                let _ = recompute_mob_peer_overlay(state);
+            }
+        ",
+        );
+        assert_eq!(
+            flagged.len(),
+            2,
+            "both banned calls must flag: {flagged:#?}"
+        );
+        assert!(
+            flagged
+                .iter()
+                .all(|f| f.key.rule == "CompositionDispatchIsThePath")
+        );
+    }
+
+    #[test]
+    fn banned_helper_ignores_name_in_string_and_comment() {
+        // Names appear only in a comment and a string literal — no call site,
+        // so the prior `/composition/`-skip byte scan false positive is gone
+        // even in a file under the composition module.
+        let clean = banned_helper_findings(
+            "meerkat-runtime/src/composition/dispatcher.rs",
+            r#"
+            fn run(&self) {
+                // composition_dispatch was the legacy fork; gone now.
+                let label = "recompute_mob_peer_overlay";
+                let _ = label;
+            }
+        "#,
+        );
+        assert!(
+            clean.is_empty(),
+            "doc/import mentions must not flag: {clean:#?}"
         );
     }
 }

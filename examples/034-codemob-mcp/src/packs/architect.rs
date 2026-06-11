@@ -112,11 +112,7 @@ impl Pack for ArchitectPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some("Architecture deliberation".into()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("Architecture deliberation".into()), steps, None),
         );
 
         mob_definition(

@@ -2,7 +2,7 @@
 
 TypeScript client for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
-Current contract version: `0.6.23`.
+Current contract version: `0.7.0-alpha.0`.
 
 ## Installation
 
@@ -190,12 +190,12 @@ async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string,
 
 // WorkGraph is read-only from the SDK; agents mutate it through WorkGraph tools.
 async getWorkGraphItem(itemId: string, options?: WorkGraphItemLookupOptions): Promise<WorkItem>
-async listWorkGraphItems(filter?: WorkGraphItemFilter): Promise<WorkItemListResult>
-async listReadyWorkGraphItems(filter?: WorkGraphReadyFilter): Promise<WorkItemListResult>
+async listWorkGraphItems(filter?: WorkItemFilter): Promise<WorkItemsResult>
+async listReadyWorkGraphItems(filter?: ReadyWorkFilter): Promise<WorkItemsResult>
 async getWorkGraphSnapshot(filter?: WorkGraphSnapshotFilter): Promise<WorkGraphSnapshot>
-async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkGraphEventsResult>
-async getWorkGraphGoalStatus(params: WorkGraphGoalStatusRequest): Promise<WorkGraphGoalResult>
-async listWorkGraphAttention(params?: WorkGraphAttentionListRequest): Promise<WorkGraphAttentionListResult>
+async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkEventsResult>
+async getWorkGraphGoalStatus(params: GoalStatusRequest): Promise<GoalStatusResult>
+async listWorkGraphAttention(params?: AttentionListRequest): Promise<AttentionListResult>
 
 async readMobEvents(mobId: string, options?: MobEventsOptions): Promise<MobEventsResult>
 async spawnMobMembers(mobId: string, specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]>
@@ -387,14 +387,14 @@ try {
 
 ## Version Compatibility
 
-The SDK exports `CONTRACT_VERSION` (currently `"0.6.23"`). During `connect()`, the SDK checks that the server's contract version is compatible:
+The SDK exports `CONTRACT_VERSION` (currently `"0.7.0-alpha.0"`). During `connect()`, the SDK checks that the server's contract version is compatible:
 
 - While the major version is `0`, minor versions must match exactly (e.g. SDK `0.1.x` requires server `0.1.x`).
 - Once `1.0.0` is reached, major versions must match (standard semver).
 
 ```ts
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.6.23"
+console.log(CONTRACT_VERSION);  // "0.7.0-alpha.0"
 ```
 
 If the versions are incompatible, `connect()` throws a `MeerkatError` with code `"VERSION_MISMATCH"`.

@@ -9,7 +9,7 @@ use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarn
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
     ImageGenerationIntent, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
-    OutputSchema, Provider, ProviderImageMetadata, StopReason, SystemNoticeBlock,
+    OutputSchema, Provider, ProviderImageMetadata, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
@@ -130,38 +130,8 @@ fn project_gemini_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBl
         .collect()
 }
 
-fn legacy_assistant_to_gemini_blocks(
-    assistant: &meerkat_core::AssistantMessage,
-) -> Result<Vec<AssistantBlock>, LlmError> {
-    let mut blocks = Vec::new();
-    if !assistant.content.is_empty() {
-        blocks.push(AssistantBlock::Text {
-            text: assistant.content.clone(),
-            meta: None,
-        });
-    }
-    for tool_call in &assistant.tool_calls {
-        let args = serde_json::to_string(&tool_call.args)
-            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
-        let args = serde_json::value::RawValue::from_string(args)
-            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
-        blocks.push(AssistantBlock::ToolUse {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            args,
-            meta: None,
-        });
-    }
-    Ok(blocks)
-}
-
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -233,18 +203,6 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                let blocks = legacy_assistant_to_gemini_blocks(assistant)?;
-                if blocks.is_empty() {
-                    None
-                } else {
-                    Some(Message::BlockAssistant(BlockAssistantMessage {
-                        blocks,
-                        stop_reason: assistant.stop_reason,
-                        created_at: assistant.created_at,
-                    }))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_gemini_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -427,13 +385,8 @@ impl GeminiClient {
                         }));
                     }
                 }
-                Message::Assistant(_) => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "Legacy Message::Assistant is not supported by Gemini adapter; use BlockAssistant".to_string(),
-                    });
-                }
                 Message::BlockAssistant(a) => {
-                    // New format: ordered blocks with ProviderMeta
+                    // Ordered blocks with ProviderMeta
                     let mut parts = Vec::new();
 
                     for block in &a.blocks {
@@ -1653,7 +1606,7 @@ impl LlmClient for GeminiClient {
                                 if let Some(grounding_metadata) = cand.grounding_metadata {
                                     yield LlmEvent::ServerToolContent {
                                         id: None,
-                                        name: "google_search".to_string(),
+                                        kind: ServerToolKind::GoogleSearch,
                                         content: grounding_metadata,
                                         meta: None,
                                     };
@@ -1856,7 +1809,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "google_search".to_string(),
+                        kind: ServerToolKind::GoogleSearch,
                         content: serde_json::json!({
                             "groundingChunks": []
                         }),
@@ -2165,8 +2118,8 @@ mod tests {
         let mut grounding = None;
         while let Some(event) = stream.next().await {
             match event? {
-                LlmEvent::ServerToolContent { name, content, .. } => {
-                    assert_eq!(name, "google_search");
+                LlmEvent::ServerToolContent { kind, content, .. } => {
+                    assert_eq!(kind, ServerToolKind::GoogleSearch);
                     grounding = Some(content);
                 }
                 LlmEvent::Done { .. } => break,

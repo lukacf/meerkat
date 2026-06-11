@@ -71,6 +71,32 @@ schedule_enabled = true
 workgraph_enabled = false
 ```
 
+## Custom model registry entries
+
+Uncatalogued models served by a first-party API provider are declared once
+under `[models.<id>]`, next to the per-provider default model strings. One
+definition feeds provider inference, compaction scaling, capability gates, and
+call timeouts:
+
+```toml
+[models]
+anthropic = "claude-opus-4-8"
+
+[models.claude-internal-preview]
+provider = "anthropic"          # required: anthropic | openai | gemini
+display_name = "Claude Internal Preview"
+context_window = 500000          # drives compaction scaling
+max_output_tokens = 16384
+vision = true                    # capability flags default to false
+web_search = false
+call_timeout_secs = 900
+```
+
+`provider` parses into the closed provider vocabulary and fails closed on
+unknown names. Self-hosted models belong under `[self_hosted.models]` (below),
+not `[models]`. The same `[models.<id>]` table shape is accepted inside a mob
+definition (`mob.toml`) for mob-scoped models.
+
 ## Self-hosted model config
 
 Self-hosted models are defined directly in realm config:

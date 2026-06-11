@@ -157,6 +157,10 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    // #37: machine-owned revival obligation for members whose live
+    // materialization is gone while a durable snapshot remains.
+    pub member_revival_pending:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
     // `MobMachineAuthority.state.member_session_bindings`. Used by the
     // runtime-parity snapshot to expose the DSL's realtime binding map to
@@ -200,6 +204,19 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
     pub spawn_profile_authority_external_addressable:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, bool>,
+    // Row #320: machine-owned orphan budget for hard flow-turn timeouts.
+    pub orphan_budget: u64,
+    // Row #293: machine-owned default topology policy applied to unmatched edges.
+    pub topology_default_policy: crate::machines::mob_machine::PolicyDecision,
+    // Row #314: machine-owned per-member external rebind capability.
+    pub external_member_rebind_capability: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::ExternalMemberRebindCapability,
+    >,
+    // Row #351: machine-owned reconcile membership sets.
+    pub desired_members: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub members_to_spawn: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub members_to_retire: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -248,11 +265,11 @@ pub(super) enum MobCommand {
         result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
     Retire {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Respawn {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
@@ -279,8 +296,8 @@ pub(super) enum MobCommand {
     /// comms runtime and the recipient peer route from the mob wiring graph,
     /// then submits a typed `CommsCommand::PeerMessage`.
     SendPeerMessage {
-        from: MeerkatId,
-        to: MeerkatId,
+        from: AgentIdentity,
+        to: AgentIdentity,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
@@ -296,7 +313,7 @@ pub(super) enum MobCommand {
     },
     #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         outcome: Result<
             meerkat_runtime::completion::CompletionOutcome,
             meerkat_runtime::completion::CompletionWaitError,
@@ -452,7 +469,7 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ForceCancel {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Wire a local mob member to a peer target.
@@ -463,7 +480,7 @@ pub(super) enum MobCommand {
     /// so local/name uniqueness and descriptor/key/address truth are not
     /// collapsed into a member `WiringEdge`.
     Wire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
@@ -476,7 +493,7 @@ pub(super) enum MobCommand {
     /// local member targets forward to `UnwireMembers`, while raw external
     /// descriptors forward to `UnwireExternalPeer`.
     Unwire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },

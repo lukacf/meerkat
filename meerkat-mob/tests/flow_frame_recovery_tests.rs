@@ -75,7 +75,7 @@ fn assert_projection_mismatch(result: Result<(), RestoreIncompatible>, field: &'
 /// REQ-10 / CHOKE-04: FlowContext accesses loop iteration outputs by path.
 #[test]
 fn test_flow_context_accesses_loop_iteration_outputs() {
-    use meerkat_mob::runtime::path::resolve_context_path;
+    use meerkat_mob::runtime::path::{PathResolveError, resolve_context_path};
 
     let mut iter_outputs: IndexMap<StepId, serde_json::Value> = IndexMap::new();
     iter_outputs.insert(
@@ -100,21 +100,21 @@ fn test_flow_context_accesses_loop_iteration_outputs() {
 
     // Path: loops.review-loop.iterations.0.steps.impl.result
     let val = resolve_context_path(&ctx, "loops.review-loop.iterations.0.steps.impl.result");
-    assert_eq!(val, Some(&serde_json::json!("draft-v1")));
+    assert_eq!(val, Ok(&serde_json::json!("draft-v1")));
 
-    // Non-existent iteration index → None.
+    // Non-existent iteration index → typed MissingRoot fault (no silent None).
     let val2 = resolve_context_path(&ctx, "loops.review-loop.iterations.1.steps.impl.result");
-    assert_eq!(val2, None);
+    assert!(matches!(val2, Err(PathResolveError::MissingRoot { .. })));
 
-    // Non-existent loop → None.
+    // Non-existent loop → typed MissingRoot fault.
     let val3 = resolve_context_path(&ctx, "loops.other-loop.iterations.0.steps.impl.result");
-    assert_eq!(val3, None);
+    assert!(matches!(val3, Err(PathResolveError::MissingRoot { .. })));
 }
 
 /// Populated iteration 1 is accessible at its index — not just the out-of-bounds None case.
 #[test]
 fn test_flow_context_accesses_iteration_one_with_real_data() {
-    use meerkat_mob::runtime::path::resolve_context_path;
+    use meerkat_mob::runtime::path::{PathResolveError, resolve_context_path};
 
     let mut iter0: IndexMap<StepId, serde_json::Value> = IndexMap::new();
     iter0.insert(StepId::from("review"), serde_json::json!({"passes": false}));
@@ -139,15 +139,15 @@ fn test_flow_context_accesses_iteration_one_with_real_data() {
 
     // iteration 0 — first attempt failed
     let v0 = resolve_context_path(&ctx, "loops.review-loop.iterations.0.steps.review.passes");
-    assert_eq!(v0, Some(&serde_json::json!(false)));
+    assert_eq!(v0, Ok(&serde_json::json!(false)));
 
     // iteration 1 — second attempt passed
     let v1 = resolve_context_path(&ctx, "loops.review-loop.iterations.1.steps.review.passes");
-    assert_eq!(v1, Some(&serde_json::json!(true)));
+    assert_eq!(v1, Ok(&serde_json::json!(true)));
 
-    // out of bounds → None
+    // out of bounds → typed MissingRoot fault (no silent None)
     let v2 = resolve_context_path(&ctx, "loops.review-loop.iterations.2.steps.review.passes");
-    assert_eq!(v2, None);
+    assert!(matches!(v2, Err(PathResolveError::MissingRoot { .. })));
 }
 
 // ─── REQ-11 / CHOKE-05: Recovery drops stale ready_frames entries ────────────
@@ -276,16 +276,20 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
 }
 
 /// Recovery drops stale pending_body_frame_loops entries for loops whose
-/// active_body_frame_id is already set (body frame already started).
+/// machine-owned stage says the body frame is already active.
+///
+/// Pending-ness is the machine-owned `stage` (Running + AwaitingBodyFrame),
+/// never re-derived from `active_body_frame_id` absence.
 #[test]
 fn test_recovery_drops_stale_pending_body_frame_loops() {
     let mut run = minimal_run_with_schema_v2();
 
-    // A LoopSnapshot in Running phase with active_body_frame_id = Some(frame_id)
+    // A LoopSnapshot in Running phase whose stage is BodyFrameActive
     // → should NOT be in pending_body_frame_loops.
     let loop_snap = LoopSnapshot {
         kernel_state: loop_iteration::State {
             phase: loop_iteration::Phase::Running,
+            stage: loop_iteration::LoopIterationStage::BodyFrameActive,
             active_body_frame_id: Some(meerkat_mob::FrameId::from("body-frame-1")),
             ..loop_iteration::initial_state()
         },

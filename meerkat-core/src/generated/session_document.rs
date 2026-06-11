@@ -95,6 +95,13 @@ pub enum RealtimeTranscriptMaterializeDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditKind {
+    #[default]
+    Fork,
+    Rewrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionSystemPromptSource {
     #[default]
     DirectMutation,
@@ -112,7 +119,6 @@ pub enum ObservedSessionTailKind {
     System,
     SystemNotice,
     User,
-    Assistant,
     BlockAssistant,
     ToolResults,
 }
@@ -166,6 +172,20 @@ pub enum LiveSessionAuthorityReason {
     LiveUncommittedTranscript,
     RuntimeSystemContextDiverged,
     StoredTranscriptRevisionDiverged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionDocumentLifecycle {
+    #[default]
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionArchiveDisposition {
+    #[default]
+    Archive,
+    AlreadyArchived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +344,29 @@ pub enum SessionDocumentInput {
         runtime_system_context_diverged: bool,
         stored_is_archived: bool,
     },
+    RecoverSessionFromStore {
+        session_id: SessionDocumentKey,
+        has_metadata: bool,
+        has_build_state: bool,
+    },
+    ApplyPendingToolResults {
+        session_id: SessionDocumentKey,
+        result_count: u64,
+    },
+    TranscriptEdit {
+        session_id: SessionDocumentKey,
+        fork_or_rewrite_directive: TranscriptEditKind,
+    },
+    RecoverSessionLifecycleTerminal {
+        session_id: SessionDocumentKey,
+        terminal: SessionDocumentLifecycle,
+    },
+    ArchiveSessionDocument {
+        session_id: SessionDocumentKey,
+        runtime_backed: bool,
+        durable_snapshot_present: bool,
+        runtime_session_registered: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +449,23 @@ pub enum SessionDocumentEffect {
         authority: LiveSessionAuthorityKind,
         reason: LiveSessionAuthorityReason,
     },
+    SessionStoreRecoverySourceResolved {
+        recoverable: bool,
+    },
+    SessionToolResultsApplied {
+        session_id: SessionDocumentKey,
+        applied_count: u64,
+    },
+    TranscriptRewriteCommitted {
+        kind: TranscriptEditKind,
+        success: bool,
+    },
+    SessionLifecycleTerminalRecovered,
+    SessionArchiveResolved {
+        disposition: SessionArchiveDisposition,
+        write_document: bool,
+        retire_runtime: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,6 +504,7 @@ pub struct SessionDocumentMachineState {
     session_first_turn_phase: BTreeMap<SessionDocumentKey, SessionFirstTurnPhase>,
     session_pending_initial_prompt_present: BTreeMap<SessionDocumentKey, bool>,
     session_pending_tool_results_count: BTreeMap<SessionDocumentKey, u64>,
+    session_lifecycle_terminal: BTreeMap<SessionDocumentKey, SessionDocumentLifecycle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +581,14 @@ enum SessionDocumentTransition {
     ClassifyLiveSessionAuthorityDurableUncommitted,
     ClassifyLiveSessionAuthorityDurableSystemContext,
     ClassifyLiveSessionAuthorityDurableRevision,
+    RecoverSessionFromStoreAuthorized,
+    RecoverSessionFromStoreUnrecoverable,
+    ApplyPendingToolResults,
+    TranscriptEditFork,
+    TranscriptEditRewrite,
+    RecoverSessionLifecycleTerminal,
+    ArchiveSessionDocumentActive,
+    ArchiveSessionDocumentAlreadyArchived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +604,7 @@ impl SessionDocumentMachineAuthority {
         state.session_first_turn_phase = BTreeMap::new();
         state.session_pending_initial_prompt_present = BTreeMap::new();
         state.session_pending_tool_results_count = BTreeMap::new();
+        state.session_lifecycle_terminal = BTreeMap::new();
         Self { state }
     }
 
@@ -606,6 +676,27 @@ impl SessionDocumentMachineAuthority {
             .copied()
             .ok_or(SessionDocumentError {
                 op: "session_pending_tool_results_count",
+            })
+    }
+
+    #[must_use]
+    pub fn session_lifecycle_terminal_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<SessionDocumentLifecycle> {
+        self.state.session_lifecycle_terminal.get(key).copied()
+    }
+
+    fn session_lifecycle_terminal_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<SessionDocumentLifecycle, SessionDocumentError> {
+        self.state
+            .session_lifecycle_terminal
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_lifecycle_terminal",
             })
     }
 
@@ -2434,6 +2525,186 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::RecoverSessionFromStore {
+                session_id,
+                has_metadata,
+                has_build_state,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (store_projection_can_recover_authority(has_metadata, has_build_state))
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionFromStoreAuthorized);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (store_projection_can_recover_authority(has_metadata, has_build_state)
+                        == false)
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionFromStoreUnrecoverable);
+                }
+                let transition = Self::single_transition(matches, "RecoverSessionFromStore")?;
+                match transition {
+                    SessionDocumentTransition::RecoverSessionFromStoreAuthorized => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionStoreRecoverySourceResolved {
+                                recoverable: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::RecoverSessionFromStoreUnrecoverable => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionStoreRecoverySourceResolved {
+                                recoverable: false,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverSessionFromStore_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ApplyPendingToolResults {
+                session_id,
+                result_count,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
+                    matches.push(SessionDocumentTransition::ApplyPendingToolResults);
+                }
+                let transition = Self::single_transition(matches, "ApplyPendingToolResults")?;
+                match transition {
+                    SessionDocumentTransition::ApplyPendingToolResults => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SessionToolResultsApplied {
+                            session_id: session_id.clone(),
+                            applied_count: result_count,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ApplyPendingToolResults_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::TranscriptEdit {
+                session_id,
+                fork_or_rewrite_directive,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (fork_or_rewrite_directive == TranscriptEditKind::Fork)
+                {
+                    matches.push(SessionDocumentTransition::TranscriptEditFork);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (fork_or_rewrite_directive == TranscriptEditKind::Rewrite)
+                {
+                    matches.push(SessionDocumentTransition::TranscriptEditRewrite);
+                }
+                let transition = Self::single_transition(matches, "TranscriptEdit")?;
+                match transition {
+                    SessionDocumentTransition::TranscriptEditFork => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::TranscriptRewriteCommitted {
+                            kind: TranscriptEditKind::Fork,
+                            success: true,
+                        }])
+                    }
+                    SessionDocumentTransition::TranscriptEditRewrite => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::TranscriptRewriteCommitted {
+                            kind: TranscriptEditKind::Rewrite,
+                            success: true,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "TranscriptEdit_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecoverSessionLifecycleTerminal {
+                session_id,
+                terminal,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((terminal == SessionDocumentLifecycle::Active)
+                        || (terminal == SessionDocumentLifecycle::Archived))
+                {
+                    matches.push(SessionDocumentTransition::RecoverSessionLifecycleTerminal);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverSessionLifecycleTerminal")?;
+                match transition {
+                    SessionDocumentTransition::RecoverSessionLifecycleTerminal => {
+                        self.state
+                            .session_lifecycle_terminal
+                            .insert(session_id.clone(), terminal);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionLifecycleTerminalRecovered,
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverSessionLifecycleTerminal_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Active)
+                {
+                    matches.push(SessionDocumentTransition::ArchiveSessionDocumentActive);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Archived)
+                {
+                    matches.push(SessionDocumentTransition::ArchiveSessionDocumentAlreadyArchived);
+                }
+                let transition = Self::single_transition(matches, "ArchiveSessionDocument")?;
+                match transition {
+                    SessionDocumentTransition::ArchiveSessionDocumentActive => {
+                        self.state
+                            .session_lifecycle_terminal
+                            .insert(session_id.clone(), SessionDocumentLifecycle::Archived);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SessionArchiveResolved {
+                            disposition: SessionArchiveDisposition::Archive,
+                            write_document: durable_snapshot_present,
+                            retire_runtime: archive_should_retire_runtime(
+                                runtime_backed,
+                                durable_snapshot_present,
+                                runtime_session_registered,
+                            ),
+                        }])
+                    }
+                    SessionDocumentTransition::ArchiveSessionDocumentAlreadyArchived => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SessionArchiveResolved {
+                            disposition: SessionArchiveDisposition::AlreadyArchived,
+                            write_document: false,
+                            retire_runtime: false,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ArchiveSessionDocument_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -2829,6 +3100,67 @@ impl SessionDocumentMachineAuthority {
             stored_is_archived,
         })
     }
+
+    pub fn recover_session_from_store(
+        &mut self,
+        session_id: SessionDocumentKey,
+        has_metadata: bool,
+        has_build_state: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverSessionFromStore {
+            session_id,
+            has_metadata,
+            has_build_state,
+        })
+    }
+
+    pub fn apply_pending_tool_results(
+        &mut self,
+        session_id: SessionDocumentKey,
+        result_count: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ApplyPendingToolResults {
+            session_id,
+            result_count,
+        })
+    }
+
+    pub fn transcript_edit(
+        &mut self,
+        session_id: SessionDocumentKey,
+        fork_or_rewrite_directive: TranscriptEditKind,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::TranscriptEdit {
+            session_id,
+            fork_or_rewrite_directive,
+        })
+    }
+
+    pub fn recover_session_lifecycle_terminal(
+        &mut self,
+        session_id: SessionDocumentKey,
+        terminal: SessionDocumentLifecycle,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverSessionLifecycleTerminal {
+            session_id,
+            terminal,
+        })
+    }
+
+    pub fn archive_session_document(
+        &mut self,
+        session_id: SessionDocumentKey,
+        runtime_backed: bool,
+        durable_snapshot_present: bool,
+        runtime_session_registered: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ArchiveSessionDocument {
+            session_id,
+            runtime_backed,
+            durable_snapshot_present,
+            runtime_session_registered,
+        })
+    }
 }
 
 fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
@@ -2953,6 +3285,18 @@ fn resume_provider_recompute_from_model(
     provider_override_present: bool,
 ) -> bool {
     (model_override_present) && (provider_override_present == false)
+}
+
+fn store_projection_can_recover_authority(has_metadata: bool, has_build_state: bool) -> bool {
+    (has_metadata) || (has_build_state)
+}
+
+fn archive_should_retire_runtime(
+    runtime_backed: bool,
+    durable_snapshot_present: bool,
+    runtime_session_registered: bool,
+) -> bool {
+    (runtime_backed) && ((durable_snapshot_present) || (runtime_session_registered))
 }
 
 impl Default for SessionDocumentMachineAuthority {

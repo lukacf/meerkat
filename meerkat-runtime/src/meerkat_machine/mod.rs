@@ -24,7 +24,6 @@ use std::sync::RwLock as StdRwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex as StdMutex, OnceLock, Weak};
 
-use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::tool_scope::ToolScopeTurnOverlay;
 use meerkat_core::types::SessionId;
@@ -48,13 +47,12 @@ use crate::meerkat_machine_types::{
     MeerkatControlSnapshot, MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind,
     MeerkatFormalStateProjection, MeerkatInputsSnapshot, MeerkatLedgerSnapshot,
     MeerkatMachineCommand, MeerkatMachineCommandError, MeerkatMachineCommandResult,
-    MeerkatMachineRunFailure, MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot, SessionLlmCapabilityDelta, SessionLlmCapabilitySurface,
-    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
-    SessionToolVisibilityDelta,
+    MeerkatMachineRunFailure, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmReconfigureHost,
+    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
-use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+use crate::service_ext::SessionServiceRuntimeExt;
 use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
@@ -899,13 +897,12 @@ type MeerkatMachineCommandFuture<'a> = Pin<
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, cancel_runtime_loop_run,
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
-    machine_apply_run_return_projection, machine_batch_primitive_projections,
-    machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
-    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
-    machine_recycle_preserving_work, machine_reset, machine_retire,
-    machine_select_runtime_loop_batch, machine_stop_runtime, prepare_runtime_loop_batch_start,
-    rollback_runtime_loop_run_after_boundary_commit_failure,
+    machine_batch_primitive_projections, machine_batch_runtime_semantics,
+    machine_commit_prepared_destroy, machine_commit_service_turn_terminal_receipt,
+    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
+    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
+    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
+    prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;
@@ -1826,7 +1823,6 @@ impl LiveOpenAdmissionAuthority {
 #[cfg(feature = "live")]
 pub struct LiveRefreshResultAuthority {
     pub status: dsl::LiveRefreshPublicStatus,
-    pub refresh_enqueued: bool,
     pub sequence: u64,
     pub queue_acceptance_sequence: u64,
 }
@@ -1839,7 +1835,6 @@ pub struct LiveRefreshResultAuthority {
 #[cfg(feature = "live")]
 pub struct LiveCloseResultAuthority {
     pub status: dsl::LiveClosePublicStatus,
-    pub closed: bool,
     pub sequence: u64,
     pub close_observation_sequence: u64,
     channel_close_commit_authority: Option<meerkat_live::LiveChannelCloseCommitAuthority>,
@@ -1850,21 +1845,17 @@ impl LiveCloseResultAuthority {
     pub(crate) fn from_generated_effect(
         channel_id: String,
         status: dsl::LiveClosePublicStatus,
-        closed: bool,
         sequence: u64,
         close_observation_sequence: u64,
     ) -> Result<Self, String> {
-        let channel_close_commit_authority = if closed {
-            Some(build_live_channel_close_commit_authority(
+        let channel_close_commit_authority = match status {
+            dsl::LiveClosePublicStatus::Closed => Some(build_live_channel_close_commit_authority(
                 channel_id,
                 close_observation_sequence,
-            )?)
-        } else {
-            None
+            )?),
         };
         Ok(Self {
             status,
-            closed,
             sequence,
             close_observation_sequence,
             channel_close_commit_authority,
@@ -1895,7 +1886,6 @@ impl LiveCloseResultAuthority {
 #[cfg(feature = "live")]
 pub struct LiveCommandResultAuthority {
     pub command: dsl::LiveCommandPublicKind,
-    pub accepted: bool,
     pub sequence: u64,
     pub command_acceptance_sequence: u64,
 }
@@ -2064,8 +2054,6 @@ impl LiveChannelStatusAuthority {
 pub struct MeerkatMachine {
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
-    /// Runtime mode.
-    mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
@@ -2154,7 +2142,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: None,
             blob_store: None,
             llm_reconfigure_host: StdRwLock::new(None),
@@ -2183,7 +2170,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(blob_store),
             llm_reconfigure_host: StdRwLock::new(None),
@@ -2216,7 +2202,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(Arc::new(UnavailableBlobStore)),
             llm_reconfigure_host: StdRwLock::new(None),
@@ -2345,29 +2330,26 @@ impl MeerkatMachine {
     /// session lookup + DSL-lock-scoped apply. A typed transition error
     /// from the kernel is surfaced as a `String` so the dispatcher can
     /// map it onto `DispatchRefusal::ConsumerRefused`.
-    pub async fn apply_routed_meerkat_input(
+    pub(crate) async fn apply_routed_meerkat_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
-    ) -> Result<(), String> {
-        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
+    ) -> Result<(), dsl_authority::DslTransitionRefusal> {
         let _gate_guard = self
             .lock_current_session_mutation_gate(session_id)
             .await
             .ok_or_else(|| {
-                format!(
-                    "session `{session_id}` is not registered with this MeerkatMachine; \
-                     cannot deliver routed input"
+                dsl_authority::DslTransitionRefusal::other(
+                    "routed_session_not_registered",
+                    format!(
+                        "session `{session_id}` is not registered with this MeerkatMachine; \
+                         cannot deliver routed input"
+                    ),
                 )
             })?;
-        self.apply_session_dsl_input_with_dispatch_failure(
-            session_id,
-            input,
-            "RoutedMeerkatInput",
-            CommittedEffectDispatchFailure::PreserveCommittedDslState,
-        )
-        .await
-        .map(|_| ())
+        self.apply_routed_session_dsl_input(session_id, input, "RoutedMeerkatInput")
+            .await
+            .map(|_| ())
     }
 
     #[cfg(test)]
@@ -2601,25 +2583,33 @@ impl MeerkatMachine {
                     .execute_meerkat_machine_ingress_command(command)
                     .await
                     .map_err(Into::into),
-                MeerkatMachineCommand::Prepare { .. }
-                | MeerkatMachineCommand::Commit { .. }
-                | MeerkatMachineCommand::Fail { .. } => self
-                    .execute_meerkat_machine_legacy_run_command(command)
-                    .await
-                    .map_err(Into::into),
             }
         })
     }
 
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
-    pub async fn register_session(&self, session_id: SessionId) {
-        let _ = self
+    ///
+    /// Registration is a control-plane prerequisite: a failed register must not be
+    /// laundered to success. The inner command can fail recovery, so the typed
+    /// error is propagated to the caller rather than discarded.
+    pub async fn register_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), RuntimeControlPlaneError> {
+        match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::RegisterSession { session_id },
             )
-            .await;
+            .await
+            .map_err(MeerkatMachine::control_plane_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "register_session: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 }
 

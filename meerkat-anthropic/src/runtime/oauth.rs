@@ -15,8 +15,8 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
-    exchange_authorization_code_with_state, exchange_refresh_token, oauth_refresh_error,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code_with_state,
+    exchange_refresh_token, oauth_refresh_error,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -33,34 +33,15 @@ pub type TokenCommitFn = Box<
 // Constants (verified against claude-code/src/constants/oauth.ts)
 // ---------------------------------------------------------------------
 
-pub const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+// The OAuth client id, authorize/token endpoints, and scopes are owned by
+// the canonical per-provider declaration in
+// `meerkat_auth_core::oauth_flow::oauth_provider_declaration` — this module
+// only keeps the Anthropic-only facts that have no canonical twin there.
 pub const OAUTH_BETA_HEADER_NAME: &str = "anthropic-beta";
 pub const OAUTH_BETA_HEADER_VALUE: &str = "oauth-2025-04-20";
 
-// Claude.ai OAuth (subscription auth; user:* scopes).
-pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
-pub const CLAUDE_AI_SCOPES: &[&str] = &[
-    "user:profile",
-    "user:inference",
-    "user:sessions:claude_code",
-    "user:mcp_servers",
-    "user:file_upload",
-];
-
-// Console OAuth (for oauth_to_api_key provisioning; org:* scope).
-pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
-pub const CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
-pub const ALL_OAUTH_SCOPES: &[&str] = &[
-    "org:create_api_key",
-    "user:profile",
-    "user:inference",
-    "user:sessions:claude_code",
-    "user:mcp_servers",
-    "user:file_upload",
-];
-
-// Shared.
-pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+// Anthropic-only: Console OAuth → API-key provisioning endpoint and the
+// manual (non-loopback) redirect contract.
 pub const API_KEY_CREATE_URL: &str =
     "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
 pub const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
@@ -76,46 +57,18 @@ pub const DEFAULT_LOOPBACK_REDIRECT: &str = "http://localhost:0/callback";
 
 /// Build endpoints for the Claude.ai subscription OAuth flow.
 pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    let endpoints = OAuthEndpoints {
-        client_id: CLAUDE_CLIENT_ID.into(),
-        authorize_url: CLAUDE_AI_AUTHORIZE_URL.into(),
-        token_url: TOKEN_URL.into(),
-        device_code_url: None,
-        redirect_uri: redirect_uri.into(),
-        scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_authorize_params: vec![("code".into(), "true".into())],
-        token_request_format: OAuthTokenRequestFormat::Json,
-        include_state_in_token_exchange: true,
-        extra_token_params: Vec::new(),
-        refresh_scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_headers: Vec::new(),
-    };
-    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+    meerkat_auth_core::oauth_flow::oauth_provider_endpoints(
         meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi,
-        endpoints,
+        redirect_uri,
     )
 }
 
 /// Build endpoints for the Console OAuth flow (used only for
 /// `oauth_to_api_key` provisioning).
 pub fn console_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    let endpoints = OAuthEndpoints {
-        client_id: CLAUDE_CLIENT_ID.into(),
-        authorize_url: CONSOLE_AUTHORIZE_URL.into(),
-        token_url: TOKEN_URL.into(),
-        device_code_url: None,
-        redirect_uri: redirect_uri.into(),
-        scopes: CONSOLE_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_authorize_params: Vec::new(),
-        token_request_format: OAuthTokenRequestFormat::Json,
-        include_state_in_token_exchange: true,
-        extra_token_params: Vec::new(),
-        refresh_scopes: CONSOLE_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_headers: Vec::new(),
-    };
-    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+    meerkat_auth_core::oauth_flow::oauth_provider_endpoints(
         meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
-        endpoints,
+        redirect_uri,
     )
 }
 
@@ -458,9 +411,13 @@ mod tests {
     fn claude_ai_endpoints_match_claude_code_loopback_contract() {
         let endpoints = claude_ai_endpoints("http://localhost:1455/callback");
         assert_eq!(endpoints.redirect_uri, "http://localhost:1455/callback");
+        let declared = meerkat_auth_core::oauth_flow::oauth_provider_declaration(
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi,
+        );
         assert_eq!(
             endpoints.scopes,
-            CLAUDE_AI_SCOPES
+            declared
+                .scopes
                 .iter()
                 .map(|scope| (*scope).to_string())
                 .collect::<Vec<_>>()

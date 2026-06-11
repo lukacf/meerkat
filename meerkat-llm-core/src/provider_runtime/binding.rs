@@ -63,6 +63,32 @@ impl NormalizedBackendKind {
     }
 }
 
+/// The typed [`NormalizedBackendKind`] these OAuth login credentials target.
+///
+/// Lives here as a free function (not an inherent method on
+/// [`meerkat_core::OAuthProviderIdentity`]) because the identity is owned by
+/// `meerkat-core` while [`NormalizedBackendKind`] is owned here in
+/// `meerkat-llm-core`: this is the lowest crate that can see both. Auth-core's
+/// `oauth_provider_declaration` reads it from here rather than re-deriving the
+/// mapping.
+pub fn oauth_provider_backend_kind(
+    id: meerkat_core::OAuthProviderIdentity,
+) -> NormalizedBackendKind {
+    use meerkat_core::OAuthProviderIdentity;
+    match id {
+        OAuthProviderIdentity::AnthropicClaudeAi
+        | OAuthProviderIdentity::AnthropicConsoleApiKey => {
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi)
+        }
+        OAuthProviderIdentity::OpenAiChatGpt => {
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend)
+        }
+        OAuthProviderIdentity::GoogleCodeAssist => {
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist)
+        }
+    }
+}
+
 /// Provider-tagged normalized auth method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedAuthMethod {
@@ -73,14 +99,42 @@ pub enum NormalizedAuthMethod {
 }
 
 impl NormalizedAuthMethod {
+    /// Build the provider-tagged normalized auth method from a resolved
+    /// [`AuthProfile`](meerkat_core::AuthProfile), parsing the profile's
+    /// declared `auth_method` string through the profile provider's typed
+    /// matrix enum. Returns `None` for `Provider::Other` or an `auth_method`
+    /// that is not a member of that provider's auth matrix.
+    ///
+    /// This is the single typed projection consumed by every surface
+    /// (RPC/REST/CLI) that holds a resolved `AuthProfile`, replacing the
+    /// per-surface inline `provider -> *AuthMethod::parse` copies.
+    pub fn from_auth_profile(auth_profile: &meerkat_core::AuthProfile) -> Option<Self> {
+        Self::parse_for_provider(auth_profile.provider, auth_profile.auth_method.as_str())
+    }
+
+    /// Parse a raw `auth_method` string through the given provider's typed
+    /// matrix enum. Returns `None` for `Provider::Other` or a method that is
+    /// not a member of that provider's auth matrix.
+    ///
+    /// This is the single auth-method-string ingress for every surface that
+    /// holds a provider identity but no resolved `AuthProfile` (e.g. CLI
+    /// non-interactive login).
+    pub fn parse_for_provider(provider: Provider, raw: &str) -> Option<Self> {
+        match provider {
+            Provider::OpenAI => OpenAiAuthMethod::parse(raw).map(Self::OpenAi),
+            Provider::Anthropic => AnthropicAuthMethod::parse(raw).map(Self::Anthropic),
+            Provider::Gemini => GoogleAuthMethod::parse(raw).map(Self::Google),
+            Provider::SelfHosted => SelfHostedAuthMethod::parse(raw).map(Self::SelfHosted),
+            Provider::Other => None,
+        }
+    }
+
     /// The persisted credential mode this auth method stores in the
     /// `TokenStore`, or `None` for authorizer/ADC/SigV4-backed methods that
     /// hold no persisted secret.
     ///
     /// Delegates to the per-provider `*AuthMethod::persisted_auth_mode`, which
-    /// is the typed owner of the auth-method -> persisted-mode mapping. This is
-    /// the canonical replacement for the string-keyed
-    /// `persisted_auth_mode_for_auth_method` decision table.
+    /// is the typed owner of the auth-method -> persisted-mode mapping.
     pub fn persisted_auth_mode(self) -> Option<meerkat_core::auth::token_store::PersistedAuthMode> {
         match self {
             Self::OpenAi(method) => method.persisted_auth_mode(),
@@ -302,7 +356,11 @@ impl AuthLease for DynamicLease {
         &self.source_label
     }
     async fn refresh(&self, reason: AuthRefreshReason) -> Result<(), AuthError> {
-        Err(AuthError::RefreshFailed(format!(
+        // A dynamic lease has no in-place refresh: the caller must re-resolve
+        // the typed auth binding through the resolver. Surface that as the
+        // typed `ResolveRequired`, not a generic `RefreshFailed` (no refresh
+        // was attempted), so callers can branch on re-resolution explicitly.
+        Err(AuthError::ResolveRequired(format!(
             "dynamic lease '{}' cannot refresh in place for reason {reason:?}; re-resolve the typed auth_binding",
             self.source_label
         )))
@@ -358,7 +416,7 @@ mod tests {
             .refresh(AuthRefreshReason::Manual)
             .await
             .expect_err("dynamic refresh must not report success without work");
-        assert!(matches!(err, AuthError::RefreshFailed(_)));
+        assert!(matches!(err, AuthError::ResolveRequired(_)));
     }
 
     #[tokio::test]

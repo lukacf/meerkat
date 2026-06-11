@@ -79,12 +79,14 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
     assert.equal(state.run_counter, undefined);
 
     session.destroy();
-    const archived = session.getState();
-    assert.equal(archived.session_id, state.session_id);
-    assert.equal(archived.is_active, false);
+    // Row #215: a destroyed handle is retired and fails closed — it is no
+    // longer an addressable archived projection. getState() throws the typed
+    // invalid_session_handle envelope (a JSON string from err_js).
+    assert.throws(() => session.getState(), /invalid_session_handle/);
+    // turn() wraps the rejection into a typed MeerkatError carrying the code.
     await assert.rejects(
       () => session.turn("stale handles must not restart archived sessions"),
-      /SESSION_NOT_FOUND|session not found/,
+      (error) => error?.code === "invalid_session_handle",
     );
     assert.throws(() => session.isDestroyed, /deprecated/i);
   } finally {
@@ -140,16 +142,24 @@ test("Session.destroy does not cache destroyed state when the underlying wasm de
 test("Session.destroy treats runtime teardown as canonical absence without poisoning the handle", () => {
   let destroyAttempts = 0;
   let stateReads = 0;
+  // The real WASM runtime rejects with its typed `{ code, message }` JSON
+  // envelope string (via `err_js`), not a plain Error message. Row #215:
+  // destroy idempotency is classified by the typed `code`, never by string
+  // matching the message.
+  const notInitializedEnvelope = JSON.stringify({
+    code: "not_initialized",
+    message: "runtime not initialized",
+  });
   const session = new Session(
     8,
     async () => "{}",
     () => {
       stateReads += 1;
-      throw new Error("not_initialized: runtime not initialized");
+      throw notInitializedEnvelope;
     },
     () => {
       destroyAttempts += 1;
-      throw new Error("not_initialized: runtime not initialized");
+      throw notInitializedEnvelope;
     },
     () => "[]",
     async () => JSON.stringify({ handle: 8, status: "staged" }),
@@ -450,14 +460,16 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await delay(25);
         items = subscription.poll();
-        if (items.some((item) => item.type === "lagged")) {
+        if (items.some((item) => item.payload?.type === "stream_truncated")) {
           break;
         }
       }
 
-      const lagged = items.find((item) => item.type === "lagged");
-      assert.ok(lagged, "expected a lagged signal from the shipped subscription path");
-      assert.ok(lagged.skipped >= 1);
+      // K19: a lag gap arrives as the generated stream_truncated envelope.
+      const lagged = items.find((item) => item.payload?.type === "stream_truncated");
+      assert.ok(lagged, "expected a stream_truncated lag signal from the shipped subscription path");
+      assert.equal(lagged.payload.reason.kind, "stream_lagged");
+      assert.ok(lagged.payload.reason.dropped >= 1);
       const survivingEvent = items.find((item) => item.payload?.type === "text_delta");
       assert.ok(survivingEvent, "expected a surviving text_delta event after lag");
       subscription.close();
@@ -517,11 +529,11 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_unwire(mobId, member, peer) {
       calls.push(["unwire", mobId, member, peer]);
     },
-    async mob_wire_target(mobId, member, targetJson) {
-      calls.push(["wire_target", mobId, member, JSON.parse(targetJson)]);
+    async mob_wire_peer(mobId, member, peerJson) {
+      calls.push(["wire_peer", mobId, member, JSON.parse(peerJson)]);
     },
-    async mob_unwire_target(mobId, member, targetJson) {
-      calls.push(["unwire_target", mobId, member, JSON.parse(targetJson)]);
+    async mob_unwire_peer(mobId, member, peerJson) {
+      calls.push(["unwire_peer", mobId, member, JSON.parse(peerJson)]);
     },
     async mob_list_members() {
       return JSON.stringify([
@@ -548,9 +560,11 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         handling_mode: "queue",
       });
     },
-    async mob_member_status(_mobId, agentIdentity) {
+    async mob_member_status(mobId, agentIdentity) {
       return JSON.stringify({
         status: "active",
+        // member_ref is runtime-owned and arrives in the status payload.
+        member_ref: `ref-${mobId}-${agentIdentity}`,
         agent_runtime_id: { identity: agentIdentity, generation: 1 },
         fence_token: 1,
         tokens_used: 7,

@@ -32,7 +32,7 @@ export interface MobMemberSendResult {
 }
 
 export interface MobFlowStatusResult {
-  run: unknown;
+  run?: Record<string, unknown>;
 }
 
 export interface MobHelperResult {
@@ -58,8 +58,9 @@ export interface MobMemberStatusResult {
   external_member?: unknown;
   is_final: boolean;
   kickoff?: unknown;
+  member_ref: WireMemberRef;
   output_preview?: string;
-  peer_connectivity?: unknown;
+  peer_connectivity?: Record<string, unknown>;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
@@ -69,4 +70,11 @@ export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
   status: "applied" | "staged" | "duplicate";
+}
+
+export interface MobLifecycleResult {
+  action: "stop" | "resume" | "complete" | "reset" | "destroy";
+  destroy_report?: unknown;
+  mob_id: string;
+  ok: boolean;
 }

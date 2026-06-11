@@ -3,6 +3,7 @@ use crate::identity::{
     NamedTypeBinding, NamedTypeId, PhaseId, ProtocolId, RustTypeAtom, SignalVariantId,
     TransitionId,
 };
+use crate::seam::SeamClassification;
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
@@ -42,6 +43,10 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_coordination_resource_claim_unexpired",
     "mob_coordination_resource_claim_active_at",
     "mob_coordination_resource_claim_inactive_at",
+    // WAVE G2 machine folds (#181 respawn generation, #351 membership reconcile).
+    "mob_machine_next_respawn_generation",
+    "mob_machine_members_to_spawn",
+    "mob_machine_members_to_retire",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +130,35 @@ impl MachineSchema {
             if !field_names.contains(initializer.field.as_str()) {
                 return Err(MachineSchemaError::UnknownField {
                     field: initializer.field.as_str().to_owned(),
+                });
+            }
+        }
+
+        // Every declared semantic state field MUST carry an explicit
+        // `state.init.fields` initializer (#174, fix (b)). Without this, a
+        // field with no declared initializer falls through to the runtime
+        // type-generic auto-seed (`GeneratedMachineKernel::initial_state`),
+        // and enum-typed fields in particular default to the reserved
+        // `_Unset` sentinel — an untyped, semantically-meaningless placeholder
+        // that launders an absent value into a live field. The fix is to fail
+        // closed at codegen-validation time: a machine that omits an
+        // initializer for any of its `state.fields` is rejected, forcing the
+        // author to declare the typed initial fact (a typed Option-shaped
+        // `None`, an `EmptySet`/`EmptyMap`, or a concrete enum variant) rather
+        // than relying on an unset sentinel. The machine's phase field is
+        // modelled separately (`state.init.phase`) and is excluded from
+        // `state.fields` by the codegen, so it is never subject to this rule.
+        let initialized_fields: IndexSet<&str> = self
+            .state
+            .init
+            .fields
+            .iter()
+            .map(|initializer| initializer.field.as_str())
+            .collect();
+        for field in &self.state.fields {
+            if !initialized_fields.contains(field.name.as_str()) {
+                return Err(MachineSchemaError::MissingInitializer {
+                    field: field.name.as_str().to_owned(),
                 });
             }
         }
@@ -312,9 +346,13 @@ impl MachineSchema {
         }
         validate_string_enum_named_variants_machine(self)?;
 
-        // Validate effect dispositions: every rule must reference a known effect variant,
-        // no duplicates, and when dispositions are present every effect must be covered.
-        if !self.effect_dispositions.is_empty() {
+        // Validate effect dispositions: every rule must reference a known effect
+        // variant with no duplicates, and — unconditionally (#294) — when the
+        // machine declares any effect, every effect variant must carry a
+        // disposition. An empty `effect_dispositions` vector on a machine that
+        // has effects is a coverage gap, not a pass (the gate that RMAT treats
+        // as coverage truth must not be silently satisfiable by emptiness).
+        {
             let mut disposed_variants: IndexSet<&str> = IndexSet::new();
             for rule in &self.effect_dispositions {
                 if !effect_variants.contains(rule.effect_variant.as_str()) {
@@ -367,6 +405,10 @@ pub struct EffectDispositionRule {
     /// in every composition that includes this machine.
     /// Only meaningful for `Local` or `External` dispositions.
     pub handoff_protocol: Option<ProtocolId>,
+    /// Schema-owned classification of this effect's ownership boundary.
+    /// Declared on the catalog DSL via the `seam <Classification>` clause and
+    /// read by the seam-inventory audit straight off the generated schema.
+    pub seam_classification: SeamClassification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1725,6 +1767,7 @@ pub enum MachineSchemaError {
     EmptyName(&'static str),
     UnknownPhase { phase: String },
     UnknownField { field: String },
+    MissingInitializer { field: String },
     UnknownInputVariant { variant: String },
     UnknownSurfaceOnlyInputVariant { variant: String },
     UnknownRuntimeInternalInputVariant { variant: String },
@@ -1753,6 +1796,12 @@ impl fmt::Display for MachineSchemaError {
             Self::EmptyName(kind) => write!(f, "empty {kind} name"),
             Self::UnknownPhase { phase } => write!(f, "unknown phase `{phase}`"),
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
+            Self::MissingInitializer { field } => write!(
+                f,
+                "state field `{field}` has no `state.init.fields` initializer; \
+                 declare a typed initial fact (it must not rely on the runtime \
+                 type-generic auto-seed / `_Unset` sentinel)"
+            ),
             Self::UnknownInputVariant { variant } => {
                 write!(f, "unknown input variant `{variant}`")
             }
@@ -1890,6 +1939,59 @@ mod tests {
             Err(MachineSchemaError::MissingNamedTypeBinding {
                 name: "ToolSourceKind".into(),
             })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_effect_declaring_machine_with_empty_dispositions() {
+        // #294: effect-disposition coverage is unconditional. A machine that
+        // declares effects but carries an empty `effect_dispositions` vector is
+        // a coverage gap, not a pass — clearing the dispositions of an
+        // otherwise-valid machine must fail closed with MissingEffectDisposition
+        // (previously the `if !is_empty()` gate let zero coverage through).
+        let mut schema = meerkat_machine();
+        assert_eq!(schema.validate(), Ok(()));
+        schema.effect_dispositions.clear();
+        assert!(
+            matches!(
+                schema.validate(),
+                Err(MachineSchemaError::MissingEffectDisposition { .. })
+            ),
+            "empty dispositions on an effect-declaring machine must fail closed"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_state_field_without_initializer() {
+        // #174 (fix (b)): every declared semantic state field MUST carry an
+        // explicit `state.init.fields` initializer. A field left uninitialized
+        // would otherwise fall through to the runtime type-generic auto-seed
+        // (and, for enum-typed fields, the reserved `_Unset` sentinel). Dropping
+        // the initializer for any declared `state.fields` entry must fail closed
+        // with `MissingInitializer` rather than silently relying on the seed.
+        let mut schema = meerkat_machine();
+        assert_eq!(schema.validate(), Ok(()));
+
+        let dropped = schema
+            .state
+            .fields
+            .first()
+            .expect("MeerkatMachine has at least one semantic state field")
+            .name
+            .as_str()
+            .to_owned();
+        schema
+            .state
+            .init
+            .fields
+            .retain(|initializer| initializer.field.as_str() != dropped);
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingInitializer {
+                field: dropped.clone(),
+            }),
+            "a declared state field with no initializer must fail closed (field `{dropped}`)"
         );
     }
 

@@ -23,8 +23,8 @@ use crate::session::TranscriptRewriteReason;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
-    TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
+    CallTimeoutVerdict, ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect,
+    TurnExecutionInput, TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
     TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
@@ -144,47 +144,17 @@ fn synthetic_notice_block_message(
     Message::SystemNotice(SystemNoticeMessage::with_block(kind, Some(body), block))
 }
 
+/// Test-only predicate; production notice refresh goes through the atomic
+/// `Session::replace_synthetic_notices` transcript authority.
+#[cfg(test)]
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
 }
 
-fn merge_provider_param_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target_obj), Value::Object(patch_obj)) => {
-            for (key, value) in patch_obj {
-                if value.is_null() {
-                    target_obj.remove(key);
-                } else {
-                    merge_provider_param_patch(
-                        target_obj.entry(key.clone()).or_insert(Value::Null),
-                        value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
-        }
-    }
-}
-
-fn merged_provider_params(defaults: Option<&Value>, explicit: Option<&Value>) -> Option<Value> {
-    match (defaults, explicit) {
-        (None, None) => None,
-        (Some(defaults), None) => Some(defaults.clone()),
-        (None, Some(explicit)) => Some(explicit.clone()),
-        (Some(defaults), Some(explicit)) => {
-            let mut merged = defaults.clone();
-            merge_provider_param_patch(&mut merged, explicit);
-            Some(merged)
-        }
-    }
-}
-
 fn hidden_deferred_catalog_names(
     catalog: &[crate::ToolCatalogEntry],
-    visible_names: &BTreeSet<String>,
-) -> BTreeSet<String> {
+    visible_names: &BTreeSet<crate::types::ToolName>,
+) -> BTreeSet<crate::types::ToolName> {
     catalog
         .iter()
         .filter(|entry| entry.plane == ToolPlaneClass::Session)
@@ -194,7 +164,7 @@ fn hidden_deferred_catalog_names(
                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
             )
         })
-        .map(|entry| entry.tool.name.to_string())
+        .map(|entry| entry.tool.name.clone())
         .filter(|name| !visible_names.contains(name))
         .collect()
 }
@@ -231,13 +201,13 @@ where
 }
 
 fn tool_call_args_projection_error(tool_name: &str, error: ToolCallArgumentsError) -> AgentError {
-    AgentError::ToolError(
-        ToolError::invalid_arguments(
-            tool_name,
-            format!("tool call arguments projection failed: {error}"),
-        )
-        .to_string(),
-    )
+    // Preserve the typed `invalid_arguments` cause so its `error_code()`
+    // survives terminalization to the wire surface, rather than flattening
+    // it into an opaque string.
+    AgentError::tool(ToolError::invalid_arguments(
+        tool_name,
+        format!("tool call arguments projection failed: {error}"),
+    ))
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -246,8 +216,25 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
+    /// Best-effort intra-loop session checkpoint.
+    ///
+    /// This is deliberately NOT the authoritative persistence path: the
+    /// `PersistentSessionService` re-persists the full session with
+    /// `?`-propagation after each turn (`persist_full_session_or_discard_live`),
+    /// and that is the path callers rely on for durability. This in-loop save
+    /// is a redundant convenience for the keep-alive checkpointer / store and
+    /// must therefore stay non-terminal: a failure here is logged, not
+    /// propagated, because the authoritative persistence boundary owns the
+    /// durable outcome.
+    ///
+    /// Consistent with that contract, [`RunResult`](crate::types::RunResult)
+    /// exposes no persistence-success field — the run result never claims a
+    /// persistence outcome, so a best-effort miss here cannot launder into a
+    /// false success.
     async fn save_session_best_effort(&mut self) {
-        self.sync_system_context_state_to_session();
+        if let Err(e) = self.sync_system_context_state_to_session() {
+            tracing::warn!("Failed to sync system-context state into session: {}", e);
+        }
         if let Some(ref checkpointer) = self.checkpointer {
             checkpointer.checkpoint(&self.session).await;
             return;
@@ -332,13 +319,12 @@ where
     }
 
     fn turn_in_extraction_flow(&self) -> Result<bool, AgentError> {
-        let snapshot = self.runtime_turn_authority_snapshot()?;
-        Ok(matches!(snapshot.turn_phase, TurnPhase::Extracting)
-            || (self.extraction_state.primary_output().is_some()
-                && matches!(
-                    snapshot.turn_phase,
-                    TurnPhase::CallingLlm | TurnPhase::DrainingBoundary
-                )))
+        // Dogma K9: the generated machine owns the total in-extraction fact
+        // (`extraction_active`, set by EnterExtraction, cleared on terminal
+        // transitions and run start). The former derivation from the
+        // loop-local `extraction_state.primary_output` scratch was shell
+        // shadow truth with a divergence window during retry rounds.
+        Ok(self.runtime_turn_authority_snapshot()?.extraction_active)
     }
 
     fn turn_terminal_outcome(&self) -> Result<TurnTerminalOutcome, AgentError> {
@@ -382,7 +368,8 @@ where
             CallTimeoutOverride::Value(d) => Some(*d),
             CallTimeoutOverride::Disabled => None,
             CallTimeoutOverride::Inherit => {
-                // Consult the injected resolver with the current model/provider.
+                // Consult the injected resolver with the typed client provider
+                // identity — no string boundary to re-parse.
                 self.model_defaults_resolver
                     .as_ref()
                     .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
@@ -417,16 +404,23 @@ where
 
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
             let mut hydrated = messages.to_vec();
+            // The model boundary is always fail-closed: a durable blob missing
+            // at live LLM-execution hydration is a typed terminal fault, never
+            // silently rewritten into placeholder prompt text. Placeholder
+            // hydration exists only for read-side transcript rendering.
             hydrate_messages_for_execution(
                 blob_store.as_ref(),
                 &mut hydrated,
-                MissingBlobBehavior::HistoricalPlaceholder,
+                MissingBlobBehavior::Error,
             )
             .await
-            .map_err(|err| {
-                AgentError::InternalError(format!(
-                    "failed to hydrate image refs before llm execution: {err}"
-                ))
+            .map_err(|err| match err {
+                crate::blob::BlobStoreError::NotFound(blob_id) => AgentError::ConfigError(format!(
+                    "required image blob is unavailable before llm execution: {blob_id}"
+                )),
+                other => AgentError::InternalError(format!(
+                    "failed to hydrate image refs before llm execution: {other}"
+                )),
             })?;
             Some(hydrated)
         } else {
@@ -489,24 +483,25 @@ where
                     {
                         Ok(inner_result) => inner_result,
                         Err(_elapsed) => {
-                            // Timeout fired — classify by pre-selected source.
-                            // TurnBudget is non-retryable (whole-turn expired).
-                            // CallBudget flows through step 5 retry logic below.
-                            match source {
-                                CallTimeoutSource::CallBudget => Err(AgentError::Llm {
-                                    provider: self.client.provider(),
+                            // Timeout fired — source is pre-selected shell-side,
+                            // but MeerkatMachine (#323) owns the VERDICT: retryable
+                            // call timeout vs terminal turn-budget. The loop only
+                            // mirrors the emitted verdict into the existing paths.
+                            let timeout_ms = effective_timeout.as_millis() as u64;
+                            match self.classify_call_timeout(source, timeout_ms)? {
+                                CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
+                                    provider: self.client.provider().as_str(),
                                     reason: crate::error::LlmFailureReason::CallTimeout {
-                                        duration_ms: effective_timeout.as_millis() as u64,
+                                        duration_ms: timeout_ms,
                                     },
                                     message: format!(
                                         "LLM call timed out after {}s",
                                         effective_timeout.as_secs()
                                     ),
                                 }),
-                                CallTimeoutSource::TurnBudget => {
+                                CallTimeoutVerdict::TerminalTurnBudget => {
                                     let exceeded =
                                         self.budget.observe().exceeded().unwrap_or_else(|| {
-                                            let timeout_ms = effective_timeout.as_millis() as u64;
                                             let (elapsed_ms, limit_ms) = self
                                                 .budget
                                                 .time_usage()
@@ -534,7 +529,7 @@ where
                         if allow_empty_success {
                             return Ok(result);
                         }
-                        let error = AgentError::llm_empty_response(self.client.provider());
+                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
                         // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
                         // owns the recoverable-vs-fatal/exhaustion verdict. Only
                         // a machine `Recover` verdict drives the retry path;
@@ -566,16 +561,12 @@ where
                                     retry: retry_schedule.clone(),
                                 })?;
                             self.execute_turn_effects(&recover, turn_count, event_tx)
-                                .await;
+                                .await?;
                             let _ = crate::event_tap::tap_emit(
                                 &self.event_tap,
                                 event_tx.as_ref(),
                                 AgentEvent::Retrying {
-                                    attempt: retry_schedule.plan.attempt,
-                                    max_attempts: retry_schedule.plan.max_retries,
-                                    error: error.to_string(),
-                                    delay_ms: retry_schedule.plan.selected_delay_ms,
-                                    retry: Some(retry_schedule.clone()),
+                                    retry: retry_schedule.clone(),
                                 },
                             )
                             .await;
@@ -590,7 +581,7 @@ where
                                     retry_attempt: retry_schedule.plan.attempt,
                                 })?;
                             self.execute_turn_effects(&retry, turn_count, event_tx)
-                                .await;
+                                .await?;
                             continue;
                         }
                         return Err(error);
@@ -630,16 +621,12 @@ where
                                 retry: retry_schedule.clone(),
                             })?;
                         self.execute_turn_effects(&recover, turn_count, event_tx)
-                            .await;
+                            .await?;
                         let _ = crate::event_tap::tap_emit(
                             &self.event_tap,
                             event_tx.as_ref(),
                             AgentEvent::Retrying {
-                                attempt: retry_schedule.plan.attempt,
-                                max_attempts: retry_schedule.plan.max_retries,
-                                error: e.to_string(),
-                                delay_ms: retry_schedule.plan.selected_delay_ms,
-                                retry: Some(retry_schedule.clone()),
+                                retry: retry_schedule.clone(),
                             },
                         )
                         .await;
@@ -653,7 +640,7 @@ where
                             retry_attempt: retry_schedule.plan.attempt,
                         })?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
-                            .await;
+                            .await?;
                         continue;
                     }
                     return Err(e);
@@ -674,10 +661,8 @@ where
                     session_id: self.session.id().clone(),
                     turn_number: Some(turn_count),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -767,6 +752,76 @@ where
             })
     }
 
+    /// #128: mirror MeerkatMachine's empty-assistant-output verdict.
+    ///
+    /// The agent loop computes `has_visible_or_actionable` (this turn's
+    /// assistant message OR any prior visible/actionable output in the run) as
+    /// a pure pre-classifier, then drives the machine's
+    /// `ClassifyAssistantOutput` classifier. MeerkatMachine — not this shell —
+    /// owns whether the empty output is terminal. Fails closed if no verdict.
+    fn classify_assistant_output_terminal(
+        &self,
+        has_visible_or_actionable: bool,
+    ) -> Result<bool, AgentError> {
+        let effects = self.apply_turn_input_via_runtime_handle(
+            &TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            },
+        )?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::AssistantOutputClassified {
+                    empty_response_terminal,
+                } => Some(empty_response_terminal),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine accepted ClassifyAssistantOutput but emitted no verdict"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// #323: mirror MeerkatMachine's call-timeout verdict.
+    ///
+    /// Source selection stays shell-side (the loop knows which budget fired
+    /// before awaiting); the machine owns whether the timeout is a retryable
+    /// call timeout or a terminal turn-budget exhaustion. Fails closed if no
+    /// verdict.
+    fn classify_call_timeout(
+        &self,
+        source: CallTimeoutSource,
+        timeout_ms: u64,
+    ) -> Result<CallTimeoutVerdict, AgentError> {
+        let dsl_source = match source {
+            CallTimeoutSource::CallBudget => {
+                crate::turn_execution_authority::CallTimeoutSource::CallBudget
+            }
+            CallTimeoutSource::TurnBudget => {
+                crate::turn_execution_authority::CallTimeoutSource::TurnBudget
+            }
+        };
+        let effects =
+            self.apply_turn_input_via_runtime_handle(&TurnExecutionInput::ClassifyCallTimeout {
+                source: dsl_source,
+                timeout_ms,
+            })?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::CallTimeoutClassified { verdict, .. } => Some(verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine accepted ClassifyCallTimeout but emitted no verdict"
+                        .to_string(),
+                )
+            })
+    }
+
     fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
@@ -818,50 +873,66 @@ where
 
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
+    ///
+    /// Terminal effects (`RunCompleted`/`RunFailed`/`RunCancelled`) are applied
+    /// against the runtime turn-state handle, which owns the canonical
+    /// lifecycle fact. If the handle REJECTS a terminal effect, the run is NOT
+    /// terminalized — fail closed by `?`-propagating the rejection as an
+    /// `AgentError` (mirroring `apply_turn_input_via_runtime_handle`) instead of
+    /// laundering it into a `tracing::warn!` and reporting the effect applied.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
-        turn_count: u32,
+        // Retained in the signature as the turn context effects execute within;
+        // no longer consumed since compaction indexing stopped using the turn
+        // as a source-identity proxy (#152).
+        _turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
-    ) {
+    ) -> Result<(), AgentError> {
         for effect in &transition.effects {
             match effect {
                 TurnExecutionEffect::RunCompleted { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_completed(run_id.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunCompleted effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle.run_completed(run_id.clone()).map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "runtime turn-state handle rejected RunCompleted effect for \
+                                 {run_id:?}: {err}"
+                            ))
+                        })?;
                     }
                 }
                 TurnExecutionEffect::RunFailed { run_id, reason } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_failed(run_id.clone(), reason.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunFailed effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle
+                            .run_failed(run_id.clone(), reason.clone())
+                            .map_err(|err| {
+                                AgentError::InternalError(format!(
+                                    "runtime turn-state handle rejected RunFailed effect for \
+                                     {run_id:?}: {err}"
+                                ))
+                            })?;
                     }
                 }
                 TurnExecutionEffect::RunCancelled { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_cancelled(run_id.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunCancelled effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle.run_cancelled(run_id.clone()).map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "runtime turn-state handle rejected RunCancelled effect for \
+                                 {run_id:?}: {err}"
+                            ))
+                        })?;
                     }
                 }
                 TurnExecutionEffect::RunStarted { .. }
                 | TurnExecutionEffect::BoundaryApplied { .. }
                 | TurnExecutionEffect::CheckCompaction
-                // Mirrored directly by `classify_llm_failure_recovery`; never
-                // routed through turn-effect execution.
-                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. } => {}
+                // Classifier verdicts are mirrored directly at their call
+                // sites (classify_llm_failure_recovery / classify_assistant_output
+                // / classify_call_timeout); never routed through turn-effect
+                // execution.
+                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. }
+                | TurnExecutionEffect::AssistantOutputClassified { .. }
+                | TurnExecutionEffect::CallTimeoutClassified { .. } => {}
             }
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;
@@ -895,18 +966,12 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            match self
-                                .index_compaction_discards(&outcome.discarded, turn_count)
-                                .await
-                            {
+                            match self.index_compaction_discards(&outcome.discarded).await {
                                 crate::memory::MemoryIndexDelivery::Rejected {
                                     error,
                                     attempted_entries,
                                     ..
                                 } => {
-                                    let error_message = format!(
-                                        "memory indexing failed after compaction ({attempted_entries} entries attempted): {error}"
-                                    );
                                     tracing::warn!(
                                         error = %error,
                                         attempted_entries,
@@ -916,7 +981,10 @@ where
                                         &self.event_tap,
                                         event_tx.as_ref(),
                                         AgentEvent::CompactionFailed {
-                                            error: error_message,
+                                            reason: crate::event::CompactionFailureReason::memory_indexing_failed(
+                                                attempted_entries,
+                                                error.to_string(),
+                                            ),
                                         },
                                     )
                                     .await
@@ -935,15 +1003,14 @@ where
                                 outcome.new_messages,
                                 TranscriptRewriteReason::new("compaction"),
                             ) {
-                                let error_message = format!(
-                                    "failed to commit compaction transcript rewrite: {error}"
-                                );
                                 tracing::warn!(error = %error, "failed to commit compaction transcript rewrite");
                                 if !crate::event_tap::tap_emit(
                                     &self.event_tap,
                                     event_tx.as_ref(),
                                     AgentEvent::CompactionFailed {
-                                        error: error_message,
+                                        reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                                            error.to_string(),
+                                        ),
                                     },
                                 )
                                 .await
@@ -982,22 +1049,23 @@ where
                     .session_boundary_index
                     .saturating_add(1);
                 let cadence = self.compaction_cadence.clone();
-                if let Err(error) =
-                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
-                {
-                    tracing::warn!(
-                        error = %error,
-                        "failed to persist session compaction cadence metadata"
-                    );
-                }
+                // A cadence-persist failure is a typed serialization fault, not
+                // a best-effort no-op: surfacing it keeps the persisted cadence
+                // and the in-memory `compaction_cadence` from silently diverging.
+                crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                    .map_err(|error| {
+                        AgentError::InternalError(format!(
+                            "failed to persist session compaction cadence metadata: {error}"
+                        ))
+                    })?;
             }
         }
+        Ok(())
     }
 
     async fn index_compaction_discards(
         &self,
         discarded: &[Message],
-        turn_count: u32,
     ) -> crate::memory::MemoryIndexDelivery {
         let session_id = self.session.id().clone();
         let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
@@ -1005,14 +1073,20 @@ where
             return crate::memory::MemoryIndexDelivery::NoStore { scope };
         };
         let mut requests = Vec::new();
-        for message in discarded {
-            let content = message.as_indexable_text();
-            if content.is_empty() {
-                continue;
-            }
+        // Compaction discards the front prefix of session history, so a
+        // discarded entry's index IS its offset in the original transcript.
+        // The typed source carries that offset as the canonical origin handle,
+        // not the compaction turn number (which was only a proxy).
+        for (offset, message) in discarded.iter().enumerate() {
+            // Carry the typed indexability decision to the store; the store
+            // owns the include/exclude policy rather than the producer inferring
+            // it from an empty flattened string.
+            let content = message.indexable_content();
             let metadata = crate::memory::MemoryMetadata {
                 session_id: session_id.clone(),
-                turn: Some(turn_count),
+                source: crate::memory::MemorySource::Compaction {
+                    source_range: crate::memory::MessageRange::single(offset as u64),
+                },
                 indexed_at: crate::time_compat::SystemTime::now(),
             };
             let request =
@@ -1061,10 +1135,18 @@ where
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
-        if !self
-            .cancel_after_boundary_requested
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        // Non-blocking drain of the typed command channel. Coalesce any pending
+        // commands into a single boundary observation, mirroring the prior
+        // `AtomicBool::swap(false)` edge semantics: the request is observed at
+        // most once per boundary regardless of how many commands queued. A
+        // disconnected producer simply means no request is pending.
+        let mut requested = false;
+        while let Ok(crate::agent::CancelAfterBoundaryCommand) =
+            self.cancel_after_boundary_rx.try_recv()
         {
+            requested = true;
+        }
+        if !requested {
             return Ok(());
         }
 
@@ -1107,7 +1189,7 @@ where
             failure: TurnFailureSource::from_agent_error(error),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -1124,7 +1206,7 @@ where
             error: reason.clone(),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
-            .await;
+            .await?;
 
         let extraction_error = crate::types::ExtractionError {
             last_output: self
@@ -1145,11 +1227,17 @@ where
             structured_output: None,
             extraction_error: Some(extraction_error.clone()),
             schema_warnings: self.extraction_state.take_schema_warnings(),
-            skill_diagnostics: self.collect_skill_diagnostics().await,
+            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
         self.save_session_best_effort().await;
         self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
             .await;
+        // `ExtractionFailed` IS the terminal observability event for a failed
+        // extraction. Mark the run-completed event as already emitted so the
+        // outer run loop does not additionally publish a success-shaped
+        // `RunCompleted` (which carries `terminal_cause_kind: None` and would
+        // launder the failed run as a clean completion to late observers).
+        self.run_completed_event_emitted = true;
         Ok(result)
     }
 
@@ -1195,11 +1283,27 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
-        let max_turns = self.config.max_turns.unwrap_or(100);
+        // The turn cap is resolved once at the build/composition seam
+        // (`AgentBuilder::build_inner` applies `DEFAULT_MAX_TURNS` when the
+        // surface left `config.max_turns` unset). The loop reads that resolved
+        // value rather than re-deriving the default here; a missing resolution
+        // is a build-seam invariant violation, not a license to invent a cap.
+        let max_turns = self.config.max_turns.ok_or_else(|| {
+            AgentError::InternalError(
+                "agent turn cap was not resolved at the build seam: config.max_turns is None"
+                    .to_string(),
+            )
+        })?;
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
         self.extraction_state.reset();
+        // Flush any cancel-after-boundary commands left undrained by a prior
+        // run so a stale request never leaks into this fresh run. The producer
+        // end (the requesting surface) cannot reach the agent-owned receiver, so
+        // the staleness reset lives here at the run-start seam — replacing the
+        // previous surface-side `clear` of the shared `AtomicBool` carrier.
+        while self.cancel_after_boundary_rx.try_recv().is_ok() {}
 
         // --- Authority lifecycle: consume the generated primitive start ---
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
@@ -1224,7 +1328,7 @@ where
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
         })?;
-        self.execute_turn_effects(&t, 0, &event_tx).await;
+        self.execute_turn_effects(&t, 0, &event_tx).await?;
 
         // Helper to conditionally emit events (only when listener exists).
         // Also forwards to the event tap for interaction-scoped subscribers.
@@ -1297,14 +1401,16 @@ where
                     //
                     //    Strip prior synthetic AuthReauthRequired notices
                     //    so the notice always reflects current DSL state.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| {
-                            !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
-                        },
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up auth synthetic notices");
-                    }
+                    //    Notice refresh is ONE atomic transcript-authority
+                    //    edit; a strip fault propagates typed instead of
+                    //    leaving a stale notice in prompt truth.
+                    self.session
+                        .replace_synthetic_notices(SystemNoticeKind::AuthReauthRequired, Vec::new())
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "auth synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 1. Poll external updates BEFORE tool capture so newly
                     //    connected tools are visible in the same LLM call.
@@ -1320,28 +1426,24 @@ where
                     }
 
                     // 3. Manage [MCP_PENDING] notice lifecycle.
-                    //    Always strip prior synthetic notices to avoid stale state.
-                    //    Uses starts_with on a strict prefix to avoid matching user text.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| !is_synthetic_notice(message, SystemNoticeKind::McpPending),
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up MCP synthetic notices");
-                    }
-                    // The MCP lifecycle handle is the only authoritative read
-                    // side for pending server notices. Without it, core has no
-                    // typed owner to project from.
+                    //    The MCP lifecycle handle is the only authoritative
+                    //    read side for pending server notices; the refresh is
+                    //    ONE atomic strip+push transcript edit. A strip fault
+                    //    propagates typed — no push happens on top of a stale
+                    //    notice.
                     let pending_servers: Vec<String> = self
                         .mcp_server_lifecycle_handle
                         .as_deref()
                         .map(|handle| handle.pending_server_ids().into_iter().collect())
                         .unwrap_or_default();
-                    if !pending_servers.is_empty() {
+                    let mcp_pending_notices = if pending_servers.is_empty() {
+                        Vec::new()
+                    } else {
                         let body = format!(
                             "Servers connecting: {}. Tools will appear when ready.",
                             pending_servers.join(", ")
                         );
-                        self.session.push(synthetic_notice_block_message(
+                        vec![synthetic_notice_block_message(
                             SystemNoticeKind::McpPending,
                             body.clone(),
                             crate::types::SystemNoticeBlock::Mcp {
@@ -1352,16 +1454,23 @@ where
                                 detail: Some(body),
                                 pending_sources: pending_servers,
                             },
-                        ));
-                    }
+                        )]
+                    };
+                    self.session
+                        .replace_synthetic_notices(
+                            SystemNoticeKind::McpPending,
+                            mcp_pending_notices,
+                        )
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "MCP pending synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 3b. Background shell job completion notices via CompletionFeed.
-                    if let Err(error) = self.session.retain_messages_internal(
-                        |message| !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob),
-                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                    ) {
-                        tracing::warn!(error = %error, "failed to clean up background-job synthetic notices");
-                    }
+                    //    Collected first, then applied through the ONE atomic
+                    //    notice-refresh transcript edit below.
+                    let mut background_job_notices: Vec<Message> = Vec::new();
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
                     if let (Some(feed), Some(registry)) =
                         (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
@@ -1417,7 +1526,7 @@ where
                                 entry.display_name, job_id, status_str, detail,
                             );
                             notice.push_str("\nUse shell_job_status to get the full output.");
-                            self.session.push(synthetic_notice_block_message(
+                            background_job_notices.push(synthetic_notice_block_message(
                                 SystemNoticeKind::BackgroundJob,
                                 notice,
                                 crate::types::SystemNoticeBlock::BackgroundJob {
@@ -1451,6 +1560,20 @@ where
                             "completion feed present without generated ops cursor authority; skipping feed delivery"
                         );
                     }
+                    // ONE atomic strip+push refresh for background-job
+                    // notices: stale notices are cleared even when no feed is
+                    // wired, and a strip fault propagates typed instead of
+                    // pushing fresh notices beside stale ones.
+                    self.session
+                        .replace_synthetic_notices(
+                            SystemNoticeKind::BackgroundJob,
+                            background_job_notices,
+                        )
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "background-job synthetic notice refresh failed: {error}"
+                            ))
+                        })?;
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
@@ -1471,7 +1594,7 @@ where
                                 let control_names = catalog
                                     .iter()
                                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                                    .map(|entry| entry.tool.name.to_string())
+                                    .map(|entry| entry.tool.name.clone())
                                     .collect::<std::collections::HashSet<_>>();
                                 let deferred_names = if !control_names.is_empty()
                                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -1487,7 +1610,7 @@ where
                                                         ToolCatalogDeferredEligibility::DeferredEligible { .. }
                                                     )
                                                 })
-                                                .map(|entry| entry.tool.name.to_string())
+                                                .map(|entry| entry.tool.name.clone())
                                                 .collect()
                                 } else {
                                     std::collections::HashSet::new()
@@ -1708,24 +1831,27 @@ where
 
                     let effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    let mut effective_provider_params = merged_provider_params(
-                        self.config.provider_tool_defaults.as_ref(),
-                        self.config.provider_params.as_ref(),
-                    );
+                    // Typed field-wise merge on the carrier: explicit params
+                    // win, build-derived tool defaults fill unset slots. A
+                    // provider-family conflict is a typed config fault.
+                    let mut effective_provider_params = self
+                        .config
+                        .provider_params
+                        .effective_params()
+                        .map_err(|error| AgentError::ConfigError(error.to_string()))?;
 
                     let pre_llm_invocation = HookInvocation {
                         point: HookPoint::PreLlmRequest,
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: Some(HookLlmRequest {
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
-                            provider_params: effective_provider_params.clone(),
+                            provider_params: (!effective_provider_params.is_empty())
+                                .then(|| effective_provider_params.clone()),
                             message_count: self.session.messages().len(),
                         }),
                         llm_response: None,
@@ -1777,22 +1903,34 @@ where
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
-                        // Inject structured_output into provider params
-                        let mut params =
-                            effective_provider_params.unwrap_or_else(|| serde_json::json!({}));
-                        if let Some(output_schema) = &self.config.output_schema
-                            && let Some(obj) = params.as_object_mut()
-                        {
-                            obj.insert("structured_output".to_string(), output_schema.to_value());
+                        // Inject structured_output through the typed ProviderTag
+                        // owner; an identity-conflict fault terminalizes the
+                        // extraction instead of being silently dropped. A
+                        // provider with no typed structured-output slot is a
+                        // typed `NoProviderSlot` outcome — extraction proceeds
+                        // prompt-based and the schema is enforced at the
+                        // validation seam below.
+                        if let Some(output_schema) = self.config.output_schema.clone() {
+                            match effective_provider_params
+                                .set_structured_output(self.client.provider(), output_schema)
+                            {
+                                Ok(_injection) => {}
+                                Err(error) => {
+                                    return self
+                                        .complete_extraction_failed(
+                                            &run_id,
+                                            turn_count,
+                                            tool_call_count,
+                                            error.to_string(),
+                                            &event_tx,
+                                        )
+                                        .await;
+                                }
+                            }
                         }
                         // Strip the provider-native web-search/grounding body via the typed
                         // ProviderTag owner — extraction is deterministic and tool-free.
-                        let mut typed = ProviderParamsOverride::from_legacy_provider_value(
-                            self.client.provider(),
-                            &params,
-                        );
-                        typed.clear_web_search();
-                        effective_provider_params = Some(typed.to_legacy_provider_value());
+                        effective_provider_params.clear_web_search();
                     }
 
                     // No tools for extraction turn (empty slice)
@@ -1802,18 +1940,13 @@ where
                     } else {
                         &tool_defs
                     };
-                    let typed_provider_params = effective_provider_params
-                        .as_ref()
-                        .map(|params| {
-                            ProviderParamsOverride::from_legacy_provider_value(
-                                self.client.provider(),
-                                params,
-                            )
-                        })
-                        .filter(|params| !params.is_empty());
+                    let typed_provider_params =
+                        Some(effective_provider_params).filter(|params| !params.is_empty());
 
                     // Call LLM with retry — route errors through machine authority
-                    let boundary_system_context = self.take_pending_system_context_boundary();
+                    let boundary_system_context = self
+                        .take_pending_system_context_boundary()
+                        .map_err(|e| AgentError::InternalError(e.to_string()))?;
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
                     let result = match self
@@ -1900,25 +2033,33 @@ where
                     let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let assistant_text = assistant_msg.to_string();
 
-                    if !assistant_msg.has_visible_or_actionable_output() {
-                        if !run_has_visible_or_actionable_output {
-                            let error = AgentError::llm_empty_response(self.client.provider());
-                            if in_extraction {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                                .await?;
-                            return Err(error);
+                    // #128: the shell computes the pure pre-classifier (this
+                    // turn's output OR any prior visible/actionable output in the
+                    // run) and MeerkatMachine owns the empty-output terminal
+                    // verdict. The loop mirrors `empty_response_terminal`.
+                    let turn_has_visible_or_actionable =
+                        assistant_msg.has_visible_or_actionable_output();
+                    let has_visible_or_actionable =
+                        turn_has_visible_or_actionable || run_has_visible_or_actionable_output;
+                    if self.classify_assistant_output_terminal(has_visible_or_actionable)? {
+                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
                         }
-                    } else if assistant_blocks_have_user_visible_output(&assistant_msg.blocks) {
+                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                            .await?;
+                        return Err(error);
+                    } else if turn_has_visible_or_actionable
+                        && assistant_blocks_have_user_visible_output(&assistant_msg.blocks)
+                    {
                         run_has_visible_or_actionable_output = true;
                     }
 
@@ -1927,10 +2068,8 @@ where
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: None,
                         llm_response: Some(HookLlmResponse {
                             assistant_text: assistant_text.clone(),
@@ -2080,10 +2219,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: Some(HookToolCall {
@@ -2129,7 +2266,11 @@ where
                                 &visible_tool_names,
                                 tc.name.as_str(),
                             ) {
-                                let error = AgentError::ToolError(error.to_string());
+                                // Preserve the typed `access_denied` / `not_found`
+                                // cause through terminalization so the distinction
+                                // survives to `error_code()`/wire instead of being
+                                // flattened into an opaque message.
+                                let error = AgentError::tool(error);
                                 self.terminalize_fatal_error(
                                     &run_id, turn_count, &event_tx, &error,
                                 )
@@ -2144,18 +2285,53 @@ where
                             executable_tool_calls.push((tool_index, tc));
                         }
 
-                        // Execute all allowed tool calls in parallel using join_all
+                        // Execute all allowed tool calls in parallel, bounding
+                        // concurrency with a semaphore and applying the typed
+                        // per-call timeout policy from `tools_config`. Timeout
+                        // expiry becomes a `ToolError::Timeout` so it flows
+                        // through `terminal_tool_outcome_for_error` exactly like
+                        // any other tool execution failure.
                         let tool_dispatch_context = self.tool_dispatch_context.clone();
+                        let default_timeout = self.tools_config.default_timeout;
+                        let tool_timeouts = self.tools_config.tool_timeouts.clone();
+                        let max_concurrent = self.tools_config.max_concurrent.max(1);
+                        let dispatch_semaphore =
+                            Arc::new(tokio::sync::Semaphore::new(max_concurrent));
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|(tool_index, tc)| {
                                 let tools_ref = Arc::clone(&tools_ref);
                                 let tool_dispatch_context = tool_dispatch_context.clone();
+                                let dispatch_semaphore = Arc::clone(&dispatch_semaphore);
+                                let call_timeout = tool_timeouts
+                                    .get(tc.name.as_str())
+                                    .copied()
+                                    .unwrap_or(default_timeout);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = tools_ref
-                                        .dispatch_with_context(tc.as_view(), &tool_dispatch_context)
-                                        .await;
+                                    let dispatch_result = match dispatch_semaphore.acquire().await {
+                                        Ok(_permit) => {
+                                            match tokio::time::timeout(
+                                                call_timeout,
+                                                tools_ref.dispatch_with_context(
+                                                    tc.as_view(),
+                                                    &tool_dispatch_context,
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(result) => result,
+                                                Err(_) => Err(ToolError::timeout(
+                                                    tc.name.clone(),
+                                                    u64::try_from(call_timeout.as_millis())
+                                                        .unwrap_or(u64::MAX),
+                                                )),
+                                            }
+                                        }
+                                        Err(_) => Err(ToolError::execution_failed(
+                                            "tool dispatch concurrency semaphore closed",
+                                        )),
+                                    };
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tool_index, tc, dispatch_result, duration_ms)
                                 }
@@ -2205,6 +2381,22 @@ where
                                 tool_result.tool_use_id = tc.id.clone();
                             }
 
+                            // Reject unsupported video tool results BEFORE any
+                            // success-shaped progress events are emitted and
+                            // route the rejection through the turn machine, so
+                            // public event truth never reports completion while
+                            // the terminal truth is an error.
+                            if tool_result.has_video() {
+                                let error = AgentError::ConfigError(
+                                    "video blocks are not supported in tool results".to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+
                             let post_tool_report = self
                                 .execute_turn_hooks(
                                     HookInvocation {
@@ -2212,10 +2404,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: None,
@@ -2247,7 +2437,6 @@ where
                             emit_event!(AgentEvent::ToolExecutionCompleted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                result: tool_result.text_content(),
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                                 duration_ms,
@@ -2260,12 +2449,6 @@ where
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                             });
-
-                            if tool_result.has_video() {
-                                return Err(AgentError::ConfigError(
-                                    "video blocks are not supported in tool results".to_string(),
-                                ));
-                            }
 
                             tool_results.push(tool_result);
                             accumulated_session_effects.extend(tool_session_effects);
@@ -2354,7 +2537,7 @@ where
                         let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                             run_id: run_id.clone(),
                         })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                         turn_count += 1;
                     } else if self.turn_in_extraction_flow()? {
                         // Extraction turn response — validate against schema
@@ -2453,7 +2636,7 @@ where
                                     // Authority decided to retry — push retry prompt
                                     self.session
                                         .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                                     turn_count += 1;
                                     continue;
                                 }
@@ -2462,7 +2645,7 @@ where
                                 // main run already completed; extraction is a
                                 // post-run outcome and must not terminalize the
                                 // run as failed.
-                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                                 let extraction_error = crate::types::ExtractionError {
                                     last_output: self
                                         .extraction_state
@@ -2482,7 +2665,9 @@ where
                                     structured_output: None,
                                     extraction_error: Some(extraction_error.clone()),
                                     schema_warnings: self.extraction_state.take_schema_warnings(),
-                                    skill_diagnostics: self.collect_skill_diagnostics().await,
+                                    skill_diagnostics: self
+                                        .resolve_skill_diagnostics_for_result()
+                                        .await,
                                 };
                                 self.save_session_best_effort().await;
                                 self.emit_extraction_failed_event(
@@ -2513,7 +2698,7 @@ where
                             structured_output,
                             extraction_error: None,
                             schema_warnings,
-                            skill_diagnostics: self.collect_skill_diagnostics().await,
+                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
                         };
                         // Validation passed — complete via authority
                         let t = self.apply_turn_input(
@@ -2521,7 +2706,7 @@ where
                                 run_id: run_id.clone(),
                             },
                         )?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                         self.save_session_best_effort().await;
                         if let Some(structured_output) = result.structured_output.clone() {
                             self.emit_extraction_succeeded_event(
@@ -2559,6 +2744,27 @@ where
                         if let Some(output_schema) = self.config.output_schema.clone()
                             && !self.turn_in_extraction_flow()?
                         {
+                            // Compile schema and capture warnings BEFORE emitting
+                            // any success-shaped boundary event. Schema compile is
+                            // a fallible extraction-setup step; if it fails the run
+                            // must terminalize as an extraction failure, so we must
+                            // not advertise `TurnCompleted`/`RunCompleted(success)`
+                            // ahead of an outcome that can still fail (row #194).
+                            let compiled = match self.client.compile_schema(&output_schema) {
+                                Ok(compiled) => compiled,
+                                Err(error) => {
+                                    return self
+                                        .complete_extraction_failed(
+                                            &run_id,
+                                            turn_count,
+                                            tool_call_count,
+                                            error.to_string(),
+                                            &event_tx,
+                                        )
+                                        .await;
+                                }
+                            };
+
                             emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                             // The main agentic turn has committed. Extraction
@@ -2589,23 +2795,6 @@ where
                                 .await;
                             self.run_completed_event_emitted = true;
 
-                            // Compile schema and capture warnings. Once the
-                            // main run is complete, schema setup failure is an
-                            // extraction failure, not a run failure.
-                            let compiled = match self.client.compile_schema(&output_schema) {
-                                Ok(compiled) => compiled,
-                                Err(error) => {
-                                    return self
-                                        .complete_extraction_failed(
-                                            &run_id,
-                                            turn_count,
-                                            tool_call_count,
-                                            error.to_string(),
-                                            &event_tx,
-                                        )
-                                        .await;
-                                }
-                            };
                             self.extraction_state
                                 .set_schema_warnings(compiled.warnings.clone());
 
@@ -2624,7 +2813,7 @@ where
                             let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
                                 run_id: run_id.clone(),
                             })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                             turn_count += 1;
                             continue;
                         }
@@ -2634,7 +2823,7 @@ where
                                 self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                                     run_id: run_id.clone(),
                                 })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                             self.save_session_best_effort().await;
                             return self.build_result(turn_count + 1, tool_call_count).await;
                         }
@@ -2649,7 +2838,7 @@ where
                             structured_output: None,
                             extraction_error: None,
                             schema_warnings: None,
-                            skill_diagnostics: self.collect_skill_diagnostics().await,
+                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
                         };
                         self.run_completed_hooks_before_terminal(
                             &mut result,
@@ -2667,7 +2856,7 @@ where
                         let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                             run_id: run_id.clone(),
                         })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
 
                         // Save session
                         self.save_session_best_effort().await;
@@ -2679,37 +2868,68 @@ where
                     // Await completion of all pending barrier operations via
                     // the machine-owned turn-local wait-set. Only barrier ops
                     // block the turn; detached ops run independently.
+                    // Authority/wait faults in this arm must apply
+                    // `TurnExecutionInput::FatalFailure` to the turn machine
+                    // before returning, mirroring the drain_turn_boundary path
+                    // below; a raw `Err` would leave the turn non-terminal.
                     if !self.turn_pending_ops_registered()? {
-                        return Err(AgentError::InternalError(
+                        let error = AgentError::InternalError(
                             "WaitingForOps entered without registered pending_op_refs".to_string(),
-                        ));
+                        );
+                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                            .await?;
+                        return Err(error);
                     }
                     let barrier_ids = self.turn_barrier_operation_ids()?;
                     if !barrier_ids.is_empty() {
-                        let wait_result = if let Some(ref registry) = self.ops_lifecycle {
-                            registry
-                                .wait_all(&run_id, &barrier_ids)
-                                .await
-                                .map_err(|e| {
-                                    AgentError::InternalError(format!(
-                                        "ops lifecycle wait_all failed: {e}"
-                                    ))
-                                })?
-                        } else {
-                            return Err(AgentError::InternalError(
-                                "barrier ops registered without ops_lifecycle registry".to_string(),
-                            ));
+                        // Clone the Arc so the immutable borrow of
+                        // `self.ops_lifecycle` is released before the
+                        // `&mut self` terminalization calls below.
+                        let registry = match self.ops_lifecycle.clone() {
+                            Some(registry) => registry,
+                            None => {
+                                let error = AgentError::InternalError(
+                                    "barrier ops registered without ops_lifecycle registry"
+                                        .to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                        };
+                        let wait_result = match registry.wait_all(&run_id, &barrier_ids).await {
+                            Ok(wait_result) => wait_result,
+                            Err(e) => {
+                                let error = AgentError::InternalError(format!(
+                                    "ops lifecycle wait_all failed: {e}"
+                                ));
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
                         };
                         // Feed the authority-owned wait-all obligation back through the
                         // generated handoff helper without relabeling its run identity.
-                        let turn_handle = self.turn_state_handle.as_deref().ok_or_else(|| {
-                            AgentError::InternalError(
-                                "runtime turn-state handle missing while submitting \
-                                 ops barrier satisfaction feedback"
-                                    .to_string(),
-                            )
-                        })?;
-                        submit_ops_barrier_satisfied(
+                        let turn_handle = match self.turn_state_handle.as_deref() {
+                            Some(turn_handle) => turn_handle,
+                            None => {
+                                let error = AgentError::InternalError(
+                                    "runtime turn-state handle missing while submitting \
+                                     ops barrier satisfaction feedback"
+                                        .to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                        };
+                        if let Err(err) = submit_ops_barrier_satisfied(
                             turn_handle,
                             OpsBarrierSatisfactionObligation {
                                 run_id: wait_result.satisfied.run_id,
@@ -2719,12 +2939,14 @@ where
                                     .into_iter()
                                     .collect(),
                             },
-                        )
-                        .map_err(|err| {
-                            AgentError::InternalError(format!(
+                        ) {
+                            let error = AgentError::InternalError(format!(
                                 "generated ops_barrier_satisfaction feedback rejected: {err}"
-                            ))
-                        })?;
+                            ));
+                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                                .await?;
+                            return Err(error);
+                        }
                     }
                     self.observe_cancel_after_boundary_request(&run_id)?;
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
@@ -2741,7 +2963,7 @@ where
                     let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                         run_id: run_id.clone(),
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                     turn_count += 1;
                 }
                 TurnPhase::DrainingBoundary | TurnPhase::Extracting => {
@@ -2749,7 +2971,7 @@ where
                     let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                         run_id: run_id.clone(),
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                 }
                 TurnPhase::Cancelling => {
                     // Handle cancellation
@@ -2765,7 +2987,7 @@ where
                         run_id: run_id.clone(),
                         retry_attempt,
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                 }
                 TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
                     return self.build_result(turn_count, tool_call_count).await;
@@ -2792,7 +3014,7 @@ where
                 structured_output: None,
                 extraction_error: None,
                 schema_warnings: None,
-                skill_diagnostics: self.collect_skill_diagnostics().await,
+                skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
             }),
             SurfaceResultClass::HardFailure => {
                 let cause_kind = match self.require_machine_terminal_failure_cause_kind(format!(
@@ -2821,14 +3043,55 @@ where
         }
     }
 
-    async fn collect_skill_diagnostics(&self) -> Option<crate::skills::SkillRuntimeDiagnostics> {
-        let runtime = self.skill_engine.as_ref()?;
-        let source_health = runtime.health_snapshot().await.ok()?;
-        let quarantined = runtime.quarantined_diagnostics().await.unwrap_or_default();
-        Some(crate::skills::SkillRuntimeDiagnostics {
+    /// Collect skill-runtime diagnostics for the terminal `RunResult`.
+    ///
+    /// Returns `Ok(None)` when there is no skill engine (genuinely absent),
+    /// `Ok(Some(_))` when diagnostics were collected, and `Err(_)` when a typed
+    /// collection fault occurred. This keeps a collection fault distinguishable
+    /// from "healthy/absent" rather than laundering a typed `SkillError` into a
+    /// whole-`None` (`health_snapshot().ok()?`) or an empty list
+    /// (`quarantined_diagnostics().unwrap_or_default()`).
+    ///
+    async fn collect_skill_diagnostics(
+        &self,
+    ) -> Result<Option<crate::skills::SkillRuntimeDiagnostics>, crate::skills::SkillError> {
+        let Some(runtime) = self.skill_engine.as_ref() else {
+            return Ok(None);
+        };
+        let source_health = runtime.health_snapshot().await?;
+        let quarantined = runtime.quarantined_diagnostics().await?;
+        Ok(Some(crate::skills::SkillRuntimeDiagnostics {
             source_health,
             quarantined,
-        })
+            collection_fault: None,
+        }))
+    }
+
+    /// Resolve skill diagnostics for the terminal `RunResult`, recording any
+    /// typed collection fault inside the result instead of dropping it.
+    ///
+    /// A collection fault produces diagnostics carrying the typed
+    /// `collection_fault` (dogma row #239): surfaces receive an explicit
+    /// failure fact instead of absent or healthy-looking diagnostics.
+    async fn resolve_skill_diagnostics_for_result(
+        &self,
+    ) -> Option<crate::skills::SkillRuntimeDiagnostics> {
+        match self.collect_skill_diagnostics().await {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                let reason = crate::event::SkillResolutionFailureReason::from_skill_error(&error);
+                tracing::warn!(
+                    %error,
+                    "skill diagnostics collection failed; recording typed collection fault \
+                     in the run result"
+                );
+                Some(crate::skills::SkillRuntimeDiagnostics {
+                    source_health: Default::default(),
+                    quarantined: Vec::new(),
+                    collection_fault: Some(reason),
+                })
+            }
+        }
     }
 }
 
@@ -2897,7 +3160,6 @@ mod tests {
         ToolDef, ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
 
@@ -2957,8 +3219,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3103,12 +3365,151 @@ mod tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: Value,
-        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillFunctionOutput, crate::skills::SkillError>,
+        > + Send {
             let missing = key.clone();
             async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
+    }
+
+    /// Skill engine whose health probe fails, used to assert that
+    /// `collect_skill_diagnostics` surfaces the typed collection fault instead
+    /// of laundering it into a whole-`None` diagnostics value (dogma row #239).
+    struct FailingHealthSkillEngine;
+
+    impl SkillEngine for FailingHealthSkillEngine {
+        fn inventory_section(
+            &self,
+        ) -> impl Future<Output = Result<String, crate::skills::SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            _keys: &[SkillKey],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<
+            Output = Result<
+                Vec<crate::skills::SkillQuarantineDiagnostic>,
+                crate::skills::SkillError,
+            >,
+        > + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<
+            Output = Result<crate::skills::SourceHealthSnapshot, crate::skills::SkillError>,
+        > + Send {
+            async move {
+                Err(crate::skills::SkillError::Load(
+                    "skill source health probe failed".into(),
+                ))
+            }
+        }
+
+        fn list_artifacts(
+            &self,
+            key: &SkillKey,
+        ) -> impl Future<
+            Output = Result<Vec<crate::skills::SkillArtifact>, crate::skills::SkillError>,
+        > + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            key: &SkillKey,
+            _artifact_path: &str,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillArtifactContent, crate::skills::SkillError>,
+        > + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            key: &SkillKey,
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::event::ToolCallArguments,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillFunctionOutput, crate::skills::SkillError>,
+        > + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+    }
+
+    /// Dogma row #239 (in-lane portion): a typed skill-diagnostics collection
+    /// fault must remain distinguishable from "healthy/absent". The source seam
+    /// no longer launders `health_snapshot()`/`quarantined_diagnostics()` errors
+    /// into a whole-`None`/empty value; `collect_skill_diagnostics` returns the
+    /// typed `SkillError` so the fault is surfaced rather than swallowed.
+    #[tokio::test]
+    async fn collect_skill_diagnostics_surfaces_typed_collection_fault() {
+        let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(Arc::new(
+            FailingHealthSkillEngine,
+        )));
+        let agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_skill_engine(skill_runtime)
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        match agent.collect_skill_diagnostics().await {
+            Err(crate::skills::SkillError::Load(message)) => {
+                assert!(
+                    message.contains("health probe failed"),
+                    "expected typed health-probe fault, got: {message}"
+                );
+            }
+            Err(other) => panic!("expected typed Load fault, got: {other:?}"),
+            Ok(diagnostics) => panic!(
+                "collection fault must not launder into a healthy/absent diagnostics value, \
+                 got: {diagnostics:?}"
+            ),
+        }
+    }
+
+    /// With no skill engine attached, the diagnostics collection is genuinely
+    /// absent (`Ok(None)`) — distinct from the collection-fault case above.
+    #[tokio::test]
+    async fn collect_skill_diagnostics_absent_engine_is_ok_none() {
+        let agent = build_agent(Arc::new(StaticLlmClient)).await;
+        assert!(
+            matches!(agent.collect_skill_diagnostics().await, Ok(None)),
+            "absent skill engine must report Ok(None), not a fault"
+        );
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -3144,8 +3545,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "openai"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {
@@ -3198,8 +3599,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3313,8 +3714,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3478,8 +3879,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3533,7 +3934,13 @@ mod tests {
     }
 
     struct RecordingMemoryStore {
-        entries: Mutex<Vec<(MemoryIndexScope, String, MemoryMetadata)>>,
+        entries: Mutex<
+            Vec<(
+                MemoryIndexScope,
+                crate::types::MemoryIndexableContent,
+                MemoryMetadata,
+            )>,
+        >,
         fail_indexing: bool,
         fail_after_successful_entries: Option<usize>,
     }
@@ -3568,6 +3975,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
+                .map(|(_, content, _)| content.clone().into_indexable_text())
+                .collect()
+        }
+
+        fn typed_contents(&self) -> Vec<crate::types::MemoryIndexableContent> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
                 .map(|(_, content, _)| content.clone())
                 .collect()
         }
@@ -3589,7 +4005,7 @@ mod tests {
             batch: MemoryIndexBatch,
         ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
             if self.fail_indexing {
-                return Err(MemoryStoreError::Index("injected failure".to_string()));
+                return Err(MemoryStoreError::Storage("injected failure".to_string()));
             }
             let (receipt_scope, requests) = batch.into_parts();
             let indexed_entries = requests.len();
@@ -3598,7 +4014,7 @@ mod tests {
                 .fail_after_successful_entries
                 .is_some_and(|successful_entries| indexed_entries > successful_entries)
             {
-                return Err(MemoryStoreError::Index("injected failure".to_string()));
+                return Err(MemoryStoreError::Storage("injected failure".to_string()));
             }
             for request in requests {
                 let (scope, content, metadata) = request.into_parts();
@@ -3773,8 +4189,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3936,12 +4352,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         deferred,
                         true,
-                        "callback:test".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "test".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:test".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "test".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::control_inline(control, true),
                 ]
@@ -3983,7 +4405,6 @@ mod tests {
                         authorities: vec![crate::DeferredToolLoadAuthority::new(
                             "deferred_tool",
                             crate::ToolVisibilityWitness {
-                                stable_owner_key: Some("callback:test".to_string()),
                                 last_seen_provenance: Some(crate::ToolProvenance {
                                     kind: crate::ToolSourceKind::Callback,
                                     source_id: "test".into(),
@@ -4033,12 +4454,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         secret,
                         true,
-                        "callback:direct-builder".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "direct-builder".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:direct-builder".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "direct-builder".into(),
+                        },
                     ),
                 ]
                 .into(),
@@ -4131,8 +4558,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4183,8 +4610,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4256,8 +4683,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4329,8 +4756,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4449,7 +4876,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &crate::service::AppendSystemContextRequest {
-                    text: "STEER_MARKER_visible_after_tool".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "STEER_MARKER_visible_after_tool".to_string(),
+                    ),
                     source: Some("test:active-steer".to_string()),
                     idempotency_key: Some("test:active-steer".to_string()),
                     source_kind: crate::session::SystemContextSource::RuntimeSteer,
@@ -4550,11 +4979,16 @@ mod tests {
 
         let mut saw_compaction_failure = false;
         while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::CompactionFailed { error } = event {
-                assert!(
-                    error.contains("stream ended before done"),
-                    "unexpected compaction failure: {error}"
-                );
+            if let crate::event::AgentEvent::CompactionFailed { reason } = event {
+                match reason {
+                    crate::event::CompactionFailureReason::LlmFailed { message, .. } => {
+                        assert!(
+                            message.contains("stream ended before done"),
+                            "unexpected compaction failure message: {message}"
+                        );
+                    }
+                    other => unreachable!("unexpected compaction failure reason: {other:?}"),
+                }
                 saw_compaction_failure = true;
             }
         }
@@ -4588,7 +5022,15 @@ mod tests {
             "the next boundary after a failed compaction should not immediately retry compaction"
         );
 
-        let cadence = crate::agent::compact::load_compaction_cadence(agent.session());
+        let cadence: crate::compact::SessionCompactionCadence = serde_json::from_value(
+            agent
+                .session()
+                .metadata()
+                .get(crate::compact::SESSION_COMPACTION_CADENCE_KEY)
+                .expect("cadence metadata must be persisted by the run loop")
+                .clone(),
+        )
+        .unwrap();
         assert_eq!(cadence.session_boundary_index, 3);
         assert_eq!(cadence.last_compaction_boundary_index, None);
         assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
@@ -4630,6 +5072,60 @@ mod tests {
         );
     }
 
+    /// Row 319: the compaction-discard producer must carry the typed
+    /// `MemoryIndexableContent` (the include/exclude policy) to the store,
+    /// rather than flattening to a `String` and silently skipping excluded
+    /// messages via the empty-string convention. A discarded tool-result
+    /// message must reach the store as a typed `Excluded(ToolResults)` request,
+    /// so the store — not the producer — owns indexability.
+    #[tokio::test]
+    async fn compaction_discard_producer_carries_typed_indexability_to_store() {
+        let client = Arc::new(StaticLlmClient);
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let discarded = vec![
+            Message::User(UserMessage::text("indexable user turn")),
+            Message::tool_results(vec![ToolResult::new(
+                "call-1".to_string(),
+                "tool output".to_string(),
+                false,
+            )]),
+        ];
+
+        let delivery = agent.index_compaction_discards(&discarded).await;
+        assert!(
+            matches!(delivery, crate::memory::MemoryIndexDelivery::Delivered(_)),
+            "typed indexability delivery should succeed: {delivery:?}"
+        );
+
+        let typed = memory_store.typed_contents();
+        assert_eq!(
+            typed.len(),
+            2,
+            "both discarded messages must reach the store as typed requests, not be skipped by the producer"
+        );
+        assert!(
+            typed.iter().any(|content| matches!(
+                content,
+                crate::types::MemoryIndexableContent::Indexable(text) if text == "indexable user turn"
+            )),
+            "the user turn must reach the store as typed Indexable content: {typed:?}"
+        );
+        assert!(
+            typed.iter().any(|content| matches!(
+                content,
+                crate::types::MemoryIndexableContent::Excluded(
+                    crate::types::MemoryIndexExclusion::ToolResults
+                )
+            )),
+            "the tool-result message must reach the store with its typed ToolResults exclusion, not be silently dropped by the producer: {typed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn compaction_memory_index_failure_preserves_original_history() {
         let client = Arc::new(CompactionAwareLlmClient::new());
@@ -4662,9 +5158,9 @@ mod tests {
         let mut saw_completed = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::CompactionFailed { error }
-                    if error.contains("memory indexing failed") =>
-                {
+                crate::event::AgentEvent::CompactionFailed {
+                    reason: crate::event::CompactionFailureReason::MemoryIndexingFailed { .. },
+                } => {
                     saw_memory_failure = true;
                 }
                 crate::event::AgentEvent::CompactionCompleted { .. } => {
@@ -4741,14 +5237,10 @@ mod tests {
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: Vec::new(),
-                        published_patches: Vec::new(),
-                        error: None,
+                        failure_reason: None,
                         duration_ms: None,
                     }],
                     decision: None,
-                    patches: Vec::new(),
-                    published_patches: Vec::new(),
                 })
             }
         }
@@ -4877,6 +5369,7 @@ mod tests {
         );
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -4888,6 +5381,310 @@ mod tests {
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::HookDenied),
             "RunCompleted hook denial should leave the machine-owned terminal cause"
+        );
+    }
+
+    /// Row #102 gate: a turn-state handle that REJECTS the terminal
+    /// `run_completed` effect must NOT be laundered into a `tracing::warn!`
+    /// while the run reports success. `execute_turn_effects` fail-closes by
+    /// `?`-propagating the rejection as an `AgentError`, so the run
+    /// terminalizes with an error rather than fabricating an `Ok(RunResult)`
+    /// over a handle that refused the canonical lifecycle fact.
+    ///
+    /// Wraps the generated-kernel-backed [`TestTurnStateHandle`] so every
+    /// non-terminal transition still moves through real MeerkatMachine
+    /// authority; only `run_completed` is forced to reject.
+    #[derive(Debug)]
+    struct RejectRunCompletedHandle {
+        inner: crate::agent::test_turn_state_handle::TestTurnStateHandle,
+    }
+
+    impl RejectRunCompletedHandle {
+        fn new() -> Self {
+            Self {
+                inner: crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            }
+        }
+    }
+
+    impl crate::handles::TurnStateHandle for RejectRunCompletedHandle {
+        fn apply_turn_input(
+            &self,
+            input: crate::turn_execution_authority::TurnExecutionInput,
+        ) -> Result<
+            Vec<crate::turn_execution_authority::TurnExecutionEffect>,
+            crate::handles::DslTransitionError,
+        > {
+            self.inner.apply_turn_input(input)
+        }
+
+        fn start_conversation_run(
+            &self,
+            run_id: RunId,
+            primitive_kind: TurnPrimitiveKind,
+            admitted_content_shape: ContentShape,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            max_extraction_retries: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_conversation_run(
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            )
+        }
+
+        fn start_immediate_append(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_append(run_id)
+        }
+
+        fn start_immediate_context(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_context(run_id)
+        }
+
+        fn primitive_applied(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.primitive_applied(run_id)
+        }
+
+        fn llm_returned_tool_calls(
+            &self,
+            run_id: RunId,
+            tool_count: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_tool_calls(run_id, tool_count)
+        }
+
+        fn llm_returned_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_terminal(run_id)
+        }
+
+        fn register_pending_ops(
+            &self,
+            run_id: RunId,
+            op_refs: std::collections::BTreeSet<crate::ops::AsyncOpRef>,
+            barrier_operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner
+                .register_pending_ops(run_id, op_refs, barrier_operation_ids)
+        }
+
+        fn tool_calls_resolved(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.tool_calls_resolved(run_id)
+        }
+
+        fn ops_barrier_satisfied(
+            &self,
+            run_id: RunId,
+            operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.ops_barrier_satisfied(run_id, operation_ids)
+        }
+
+        fn boundary_continue(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_continue(run_id)
+        }
+
+        fn boundary_complete(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_complete(run_id)
+        }
+
+        fn enter_extraction(
+            &self,
+            run_id: RunId,
+            max_retries: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.enter_extraction(run_id, max_retries)
+        }
+
+        fn extraction_start(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_start(run_id)
+        }
+
+        fn extraction_validation_passed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_passed(run_id)
+        }
+
+        fn extraction_validation_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_failed(run_id, error)
+        }
+
+        fn extraction_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_failed(run_id, error)
+        }
+
+        fn recoverable_failure(
+            &self,
+            run_id: RunId,
+            retry: crate::retry::LlmRetrySchedule,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.recoverable_failure(run_id, retry)
+        }
+
+        fn fatal_failure(
+            &self,
+            run_id: RunId,
+            failure: TurnFailureSource,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.fatal_failure(run_id, failure)
+        }
+
+        fn retry_requested(
+            &self,
+            run_id: RunId,
+            retry_attempt: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.retry_requested(run_id, retry_attempt)
+        }
+
+        fn cancel_now(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancel_now(run_id)
+        }
+
+        fn request_cancel_after_boundary(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.request_cancel_after_boundary(run_id)
+        }
+
+        fn cancellation_observed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancellation_observed(run_id)
+        }
+
+        fn acknowledge_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.acknowledge_terminal(run_id)
+        }
+
+        fn turn_limit_reached(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.turn_limit_reached(run_id)
+        }
+
+        fn budget_exhausted(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.budget_exhausted(run_id)
+        }
+
+        fn time_budget_exceeded(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.time_budget_exceeded(run_id)
+        }
+
+        fn force_cancel_no_run(&self) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.force_cancel_no_run()
+        }
+
+        /// The fail-closed seam under test: reject the terminal completion
+        /// effect. The agent loop must surface this as an error, not warn and
+        /// report the run completed.
+        fn run_completed(&self, _run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            Err(crate::handles::DslTransitionError::guard_rejected(
+                "RejectRunCompletedHandle::run_completed",
+                "test handle rejects the terminal RunCompleted effect",
+            ))
+        }
+
+        fn run_failed(
+            &self,
+            run_id: RunId,
+            reason: crate::turn_execution_authority::TurnFailureReason,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_failed(run_id, reason)
+        }
+
+        fn run_cancelled(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_cancelled(run_id)
+        }
+
+        fn snapshot(&self) -> crate::handles::TurnStateSnapshot {
+            self.inner.snapshot()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_completed_effect_rejection_fails_run_closed() {
+        let mut agent = AgentBuilder::new()
+            .resume_session({
+                let mut session = crate::Session::new();
+                session
+                    .set_build_state(crate::SessionBuildState::default())
+                    .expect("test session build state should serialize");
+                session
+            })
+            .with_turn_state_handle(Arc::new(RejectRunCompletedHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, _rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err(
+                "a turn-state handle that rejects the RunCompleted terminal effect must fail \
+                 the run closed, not report success",
+            );
+        assert!(
+            matches!(err, AgentError::InternalError(ref message)
+                if message.contains("rejected RunCompleted effect")),
+            "rejection must propagate as an InternalError naming the rejected terminal effect, \
+             got: {err:?}"
         );
     }
 
@@ -4973,17 +5770,12 @@ mod tests {
             match event {
                 crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
                 crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
-                crate::event::AgentEvent::RunFailed {
-                    error_class,
-                    error_report,
-                    ..
-                } => {
+                crate::event::AgentEvent::RunFailed { error_report, .. } => {
                     saw_run_failed = true;
-                    saw_typed_boundary_failure = error_class == crate::event::AgentErrorClass::Hook
+                    saw_typed_boundary_failure = error_report.class
+                        == crate::event::AgentErrorClass::Hook
                         && matches!(
-                            error_report
-                                .as_ref()
-                                .and_then(|report| report.reason.as_ref()),
+                            error_report.reason.as_ref(),
                             Some(crate::event::AgentErrorReason::HookDenied {
                                 hook_id: Some(hook_id),
                                 point: HookPoint::TurnBoundary,
@@ -5028,6 +5820,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -5097,6 +5890,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -5156,10 +5950,22 @@ mod tests {
 
     #[tokio::test]
     async fn hot_swap_request_policy_updates_next_turn_provider_params() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
         let client = Arc::new(RecordingLlmClient::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .provider_params(serde_json::json!({"old": true}))
-            .provider_tool_defaults(serde_json::json!({"stale_tool": {"type": "old"}}))
+            .provider_params(ProviderParamsOverride {
+                top_p: Some(0.5),
+                ..Default::default()
+            })
+            .provider_tool_defaults(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "stale"}),
+                )),
+                ..Default::default()
+            }))
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
@@ -5168,9 +5974,15 @@ mod tests {
             client.clone(),
             crate::SessionLlmRequestPolicy {
                 model: "new-model".to_string(),
-                provider_params: Some(serde_json::json!({"temperature": 0.2})),
-                provider_tool_defaults: Some(serde_json::json!({
-                    "web_search": {"type": "web_search"}
+                provider_params: Some(ProviderParamsOverride {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                }),
+                provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": "web_search"}),
+                    )),
+                    ..Default::default()
                 })),
             },
         );
@@ -5242,6 +6054,24 @@ mod tests {
                 .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
             "expected runtime prompt to include rendered skill injection, saw: {seen_messages:?}"
         );
+
+        // The durable transcript must preserve the typed activation provenance
+        // — a SkillContext block carrying the canonical key — never an
+        // anonymous text fold of the rendered body into operator text.
+        let has_typed_skill_block = agent.session().messages().iter().any(|message| {
+            matches!(message, Message::User(user) if user.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::SkillContext { skill_key, .. }
+                        if skill_key.to_string()
+                            == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"
+                )
+            }))
+        });
+        assert!(
+            has_typed_skill_block,
+            "durable transcript must carry the typed SkillContext block with provenance"
+        );
     }
 
     #[tokio::test]
@@ -5287,6 +6117,50 @@ mod tests {
             "provider should receive hydrated inline image bytes"
         );
         assert_eq!(blob_store.gets(), vec![blob_id]);
+    }
+
+    /// Row 205: a durable image blob missing from the store at the live
+    /// LLM-execution hydration seam terminalizes the turn with a typed
+    /// `ConfigError` — the model boundary is unconditionally fail-closed and
+    /// never degrades to placeholder prompt text.
+    #[tokio::test]
+    async fn llm_execution_errors_on_missing_blob_when_policy_is_error() {
+        let missing_blob_id = BlobId::new("sha256:absent-image");
+        // Empty blob store: the referenced blob is absent.
+        let blob_store = Arc::new(RecordingBlobStore::new(Vec::new()));
+        let client = Arc::new(ImageHydrationLlmClient::new());
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: missing_blob_id.clone(),
+                },
+            },
+        ])));
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .resume_session(session)
+            .with_blob_store(blob_store.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let err = agent
+            .run("current turn".to_string().into())
+            .await
+            .expect_err("missing required blob at the model boundary must fail the run");
+
+        assert!(
+            matches!(err, AgentError::ConfigError(ref message) if message.contains("absent-image")),
+            "missing-blob refusal must surface as a typed ConfigError, got: {err:?}"
+        );
+        // The provider must never be reached with a placeholder-substituted
+        // image: the fault is raised before the LLM call.
+        assert!(
+            client.seen().is_empty(),
+            "provider must not be called when the required blob is missing under Error policy"
+        );
     }
 
     #[tokio::test]
@@ -5394,6 +6268,87 @@ mod tests {
         assert_eq!(outcome.terminal_cause(), expected.terminal_cause());
     }
 
+    /// Row 166: the normal LLM-driven tool dispatch loop must apply the typed
+    /// `ToolsConfig` per-call timeout. A tool that hangs forever must be
+    /// terminalized as a `timeout` tool result (flowing through
+    /// `terminal_tool_outcome_for_error`) rather than blocking the turn.
+    #[tokio::test]
+    async fn normal_loop_tool_dispatch_applies_tools_config_timeout() {
+        struct HangingTurnDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for HangingTurnDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                std::future::pending().await
+            }
+        }
+
+        let client = Arc::new(BoundaryContextRecordingClient::new());
+        let tools = Arc::new(HangingTurnDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "hangs until the per-call timeout fires",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+        });
+
+        let tools_config = crate::config::ToolsConfig {
+            default_timeout: std::time::Duration::from_millis(20),
+            ..crate::config::ToolsConfig::default()
+        };
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tools_config(tools_config)
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("start with a tool".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly once the per-call timeout fires")
+        .expect("agent run should succeed after timeout terminalization");
+
+        // The hanging tool resolves to a timeout tool result, so the second
+        // turn ends the conversation: two turns total.
+        assert_eq!(result.turns, 2);
+
+        let mut saw_timeout_completion = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolExecutionCompleted {
+                name,
+                is_error,
+                content,
+                ..
+            } = event
+                && name == "slow_tool"
+            {
+                assert!(is_error, "timed-out tool result must be an error");
+                let text = crate::types::text_content(&content);
+                assert!(
+                    text.contains("\"error\":\"timeout\""),
+                    "timed-out tool result must carry the canonical timeout payload, got: {text}"
+                );
+                saw_timeout_completion = true;
+            }
+        }
+        assert!(
+            saw_timeout_completion,
+            "normal dispatch loop must emit a timeout tool completion for the hanging tool"
+        );
+    }
+
     #[tokio::test]
     async fn external_tool_dispatch_clears_tool_returned_terminal_cause() {
         struct ToolAuthoredTerminalCauseDispatcher {
@@ -5452,6 +6407,257 @@ mod tests {
             "runtime must not trust terminal cause supplied by tool-authored Ok outcomes"
         );
         assert_eq!(outcome.terminal_cause(), None);
+    }
+
+    /// Row 273: a `WaitingForOps` authority fault (here: barrier ops
+    /// registered without an `ops_lifecycle` registry) must terminalize the
+    /// turn through `TurnExecutionInput::FatalFailure` BEFORE returning the
+    /// raw `AgentError`, so the turn is never left non-terminal.
+    #[tokio::test]
+    async fn waiting_for_ops_registry_missing_terminalizes_turn() {
+        struct BarrierOpDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for BarrierOpDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                // Register a barrier async op with no backing ops_lifecycle
+                // registry on the agent, forcing the WaitingForOps arm into
+                // the "registry missing" fault path.
+                let mut outcome = crate::ops::ToolDispatchOutcome::sync_result(ToolResult::new(
+                    call.id.to_string(),
+                    "queued".to_string(),
+                    false,
+                ));
+                outcome.async_ops.push(crate::ops::AsyncOpRef::barrier(
+                    crate::ops::OperationId::new(),
+                ));
+                Ok(outcome)
+            }
+        }
+
+        struct SingleToolCallClient;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for SingleToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-barrier".to_string(),
+                        name: "queue_op".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static raw value should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let client = Arc::new(SingleToolCallClient);
+        let tools = Arc::new(BarrierOpDispatcher {
+            tools: Arc::from([Arc::new(ToolDef {
+                name: "queue_op".into(),
+                description: "registers a barrier async op".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            })]),
+        });
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("barrier ops without a registry must fail the run");
+        assert!(
+            matches!(err, AgentError::InternalError(_)),
+            "registry-missing fault should surface as an internal error"
+        );
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            TurnTerminalOutcome::Failed,
+            "WaitingForOps registry-missing fault must terminalize the turn authority"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "the fault must terminalize through the failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "a WaitingForOps fault must not publish completed authority effects"
+        );
+    }
+
+    /// Row 274: an unsupported video tool result must terminalize the turn
+    /// via the machine and must NOT emit success-shaped progress events
+    /// (`ToolExecutionCompleted`/`ToolResultReceived`) for the rejected call.
+    #[tokio::test]
+    async fn unsupported_video_tool_result_terminalizes_without_success_events() {
+        struct VideoResultDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for VideoResultDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(ToolResult::with_blocks(
+                    call.id.to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 1_000,
+                        data: crate::types::VideoData::from("AAAA"),
+                    }],
+                    false,
+                )
+                .into())
+            }
+        }
+
+        struct SingleToolCallClient;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for SingleToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-video".to_string(),
+                        name: "make_video".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static raw value should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let client = Arc::new(SingleToolCallClient);
+        let tools = Arc::new(VideoResultDispatcher {
+            tools: Arc::from([Arc::new(ToolDef {
+                name: "make_video".into(),
+                description: "returns an unsupported video block".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            })]),
+        });
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("unsupported video tool result must fail the run");
+        assert!(
+            matches!(err, AgentError::ConfigError(_)),
+            "video rejection should surface as a config error"
+        );
+
+        let mut saw_tool_progress_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(
+                event,
+                crate::event::AgentEvent::ToolExecutionCompleted { .. }
+                    | crate::event::AgentEvent::ToolResultReceived { .. }
+            ) {
+                saw_tool_progress_event = true;
+            }
+        }
+        assert!(
+            !saw_tool_progress_event,
+            "rejected video tool result must not emit success-shaped progress events"
+        );
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            TurnTerminalOutcome::Failed,
+            "unsupported video tool result must terminalize the turn authority"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "video rejection must terminalize through the failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "video rejection must not publish completed authority effects"
+        );
     }
 
     #[tokio::test]
@@ -5541,9 +6747,7 @@ mod tests {
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: Vec::new(),
-                        published_patches: Vec::new(),
-                        error: None,
+                        failure_reason: None,
                         duration_ms: None,
                     }],
                     ..HookExecutionReport::empty()
@@ -5628,8 +6832,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5670,8 +6874,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5709,8 +6913,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5855,18 +7059,12 @@ mod tests {
         let mut saw_success_like_event = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::RunFailed {
-                    error_class,
-                    error_report,
-                    ..
-                } => {
+                crate::event::AgentEvent::RunFailed { error_report, .. } => {
                     saw_run_failed = true;
-                    saw_typed_post_tool_failure = error_class
+                    saw_typed_post_tool_failure = error_report.class
                         == crate::event::AgentErrorClass::Hook
                         && matches!(
-                            error_report
-                                .as_ref()
-                                .and_then(|report| report.reason.as_ref()),
+                            error_report.reason.as_ref(),
                             Some(crate::event::AgentErrorReason::HookDenied {
                                 hook_id: Some(hook_id),
                                 point: crate::hooks::HookPoint::PostToolExecution,
@@ -5904,6 +7102,7 @@ mod tests {
         );
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -6492,8 +7691,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6532,8 +7731,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6559,6 +7758,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
         assert_eq!(
@@ -6598,6 +7798,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -6668,6 +7869,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_cause_kind,
@@ -6700,11 +7902,54 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::TurnLimitReached)
         );
+    }
+
+    /// Dogma row #272: the agent-loop turn cap default is resolved at the
+    /// build/composition seam, not privately invented inside `run_loop`.
+    ///
+    /// With `config.max_turns` left unset, the builder resolves the named
+    /// `DEFAULT_MAX_TURNS` owner into the agent's config, so the resolved value
+    /// is assertable on the built agent and the loop reads it rather than
+    /// re-deriving the default.
+    #[tokio::test]
+    async fn max_turns_default_is_resolved_at_build_seam_not_in_loop() {
+        // `build_agent` uses `AgentBuilder::new()` whose default config leaves
+        // `max_turns = None`; the build seam must resolve it.
+        let agent = build_agent(Arc::new(StaticLlmClient)).await;
+        assert_eq!(
+            agent.config.max_turns,
+            Some(crate::config::DEFAULT_MAX_TURNS),
+            "build seam must resolve the turn-cap default into the agent config"
+        );
+    }
+
+    /// Dogma row #272: the loop terminalizes via the machine-owned
+    /// `TurnLimitReached` at the build-resolved cap value, with no literal
+    /// fallback default invented inside `run_loop`.
+    #[tokio::test]
+    async fn run_loop_terminalizes_at_build_resolved_turn_cap() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        // The build seam resolved a non-`None` cap; force it to a tiny value so
+        // the loop trips the turn limit immediately, proving the loop reads the
+        // resolved value rather than a privately-invented default.
+        agent.config.max_turns = Some(0);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("turn limit should terminalize the run");
+        match err {
+            AgentError::TerminalFailure { cause_kind, .. } => {
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::TurnLimitReached);
+            }
+            other => panic!("expected machine-owned turn-limit terminal failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -6744,6 +7989,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.admitted_content_shape,
@@ -6815,6 +8061,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.turn_phase,
@@ -6852,13 +8099,13 @@ mod tests {
 
     #[tokio::test]
     async fn post_llm_boundary_cancel_does_not_return_success() {
+        use crate::agent::{CancelAfterBoundaryCommand, CancelAfterBoundarySender};
         use crate::hooks::{
             HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
         };
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         struct RequestBoundaryCancelHook {
-            flag: Arc<AtomicBool>,
+            sender: CancelAfterBoundarySender,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -6870,7 +8117,9 @@ mod tests {
                 _overrides: Option<&crate::config::HookRunOverrides>,
             ) -> Result<HookExecutionReport, HookEngineError> {
                 if invocation.point == HookPoint::PostLlmResponse {
-                    self.flag.store(true, Ordering::SeqCst);
+                    self.sender
+                        .send(CancelAfterBoundaryCommand)
+                        .expect("agent must retain the cancel-after-boundary receiver");
                 }
                 Ok(HookExecutionReport::empty())
             }
@@ -6878,7 +8127,7 @@ mod tests {
 
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.hook_engine = Some(Arc::new(RequestBoundaryCancelHook {
-            flag: agent.cancel_after_boundary_handle(),
+            sender: agent.cancel_after_boundary_handle(),
         }));
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
@@ -6892,6 +8141,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Cancelled);
         assert_eq!(
@@ -6909,6 +8159,64 @@ mod tests {
                 "cancelled boundary must not emit RunCompleted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn typed_cancel_after_boundary_command_observed_once_at_boundary() {
+        use crate::agent::CancelAfterBoundaryCommand;
+
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+
+        // Drive the turn machine to a live boundary phase (CallingLlm) so the
+        // observe seam is eligible to apply the cancel-after-boundary input.
+        let run_id = {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            start_test_conversation_turn(handle)
+        };
+        assert_eq!(
+            agent.turn_phase().expect("turn phase"),
+            crate::turn_execution_authority::TurnPhase::CallingLlm
+        );
+        assert!(
+            !agent
+                .turn_cancel_after_boundary()
+                .expect("cancel-after-boundary flag"),
+            "fixture must start with no boundary-cancel request observed"
+        );
+
+        // A surface requests boundary cancellation by sending the typed command
+        // on a cloned producer handle — the raw AtomicBool carrier is gone.
+        let sender = agent.cancel_after_boundary_handle();
+        sender
+            .send(CancelAfterBoundaryCommand)
+            .expect("agent must retain the cancel-after-boundary receiver");
+
+        agent
+            .observe_cancel_after_boundary_request(&run_id)
+            .expect("observe must apply the typed command at the boundary");
+
+        assert!(
+            agent
+                .turn_cancel_after_boundary()
+                .expect("cancel-after-boundary flag"),
+            "the typed command must be observed once and applied to the machine"
+        );
+
+        // The edge was consumed: the receiver is drained, so a subsequent
+        // observe with no fresh command is a pure no-op (observed at most once).
+        assert!(
+            matches!(
+                agent.cancel_after_boundary_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "the typed command must be drained exactly once, not left re-observable"
+        );
+        agent
+            .observe_cancel_after_boundary_request(&run_id)
+            .expect("a second observe with no fresh command must be a no-op");
     }
 
     #[tokio::test]
@@ -7005,8 +8313,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7045,7 +8353,10 @@ mod tests {
             result.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
-        assert_eq!(agent.state(), LoopState::Completed);
+        assert_eq!(
+            agent.state().expect("loop state projects"),
+            LoopState::Completed
+        );
     }
 
     /// Regression test: tool-call budget exhaustion detected anywhere in the
@@ -7068,7 +8379,10 @@ mod tests {
             result.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
-        assert_eq!(agent.state(), LoopState::Completed);
+        assert_eq!(
+            agent.state().expect("loop state projects"),
+            LoopState::Completed
+        );
     }
 
     // -- Retry delay hint tests (PR #156 port) --
@@ -7176,8 +8490,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7351,8 +8665,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7430,8 +8744,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7466,8 +8780,42 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// Row #194: a client that completes the main agentic turn normally but
+    /// whose `compile_schema` fails, so structured-output extraction setup
+    /// cannot proceed.
+    struct CompileSchemaFailingClient;
+
+    #[async_trait]
+    impl AgentLlmClient for CompileSchemaFailingClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(text_response("main answer"))
+        }
+
+        fn compile_schema(
+            &self,
+            _output_schema: &crate::types::OutputSchema,
+        ) -> Result<crate::schema::CompiledSchema, crate::schema::SchemaError> {
+            Err(crate::schema::SchemaError::InvalidRoot)
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7983,6 +9331,68 @@ mod tests {
         assert!(
             !saw_run_failed,
             "extraction must not trip agentic max_turns after RunCompleted"
+        );
+    }
+
+    /// Row #194: when a structured-output run's `compile_schema` fails, the
+    /// success-shaped boundary events (`TurnCompleted` / `RunCompleted`) must
+    /// NOT be emitted before the extraction-failed terminal. Schema compile is
+    /// a fallible extraction-setup step that runs before any success event.
+    #[tokio::test]
+    async fn compile_schema_failure_emits_no_run_completed_before_terminal() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(CompileSchemaFailingClient);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect(
+                "compile_schema failure terminalizes as an extraction failure, not a run error",
+            );
+
+        // The run terminalizes as an extraction failure (not a success).
+        assert!(
+            result.extraction_error.is_some(),
+            "compile_schema failure must surface as an extraction error"
+        );
+        assert!(result.structured_output.is_none());
+
+        let mut saw_run_completed = false;
+        let mut saw_turn_completed = false;
+        let mut saw_extraction_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
+                crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
+                crate::event::AgentEvent::ExtractionFailed { .. } => saw_extraction_failed = true,
+                _ => {}
+            }
+        }
+
+        assert!(
+            !saw_run_completed,
+            "RunCompleted(success) must not precede the extraction-failed terminal"
+        );
+        assert!(
+            !saw_turn_completed,
+            "TurnCompleted must not be emitted before the fallible schema compile resolves"
+        );
+        assert!(
+            saw_extraction_failed,
+            "compile_schema failure must emit ExtractionFailed"
         );
     }
 

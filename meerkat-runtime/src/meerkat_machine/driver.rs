@@ -166,6 +166,15 @@ impl IngressView<'_> {
         self.driver.admitted_handling_mode(input_id)
     }
 
+    /// #338: machine-owned per-input live-interrupt verdict, read from the
+    /// admission `RuntimeInputSemantics`. Defaults to `false` when no admission
+    /// semantics were recorded for the input.
+    pub(crate) fn live_interrupt_required(&self, input_id: &InputId) -> bool {
+        self.driver
+            .admitted_runtime_semantics(input_id)
+            .is_some_and(|semantics| semantics.live_interrupt_required)
+    }
+
     pub(crate) fn runtime_semantics(
         &self,
         input_id: &InputId,
@@ -241,6 +250,15 @@ impl DriverEntry {
         }
     }
 
+    /// Machine-owned per-run boundary counter — the single producer of the
+    /// run-boundary receipt sequence (dogma K10).
+    pub(crate) fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {
+        match self {
+            DriverEntry::Ephemeral(d) => d.run_boundary_sequence(run_id),
+            DriverEntry::Persistent(d) => d.inner_ref().run_boundary_sequence(run_id),
+        }
+    }
+
     pub(crate) fn as_driver_mut(&mut self) -> &mut dyn RuntimeDriver {
         match self {
             DriverEntry::Ephemeral(d) => d,
@@ -301,16 +319,6 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.preview_accept_resolved_input(input, resolved).await,
             DriverEntry::Persistent(d) => d.preview_accept_resolved_input(input, resolved).await,
-        }
-    }
-
-    pub(crate) fn resolve_admission_idempotency(
-        &mut self,
-        input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.resolve_admission_idempotency(input),
-            DriverEntry::Persistent(d) => d.resolve_admission_idempotency(input),
         }
     }
 
@@ -428,14 +436,6 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.take_wake_requested(),
             DriverEntry::Persistent(d) => d.take_wake_requested(),
-        }
-    }
-
-    /// Dequeue the next input for processing.
-    pub(crate) fn dequeue_next(&mut self) -> Option<(InputId, crate::input::Input)> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.dequeue_next(),
-            DriverEntry::Persistent(d) => d.dequeue_next(),
         }
     }
 
@@ -680,18 +680,6 @@ impl DriverEntry {
         }
     }
 
-    /// Stage an input (Queued → Staged).
-    pub(crate) fn stage_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), crate::traits::RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.stage_input(input_id, run_id),
-            DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
-        }
-    }
-
     /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
     pub(crate) fn machine_realize_stage_batch(
         &mut self,
@@ -880,25 +868,6 @@ pub(crate) enum RuntimeLoopRunCommitError {
     TerminalSnapshot(RuntimeDriverError),
 }
 
-impl RuntimeLoopRunCommitError {
-    pub(crate) fn should_unregister_session(&self) -> bool {
-        false
-    }
-
-    pub(crate) fn is_boundary_commit(&self) -> bool {
-        matches!(self, Self::BoundaryCommit(_))
-    }
-
-    pub(crate) fn into_driver_error(self) -> RuntimeDriverError {
-        match self {
-            Self::Rejected(err)
-            | Self::BoundaryCommit(err)
-            | Self::PostBoundaryValidation(err)
-            | Self::TerminalSnapshot(err) => err,
-        }
-    }
-}
-
 impl std::fmt::Display for RuntimeLoopRunCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -916,18 +885,6 @@ impl std::error::Error for RuntimeLoopRunCommitError {}
 pub(crate) enum RuntimeLoopRunFailError {
     Rejected(RuntimeDriverError),
     TerminalSnapshot(RuntimeDriverError),
-}
-
-impl RuntimeLoopRunFailError {
-    pub(crate) fn should_unregister_session(&self) -> bool {
-        false
-    }
-
-    pub(crate) fn into_driver_error(self) -> RuntimeDriverError {
-        match self {
-            Self::Rejected(err) | Self::TerminalSnapshot(err) => err,
-        }
-    }
 }
 
 impl std::fmt::Display for RuntimeLoopRunFailError {
@@ -1108,34 +1065,6 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
         }
     }
     Ok(())
-}
-
-fn machine_rollback_active_run_after_boundary_commit_failure(
-    driver: &mut DriverEntry,
-    run_id: &RunId,
-    input_ids: &[InputId],
-) -> Result<(), RuntimeDriverError> {
-    driver.rollback_staged(input_ids).map_err(|err| {
-        RuntimeDriverError::Internal(format!(
-            "failed to roll back staged inputs after boundary commit failure: {err}"
-        ))
-    })?;
-    machine_apply_run_return_projection(driver, run_id, RunReturnDisposition::Rollback)
-        .map(|_| ())
-        .map_err(|err| {
-            RuntimeDriverError::Internal(format!(
-                "failed to roll back runtime run after boundary commit failure: {err}"
-            ))
-        })
-}
-
-pub(crate) async fn rollback_runtime_loop_run_after_boundary_commit_failure(
-    driver: &SharedDriver,
-    run_id: &RunId,
-    input_ids: &[InputId],
-) -> Result<(), RuntimeDriverError> {
-    let mut driver = driver.lock().await;
-    machine_rollback_active_run_after_boundary_commit_failure(&mut driver, run_id, input_ids)
 }
 
 fn machine_apply_turn_run_completed(
@@ -1619,6 +1548,17 @@ pub(crate) struct MachineRecoveryDelta {
         Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
 }
 
+/// Mechanical, total, identity-preserving projection of the durable runtime
+/// `InputLifecycleState` seed phase onto the generated DSL's
+/// `RecoveredInputObservedPhase` input type. This is a boundary type-translation
+/// only — NOT an authority step: every runtime variant maps 1:1 onto its
+/// same-named DSL variant and no phase is collapsed, inferred, or normalized
+/// here. All recovery normalization authority lives in the generated
+/// `NormalizeRecoveredInputLifecycle` transition, which receives this raw
+/// observed phase and decides the normalized lifecycle. The `match` is
+/// exhaustive over `InputLifecycleState`, so a new runtime phase fails closed at
+/// compile time rather than silently defaulting. Mirrors the reverse
+/// DSL→runtime translation in `lifecycle_from_normalized_phase`.
 fn recovered_observed_phase(
     phase: InputLifecycleState,
 ) -> crate::meerkat_machine::dsl::RecoveredInputObservedPhase {
@@ -1812,11 +1752,10 @@ pub(crate) fn machine_apply_recovered_input_normalization(
     }
 
     seed.phase = next_phase;
-    seed.terminal_outcome = next_terminal.clone();
     if next_terminal.is_some() {
         seed.recovery_lane = None;
     }
-    state.terminal_outcome = next_terminal;
+    seed.terminal_outcome = next_terminal;
 
     if recovered {
         delta.recovered += 1;
@@ -2326,8 +2265,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: "drive the queue".into(),
-            blocks: None,
+            content: "drive the queue".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
@@ -2350,6 +2288,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &resume_state,
                 &seed,
@@ -2366,6 +2305,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2416,6 +2356,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prefix_state,
                 &seed,
@@ -2432,6 +2373,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2505,6 +2447,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &event_state,
                 &seed,
@@ -2521,6 +2464,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2565,6 +2509,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &state,
                 &seed,
@@ -2609,6 +2554,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &state,
                 &seed,
@@ -2721,7 +2667,7 @@ pub(crate) async fn commit_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
     consumed_input_ids: Vec<InputId>,
-    receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+    receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
     session_snapshot: Option<Vec<u8>>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
     let mut driver = driver.lock().await;
@@ -2730,6 +2676,10 @@ pub(crate) async fn commit_runtime_loop_run(
     // guards (input_id is informational), so firing once with any
     // contributing input is sufficient to flip `lifecycle_phase`.
     let commit_input_id = consumed_input_ids.first().cloned();
+    // Dogma K10: mint the final receipt from the machine-owned per-run
+    // boundary counter — the executor's draft carries no sequence, so the
+    // durable receipt can never diverge from `RecordBoundarySeq`'s value.
+    let receipt = receipt.into_sequenced(driver.run_boundary_sequence(&run_id));
     machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let completed_run_id = run_id.clone();
@@ -3194,6 +3144,38 @@ mod run_failed_cause_tests {
             class.cleanup_observation(),
             crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::FinalizationFailed
         );
+    }
+
+    #[test]
+    fn recovered_observed_phase_is_a_total_identity_projection_not_an_authority_step() {
+        // `recovered_observed_phase` must remain a mechanical 1:1 boundary
+        // type-translation from the durable runtime seed phase onto the DSL's
+        // `RecoveredInputObservedPhase` — it must not collapse, infer, or
+        // normalize any phase (that authority lives in
+        // `NormalizeRecoveredInputLifecycle`). Every runtime phase variant maps
+        // to its same-named observed-phase variant.
+        use crate::meerkat_machine::dsl::RecoveredInputObservedPhase as Observed;
+        let cases = [
+            (InputLifecycleState::Accepted, Observed::Accepted),
+            (InputLifecycleState::Queued, Observed::Queued),
+            (InputLifecycleState::Staged, Observed::Staged),
+            (InputLifecycleState::Applied, Observed::Applied),
+            (
+                InputLifecycleState::AppliedPendingConsumption,
+                Observed::AppliedPendingConsumption,
+            ),
+            (InputLifecycleState::Consumed, Observed::Consumed),
+            (InputLifecycleState::Superseded, Observed::Superseded),
+            (InputLifecycleState::Coalesced, Observed::Coalesced),
+            (InputLifecycleState::Abandoned, Observed::Abandoned),
+        ];
+        for (phase, expected) in cases {
+            assert_eq!(
+                recovered_observed_phase(phase),
+                expected,
+                "recovered_observed_phase must project {phase:?} onto its same-named observed phase without reclassification",
+            );
+        }
     }
 
     #[test]

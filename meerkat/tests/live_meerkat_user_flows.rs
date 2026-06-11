@@ -154,8 +154,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        self.client.provider().as_str()
+    fn provider(&self) -> meerkat_core::Provider {
+        self.client.provider()
     }
 
     fn model(&self) -> &str {
@@ -853,8 +853,9 @@ mod budget_exhaustion {
         }
 
         // Verify agent is in valid state
+        let loop_state = agent.state().expect("loop state projects");
         assert!(
-            agent.state().is_terminal() || agent.state() == LoopState::CallingLlm,
+            loop_state.is_terminal() || loop_state == LoopState::CallingLlm,
             "Agent should be in valid state"
         );
     }
@@ -1439,8 +1440,8 @@ mod sanity {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         fn model(&self) -> &'static str {

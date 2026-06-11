@@ -23,7 +23,6 @@ use crate::accept::{
     AcceptOutcome, AdmissionPlan, AdmissionQueueAction, CoarseAdmissionFlags,
     ExistingQueuedAdmissionAction, MachineAdmissionAuthority, RejectReason, ResolvedAdmission,
 };
-use crate::durability::durability_rejection_detail;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
@@ -607,6 +606,24 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(|state| state.input_boundary_sequences.get(&key).copied())
     }
 
+    /// Read the machine-owned per-run boundary counter for a run.
+    ///
+    /// This is the SINGLE producer of the run-boundary receipt sequence
+    /// (dogma K10): live boundary-context checkpoints advance it inside the
+    /// generated machine; runs without an entry are at the base sequence 0.
+    /// The driver mints final `RunBoundaryReceipt`s from this value — shells
+    /// and executors never fabricate it.
+    pub fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {
+        let key = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            state
+                .live_boundary_context_sequence_by_run
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
     /// Read the typed terminal outcome for an input, reconstructed from the
     /// DSL's typed terminal metadata maps.
     pub fn input_terminal_outcome(&self, input_id: &InputId) -> Option<InputTerminalOutcome> {
@@ -1165,7 +1182,6 @@ impl EphemeralRuntimeDriver {
             to: phase,
             reason: Some(reason.into()),
         });
-        state.terminal_outcome = Some(terminal_outcome);
         state.updated_at = now;
         Ok(())
     }
@@ -1886,7 +1902,6 @@ impl EphemeralRuntimeDriver {
                 },
                 "IncrementAttemptCount",
             )?;
-            let attempt_count = self.input_attempt_count(input_id);
 
             let now = Utc::now();
             if let Some(state) = self.ledger.get_mut(input_id) {
@@ -1896,7 +1911,6 @@ impl EphemeralRuntimeDriver {
                     to: InputLifecycleState::Staged,
                     reason: Some(format!("StageForRun({run_id})")),
                 });
-                state.attempt_count = attempt_count;
                 state.updated_at = now;
             }
             self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
@@ -2118,16 +2132,13 @@ impl EphemeralRuntimeDriver {
                         InputLifecycleState::Abandoned,
                         "ResolveStagedRollback->Abandon",
                     )?;
-                    self.events.push(
-                        self.make_envelope(RuntimeEvent::InputLifecycle(
+                    self.events
+                        .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                             InputLifecycleEvent::Abandoned {
                                 input_id: input_id.clone(),
-                                reason: mm_dsl::InputAbandonReason::MaxAttemptsExhausted
-                                    .as_str()
-                                    .to_string(),
+                                reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
                             },
-                        )),
-                    );
+                        )));
                 }
                 other => {
                     return Err(RuntimeDriverError::Internal(format!(
@@ -2471,9 +2482,13 @@ impl EphemeralRuntimeDriver {
         ))
     }
 
+    /// Render the machine-emitted typed rejection reason into the domain
+    /// `RejectReason`. Durability rejection text is pure rendering of the
+    /// typed reason the generated authority emitted — the shell does not
+    /// re-evaluate any durability rule here.
     fn reject_reason_from_machine_validation(
         reason: mm_dsl::AdmissionRejectReasonKind,
-        durability_detail: Option<&str>,
+        input_kind: crate::identifiers::InputKind,
         peer_handling_mode_detail: Option<&str>,
         peer_response_terminal_detail: Option<&str>,
     ) -> Result<RejectReason, RuntimeDriverError> {
@@ -2483,9 +2498,19 @@ impl EphemeralRuntimeDriver {
             ))
         };
         match reason {
-            mm_dsl::AdmissionRejectReasonKind::DurabilityViolation => {
+            mm_dsl::AdmissionRejectReasonKind::DurabilityMissing => {
                 Ok(RejectReason::DurabilityViolation {
-                    detail: durability_detail.ok_or_else(missing_detail)?.to_owned(),
+                    detail: "input durability observation missing".to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden => {
+                Ok(RejectReason::DurabilityViolation {
+                    detail: "External ingress cannot submit derived inputs".to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::DerivedDurabilityForbiddenForInputKind => {
+                Ok(RejectReason::DurabilityViolation {
+                    detail: format!("Derived durability forbidden for {input_kind}"),
                 })
             }
             mm_dsl::AdmissionRejectReasonKind::PeerHandlingModeInvalid => {
@@ -2552,21 +2577,6 @@ impl EphemeralRuntimeDriver {
         Self::resolved_idempotency_from_machine_effects(input_id, effects)
     }
 
-    pub(crate) fn resolve_admission_idempotency(
-        &mut self,
-        input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
-        let input_id = input.id().clone();
-        self.resolve_idempotency(
-            &input_id,
-            input
-                .header()
-                .idempotency_key
-                .as_ref()
-                .map(std::string::ToString::to_string),
-        )
-    }
-
     pub(crate) fn register_accepted_idempotency(
         &mut self,
         input_id: &InputId,
@@ -2613,6 +2623,8 @@ impl EphemeralRuntimeDriver {
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
+                execution_handling_mode,
+                live_interrupt_required,
             } => Some((
                 input_id,
                 policy_version,
@@ -2635,6 +2647,8 @@ impl EphemeralRuntimeDriver {
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
+                execution_handling_mode,
+                live_interrupt_required,
             )),
             _ => None,
         }) else {
@@ -2665,6 +2679,8 @@ impl EphemeralRuntimeDriver {
             request_immediate_processing,
             interrupt_yielding,
             wake_if_idle,
+            execution_handling_mode,
+            live_interrupt_required,
         ) = effect;
 
         if input_id != authority.input_id() {
@@ -2688,13 +2704,14 @@ impl EphemeralRuntimeDriver {
         let runtime_semantics = RuntimeInputSemantics {
             boundary: runtime_boundary.into(),
             execution_kind: runtime_execution_kind.into(),
-            execution_handling_mode: crate::policy_table::idle_steer_execution_handling_mode(
-                input.kind(),
-                self.runtime_phase_snapshot() != RuntimeState::Running,
-                policy.routing_disposition,
-            ),
+            // #24: the machine emits the idle-steer normalization directly as a
+            // typed `Option<InputLane>`; project to `HandlingMode` via the
+            // existing lane mapping. The shell normalizer is deleted.
+            execution_handling_mode: execution_handling_mode
+                .map(Self::handling_mode_from_admission_lane),
             peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                 .map(Into::into),
+            live_interrupt_required,
         };
         let handling_mode = Self::handling_mode_from_admission_lane(lane);
         let admission_plan = Self::admission_plan_from_machine_effect(
@@ -2810,7 +2827,6 @@ impl EphemeralRuntimeDriver {
         }
 
         let input_id = input.id().clone();
-        let durability_detail = durability_rejection_detail(&input);
         let peer_handling_mode_error =
             crate::peer_handling_mode::validate_peer_handling_mode(&input)
                 .err()
@@ -2845,9 +2861,7 @@ impl EphemeralRuntimeDriver {
             }
             let reason = Self::reject_reason_from_machine_validation(
                 reason,
-                durability_detail
-                    .as_deref()
-                    .or(Some("durability rejected by generated authority")),
+                input.kind(),
                 peer_handling_mode_error.as_deref(),
                 peer_response_terminal_detail.as_deref(),
             )?;
@@ -2950,7 +2964,6 @@ impl EphemeralRuntimeDriver {
                     to: InputLifecycleState::Consumed,
                     reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
                 });
-                state.terminal_outcome = Some(terminal_outcome);
                 state.updated_at = now;
                 self.ledger.accept(state);
                 self.record_admission_metadata(
@@ -3035,7 +3048,6 @@ impl EphemeralRuntimeDriver {
             })
             .collect();
         let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
-        let reason_label = dsl_reason.as_str();
         let mut count = 0;
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
@@ -3065,7 +3077,7 @@ impl EphemeralRuntimeDriver {
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Abandoned {
                         input_id: id.clone(),
-                        reason: reason_label.to_string(),
+                        reason: reason.clone(),
                     },
                 )));
         }
@@ -3078,7 +3090,6 @@ impl EphemeralRuntimeDriver {
         reason: InputAbandonReason,
     ) -> Result<usize, RuntimeDriverError> {
         let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
-        let reason_label = dsl_reason.as_str();
         let mut count = 0;
         for input_id in input_ids {
             if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
@@ -3107,7 +3118,7 @@ impl EphemeralRuntimeDriver {
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Abandoned {
                         input_id: input_id.clone(),
-                        reason: reason_label.to_string(),
+                        reason: reason.clone(),
                     },
                 )));
         }
@@ -3216,10 +3227,14 @@ impl EphemeralRuntimeDriver {
                 },
                 "MarkAppliedPendingConsumption",
             )?;
+            // The boundary sequence is machine-derived: RecordBoundarySeq
+            // reads the canonical per-run counter inside the generated
+            // machine. The receipt's `sequence` is a read-only projection of
+            // that same counter, never a producer.
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
                     input_id: key,
-                    seq: receipt.sequence,
+                    run_id: mm_dsl::RunId::from_domain(run_id),
                 },
                 "RecordBoundarySeq",
             )?;
@@ -3351,9 +3366,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: "peer body".into(),
+            content: "peer body".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -3400,9 +3414,8 @@ mod tests {
                 request_id: format!("request-{label}"),
                 phase: crate::input::ResponseProgressPhase::InProgress,
             }),
-            body: format!("progress {label}"),
+            content: format!("progress {label}").into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -3676,7 +3689,8 @@ mod tests {
             .expect("generated validation feedback should resolve");
         assert_eq!(
             generated_reason,
-            Some(mm_dsl::AdmissionRejectReasonKind::DurabilityViolation)
+            Some(mm_dsl::AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden),
+            "derived operator prompt must reject on the external-derived rule"
         );
 
         let outcome = driver.accept_input(input).await.unwrap();
@@ -3703,6 +3717,137 @@ mod tests {
         });
     }
 
+    #[test]
+    fn admission_validation_durability_reasons_are_machine_emitted() {
+        use crate::identifiers::InputKind;
+        use mm_dsl::AdmissionRejectReasonKind as Reason;
+
+        let driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("validation-reasons"));
+
+        let operator = InputOrigin::Operator;
+        let system = InputOrigin::System;
+        let flow = InputOrigin::Flow {
+            flow_id: "flow-1".into(),
+            step_index: 0,
+        };
+        let peer = InputOrigin::Peer {
+            peer_id: "peer-1".into(),
+            display_identity: None,
+            runtime_id: None,
+        };
+        let external = InputOrigin::External {
+            source_name: "webhook".into(),
+        };
+
+        let cases: Vec<(InputKind, &InputOrigin, InputDurability, Option<Reason>)> = vec![
+            // External-ingress origins cannot submit derived inputs at all.
+            (
+                InputKind::Prompt,
+                &operator,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::PeerMessage,
+                &peer,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::ExternalEvent,
+                &external,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::Continuation,
+                &operator,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            // Internal origins may not derive these input kinds.
+            (
+                InputKind::Prompt,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerMessage,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerRequest,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerResponseTerminal,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::FlowStep,
+                &flow,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            // Internal origins may derive reconstructable input kinds.
+            (
+                InputKind::PeerResponseProgress,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            (
+                InputKind::ExternalEvent,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            (
+                InputKind::Operation,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            // Durable/Ephemeral are always authorized.
+            (InputKind::Prompt, &operator, InputDurability::Durable, None),
+            (
+                InputKind::Prompt,
+                &operator,
+                InputDurability::Ephemeral,
+                None,
+            ),
+        ];
+
+        for (input_kind, input_origin, durability, expected) in cases {
+            let input_id = InputId::new();
+            let resolved = driver
+                .resolve_admission_validation(
+                    &input_id,
+                    AdmissionValidationFacts {
+                        input_kind,
+                        input_origin,
+                        durability,
+                        peer_handling_mode_valid: true,
+                        peer_response_terminal_structurally_valid: true,
+                        peer_response_terminal_observed_status:
+                            mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,
+                    },
+                )
+                .expect("generated validation must resolve");
+            assert_eq!(
+                resolved, expected,
+                "machine-emitted reason mismatch for {input_kind:?}/{input_origin:?}/{durability:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn consume_on_accept_terminal_outcome_is_machine_owned() {
         let mut driver =
@@ -3713,17 +3858,12 @@ mod tests {
         let outcome = driver.accept_input(input).await.unwrap();
 
         match outcome {
-            crate::accept::AcceptOutcome::Accepted { seed, state, .. } => {
+            crate::accept::AcceptOutcome::Accepted { seed, .. } => {
                 assert_eq!(seed.phase, InputLifecycleState::Consumed);
                 assert_eq!(
                     seed.terminal_outcome,
                     Some(InputTerminalOutcome::Consumed),
                     "accepted result must project terminal outcome from generated machine state"
-                );
-                assert_eq!(
-                    state.terminal_outcome,
-                    Some(InputTerminalOutcome::Consumed),
-                    "shell cache should mirror the generated terminal outcome"
                 );
             }
             other => panic!("expected consume-on-accept accepted outcome, got {other:?}"),
@@ -3832,7 +3972,6 @@ mod tests {
             .dsl_apply(
                 mm_dsl::MeerkatMachineInput::PeerRequestSent {
                     corr_id: request_id.into(),
-                    to: peer_id.to_string(),
                 },
                 "PeerRequestSent(test)",
             )
@@ -3857,9 +3996,8 @@ mod tests {
                 request_id: request_uuid.to_string(),
                 status: meerkat_core::handles::PeerResponseTerminalProjectionStatus::Cancelled,
             }),
-            body: String::new(),
+            content: meerkat_core::types::ContentInput::Text(String::new()),
             payload: Some(serde_json::json!({"ok": false})),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -3881,7 +4019,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandon_all_non_terminal_cache_mirrors_generated_projection() {
+    async fn abandon_all_non_terminal_projects_generated_terminal_outcome() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("abandon-projection"));
         let input = prompt_input("abandon me");
         let input_id = input.id().clone();
@@ -3896,15 +4034,8 @@ mod tests {
             driver.input_terminal_outcome(&input_id),
             Some(InputTerminalOutcome::Abandoned {
                 reason: InputAbandonReason::Stopped
-            })
-        );
-        let cached = driver
-            .input_state(&input_id)
-            .and_then(|state| state.terminal_outcome.clone());
-        assert_eq!(
-            cached,
-            driver.input_terminal_outcome(&input_id),
-            "compatibility cache must mirror the generated terminal projection"
+            }),
+            "generated machine projection is the only terminal-outcome owner"
         );
     }
 

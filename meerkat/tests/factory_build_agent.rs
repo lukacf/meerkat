@@ -18,7 +18,7 @@ use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmReque
 use meerkat::{AgentError, AgentLlmClient, BuildAgentError, CompiledSchema, LlmStreamResult};
 use meerkat_client::{LlmClient, TestClient};
 #[cfg(feature = "comms")]
-use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
+use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, identity::Keypair};
 use meerkat_core::AssistantBlock;
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::service::MobToolAuthorityContext;
@@ -106,8 +106,8 @@ impl AgentLlmClient for MockAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &str {
@@ -136,7 +136,7 @@ impl AgentLlmClient for CountingAgentLlmClient {
             .await
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> meerkat_core::Provider {
         self.inner.provider()
     }
 
@@ -166,18 +166,10 @@ fn counting_agent_llm_client_decorator(
 }
 
 #[cfg(feature = "comms")]
-fn trusted_peer_descriptor(peer: TrustedPeer) -> meerkat_core::comms::TrustedPeerDescriptor {
-    meerkat_core::comms::TrustedPeerDescriptor {
-        peer_id: peer.pubkey.to_peer_id(),
-        name: meerkat_core::comms::PeerName::new(peer.name).expect("valid peer name"),
-        address: meerkat_core::comms::PeerAddress::parse(peer.addr).expect("valid peer address"),
-        pubkey: *peer.pubkey.as_bytes(),
-    }
-}
-
-#[cfg(feature = "comms")]
-async fn add_trusted_peer_with_generated_authority(runtime: Arc<CommsRuntime>, peer: TrustedPeer) {
-    let peer = trusted_peer_descriptor(peer);
+async fn add_trusted_peer_with_generated_authority(
+    runtime: Arc<CommsRuntime>,
+    peer: meerkat_core::comms::TrustedPeerDescriptor,
+) {
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
     let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -445,6 +437,34 @@ async fn explicit_web_search_fallback_is_visible_for_realtime_model() {
 }
 
 #[tokio::test]
+async fn explicit_web_search_enable_without_provider_errors() {
+    // #108: an explicit web-search Enable with no executor override, a model
+    // that lacks native search, and a default config (provider web search
+    // disabled) must fail closed — never silently build tool-less.
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let mut build_config = AgentBuildConfig {
+        override_web_search: ToolCategoryOverride::Enable,
+        ..AgentBuildConfig::new("gpt-realtime-2")
+    };
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+    // OpenAI provider web search defaults to enabled; the #108 fail-closed path
+    // only triggers when the capability is genuinely undeliverable, so disable
+    // the provider-native fallback to match this test's stated premise (a model
+    // that lacks native search AND no provider web search to fall back to).
+    let mut config = Config::default();
+    config.provider_tools.openai.web_search = false;
+    let result = factory.build_agent(build_config, &config).await;
+    let err = result
+        .err()
+        .expect("explicit web-search enable with no provider must fail closed");
+    assert!(
+        matches!(err, meerkat::BuildAgentError::CapabilityUnavailable { capability, .. } if capability == "web_search"),
+        "expected CapabilityUnavailable(web_search), got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn web_search_fallback_stays_hidden_on_inherit() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp).builtins(true);
@@ -625,8 +645,8 @@ async fn agent_llm_client_decorator_wraps_agent_llm_client_override() {
 /// rejects at the AuthBindingRef gate before ever reaching the API-key check.
 /// This test's original path (config → ambient provider resolution → MissingApiKey)
 /// is unreachable. Environments with `ANTHROPIC_API_KEY` set would early-return
-/// "Skipping"; environments without it now hit `ConnectionResolution` refusal,
-/// not `MissingApiKey` — the assertion at line 309 fails. Ignored rather than
+/// "Skipping"; environments without it now hit a typed `LlmClient` resolution
+/// refusal, not `MissingApiKey` — the assertion at line 309 fails. Ignored rather than
 /// deleted so the pre-wave-c intent stays visible and a future reader can
 /// confirm 2b replaced it.
 #[ignore = "wave-c auth-seam cleanup removed the ambient MissingApiKey path; superseded by test 2b"]
@@ -767,8 +787,6 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::Responses,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(
@@ -778,7 +796,7 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             remote_model: "gemma4:31b".to_string(),
             display_name: "Gemma 4 31B".into(),
             family: "gemma-4".to_string(),
-            tier: meerkat_models::ModelTier::Supported,
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(256_000),
             max_output_tokens: Some(8_192),
             vision: true,
@@ -819,8 +837,6 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(
@@ -830,7 +846,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             remote_model: "gemma4:e2b".to_string(),
             display_name: "Gemma 4 E2B".into(),
             family: "gemma-4".to_string(),
-            tier: meerkat_models::ModelTier::Supported,
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(128_000),
             max_output_tokens: Some(8_192),
             vision: true,
@@ -989,14 +1005,16 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
             .await
             .unwrap(),
     );
+    let peer_a_pubkey = Keypair::generate().public_key();
     add_trusted_peer_with_generated_authority(
         Arc::clone(&comms_runtime),
-        TrustedPeer {
-            name: "peer-a".into(),
-            pubkey: Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: Default::default(),
-        },
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer-a",
+            peer_a_pubkey.to_peer_id().to_string(),
+            *peer_a_pubkey.as_bytes(),
+            "tcp://127.0.0.1:9999",
+        )
+        .expect("trusted peer descriptor"),
     )
     .await;
     let factory = temp_factory(&temp)
@@ -1113,12 +1131,20 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         max_tokens: 4096,
         structured_output_retries: 2,
         provider: Provider::Anthropic,
-        // Use `thinking` (the Anthropic legacy key that survived Wave-C).
-        // `reasoning` is OpenAI-only; passing it through the Anthropic
-        // legacy projector rejects with `LegacyProviderParamsError::UnknownKey`.
-        provider_params: Some(json!({
-            "thinking": { "budget_tokens": 2048 }
-        })),
+        // K2: durable metadata carries the typed override directly.
+        provider_params: Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 2048,
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        }),
         self_hosted_server_id: None,
         tooling: SessionTooling {
             builtins: ToolCategoryOverride::Enable,
@@ -1149,13 +1175,23 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     };
     session.set_session_metadata(original_metadata).unwrap();
 
-    // Resume with the same model (simulating the normal resume flow)
+    // Resume with the same model (simulating the normal resume flow).
+    // The resumed metadata enables WorkGraph (tooling.workgraph = Enable);
+    // post-#109 an explicit WorkGraph enable must be deliverable, so the build
+    // is realm-scoped (the typed RealmId owns the WorkGraph store scope) rather
+    // than relying on the removed "default" slug fallback.
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
         provider: Some(Provider::OpenAI),
         max_tokens: Some(1024),
-        provider_params: Some(json!({ "temperature": 0.1 })),
+        provider_params: Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                temperature: Some(0.1),
+                ..Default::default()
+            },
+        ),
+        realm_id: Some(meerkat_core::RealmId::parse("dev").expect("valid realm")),
         ..AgentBuildConfig::new("gpt-5.4")
     };
 
@@ -1170,9 +1206,19 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     assert_eq!(metadata.provider, Provider::Anthropic);
     assert_eq!(
         metadata.provider_params,
-        Some(json!({
-            "thinking": { "budget_tokens": 2048 }
-        }))
+        Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    thinking: Some(
+                        meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Enabled {
+                            budget_tokens: 2048,
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        })
     );
     assert_eq!(
         metadata.comms_name.as_deref(),
@@ -1213,9 +1259,12 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             max_tokens: 4096,
             structured_output_retries: 2,
             provider: Provider::Anthropic,
-            provider_params: Some(json!({
-                "reasoning": { "budget_tokens": 2048 }
-            })),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    thinking_budget_tokens: Some(2048),
+                    ..Default::default()
+                },
+            ),
             self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Disable,
@@ -1246,13 +1295,21 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
         resume_session: Some(session),
         provider: Some(Provider::OpenAI),
         max_tokens: Some(1024),
-        // Use `reasoning_effort` (a surviving OpenAI legacy key). The
-        // Wave-C typed-ProviderTag migration removed `temperature` from
-        // the OpenAI legacy projector — the test originally fed
-        // `temperature` as an arbitrary provider param, but the specific
-        // key doesn't matter for the override-mask contract this test
-        // exercises.
-        provider_params: Some(json!({ "reasoning_effort": "low" })),
+        // The specific knob doesn't matter for the override-mask contract
+        // this test exercises; the typed override carries it directly (K2).
+        provider_params: Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        reasoning_effort: Some(
+                            meerkat_core::lifecycle::run_primitive::ReasoningEffort::Low,
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        ),
         keep_alive: false,
         comms_name: Some("explicit-name".to_string()),
         peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "explicit")),
@@ -1277,7 +1334,19 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
     assert_eq!(metadata.max_tokens, 1024);
     assert_eq!(
         metadata.provider_params,
-        Some(json!({ "reasoning_effort": "low" }))
+        Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        reasoning_effort: Some(
+                            meerkat_core::lifecycle::run_primitive::ReasoningEffort::Low,
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }
+        )
     );
     assert!(!metadata.keep_alive);
     assert_eq!(metadata.comms_name.as_deref(), Some("explicit-name"));
@@ -1412,6 +1481,98 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
     assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Inherit);
     assert_eq!(metadata.tooling.schedule, ToolCategoryOverride::Disable);
     assert_eq!(metadata.tooling.workgraph, ToolCategoryOverride::Disable);
+}
+
+// Regression for dogma row #76: the facade must carry `override_comms`
+// through the full resume-override pipeline — apply_build copy, mask-OR
+// (explicit override wins over persisted), and mask-rehydration (persisted
+// value survives when the caller did not set the mask). Comms previously had
+// the typed field plumbed in core + on the build struct, but the facade
+// dropped it at all three seams, so a resumed turn silently re-derived comms
+// tooling from the build default instead of honoring the explicit override.
+#[tokio::test]
+async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates() {
+    fn session_with_comms(comms: ToolCategoryOverride) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: Provider::Anthropic,
+                provider_params: None,
+                self_hosted_server_id: None,
+                tooling: SessionTooling {
+                    builtins: ToolCategoryOverride::Enable,
+                    shell: ToolCategoryOverride::Inherit,
+                    comms,
+                    mob: ToolCategoryOverride::Inherit,
+                    memory: ToolCategoryOverride::Inherit,
+                    schedule: ToolCategoryOverride::Inherit,
+                    workgraph: ToolCategoryOverride::Inherit,
+                    image_generation: ToolCategoryOverride::Inherit,
+                    web_search: ToolCategoryOverride::Inherit,
+                    active_skills: None,
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .unwrap();
+        session
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    // Explicit-override leg: caller sets override_comms + its mask bit, so the
+    // explicit Disable must win over the persisted Enable.
+    let mut explicit = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session_with_comms(ToolCategoryOverride::Enable)),
+        override_comms: ToolCategoryOverride::Disable,
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+    explicit.resume_override_mask.override_comms = true;
+
+    let agent = factory.build_agent(explicit, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+    assert_eq!(
+        metadata.tooling.comms,
+        ToolCategoryOverride::Disable,
+        "explicit override_comms must win over the persisted comms tooling on resume"
+    );
+
+    // Rehydration leg: caller leaves override_comms at Inherit with no mask
+    // bit, so the persisted Enable must survive instead of collapsing to the
+    // build default.
+    let rehydrate = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session_with_comms(ToolCategoryOverride::Enable)),
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+
+    let agent = factory.build_agent(rehydrate, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+    assert_eq!(
+        metadata.tooling.comms,
+        ToolCategoryOverride::Enable,
+        "persisted comms tooling must rehydrate when the caller sets no explicit override"
+    );
 }
 
 #[cfg(feature = "comms")]
@@ -1581,7 +1742,7 @@ async fn build_agent_applies_system_prompt_override() {
     let custom_prompt = "You are a helpful test assistant.".to_string();
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        system_prompt: Some(custom_prompt.clone()),
+        system_prompt: meerkat::SystemPromptOverride::Set(custom_prompt.clone()),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
 
@@ -2767,14 +2928,16 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
     let _shared_pubkey = shared_runtime.public_key().to_peer_id();
 
     // Add a sentinel peer to the shared runtime so we can detect reuse.
+    let sentinel_pubkey = meerkat_comms::identity::Keypair::generate().public_key();
     add_trusted_peer_with_generated_authority(
         Arc::clone(&shared_runtime),
-        meerkat_comms::TrustedPeer {
-            name: "sentinel".into(),
-            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: meerkat_comms::PeerMeta::default(),
-        },
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            "sentinel",
+            sentinel_pubkey.to_peer_id().to_string(),
+            *sentinel_pubkey.as_bytes(),
+            "tcp://127.0.0.1:9999",
+        )
+        .expect("trusted peer descriptor"),
     )
     .await;
 
@@ -2941,7 +3104,19 @@ async fn web_search_opt_out_via_null() {
     let client = Arc::new(ParamsCaptureClient::new());
     let build_config = AgentBuildConfig {
         llm_client_override: Some(client.clone()),
-        provider_params: Some(json!({"web_search": null})),
+        provider_params: Some(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::Value::Null,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        }),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -2962,7 +3137,12 @@ async fn web_search_explicit_params_merged_with_defaults() {
     let client = Arc::new(ParamsCaptureClient::new());
     let build_config = AgentBuildConfig {
         llm_client_override: Some(client.clone()),
-        provider_params: Some(json!({"thinking_budget": 5000})),
+        provider_params: Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                thinking_budget_tokens: Some(5000),
+                ..Default::default()
+            },
+        ),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -3010,7 +3190,21 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(client.clone()),
         override_builtins: ToolCategoryOverride::Disable,
-        provider_params: Some(json!({"web_search": {"type": "web_search"}})),
+        provider_params: Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        web_search: Some(
+                            meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                                &serde_json::json!({"type": "web_search"}),
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        ),
         ..AgentBuildConfig::new("gpt-5.4")
     };
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -3124,4 +3318,209 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
     };
     metadata.apply_llm_identity(&new_identity);
     assert_eq!(metadata.auth_binding, Some(swapped_ref));
+}
+
+/// Memory enabled at the factory level (config truth) must fail closed when
+/// the memory store cannot open — even with an `Inherit` per-build override.
+/// Building an agent without the promised `memory_search` tool would silently
+/// misreport the session's capability truth.
+#[cfg(feature = "memory-store-session")]
+#[tokio::test]
+async fn factory_enabled_memory_open_failure_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let store_path = temp.path().join("sessions");
+    std::fs::create_dir_all(&store_path).unwrap();
+    // Occupy the memory dir path with a plain file so HnswMemoryStore::open fails.
+    std::fs::write(store_path.join("memory"), b"not a directory").unwrap();
+
+    let factory = AgentFactory::new(store_path.clone()).memory(true);
+    let config = Config::default();
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        // Inherit resolves against the factory-level enable: still effective.
+        override_memory: ToolCategoryOverride::Inherit,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let err = factory
+        .build_agent(build_config, &config)
+        .await
+        .err()
+        .expect("enabled memory with an unopenable store must fail the build");
+    match err {
+        BuildAgentError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "memory");
+        }
+        other => panic!("expected CapabilityUnavailable for memory, got: {other:?}"),
+    }
+}
+
+/// Sibling of the open-failure arm: a meerkat build WITHOUT the
+/// `memory-store-session` feature can never deliver the promised
+/// `memory_search` tool, so an effective memory enable must fail the build
+/// typed (`CapabilityUnavailable`) instead of silently producing a
+/// memory-less agent.
+#[cfg(not(feature = "memory-store-session"))]
+#[tokio::test]
+async fn factory_enabled_memory_without_feature_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).memory(true);
+    let config = Config::default();
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        // Inherit resolves against the factory-level enable: still effective.
+        override_memory: ToolCategoryOverride::Inherit,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let err = factory
+        .build_agent(build_config, &config)
+        .await
+        .err()
+        .expect("enabled memory without the memory-store-session feature must fail the build");
+    match err {
+        BuildAgentError::CapabilityUnavailable { capability, reason } => {
+            assert_eq!(capability, "memory");
+            assert!(
+                reason.contains("memory-store-session"),
+                "reason must name the missing feature, got: {reason}"
+            );
+        }
+        other => panic!("expected CapabilityUnavailable for memory, got: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config-owned tool execution policy reaches factory-built agents
+// ---------------------------------------------------------------------------
+
+/// `Config.tools` (per-call timeout policy) must be honored by an agent built
+/// through `AgentFactory::build_agent()` — not only by direct `AgentBuilder`
+/// composition. Regression pin for the dead `with_tools_config` seam: without
+/// the factory wiring, every factory-built agent silently ran on
+/// `ToolsConfig::default()` and this hanging tool would stall the turn for the
+/// default timeout instead of the configured 50ms.
+#[tokio::test]
+async fn factory_built_agent_honors_config_tools_timeout() {
+    struct ToolCallingThenDoneClient {
+        calls: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ToolCallingThenDoneClient {
+        async fn stream_response(
+            &self,
+            _messages: &[meerkat::Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&ProviderParamsOverride>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            let mut calls = self.calls.lock().unwrap();
+            let response = if *calls == 0 {
+                LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "slow-call-1".to_string(),
+                        name: "slow_tool".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    meerkat_core::StopReason::ToolUse,
+                    meerkat_core::Usage::default(),
+                )
+            } else {
+                LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    meerkat_core::StopReason::EndTurn,
+                    meerkat_core::Usage::default(),
+                )
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-slow-tool-model"
+        }
+    }
+
+    struct HangingToolDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for HangingToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            std::future::pending().await
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.tools.default_timeout = std::time::Duration::from_millis(50);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+    let build_config = AgentBuildConfig {
+        agent_llm_client_override: Some(Arc::new(ToolCallingThenDoneClient {
+            calls: Mutex::new(0),
+        })),
+        external_tools: Some(Arc::new(HangingToolDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "hangs until the per-call timeout fires",
+                json!({ "type": "object" }),
+            ))]),
+        })),
+        event_tx: Some(event_tx),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.run("use the slow tool".to_string().into()),
+    )
+    .await
+    .expect("run must complete promptly once the configured per-call timeout fires")
+    .expect("agent run should succeed after timeout terminalization");
+    assert_eq!(result.turns, 2);
+
+    let mut saw_timeout_completion = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let meerkat::AgentEvent::ToolExecutionCompleted {
+            name,
+            is_error,
+            content,
+            ..
+        } = event
+            && name == "slow_tool"
+        {
+            assert!(is_error, "timed-out tool result must be an error");
+            let text = meerkat_core::types::text_content(&content);
+            assert!(
+                text.contains("\"error\":\"timeout\""),
+                "timed-out tool result must carry the canonical timeout payload, got: {text}"
+            );
+            saw_timeout_completion = true;
+        }
+    }
+    assert!(
+        saw_timeout_completion,
+        "factory-built agent must apply Config.tools.default_timeout to tool dispatch"
+    );
 }

@@ -4,9 +4,7 @@
 //! command/result surface plus the durable diagnostic snapshot shapes that
 //! remain useful for inspection and follow-up work.
 
-use crate::ids::{
-    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, RunId, WorkRef, WorkSpec,
-};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, FlowId, RunId, WorkRef, WorkSpec};
 use crate::roster::{Roster, RosterEntry};
 use crate::run::MobRun;
 #[cfg(test)]
@@ -20,6 +18,13 @@ use indexmap::IndexSet;
 use meerkat_machine_derive::CommandManifest;
 use meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant;
 use std::collections::BTreeMap;
+
+// Keystone-A generalization: the MobMachineCatalogInput mirror (enum + ALL +
+// input_variant + as_str) is now SCHEMA-DERIVED — emitted by `xtask
+// protocol-codegen` from MobMachine's inputs.variants into the generated module
+// below, replacing the former ~560-line hand-maintained enum. A mob input fold
+// no longer touches this mirror.
+pub use crate::generated::catalog_input::MobMachineCatalogInput;
 use std::sync::Arc;
 
 /// Public Mob mutations route through this single top-level machine command
@@ -64,10 +69,10 @@ pub(crate) enum MobMachineCommand {
         filter: Box<crate::runtime::MemberFilter>,
     },
     Retire {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     Respawn {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         initial_message: Option<meerkat_core::types::ContentInput>,
     },
     RetireAll,
@@ -100,10 +105,10 @@ pub(crate) enum MobMachineCommand {
     ListMembersIncludingRetiring,
     ListAllMembers,
     MemberStatus {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     SubscribeAgentEvents {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     SubscribeAllAgentEvents,
     SubscribeMobEvents {
@@ -119,7 +124,7 @@ pub(crate) enum MobMachineCommand {
         authority_context: meerkat_core::service::MobToolAuthorityContext,
     },
     GetMember {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     #[cfg(test)]
     FlowTrackerCounts,
@@ -139,7 +144,7 @@ pub(crate) enum MobMachineCommand {
     },
     Shutdown,
     ForceCancel {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     /// Wire a local member to a peer target. D-track-b (#14) lands the
     /// producer-wiring handler that authorizes and applies this command;
@@ -147,7 +152,7 @@ pub(crate) enum MobMachineCommand {
     /// the command surface so the public `MobHandle::wire` method stays
     /// on the one top-level machine-command seam.
     Wire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: crate::runtime::PeerTarget,
     },
     /// Materialize many local-member wiring edges through one actor command.
@@ -161,7 +166,7 @@ pub(crate) enum MobMachineCommand {
     },
     /// Unwire a local member from a peer target. Mirror of `Wire`.
     Unwire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: crate::runtime::PeerTarget,
     },
 }
@@ -215,7 +220,7 @@ pub(crate) enum MobMachineCommandResult {
     #[allow(dead_code)]
     Bool(bool),
     EventStream(meerkat_core::EventStream),
-    AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
+    AllAgentEventStreams(Vec<(AgentIdentity, meerkat_core::EventStream)>),
     MobEventRouter(crate::runtime::MobEventRouterHandle),
     MobEvents(Vec<crate::event::MobEvent>),
     GetMember(Option<RosterEntry>),
@@ -294,525 +299,6 @@ impl MobMachineCommandClassification {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MobMachineCatalogInput {
-    RunFlow,
-    CancelFlow,
-    FlowStatus,
-    ClassifyFlowRunTerminality,
-    ClassifyFlowStepTerminality,
-    ClassifyFlowFrameTerminalStatus,
-    ClassifyFlowRunPublicResult,
-    Spawn,
-    AuthorizeSpawnProfile,
-    ClassifySpawnManyFailure,
-    ClassifyMemberWait,
-    ResolveFlowDelegationEdgeAdmission,
-    ClassifyRemoteMemberRuntimeObservation,
-    ResolveSpawnMemberAdmission,
-    ResolveCurrentMobAdmission,
-    ResolveSpawnToolAdmission,
-    ResolveCreateMobAdmission,
-    ResolveProfileMutationAdmission,
-    ClassifyMemberOperationEligibility,
-    ClassifyBridgeRejectionRecovery,
-    ClassifyPendingSupervisorAcceptance,
-    EnsureMember,
-    Reconcile,
-    Retire,
-    RetireAbsent,
-    RequestPendingSessionIngressDetachForMobDestroy,
-    Respawn,
-    RetireAll,
-    BindOwnerBridgeSession,
-    WireMembers,
-    WireMembersWithTrust,
-    UnwireMembers,
-    WireExternalPeer,
-    RegisterMemberPeer,
-    AuthorizeMemberPeerRebind,
-    AuthorizeMemberPeerOverlay,
-    AuthorizeMemberTrustWiring,
-    AuthorizeMemberTrustUnwiring,
-    AuthorizeMemberTrustCleanup,
-    AuthorizeMemberTrustCleanupObserved,
-    AuthorizeExternalPeerReciprocalTrust,
-    UnwireExternalPeer,
-    ProvisionSupervisorAuthority,
-    ClearSupervisorPendingRotation,
-    RecordSupervisorPendingRotation,
-    CommitSupervisorRotation,
-    ClearSupervisorAuthorityForDestroy,
-    RestoreSupervisorAuthorityAfterDestroyRollback,
-    SubmitWork,
-    ResolveSubmitWorkRejection,
-    CancelWork,
-    CancelAllWork,
-    ResolveCancelAllWorkRejection,
-    Stop,
-    Resume,
-    Complete,
-    Reset,
-    Destroy,
-    RosterSnapshot,
-    ListMembers,
-    ListMembersIncludingRetiring,
-    ListAllMembers,
-    MemberStatus,
-    SubscribeAgentEvents,
-    SubscribeAllAgentEvents,
-    SubscribeMobEvents,
-    SubscribeStructuralEvents,
-    AuthorizeMobEventRouterMemberSubscription,
-    AuthorizeMobEventRouterMemberRemoval,
-    PollEvents,
-    PollEventsStrict,
-    ReplayAllEvents,
-    RecordOperatorActionProvenance,
-    GetMember,
-    SetSpawnPolicy,
-    ResolveSpawnPolicy,
-    Shutdown,
-    ForceCancel,
-    CreateRunSeed,
-    CreateFrameSeed,
-    CreateLoopSeed,
-    RecordLoopBodyFrameCompleted,
-    RecordLoopUntilConditionMet,
-    RecordLoopUntilConditionFailed,
-    AuthorizeFlowRunReducerCommand,
-    AuthorizeFlowFrameReducerCommand,
-    AuthorizeLoopIterationReducerCommand,
-    SessionIngressDetachedForMobDestroy,
-    SessionIngressDetachFailedForMobDestroy,
-    KickoffMarkPending,
-    KickoffMarkStarting,
-    StartupMarkReady,
-    KickoffResolveStarted,
-    KickoffResolveCallbackPending,
-    KickoffResolveFailed,
-    KickoffCancelRequested,
-    KickoffClear,
-    RecordCoordinationWorkIntent,
-    RecordCoordinationResourceClaim,
-    UpdateCoordinationWorkIntentStatus,
-    UpdateCoordinationResourceClaimStatus,
-    ObserveCoordinationResourceClaimOverlap,
-}
-
-impl MobMachineCatalogInput {
-    pub const ALL: &'static [Self] = &[
-        Self::RunFlow,
-        Self::CancelFlow,
-        Self::FlowStatus,
-        Self::ClassifyFlowRunTerminality,
-        Self::ClassifyFlowStepTerminality,
-        Self::ClassifyFlowFrameTerminalStatus,
-        Self::ClassifyFlowRunPublicResult,
-        Self::Spawn,
-        Self::AuthorizeSpawnProfile,
-        Self::ClassifySpawnManyFailure,
-        Self::ClassifyMemberWait,
-        Self::ResolveFlowDelegationEdgeAdmission,
-        Self::ClassifyRemoteMemberRuntimeObservation,
-        Self::ResolveSpawnMemberAdmission,
-        Self::ResolveCurrentMobAdmission,
-        Self::ResolveSpawnToolAdmission,
-        Self::ResolveCreateMobAdmission,
-        Self::ResolveProfileMutationAdmission,
-        Self::ClassifyMemberOperationEligibility,
-        Self::ClassifyBridgeRejectionRecovery,
-        Self::ClassifyPendingSupervisorAcceptance,
-        Self::EnsureMember,
-        Self::Reconcile,
-        Self::Retire,
-        Self::RetireAbsent,
-        Self::RequestPendingSessionIngressDetachForMobDestroy,
-        Self::Respawn,
-        Self::RetireAll,
-        Self::BindOwnerBridgeSession,
-        Self::WireMembers,
-        Self::WireMembersWithTrust,
-        Self::UnwireMembers,
-        Self::WireExternalPeer,
-        Self::RegisterMemberPeer,
-        Self::AuthorizeMemberPeerRebind,
-        Self::AuthorizeMemberPeerOverlay,
-        Self::AuthorizeMemberTrustWiring,
-        Self::AuthorizeMemberTrustUnwiring,
-        Self::AuthorizeMemberTrustCleanup,
-        Self::AuthorizeMemberTrustCleanupObserved,
-        Self::AuthorizeExternalPeerReciprocalTrust,
-        Self::UnwireExternalPeer,
-        Self::ProvisionSupervisorAuthority,
-        Self::ClearSupervisorPendingRotation,
-        Self::RecordSupervisorPendingRotation,
-        Self::CommitSupervisorRotation,
-        Self::ClearSupervisorAuthorityForDestroy,
-        Self::RestoreSupervisorAuthorityAfterDestroyRollback,
-        Self::SubmitWork,
-        Self::ResolveSubmitWorkRejection,
-        Self::CancelWork,
-        Self::CancelAllWork,
-        Self::ResolveCancelAllWorkRejection,
-        Self::Stop,
-        Self::Resume,
-        Self::Complete,
-        Self::Reset,
-        Self::Destroy,
-        Self::RosterSnapshot,
-        Self::ListMembers,
-        Self::ListMembersIncludingRetiring,
-        Self::ListAllMembers,
-        Self::MemberStatus,
-        Self::SubscribeAgentEvents,
-        Self::SubscribeAllAgentEvents,
-        Self::SubscribeMobEvents,
-        Self::SubscribeStructuralEvents,
-        Self::AuthorizeMobEventRouterMemberSubscription,
-        Self::AuthorizeMobEventRouterMemberRemoval,
-        Self::PollEvents,
-        Self::PollEventsStrict,
-        Self::ReplayAllEvents,
-        Self::RecordOperatorActionProvenance,
-        Self::GetMember,
-        Self::SetSpawnPolicy,
-        Self::ResolveSpawnPolicy,
-        Self::Shutdown,
-        Self::ForceCancel,
-        Self::CreateRunSeed,
-        Self::CreateFrameSeed,
-        Self::CreateLoopSeed,
-        Self::RecordLoopBodyFrameCompleted,
-        Self::RecordLoopUntilConditionMet,
-        Self::RecordLoopUntilConditionFailed,
-        Self::AuthorizeFlowRunReducerCommand,
-        Self::AuthorizeFlowFrameReducerCommand,
-        Self::AuthorizeLoopIterationReducerCommand,
-        session_ingress_detached_for_mob_destroy_catalog_input(),
-        session_ingress_detach_failed_for_mob_destroy_catalog_input(),
-        Self::KickoffMarkPending,
-        Self::KickoffMarkStarting,
-        Self::StartupMarkReady,
-        Self::KickoffResolveStarted,
-        Self::KickoffResolveCallbackPending,
-        Self::KickoffResolveFailed,
-        Self::KickoffCancelRequested,
-        Self::KickoffClear,
-        Self::RecordCoordinationWorkIntent,
-        Self::RecordCoordinationResourceClaim,
-        Self::UpdateCoordinationWorkIntentStatus,
-        Self::UpdateCoordinationResourceClaimStatus,
-        Self::ObserveCoordinationResourceClaimOverlap,
-    ];
-
-    #[must_use]
-    pub const fn input_variant(self) -> MobMachineInputVariant {
-        match self {
-            Self::RunFlow => MobMachineInputVariant::RunFlow,
-            Self::CancelFlow => MobMachineInputVariant::CancelFlow,
-            Self::FlowStatus => MobMachineInputVariant::FlowStatus,
-            Self::ClassifyFlowRunTerminality => MobMachineInputVariant::ClassifyFlowRunTerminality,
-            Self::ClassifyFlowStepTerminality => {
-                MobMachineInputVariant::ClassifyFlowStepTerminality
-            }
-            Self::ClassifyFlowFrameTerminalStatus => {
-                MobMachineInputVariant::ClassifyFlowFrameTerminalStatus
-            }
-            Self::ClassifyFlowRunPublicResult => {
-                MobMachineInputVariant::ClassifyFlowRunPublicResult
-            }
-            Self::Spawn => MobMachineInputVariant::Spawn,
-            Self::AuthorizeSpawnProfile => MobMachineInputVariant::AuthorizeSpawnProfile,
-            Self::ClassifySpawnManyFailure => MobMachineInputVariant::ClassifySpawnManyFailure,
-            Self::ClassifyMemberWait => MobMachineInputVariant::ClassifyMemberWait,
-            Self::ResolveFlowDelegationEdgeAdmission => {
-                MobMachineInputVariant::ResolveFlowDelegationEdgeAdmission
-            }
-            Self::ClassifyRemoteMemberRuntimeObservation => {
-                MobMachineInputVariant::ClassifyRemoteMemberRuntimeObservation
-            }
-            Self::ResolveSpawnMemberAdmission => {
-                MobMachineInputVariant::ResolveSpawnMemberAdmission
-            }
-            Self::ResolveCurrentMobAdmission => MobMachineInputVariant::ResolveCurrentMobAdmission,
-            Self::ResolveSpawnToolAdmission => MobMachineInputVariant::ResolveSpawnToolAdmission,
-            Self::ResolveCreateMobAdmission => MobMachineInputVariant::ResolveCreateMobAdmission,
-            Self::ResolveProfileMutationAdmission => {
-                MobMachineInputVariant::ResolveProfileMutationAdmission
-            }
-            Self::ClassifyMemberOperationEligibility => {
-                MobMachineInputVariant::ClassifyMemberOperationEligibility
-            }
-            Self::ClassifyBridgeRejectionRecovery => {
-                MobMachineInputVariant::ClassifyBridgeRejectionRecovery
-            }
-            Self::ClassifyPendingSupervisorAcceptance => {
-                MobMachineInputVariant::ClassifyPendingSupervisorAcceptance
-            }
-            Self::EnsureMember => MobMachineInputVariant::EnsureMember,
-            Self::Reconcile => MobMachineInputVariant::Reconcile,
-            Self::Retire => MobMachineInputVariant::Retire,
-            Self::RetireAbsent => MobMachineInputVariant::RetireAbsent,
-            Self::RequestPendingSessionIngressDetachForMobDestroy => {
-                MobMachineInputVariant::RequestPendingSessionIngressDetachForMobDestroy
-            }
-            Self::Respawn => MobMachineInputVariant::Respawn,
-            Self::RetireAll => MobMachineInputVariant::RetireAll,
-            Self::BindOwnerBridgeSession => MobMachineInputVariant::BindOwnerBridgeSession,
-            Self::WireMembers => MobMachineInputVariant::WireMembers,
-            Self::WireMembersWithTrust => MobMachineInputVariant::WireMembersWithTrust,
-            Self::UnwireMembers => MobMachineInputVariant::UnwireMembers,
-            Self::WireExternalPeer => MobMachineInputVariant::WireExternalPeer,
-            Self::RegisterMemberPeer => MobMachineInputVariant::RegisterMemberPeer,
-            Self::AuthorizeMemberPeerRebind => MobMachineInputVariant::AuthorizeMemberPeerRebind,
-            Self::AuthorizeMemberPeerOverlay => MobMachineInputVariant::AuthorizeMemberPeerOverlay,
-            Self::AuthorizeMemberTrustWiring => MobMachineInputVariant::AuthorizeMemberTrustWiring,
-            Self::AuthorizeMemberTrustUnwiring => {
-                MobMachineInputVariant::AuthorizeMemberTrustUnwiring
-            }
-            Self::AuthorizeMemberTrustCleanup => {
-                MobMachineInputVariant::AuthorizeMemberTrustCleanup
-            }
-            Self::AuthorizeMemberTrustCleanupObserved => {
-                MobMachineInputVariant::AuthorizeMemberTrustCleanupObserved
-            }
-            Self::AuthorizeExternalPeerReciprocalTrust => {
-                MobMachineInputVariant::AuthorizeExternalPeerReciprocalTrust
-            }
-            Self::UnwireExternalPeer => MobMachineInputVariant::UnwireExternalPeer,
-            Self::ProvisionSupervisorAuthority => {
-                MobMachineInputVariant::ProvisionSupervisorAuthority
-            }
-            Self::ClearSupervisorPendingRotation => {
-                MobMachineInputVariant::ClearSupervisorPendingRotation
-            }
-            Self::RecordSupervisorPendingRotation => {
-                MobMachineInputVariant::RecordSupervisorPendingRotation
-            }
-            Self::CommitSupervisorRotation => MobMachineInputVariant::CommitSupervisorRotation,
-            Self::ClearSupervisorAuthorityForDestroy => {
-                MobMachineInputVariant::ClearSupervisorAuthorityForDestroy
-            }
-            Self::RestoreSupervisorAuthorityAfterDestroyRollback => {
-                MobMachineInputVariant::RestoreSupervisorAuthorityAfterDestroyRollback
-            }
-            Self::SubmitWork => MobMachineInputVariant::SubmitWork,
-            Self::ResolveSubmitWorkRejection => MobMachineInputVariant::ResolveSubmitWorkRejection,
-            Self::CancelWork => MobMachineInputVariant::CancelWork,
-            Self::CancelAllWork => MobMachineInputVariant::CancelAllWork,
-            Self::ResolveCancelAllWorkRejection => {
-                MobMachineInputVariant::ResolveCancelAllWorkRejection
-            }
-            Self::Stop => MobMachineInputVariant::Stop,
-            Self::Resume => MobMachineInputVariant::Resume,
-            Self::Complete => MobMachineInputVariant::Complete,
-            Self::Reset => MobMachineInputVariant::Reset,
-            Self::Destroy => MobMachineInputVariant::Destroy,
-            Self::RosterSnapshot => MobMachineInputVariant::RosterSnapshot,
-            Self::ListMembers => MobMachineInputVariant::ListMembers,
-            Self::ListMembersIncludingRetiring => {
-                MobMachineInputVariant::ListMembersIncludingRetiring
-            }
-            Self::ListAllMembers => MobMachineInputVariant::ListAllMembers,
-            Self::MemberStatus => MobMachineInputVariant::MemberStatus,
-            Self::SubscribeAgentEvents => MobMachineInputVariant::SubscribeAgentEvents,
-            Self::SubscribeAllAgentEvents => MobMachineInputVariant::SubscribeAllAgentEvents,
-            Self::SubscribeMobEvents => MobMachineInputVariant::SubscribeMobEvents,
-            Self::SubscribeStructuralEvents => MobMachineInputVariant::SubscribeStructuralEvents,
-            Self::AuthorizeMobEventRouterMemberSubscription => {
-                MobMachineInputVariant::AuthorizeMobEventRouterMemberSubscription
-            }
-            Self::AuthorizeMobEventRouterMemberRemoval => {
-                MobMachineInputVariant::AuthorizeMobEventRouterMemberRemoval
-            }
-            Self::PollEvents => MobMachineInputVariant::PollEvents,
-            Self::PollEventsStrict => MobMachineInputVariant::PollEventsStrict,
-            Self::ReplayAllEvents => MobMachineInputVariant::ReplayAllEvents,
-            Self::RecordOperatorActionProvenance => {
-                MobMachineInputVariant::RecordOperatorActionProvenance
-            }
-            Self::GetMember => MobMachineInputVariant::GetMember,
-            Self::SetSpawnPolicy => MobMachineInputVariant::SetSpawnPolicy,
-            Self::ResolveSpawnPolicy => MobMachineInputVariant::ResolveSpawnPolicy,
-            Self::Shutdown => MobMachineInputVariant::Shutdown,
-            Self::ForceCancel => MobMachineInputVariant::ForceCancel,
-            Self::CreateRunSeed => MobMachineInputVariant::CreateRunSeed,
-            Self::CreateFrameSeed => MobMachineInputVariant::CreateFrameSeed,
-            Self::CreateLoopSeed => MobMachineInputVariant::CreateLoopSeed,
-            Self::RecordLoopBodyFrameCompleted => {
-                MobMachineInputVariant::RecordLoopBodyFrameCompleted
-            }
-            Self::RecordLoopUntilConditionMet => {
-                MobMachineInputVariant::RecordLoopUntilConditionMet
-            }
-            Self::RecordLoopUntilConditionFailed => {
-                MobMachineInputVariant::RecordLoopUntilConditionFailed
-            }
-            Self::AuthorizeFlowRunReducerCommand => {
-                MobMachineInputVariant::AuthorizeFlowRunReducerCommand
-            }
-            Self::AuthorizeFlowFrameReducerCommand => {
-                MobMachineInputVariant::AuthorizeFlowFrameReducerCommand
-            }
-            Self::AuthorizeLoopIterationReducerCommand => {
-                MobMachineInputVariant::AuthorizeLoopIterationReducerCommand
-            }
-            Self::SessionIngressDetachedForMobDestroy => {
-                MobMachineInputVariant::SessionIngressDetachedForMobDestroy
-            }
-            Self::SessionIngressDetachFailedForMobDestroy => {
-                MobMachineInputVariant::SessionIngressDetachFailedForMobDestroy
-            }
-            Self::KickoffMarkPending => MobMachineInputVariant::KickoffMarkPending,
-            Self::KickoffMarkStarting => MobMachineInputVariant::KickoffMarkStarting,
-            Self::StartupMarkReady => MobMachineInputVariant::StartupMarkReady,
-            Self::KickoffResolveStarted => MobMachineInputVariant::KickoffResolveStarted,
-            Self::KickoffResolveCallbackPending => {
-                MobMachineInputVariant::KickoffResolveCallbackPending
-            }
-            Self::KickoffResolveFailed => MobMachineInputVariant::KickoffResolveFailed,
-            Self::KickoffCancelRequested => MobMachineInputVariant::KickoffCancelRequested,
-            Self::KickoffClear => MobMachineInputVariant::KickoffClear,
-            Self::RecordCoordinationWorkIntent => {
-                MobMachineInputVariant::RecordCoordinationWorkIntent
-            }
-            Self::RecordCoordinationResourceClaim => {
-                MobMachineInputVariant::RecordCoordinationResourceClaim
-            }
-            Self::UpdateCoordinationWorkIntentStatus => {
-                MobMachineInputVariant::UpdateCoordinationWorkIntentStatus
-            }
-            Self::UpdateCoordinationResourceClaimStatus => {
-                MobMachineInputVariant::UpdateCoordinationResourceClaimStatus
-            }
-            Self::ObserveCoordinationResourceClaimOverlap => {
-                MobMachineInputVariant::ObserveCoordinationResourceClaimOverlap
-            }
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RunFlow => "RunFlow",
-            Self::CancelFlow => "CancelFlow",
-            Self::FlowStatus => "FlowStatus",
-            Self::ClassifyFlowRunTerminality => "ClassifyFlowRunTerminality",
-            Self::ClassifyFlowStepTerminality => "ClassifyFlowStepTerminality",
-            Self::ClassifyFlowFrameTerminalStatus => "ClassifyFlowFrameTerminalStatus",
-            Self::ClassifyFlowRunPublicResult => "ClassifyFlowRunPublicResult",
-            Self::Spawn => "Spawn",
-            Self::AuthorizeSpawnProfile => "AuthorizeSpawnProfile",
-            Self::ClassifySpawnManyFailure => "ClassifySpawnManyFailure",
-            Self::ClassifyMemberWait => "ClassifyMemberWait",
-            Self::ResolveFlowDelegationEdgeAdmission => "ResolveFlowDelegationEdgeAdmission",
-            Self::ClassifyRemoteMemberRuntimeObservation => {
-                "ClassifyRemoteMemberRuntimeObservation"
-            }
-            Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
-            Self::ResolveCurrentMobAdmission => "ResolveCurrentMobAdmission",
-            Self::ResolveSpawnToolAdmission => "ResolveSpawnToolAdmission",
-            Self::ResolveCreateMobAdmission => "ResolveCreateMobAdmission",
-            Self::ResolveProfileMutationAdmission => "ResolveProfileMutationAdmission",
-            Self::ClassifyMemberOperationEligibility => "ClassifyMemberOperationEligibility",
-            Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
-            Self::ClassifyPendingSupervisorAcceptance => "ClassifyPendingSupervisorAcceptance",
-            Self::EnsureMember => "EnsureMember",
-            Self::Reconcile => "Reconcile",
-            Self::Retire => "Retire",
-            Self::RetireAbsent => "RetireAbsent",
-            Self::RequestPendingSessionIngressDetachForMobDestroy => {
-                "RequestPendingSessionIngressDetachForMobDestroy"
-            }
-            Self::Respawn => "Respawn",
-            Self::RetireAll => "RetireAll",
-            Self::BindOwnerBridgeSession => "BindOwnerBridgeSession",
-            Self::WireMembers => "WireMembers",
-            Self::WireMembersWithTrust => "WireMembersWithTrust",
-            Self::UnwireMembers => "UnwireMembers",
-            Self::WireExternalPeer => "WireExternalPeer",
-            Self::RegisterMemberPeer => "RegisterMemberPeer",
-            Self::AuthorizeMemberPeerRebind => "AuthorizeMemberPeerRebind",
-            Self::AuthorizeMemberPeerOverlay => "AuthorizeMemberPeerOverlay",
-            Self::AuthorizeMemberTrustWiring => "AuthorizeMemberTrustWiring",
-            Self::AuthorizeMemberTrustUnwiring => "AuthorizeMemberTrustUnwiring",
-            Self::AuthorizeMemberTrustCleanup => "AuthorizeMemberTrustCleanup",
-            Self::AuthorizeMemberTrustCleanupObserved => "AuthorizeMemberTrustCleanupObserved",
-            Self::AuthorizeExternalPeerReciprocalTrust => "AuthorizeExternalPeerReciprocalTrust",
-            Self::UnwireExternalPeer => "UnwireExternalPeer",
-            Self::ProvisionSupervisorAuthority => "ProvisionSupervisorAuthority",
-            Self::ClearSupervisorPendingRotation => "ClearSupervisorPendingRotation",
-            Self::RecordSupervisorPendingRotation => "RecordSupervisorPendingRotation",
-            Self::CommitSupervisorRotation => "CommitSupervisorRotation",
-            Self::ClearSupervisorAuthorityForDestroy => "ClearSupervisorAuthorityForDestroy",
-            Self::RestoreSupervisorAuthorityAfterDestroyRollback => {
-                "RestoreSupervisorAuthorityAfterDestroyRollback"
-            }
-            Self::SubmitWork => "SubmitWork",
-            Self::ResolveSubmitWorkRejection => "ResolveSubmitWorkRejection",
-            Self::CancelWork => "CancelWork",
-            Self::CancelAllWork => "CancelAllWork",
-            Self::ResolveCancelAllWorkRejection => "ResolveCancelAllWorkRejection",
-            Self::Stop => "Stop",
-            Self::Resume => "Resume",
-            Self::Complete => "Complete",
-            Self::Reset => "Reset",
-            Self::Destroy => "Destroy",
-            Self::RosterSnapshot => "RosterSnapshot",
-            Self::ListMembers => "ListMembers",
-            Self::ListMembersIncludingRetiring => "ListMembersIncludingRetiring",
-            Self::ListAllMembers => "ListAllMembers",
-            Self::MemberStatus => "MemberStatus",
-            Self::SubscribeAgentEvents => "SubscribeAgentEvents",
-            Self::SubscribeAllAgentEvents => "SubscribeAllAgentEvents",
-            Self::SubscribeMobEvents => "SubscribeMobEvents",
-            Self::SubscribeStructuralEvents => "SubscribeStructuralEvents",
-            Self::AuthorizeMobEventRouterMemberSubscription => {
-                "AuthorizeMobEventRouterMemberSubscription"
-            }
-            Self::AuthorizeMobEventRouterMemberRemoval => "AuthorizeMobEventRouterMemberRemoval",
-            Self::PollEvents => "PollEvents",
-            Self::PollEventsStrict => "PollEventsStrict",
-            Self::ReplayAllEvents => "ReplayAllEvents",
-            Self::RecordOperatorActionProvenance => "RecordOperatorActionProvenance",
-            Self::GetMember => "GetMember",
-            Self::SetSpawnPolicy => "SetSpawnPolicy",
-            Self::ResolveSpawnPolicy => "ResolveSpawnPolicy",
-            Self::Shutdown => "Shutdown",
-            Self::ForceCancel => "ForceCancel",
-            Self::CreateRunSeed => "CreateRunSeed",
-            Self::CreateFrameSeed => "CreateFrameSeed",
-            Self::CreateLoopSeed => "CreateLoopSeed",
-            Self::RecordLoopBodyFrameCompleted => "RecordLoopBodyFrameCompleted",
-            Self::RecordLoopUntilConditionMet => "RecordLoopUntilConditionMet",
-            Self::RecordLoopUntilConditionFailed => "RecordLoopUntilConditionFailed",
-            Self::AuthorizeFlowRunReducerCommand => "AuthorizeFlowRunReducerCommand",
-            Self::AuthorizeFlowFrameReducerCommand => "AuthorizeFlowFrameReducerCommand",
-            Self::AuthorizeLoopIterationReducerCommand => "AuthorizeLoopIterationReducerCommand",
-            Self::SessionIngressDetachedForMobDestroy => "SessionIngressDetachedForMobDestroy",
-            Self::SessionIngressDetachFailedForMobDestroy => {
-                "SessionIngressDetachFailedForMobDestroy"
-            }
-            Self::KickoffMarkPending => "KickoffMarkPending",
-            Self::KickoffMarkStarting => "KickoffMarkStarting",
-            Self::StartupMarkReady => "StartupMarkReady",
-            Self::KickoffResolveStarted => "KickoffResolveStarted",
-            Self::KickoffResolveCallbackPending => "KickoffResolveCallbackPending",
-            Self::KickoffResolveFailed => "KickoffResolveFailed",
-            Self::KickoffCancelRequested => "KickoffCancelRequested",
-            Self::KickoffClear => "KickoffClear",
-            Self::RecordCoordinationWorkIntent => "RecordCoordinationWorkIntent",
-            Self::RecordCoordinationResourceClaim => "RecordCoordinationResourceClaim",
-            Self::UpdateCoordinationWorkIntentStatus => "UpdateCoordinationWorkIntentStatus",
-            Self::UpdateCoordinationResourceClaimStatus => "UpdateCoordinationResourceClaimStatus",
-            Self::ObserveCoordinationResourceClaimOverlap => {
-                "ObserveCoordinationResourceClaimOverlap"
-            }
-        }
-    }
-}
-
 impl MobMachineCommandVariant {
     #[must_use]
     pub const fn catalog_input(self) -> Option<MobMachineCatalogInput> {
@@ -866,20 +352,6 @@ impl MobMachineCommandVariant {
             Self::Shutdown => Some(MobMachineCatalogInput::Shutdown),
             Self::ForceCancel => Some(MobMachineCatalogInput::ForceCancel),
         }
-    }
-}
-
-#[allow(clippy::match_single_binding)]
-const fn session_ingress_detached_for_mob_destroy_catalog_input() -> MobMachineCatalogInput {
-    match () {
-        () => MobMachineCatalogInput::SessionIngressDetachedForMobDestroy,
-    }
-}
-
-#[allow(clippy::match_single_binding)]
-const fn session_ingress_detach_failed_for_mob_destroy_catalog_input() -> MobMachineCatalogInput {
-    match () {
-        () => MobMachineCatalogInput::SessionIngressDetachFailedForMobDestroy,
     }
 }
 
@@ -1112,11 +584,11 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachRequest,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: session_ingress_detached_for_mob_destroy_catalog_input(),
+        input: MobMachineCatalogInput::SessionIngressDetachedForMobDestroy,
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: session_ingress_detach_failed_for_mob_destroy_catalog_input(),
+        input: MobMachineCatalogInput::SessionIngressDetachFailedForMobDestroy,
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {
@@ -1226,6 +698,71 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ObserveCoordinationResourceClaimOverlap,
         reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Duplicate-member admission probe is decided by MobMachine from its own
+        // roster/binding/pending-spawn authority; the actor drives it as a
+        // read-only spawn-profile authority input before staging a spawn.
+        input: MobMachineCatalogInput::ProbeMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Respawn replacement generation is computed by MobMachine from the
+        // machine-owned per-identity generation counter; the actor drives this
+        // read-only spawn-profile authority input during respawn handling.
+        input: MobMachineCatalogInput::ComputeRespawnGeneration,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Step-output fault retry-vs-terminal disposition is decided by
+        // MobMachine from attempt/max-retries state; the flow engine drives this
+        // runtime-internal flow-projection authority input during step execution.
+        input: MobMachineCatalogInput::ClassifyStepOutputFault,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Supervisor escalation request (with an eligible target) is owned by
+        // MobMachine; the supervisor flow drives this as a supervisor-authority
+        // input from its pure eligible-candidate projection.
+        input: MobMachineCatalogInput::EscalateToSupervisor,
+        reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // No-eligible-target supervisor escalation is owned by MobMachine, which
+        // emits the typed failure; the supervisor flow drives this as a
+        // supervisor-authority input when no eligible candidate exists.
+        input: MobMachineCatalogInput::EscalateToSupervisorNoEligibleTarget,
+        reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Topology edge verdict is decided by MobMachine, which applies the
+        // default-policy fallback to the shell's pure rule-match witness; the
+        // flow engine drives this runtime-internal flow-projection authority
+        // input during delegation-edge resolution.
+        input: MobMachineCatalogInput::EvaluateTopologyEdge,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // External-member rebind capability is recorded by MobMachine at spawn
+        // mint / recovery / peer-only-resume-rebind; the actor/builder drives
+        // this read-only spawn-profile authority input so the external-member
+        // projection reads machine state instead of deriving from a token.
+        input: MobMachineCatalogInput::SetExternalMemberRebindCapability,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Hard turn-timeout detach-vs-cancel disposition is decided by MobMachine
+        // from the machine-owned orphan budget; the turn executor drives this
+        // runtime-internal flow-projection authority input on timeout.
+        input: MobMachineCatalogInput::ClassifyTurnTimeoutDisposition,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Orphan budget is machine state seeded once at build time from the
+        // definition limits; the builder drives this read-only spawn-profile
+        // authority input to seed the budget before any timeout classification.
+        input: MobMachineCatalogInput::SeedOrphanBudget,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
 ];
 

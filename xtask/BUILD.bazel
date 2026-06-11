@@ -92,6 +92,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//:repo_governance_files",
         "//:workspace_runfiles",
         ":package_runfiles",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
@@ -314,6 +315,77 @@ rust_test(
 )
 
 rust_test(
+    name = "effect_authority_test",
+    aliases = aliases(
+        package_name = "xtask",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "effect_authority",
+    crate_root = "tests/effect_authority.rs",
+    crate_features = [
+        "machine-authority",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/effect_authority.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.0-alpha.0",
+        "CARGO_BIN_NAME": "effect_authority",
+        "CARGO_MANIFEST_DIR": "./xtask",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+        "//:repo_governance_files",
+        "//meerkat-cli:package_runfiles",
+        "//meerkat-contracts:package_runfiles",
+        "//meerkat-mob:package_runfiles",
+        "//meerkat-rest:package_runfiles",
+        "//meerkat-rpc:package_runfiles",
+        "//meerkat-runtime:package_runfiles",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "WORKSPACE_ROOT": ".",
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "xtask",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-machine-codegen:meerkat_machine_codegen",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//xtask:xtask",
+        "@crates//:which-7.0.3",
+    ] + all_crate_deps(
+        package_name = "xtask",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "machines_contracts_test",
     aliases = aliases(
         package_name = "xtask",
@@ -445,7 +517,6 @@ rust_test(
         "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob-pack:package_runfiles",
         "//meerkat-mob:package_runfiles",
-        "//meerkat-models:package_runfiles",
         "//meerkat-openai:package_runfiles",
         "//meerkat-providers:package_runfiles",
         "//meerkat-rest:package_runfiles",
@@ -526,7 +597,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:repo_governance_files",
@@ -599,7 +670,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:workspace_runfiles",
         "tests/rustfmt_host.sh",
@@ -726,6 +797,7 @@ test_suite(
     tests = [
         ":buildbuddy_static_lanes_test",
         ":ci_gate_requires_rmat_test",
+        ":effect_authority_test",
         ":protocol_codegen_drift_test",
         ":rmat_audit_test",
         ":rmat_strict_test",

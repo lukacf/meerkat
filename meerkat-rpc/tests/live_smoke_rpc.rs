@@ -434,6 +434,7 @@ async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
                 handshake_failed: true,
             },
             quarantined: vec![],
+            collection_fault: None,
         }),
     };
 

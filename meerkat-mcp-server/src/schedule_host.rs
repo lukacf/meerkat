@@ -208,7 +208,11 @@ impl McpScheduleContext {
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .or_else(|| Some(self.realm_id.clone()));
         let build = SessionBuildOptions {
+            custom_models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            auto_compact_threshold_override: None,
             provider: create.provider,
+            override_comms: Default::default(),
             self_hosted_server_id: None,
             output_schema,
             structured_output_retries: create.structured_output_retries,
@@ -242,8 +246,9 @@ impl McpScheduleContext {
                 .or_else(|| self.instance_id.clone()),
             backend: create
                 .backend
-                .clone()
-                .or_else(|| Some(self.backend.clone())),
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse)
+                .or_else(|| meerkat_core::RecoveryBackendKind::parse(&self.backend)),
             config_generation: current_generation,
             auth_binding: None,
             mob_member_binding: None,
@@ -255,6 +260,7 @@ impl McpScheduleContext {
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,
@@ -266,13 +272,15 @@ impl McpScheduleContext {
         let request = CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
-            system_prompt: prompt_system_prompt
+            system_prompt: match prompt_system_prompt
                 .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
+                .or_else(|| create.system_prompt.clone())
+            {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens: create.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -581,7 +589,8 @@ async fn update_peer_ingress_context(
         _context
             .runtime_adapter
             .update_peer_ingress_context(_session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     }
     #[cfg(not(feature = "comms"))]
     let _ = (_context, _session_id);

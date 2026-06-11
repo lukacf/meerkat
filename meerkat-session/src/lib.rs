@@ -16,18 +16,8 @@ pub mod tokio {
 
 pub mod ephemeral;
 pub(crate) mod generated;
+pub mod staged_registry;
 pub(crate) mod turn_admission;
-
-/// Session persistence migration entry points.
-///
-/// Canonical module path is `meerkat_session::persistent::migrations`;
-/// the implementation lives in `meerkat_core::session_migrations` so
-/// `meerkat-store` (which depends on `meerkat-core` but not on
-/// `meerkat-session`) can call the same transforms from its own
-/// deserialize path. This re-export keeps the wave-c plan's public
-/// path stable while making the functions dependency-reachable from
-/// below.
-pub use meerkat_core::session_migrations as migrations;
 
 #[cfg(feature = "session-compaction")]
 pub mod compactor;
@@ -45,6 +35,7 @@ pub use ephemeral::{
     EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
     SessionSnapshot,
 };
+pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};
 
 /// Metadata key used to store session labels in the `Session.metadata` map.
 ///
@@ -102,5 +93,20 @@ inventory::submit! {
         requires_feature: Some("session-compaction"),
         prerequisites: &[],
         status_resolver: None,
+    }
+}
+
+/// Convert a [`meerkat_core::service::SessionControlError`] into the public
+/// [`meerkat_core::service::SessionError`] surface: session-tier causes pass
+/// through unchanged; control-tier causes surface as typed `Unsupported`.
+///
+/// Single shared owner for the ephemeral and persistent services (the
+/// persistent twin previously carried a private copy).
+pub(crate) fn control_error_into_session_error(
+    err: meerkat_core::service::SessionControlError,
+) -> meerkat_core::service::SessionError {
+    match err {
+        meerkat_core::service::SessionControlError::Session(session_err) => session_err,
+        other => meerkat_core::service::SessionError::Unsupported(other.to_string()),
     }
 }

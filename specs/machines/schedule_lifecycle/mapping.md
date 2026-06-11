@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ScheduleLifecycleMachine`
 
 ### Code Anchors
-- `schedule_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, update planning config active or paused, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules
+- `schedule_lifecycle` (machine `ScheduleLifecycleMachine`): `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, update planning config active or paused, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules
 
 ### Scenarios
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision
@@ -31,7 +31,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_revision_and_planning`
 - `RecordPlanningWindowActive`
-  - anchors: `schedule_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `schedule_revision_and_planning`
 - `SyncTargetSnapshotActive`
   - anchors: `schedule_lifecycle`
@@ -40,51 +40,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_revision_and_planning`
 - `PauseActiveOrPaused`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResumeActiveOrPaused`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`, `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeleteActive`
   - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`, `schedule_revision_and_planning`
+  - scenarios: (unclaimed)
 - `DeletePaused`
   - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`, `schedule_revision_and_planning`
+  - scenarios: (unclaimed)
 - `DeleteDeleted`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOccurrencesSupersededActive`
-  - anchors: `schedule_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `schedule_revision_and_planning`
 - `ConfirmOccurrencesSupersededPaused`
-  - anchors: `schedule_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `schedule_revision_and_planning`
 - `ConfirmOccurrencesSupersededDeleted`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `EmitScheduleNotice`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`, `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupersedePendingOccurrences`
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_revision_and_planning`
 - `PlanningWindowRecorded`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `revision_is_positive`
-  - anchors: `schedule_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `schedule_revision_and_planning`
 - `deleted_has_no_planning_cursor`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `planning_cursor_requires_occurrence_progress`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_revision_and_planning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

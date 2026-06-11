@@ -1218,7 +1218,9 @@ mod tests {
         let id = SessionId::new();
         reg.stage(id.clone(), slot(&id)).await.unwrap();
         let req = AppendSystemContextRequest {
-            text: "hello".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "hello".to_string(),
+            ),
             source: Some("test".to_string()),
             idempotency_key: Some("k1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,

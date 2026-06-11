@@ -78,7 +78,7 @@ pub use coordination::{
     WorkIntentStatus,
 };
 pub use definition::MobDefinition;
-pub use error::MobError;
+pub use error::{MobError, MobFailureClass};
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
@@ -109,8 +109,10 @@ pub mod machine_schema_exports {
     }
 }
 
-pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
-pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+pub use profile::{
+    Profile, ProfileBinding, ProfileSource, ResumeOverrideField, SpawnTooling, ToolConfig,
+};
+pub use roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot,
     LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass,
@@ -141,7 +143,8 @@ pub use runtime::{
     PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
     SpawnMemberAdmission, SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec,
     SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt,
+    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
+    profile_to_wire, stored_realm_profile_to_wire,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
@@ -163,8 +166,6 @@ pub use store::{
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
-
-pub(crate) use ids::MeerkatId;
 
 /// Closure called at each member spawn to get a fresh snapshot of external tools.
 ///

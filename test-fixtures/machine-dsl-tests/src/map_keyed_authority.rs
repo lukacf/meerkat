@@ -52,10 +52,10 @@ machine! {
             EntityRemoved { entity_id: String },
         }
 
-        disposition EntityRegistered => local,
-        disposition EntityAdvanced => local,
-        disposition EntityCompleted => local,
-        disposition EntityRemoved => local,
+        disposition EntityRegistered => local seam NoOwnerRealization,
+        disposition EntityAdvanced => local seam NoOwnerRealization,
+        disposition EntityCompleted => local seam NoOwnerRealization,
+        disposition EntityRemoved => local seam NoOwnerRealization,
 
         // Register: guard on key NOT present, insert into map
         transition RegisterEntity {

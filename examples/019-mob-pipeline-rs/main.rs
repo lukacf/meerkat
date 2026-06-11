@@ -323,8 +323,9 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     println!("\n--- Stage 1: Lint ---");
     println!("Sending lint request (live LLM call)...");
     handle
+        .member(&AgentIdentity::from("lint-1"))
+        .await?
         .internal_turn(
-            AgentIdentity::from("lint-1"),
             "Analyze this Rust function for style issues. Report PASS or FAIL with a one-line reason. \
              Do NOT use any tools -- respond in plain text only.\n\n\
              ```rust\n\
@@ -348,8 +349,9 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     println!("\n--- Stage 2: Test ---");
     println!("Sending test request (live LLM call)...");
     handle
+        .member(&AgentIdentity::from("test-1"))
+        .await?
         .internal_turn(
-            AgentIdentity::from("test-1"),
             "The lint stage passed. Now evaluate the test coverage for this function. \
              Report PASS or FAIL with a one-line summary. \
              Do NOT use any tools -- respond in plain text only.\n\n\

@@ -417,6 +417,39 @@ impl From<WireKeepAlivePolicy> for meerkat_core::lifecycle::run_primitive::KeepA
     }
 }
 
+/// Typed wire projection of
+/// [`meerkat_core::lifecycle::run_primitive::KeepAliveDirective`].
+///
+/// Tri-state with the carrying `Option`: `enable` / `disable` / absent
+/// (preserve). Dogma K13: the wire must carry the explicit `disable` intent
+/// instead of collapsing it into absence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "directive", rename_all = "snake_case")]
+pub enum WireKeepAliveDirective {
+    Enable(WireKeepAlivePolicy),
+    Disable,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::KeepAliveDirective> for WireKeepAliveDirective {
+    fn from(value: meerkat_core::lifecycle::run_primitive::KeepAliveDirective) -> Self {
+        use meerkat_core::lifecycle::run_primitive::KeepAliveDirective as Core;
+        match value {
+            Core::Enable(policy) => Self::Enable(policy.into()),
+            Core::Disable => Self::Disable,
+        }
+    }
+}
+
+impl From<WireKeepAliveDirective> for meerkat_core::lifecycle::run_primitive::KeepAliveDirective {
+    fn from(value: WireKeepAliveDirective) -> Self {
+        match value {
+            WireKeepAliveDirective::Enable(policy) => Self::Enable(policy.into()),
+            WireKeepAliveDirective::Disable => Self::Disable,
+        }
+    }
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstructionKind`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1147,9 +1180,13 @@ where
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 ///
 /// The per-turn seam between control plane and core is fully typed —
-/// `serde_json::Value` does not appear here.
-#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+/// `serde_json::Value` does not appear here. `provider_params` and
+/// `auth_binding` carry the canonical Inherit/Set/Clear tri-state via
+/// [`WireTurnMetadataOverride`]; unknown fields (including the retired
+/// `clear_*` split wire form) fail closed at the serde boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<crate::wire::mob::WireHandlingMode>,
@@ -1168,88 +1205,13 @@ pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<WireKeepAlivePolicy>,
+    pub keep_alive: Option<WireKeepAliveDirective>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_kind: Option<WireRuntimeExecutionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal_apply_intent: Option<WirePeerResponseTerminalApplyIntent>,
-}
-
-#[derive(Deserialize)]
-struct WireRuntimeTurnMetadataFields {
-    #[serde(default)]
-    handling_mode: Option<crate::wire::mob::WireHandlingMode>,
-    #[serde(default)]
-    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-    #[serde(default)]
-    flow_tool_overlay: Option<meerkat_core::TurnToolOverlay>,
-    #[serde(default)]
-    additional_instructions: Option<Vec<WireTurnInstruction>>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    provider: Option<meerkat_core::Provider>,
-    #[serde(default)]
-    provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
-    #[serde(default)]
-    auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
-    #[serde(default)]
-    keep_alive: Option<WireKeepAlivePolicy>,
-    #[serde(default)]
-    render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
-    #[serde(default)]
-    execution_kind: Option<WireRuntimeExecutionKind>,
-    #[serde(default)]
-    peer_response_terminal_apply_intent: Option<WirePeerResponseTerminalApplyIntent>,
-}
-
-impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: WireRuntimeTurnMetadataFields =
-            serde_json::from_value(raw).map_err(de::Error::custom)?;
-        let provider_params = legacy_wire_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_wire_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-
-        Ok(Self {
-            handling_mode: fields.handling_mode,
-            skill_references: fields.skill_references,
-            flow_tool_overlay: fields.flow_tool_overlay,
-            additional_instructions: fields.additional_instructions,
-            model: fields.model,
-            provider: fields.provider,
-            provider_params,
-            auth_binding,
-            keep_alive: fields.keep_alive,
-            render_metadata: fields.render_metadata,
-            execution_kind: fields.execution_kind,
-            peer_response_terminal_apply_intent: fields.peer_response_terminal_apply_intent,
-        })
-    }
 }
 
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].
@@ -1362,52 +1324,4 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
                 .map(Into::into),
         }
     }
-}
-
-pub(crate) fn legacy_wire_override_from_split_fields<T, E>(
-    set_value: Option<WireTurnMetadataOverride<T>>,
-    clear: bool,
-    set_field: &'static str,
-    clear_field: &'static str,
-) -> Result<Option<WireTurnMetadataOverride<T>>, E>
-where
-    E: de::Error,
-{
-    if clear && set_value.is_some() {
-        return Err(E::custom(format!(
-            "{clear_field} cannot be combined with {set_field}"
-        )));
-    }
-    if clear {
-        Ok(Some(WireTurnMetadataOverride::Clear))
-    } else {
-        Ok(set_value)
-    }
-}
-
-pub(crate) fn take_legacy_clear_bool<E>(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-    aliases: &[&'static str],
-) -> Result<bool, E>
-where
-    E: de::Error,
-{
-    let mut seen = None;
-    for key in std::iter::once(field).chain(aliases.iter().copied()) {
-        match object.remove(key) {
-            None => {}
-            Some(serde_json::Value::Bool(value)) => match seen {
-                None => seen = Some(value),
-                Some(previous) if previous == value => {}
-                Some(_) => {
-                    return Err(E::custom(format!(
-                        "{field} and its compatibility aliases disagree"
-                    )));
-                }
-            },
-            Some(_) => return Err(E::custom(format!("{key} must be a boolean"))),
-        }
-    }
-    Ok(seen.unwrap_or(false))
 }

@@ -3,20 +3,20 @@ import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
-import { Session } from '../dist/session.js';
+import { Session, serializePromptContentInput } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
 function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
-    runtime_version: () => '0.6.0',
-    init_runtime_from_config: () => JSON.stringify({ status: 'initialized' }),
+    runtime_version: () => '0.7.0-alpha.0',
+    init_runtime_from_config: () => JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
       return JSON.parse(definitionJson).id;
     },
     async mob_subscribe_events() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return '[]';
@@ -49,7 +49,6 @@ function canonicalEnvelope(overrides = {}) {
       type: 'runtime',
       runtime_id: 'worker-runtime',
     },
-    source_id: 'runtime:worker-runtime',
     seq: 7,
     timestamp_ms: 1710000000000,
     payload: {
@@ -63,10 +62,10 @@ function canonicalEnvelope(overrides = {}) {
 function makeSubscriptionMob(pollSubscription) {
   return new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription: pollSubscription,
     close_subscription: () => undefined,
@@ -89,10 +88,10 @@ async function runtimeWithMobList(payload) {
     {
       async default() {},
       runtime_version() {
-        return '0.6.0';
+        return '0.7.0-alpha.0';
       },
       init_runtime_from_config() {
-        return JSON.stringify({ status: 'initialized' });
+        return JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] });
       },
       async mob_list() {
         return JSON.stringify(payload);
@@ -292,7 +291,7 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
 test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads', async () => {
   const envelope = canonicalEnvelope();
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([envelope]);
   });
 
@@ -319,7 +318,7 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
     envelope,
   };
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+    assert.equal(handle, 'stream-2');
     return JSON.stringify([attributed]);
   });
 
@@ -331,6 +330,21 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
   assert.deepEqual(items[0].envelope.source, { type: 'runtime', runtime_id: 'worker-runtime' });
   assert.equal(items[0].envelope.payload.type, 'text_delta');
   assert.equal('event' in items[0].envelope, false);
+});
+
+test('Mob.subscribeMemberEvents rejects envelopes with unknown payload event types', async () => {
+  // parseEventPayload must classify the payload discriminant against the
+  // generated AgentEvent inventory (isKnownEvent) — an unknown type is a
+  // malformed/forward-incompatible wire shape, never blindly cast through.
+  const envelope = canonicalEnvelope();
+  envelope.payload = { type: 'totally_unknown_event', x: 1 };
+  const mob = makeSubscriptionMob(() => JSON.stringify([envelope]));
+
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  assert.throws(
+    () => subscription.poll(),
+    /unknown event type "totally_unknown_event"/,
+  );
 });
 
 test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () => {
@@ -345,7 +359,7 @@ test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () 
     },
   };
   const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+    if (handle === 'stream-1') {
       return JSON.stringify([sourceIdOnly]);
     }
     return JSON.stringify([
@@ -375,7 +389,7 @@ test('Mob subscriptions reject malformed typed EventEnvelope source instead of t
     source_id: 'session:00000000-0000-4000-8000-000000000001',
   });
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([malformedSource]);
   });
 
@@ -383,7 +397,7 @@ test('Mob subscriptions reject malformed typed EventEnvelope source instead of t
   assert.throws(() => subscription.poll(), /source missing session_id/);
 });
 
-test('Mob subscriptions keep legacy source_id inert when typed source disagrees', async () => {
+test('Mob subscriptions drop legacy source_id strings instead of surfacing them', async () => {
   const envelope = canonicalEnvelope({
     source: {
       type: 'session',
@@ -392,7 +406,7 @@ test('Mob subscriptions keep legacy source_id inert when typed source disagrees'
     source_id: 'session:not-a-uuid',
   });
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+    assert.equal(handle, 'stream-1');
     return JSON.stringify([envelope]);
   });
 
@@ -403,7 +417,8 @@ test('Mob subscriptions keep legacy source_id inert when typed source disagrees'
     type: 'session',
     session_id: '00000000-0000-4000-8000-000000000001',
   });
-  assert.equal(item.source_id, 'session:not-a-uuid');
+  // The legacy envelope-level string is not part of the typed envelope.
+  assert.equal(item.source_id, undefined);
 });
 
 test('Mob subscriptions reject unrecognized event envelopes instead of fabricating unknown events', async () => {
@@ -418,7 +433,7 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
     },
   };
   const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+    if (handle === 'stream-1') {
       return JSON.stringify([legacyMemberEnvelope]);
     }
     return JSON.stringify([
@@ -442,7 +457,7 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
 
 test('Mob.subscribeEvents rejects legacy string sources instead of hiding runtime generation', async () => {
   const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+    assert.equal(handle, 'stream-2');
     return JSON.stringify([
       {
         source: 'worker-runtime',
@@ -478,6 +493,45 @@ test('Session direct polling rejects malformed event items', () => {
 
   assert.throws(() => session.pollEvents(), /missing type/);
   assert.throws(() => session.subscribe().poll(), /missing type/);
+});
+
+test('Session direct polling fails closed on an unknown event type instead of casting blindly', () => {
+  const session = makeDirectSession(() =>
+    JSON.stringify([{ type: 'totally_unknown_event', payload: { x: 1 } }]),
+  );
+
+  assert.throws(() => session.pollEvents(), /unknown event type "totally_unknown_event"/);
+  assert.throws(
+    () => session.subscribe().poll(),
+    /unknown event type "totally_unknown_event"/,
+  );
+});
+
+test('Session direct polling surfaces a lag gap as the generated stream_truncated event', () => {
+  // K19: the lag contract is the generated `stream_truncated` AgentEvent
+  // (reason `stream_lagged`) — the hand `{type:'lagged'}` sentinel is gone,
+  // and the legacy sentinel now fails event-type validation like any other
+  // unknown discriminant.
+  const truncated = {
+    type: 'stream_truncated',
+    reason: { kind: 'stream_lagged', dropped: 3 },
+  };
+  const session = makeDirectSession(() => JSON.stringify([truncated]));
+
+  assert.deepEqual(session.pollEvents(), [truncated]);
+
+  const legacy = makeDirectSession(() => JSON.stringify([{ type: 'lagged', skipped: 3 }]));
+  assert.throws(() => legacy.pollEvents(), /unknown event type "lagged"/);
+});
+
+test('Session direct polling fails closed on a structurally invalid skills_resolved event', () => {
+  // `skills_resolved` is a known discriminant, but the structural skill
+  // guards inside isKnownEvent must still reject a payload missing the typed
+  // `skills` array — proof the full record (not a synthetic `{ type }`) is
+  // validated.
+  const session = makeDirectSession(() => JSON.stringify([{ type: 'skills_resolved' }]));
+
+  assert.throws(() => session.pollEvents(), /unknown event type "skills_resolved"/);
 });
 
 test('Session destroy does not cache lifecycle state in the browser handle', async () => {
@@ -584,7 +638,11 @@ test('Mob.status projects only generated status truth', async () => {
 
   assert.equal(status.mob_id, 'mob-web-unit');
   assert.equal(status.status, 'Running');
-  assert.equal(status.state, 'Running');
+  assert.equal(
+    Object.hasOwn(status, 'state'),
+    false,
+    'the deleted legacy state projection must not reappear',
+  );
 });
 
 test('MeerkatRuntime.listMobs projects only generated mob list status truth', async () => {
@@ -598,7 +656,6 @@ test('MeerkatRuntime.listMobs projects only generated mob list status truth', as
     {
       mob_id: 'mob-web-unit',
       status: 'Running',
-      state: 'Running',
     },
   ]);
 });
@@ -638,6 +695,18 @@ test('Mob decoders reject missing typed status instead of fabricating defaults',
   await assert.rejects(
     () => missingMemberStatus.memberStatus('worker-1'),
     /Invalid mob member_status response: missing status/,
+  );
+
+  const missingMemberRef = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      // status present but member_ref absent: the runtime-owned handle is
+      // required, so the SDK must fail closed rather than fabricate it.
+      return JSON.stringify({ status: 'active', tokens_used: 0, is_final: false });
+    },
+  });
+  await assert.rejects(
+    () => missingMemberRef.memberStatus('worker-1'),
+    /Invalid mob member_status response: missing member_ref/,
   );
 
   const missingRespawnStatus = new Mob('mob-web-unit', {
@@ -704,14 +773,14 @@ test('Mob result decoders reject missing generated truth instead of fabricating 
   const malformedHelperResults = [
     {
       method: 'spawnHelper',
-      call: (mob) => mob.spawnHelper('summarize'),
+      call: (mob) => mob.spawnHelper('summarize', { agentIdentity: 'helper-1' }),
       binding: 'mob_spawn_helper',
       response: { agent_identity: 'helper-1', member_ref: 'ref-helper-1' },
       pattern: /Invalid mob spawn_helper response: tokens_used must be number/,
     },
     {
       method: 'forkHelper',
-      call: (mob) => mob.forkHelper('worker-1', 'review'),
+      call: (mob) => mob.forkHelper('worker-1', 'review', { agentIdentity: 'fork-1' }),
       binding: 'mob_fork_helper',
       response: { agent_identity: 'fork-1', member_ref: 'ref-fork-1' },
       pattern: /Invalid mob fork_helper response: tokens_used must be number/,
@@ -755,6 +824,9 @@ test('Mob result decoders preserve generated result truth after validation', asy
     async mob_member_status() {
       return JSON.stringify({
         status: 'active',
+        // member_ref is runtime-owned and arrives in the payload; the SDK no
+        // longer fabricates it client-side from {mobId, agentIdentity}.
+        member_ref: 'runtime-owned-ref-worker-1',
         tokens_used: 3,
         is_final: false,
         current_session_id: 'session-1',
@@ -792,6 +864,9 @@ test('Mob result decoders preserve generated result truth after validation', asy
 
   const snapshot = await deliveryMob.memberStatus('worker-1');
   assert.equal(snapshot.current_session_id, 'session-1');
+  // member_ref must originate from the runtime payload, not be synthesized
+  // client-side from {mobId, agentIdentity}.
+  assert.equal(snapshot.member_ref, 'runtime-owned-ref-worker-1');
   // J58: realtime_attachment_status assertion removed; field gone from the
   // wire shape with the live-adapter-mvp sweep.
   assert.equal(snapshot.resolved_capabilities.realtime, true);
@@ -801,6 +876,91 @@ test('Mob result decoders preserve generated result truth after validation', asy
   assert.equal(flowStatus.run_id, 'run-1');
   assert.equal(flowStatus.status, 'running');
   assert.deepEqual(flowStatus.step_ledger, []);
+});
+
+test('memberStatus rejects malformed resolved_capabilities booleans instead of coercing', async () => {
+  // A non-boolean capability flag must fail closed; the SDK must NOT coerce it
+  // (e.g. Boolean("false") === true would silently flip the meaning).
+  const malformedMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: false,
+          image_input: false,
+          image_tool_results: false,
+          inline_video: false,
+          realtime: 'false', // string, not boolean
+          web_search: false,
+          image_generation: false,
+        },
+      });
+    },
+  });
+  await assert.rejects(
+    () => malformedMob.memberStatus('worker-1'),
+    /resolved_capabilities\.realtime must be boolean/,
+  );
+
+  // An absent capability flag is equally malformed against the domain shape
+  // (all 7 flags are required) and must throw rather than default to false.
+  const missingFlagMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: true,
+          image_input: true,
+          image_tool_results: true,
+          inline_video: true,
+          realtime: true,
+          web_search: true,
+          // image_generation omitted
+        },
+      });
+    },
+  });
+  await assert.rejects(
+    () => missingFlagMob.memberStatus('worker-1'),
+    /resolved_capabilities\.image_generation must be boolean/,
+  );
+
+  // Sanity: a fully-typed capabilities block still parses and preserves truth.
+  const validMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: true,
+          image_input: false,
+          image_tool_results: true,
+          inline_video: false,
+          realtime: true,
+          web_search: false,
+          image_generation: true,
+        },
+      });
+    },
+  });
+  const snapshot = await validMob.memberStatus('worker-1');
+  assert.deepEqual(snapshot.resolved_capabilities, {
+    vision: true,
+    image_input: false,
+    image_tool_results: true,
+    inline_video: false,
+    realtime: true,
+    web_search: false,
+    image_generation: true,
+  });
 });
 
 test('Mob.respawn rejects legacy receipt carriers instead of projecting success', async () => {
@@ -825,7 +985,7 @@ test('Mob.respawn rejects legacy receipt carriers instead of projecting success'
 test('Mob event decoders reject malformed envelopes instead of synthesizing unknown events', async () => {
   const memberMob = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return JSON.stringify([{ event: { type: 'text_delta', delta: 'legacy' } }]);
@@ -840,7 +1000,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const metadataLightMember = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 3;
+      return 'stream-3';
     },
     poll_subscription() {
       return JSON.stringify([{ payload: { type: 'turn_completed' } }]);
@@ -857,7 +1017,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const mobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -878,7 +1038,7 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const metadataLightMobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 4;
+      return 'stream-4';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -917,14 +1077,13 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 test('Mob event decoders preserve generated payload envelopes', async () => {
   const memberMob = new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'stream-1';
     },
     poll_subscription() {
       return JSON.stringify([
         {
           event_id: 'evt-1',
           source: { type: 'session', session_id: 'session-typed-1' },
-          source_id: 'session-1',
           seq: 1,
           timestamp_ms: 123,
           payload: { type: 'text_delta', delta: 'hello' },
@@ -939,12 +1098,11 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
 
   assert.equal(memberEvent.payload.type, 'text_delta');
   assert.deepEqual(memberEvent.source, { type: 'session', session_id: 'session-typed-1' });
-  assert.equal(memberEvent.source_id, 'session-1');
   assert.equal(memberEvent.seq, 1);
 
   const mobWide = new Mob('mob-web-unit', {
     async mob_subscribe_events() {
-      return 2;
+      return 'stream-2';
     },
     poll_subscription() {
       return JSON.stringify([
@@ -955,7 +1113,6 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
           envelope: {
             event_id: 'evt-2',
             source: { type: 'session', session_id: 'session-typed-2' },
-            source_id: 'session-2',
             seq: 2,
             timestamp_ms: 456,
             payload: { type: 'turn_completed' },
@@ -976,6 +1133,103 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
     type: 'session',
     session_id: 'session-typed-2',
   });
-  assert.equal(mobEvent.envelope.source_id, 'session-2');
   assert.equal(mobEvent.envelope.payload.type, 'turn_completed');
+});
+
+// ── Row #39 / K19: prompt content is emitted as the tagged content-input
+// wire shape ({"text": ...} | {"blocks": [...]}) — the tag is the
+// discriminator, never JSON shape-sniffing of a raw string. ──────────────────
+
+test('serializePromptContentInput emits plain text as the tagged {text} shape', () => {
+  assert.deepEqual(JSON.parse(serializePromptContentInput('hello world')), {
+    text: 'hello world',
+  });
+});
+
+test('serializePromptContentInput emits block content as the tagged {blocks} shape', () => {
+  const blocks = [{ type: 'text', text: 'hi' }];
+  assert.deepEqual(JSON.parse(serializePromptContentInput(blocks)), { blocks });
+});
+
+test('serializePromptContentInput keeps text that looks like block JSON as TEXT', () => {
+  // K19 regression: a plain-text prompt whose body is itself valid
+  // block-array JSON must stay tagged text — it can never be misread as
+  // structured blocks by the WASM boundary.
+  const sneaky = JSON.stringify([{ type: 'text', text: 'hi' }]);
+  assert.deepEqual(JSON.parse(serializePromptContentInput(sneaky)), {
+    text: sneaky,
+  });
+});
+
+test('Session.turn forwards tagged block JSON to the WASM boundary', async () => {
+  let forwardedPrompt;
+  const session = new Session(
+    7,
+    async (_handle, prompt) => {
+      forwardedPrompt = prompt;
+      return JSON.stringify({ text: 'ok' });
+    },
+    () => JSON.stringify({ session_id: 'session-web-unit' }),
+    () => undefined,
+    () => '[]',
+    async () => '{}',
+  );
+
+  const blocks = [
+    { type: 'text', text: 'describe' },
+    { type: 'image', media_type: 'image/png', data: 'QUJD' },
+  ];
+  await session.turn(blocks);
+  // The Rust side deserializes the tagged shape strictly and fails closed.
+  assert.deepEqual(JSON.parse(forwardedPrompt), { blocks });
+});
+
+// ── Row #215: destroyed/torn-down handles are classified by typed code ──────
+
+test('Session.destroy is idempotent on a retired handle via the typed code', () => {
+  let destroyAttempts = 0;
+  // The runtime retires a destroyed handle and rejects a repeat destroy with
+  // the typed invalid_session_handle envelope (a JSON string), like the real
+  // WASM err_js output.
+  const invalidHandleEnvelope = JSON.stringify({
+    code: 'invalid_session_handle',
+    message: 'unknown browser session handle: 7',
+  });
+  const session = new Session(
+    7,
+    async () => '{}',
+    () => '{}',
+    () => {
+      destroyAttempts += 1;
+      if (destroyAttempts > 1) {
+        throw invalidHandleEnvelope;
+      }
+    },
+    () => '[]',
+    async () => '{}',
+  );
+
+  assert.doesNotThrow(() => session.destroy());
+  // A repeat destroy of the retired handle is classified by the typed code
+  // and treated as already-gone (idempotent), not re-thrown.
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(destroyAttempts, 2);
+});
+
+test('Session.destroy re-throws non-already-gone typed errors', () => {
+  const busyEnvelope = JSON.stringify({
+    code: 'SESSION_BUSY',
+    message: 'session is busy',
+  });
+  const session = new Session(
+    7,
+    async () => '{}',
+    () => '{}',
+    () => {
+      throw busyEnvelope;
+    },
+    () => '[]',
+    async () => '{}',
+  );
+  assert.throws(() => session.destroy(), /SESSION_BUSY/);
 });

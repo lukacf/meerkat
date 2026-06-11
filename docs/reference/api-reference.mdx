@@ -283,11 +283,10 @@ See the [structured output guide](/guides/structured-output) for usage details.
 | `HookPoint` | 8 extension points (`RunStarted` through `TurnBoundary`) |
 | `HookCapability` | `Observe`, `Guardrail`, `Rewrite` (retired compatibility label; no patch authority) |
 | `HookExecutionMode` | `Foreground` (blocking) or `Background` (async) |
-| `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime, failure policy) |
+| `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime) |
 | `HookRunOverrides` | Per-run hook customization (add entries, disable by ID) |
 | `HookDecision` | `Allow` or `Deny` with reason code |
 | `HookPatch` | Retired patch surface; no valid semantic mutation variants |
-| `HookFailurePolicy` | `FailOpen` or `FailClosed` |
 
 See the [hooks guide](/guides/hooks) for usage details.
 
@@ -319,7 +318,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
 | `WireUsage` | Token/cost usage breakdown |
-| `ContractVersion` | Semver version (`0.6.23` currently) |
+| `ContractVersion` | Semver version, lock-stepped with `workspace.package.version` (see `meerkat-contracts/src/version.rs`) |
 | `CoreCreateParams` | Session creation parameters |
 | `OutputSchema` + `structured_output_retries` | Structured-output schema and retry settings carried directly on session/turn request surfaces |
 | `CommsParams` | Keep-alive + comms identity parameters |

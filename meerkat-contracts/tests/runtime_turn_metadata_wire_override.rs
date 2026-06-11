@@ -78,18 +78,17 @@ fn wire_metadata_clear_overrides_round_trip() {
 }
 
 #[test]
-fn wire_metadata_legacy_clear_only_deserializes_as_clear_overrides() {
-    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+fn wire_metadata_legacy_clear_only_payloads_are_rejected_fail_closed() {
+    let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
         "clear_provider_params": true,
         "clear_auth_binding": true,
     }))
-    .expect("legacy clear-only payloads remain accepted");
-
-    assert_eq!(
-        parsed.provider_params,
-        Some(WireTurnMetadataOverride::Clear)
+    .expect_err("retired legacy split clear_* payloads must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown field") && message.contains("clear_"),
+        "unexpected error: {err}"
     );
-    assert_eq!(parsed.auth_binding, Some(WireTurnMetadataOverride::Clear));
 }
 
 #[test]
@@ -98,7 +97,7 @@ fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
         "provider_params": { "temperature": 0.2 },
         "clear_provider_params": true,
     }))
-    .expect_err("provider_params set plus legacy clear must fail");
+    .expect_err("retired clear_provider_params field must fail closed");
     assert!(
         err.to_string().contains("clear_provider_params"),
         "unexpected error: {err}"
@@ -111,7 +110,7 @@ fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
         },
         "clear_auth_binding": true,
     }))
-    .expect_err("auth_binding set plus legacy clear must fail");
+    .expect_err("retired clear_auth_binding field must fail closed");
     assert!(
         err.to_string().contains("clear_auth_binding"),
         "unexpected error: {err}"
@@ -147,13 +146,24 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
 
 #[test]
 fn wire_metadata_provider_tag_preserves_provider_native_fields() {
-    let provider_params = ProviderParamsOverride::from_legacy_provider_value(
-        "anthropic",
-        &serde_json::json!({
-            "effort": "xhigh",
-            "web_search": null,
-        }),
-    );
+    // K2: the typed override is constructed directly — there is no legacy
+    // JSON-bag projection on this seam anymore.
+    let provider_params = ProviderParamsOverride {
+        provider_tag: Some(
+            meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    effort: Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::XHigh),
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::Value::Null,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ),
+        ..Default::default()
+    };
     let meta = RuntimeTurnMetadata {
         provider_params: Some(TurnMetadataOverride::Set(provider_params)),
         ..Default::default()
@@ -175,27 +185,39 @@ fn wire_metadata_provider_tag_preserves_provider_native_fields() {
     let parsed_wire: WireRuntimeTurnMetadata =
         serde_json::from_value(json).expect("deserialize wire metadata");
     let round_tripped: RuntimeTurnMetadata = parsed_wire.into();
-    let Some(TurnMetadataOverride::Set(provider_params)) = round_tripped.provider_params else {
+    let Some(TurnMetadataOverride::Set(round_tripped_params)) = round_tripped.provider_params
+    else {
         panic!("provider params set override should survive wire round trip");
     };
-    let legacy = provider_params.to_legacy_provider_value();
-    assert_eq!(legacy["effort"], serde_json::json!("xhigh"));
-    assert!(
-        legacy
-            .as_object()
-            .is_some_and(|obj| obj.contains_key("web_search")),
-        "explicit provider-native null must survive wire round trip"
+    let Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(tag)) =
+        round_tripped_params.provider_tag
+    else {
+        panic!("anthropic provider tag should survive wire round trip");
+    };
+    assert_eq!(
+        tag.effort,
+        Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::XHigh)
     );
-    assert!(legacy["web_search"].is_null());
+    let web_search = tag
+        .web_search
+        .expect("explicit provider-native null must survive wire round trip");
+    assert!(web_search.as_value().is_null());
 }
 
 #[test]
 fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
-    for effort in ["none", "xhigh"] {
-        let provider_params = ProviderParamsOverride::from_legacy_provider_value(
-            "openai",
-            &serde_json::json!({ "reasoning_effort": effort }),
-        );
+    use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag, ReasoningEffort};
+    for (effort, wire_effort) in [
+        (ReasoningEffort::None, "none"),
+        (ReasoningEffort::XHigh, "xhigh"),
+    ] {
+        let provider_params = ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort: Some(effort),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
         let meta = RuntimeTurnMetadata {
             provider_params: Some(TurnMetadataOverride::Set(provider_params)),
             ..Default::default()
@@ -205,16 +227,19 @@ fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
         let json = serde_json::to_value(&wire).expect("serialize wire metadata");
         assert_eq!(
             json["provider_params"]["value"]["provider_tag"]["reasoning_effort"],
-            serde_json::json!(effort)
+            serde_json::json!(wire_effort)
         );
 
         let parsed_wire: WireRuntimeTurnMetadata =
             serde_json::from_value(json).expect("deserialize wire metadata");
         let round_tripped: RuntimeTurnMetadata = parsed_wire.into();
-        let Some(TurnMetadataOverride::Set(provider_params)) = round_tripped.provider_params else {
+        let Some(TurnMetadataOverride::Set(round_tripped_params)) = round_tripped.provider_params
+        else {
             panic!("provider params set override should survive wire round trip");
         };
-        let legacy = provider_params.to_legacy_provider_value();
-        assert_eq!(legacy["reasoning_effort"], serde_json::json!(effort));
+        let Some(ProviderTag::OpenAi(tag)) = round_tripped_params.provider_tag else {
+            panic!("openai provider tag should survive wire round trip");
+        };
+        assert_eq!(tag.reasoning_effort, Some(effort));
     }
 }

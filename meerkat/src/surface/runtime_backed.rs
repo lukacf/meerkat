@@ -5,7 +5,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunPrimitive, RuntimeTurnMetadata,
+    ConversationContextAppend, RunPrimitive, RuntimeTurnMetadata,
 };
 use meerkat_core::service::{
     DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest, StartTurnRuntimeSemantics,
@@ -111,21 +111,14 @@ pub fn split_runtime_backed_eager_create_request(
         return (request, None);
     }
 
-    let mut turn_metadata = request
+    // Dogma K10: `build.initial_turn_metadata` is the sole carrier of
+    // initial-turn render/skill facts — there is no request-level duplicate
+    // left to fold in.
+    let turn_metadata = request
         .build
         .as_mut()
         .and_then(|build| build.initial_turn_metadata.take())
         .unwrap_or_default();
-    if turn_metadata.render_metadata.is_none() {
-        turn_metadata.render_metadata = request.render_metadata.take();
-    } else {
-        request.render_metadata = None;
-    }
-    if turn_metadata.skill_references.is_none() {
-        turn_metadata.skill_references = request.skill_references.take();
-    } else {
-        request.skill_references = None;
-    }
 
     let prompt = std::mem::replace(
         &mut request.prompt,
@@ -155,12 +148,10 @@ fn start_turn_request_from_initial_turn(
         system_prompt: None,
         event_tx: initial_turn.event_tx,
         runtime: StartTurnRuntimeSemantics::new(
-            None,
             initial_turn
                 .turn_metadata
                 .handling_mode
                 .unwrap_or(HandlingMode::Queue),
-            None,
             None,
             Vec::new(),
             Some(initial_turn.turn_metadata),
@@ -451,11 +442,12 @@ pub async fn configure_peer_ingress(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     session_id: &SessionId,
     keep_alive: bool,
-) {
+) -> Result<(), RuntimeDriverError> {
     let comms_rt = service.comms_runtime(session_id).await;
     adapter
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-        .await;
+        .await
+        .map(|_spawned| ())
 }
 
 pub fn default_persistent_executor(
@@ -609,9 +601,16 @@ async fn validate_workgraph_attention_primitive(
     let Some(workgraph_service) = workgraph_service else {
         return Ok(());
     };
-    let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
-        crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
-    }) else {
+    let projection = match primitive.turn_metadata() {
+        Some(metadata) => {
+            crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+                .map_err(|error| {
+                    CoreExecutorError::apply_failed_primitive_rejected(error.to_string())
+                })?
+        }
+        None => None,
+    };
+    let Some(projection) = projection else {
         return Ok(());
     };
     crate::validate_workgraph_attention_projection_current(workgraph_service, &projection)
@@ -625,26 +624,7 @@ fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| meerkat_core::PendingSystemContextAppend {
-            text: match &append.content {
-                CoreRenderable::Text { text } => text.clone(),
-                CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-                CoreRenderable::Json { value } => {
-                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-                }
-                CoreRenderable::Reference { uri, label } => match label {
-                    Some(label) => format!("{label}: {uri}"),
-                    None => uri.clone(),
-                },
-                CoreRenderable::SystemNotice { kind, body, blocks } => {
-                    meerkat_core::types::SystemNoticeMessage::with_blocks(
-                        *kind,
-                        body.clone(),
-                        blocks.clone(),
-                    )
-                    .model_projection_text()
-                }
-                _ => String::new(),
-            },
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             // Durable keyed conversation context append — not a transient steer.
@@ -673,9 +653,7 @@ fn start_turn_request_from_primitive(
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(
-            None,
             HandlingMode::Queue,
-            None,
             None,
             pre_turn_context_appends,
             metadata.cloned(),
@@ -875,6 +853,7 @@ fn ensure_materialized_session_id_matches(
 #[cfg(test)]
 mod typed_transcript_contract_tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
 
     #[test]
     fn start_turn_request_carries_typed_turn_appends() {
@@ -913,6 +892,7 @@ mod typed_transcript_contract_tests {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
     use meerkat_core::service::SessionService;
 
     #[cfg(all(
@@ -985,7 +965,7 @@ mod tests {
             }),
             skill_references: Some(vec![skill]),
             flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
-                allowed_tools: Some(vec!["runtime_tool".to_string()]),
+                allowed_tools: Some(vec!["runtime_tool".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),
             }),
@@ -1008,12 +988,10 @@ mod tests {
         let req = start_turn_request_from_primitive(&primitive)
             .expect("metadata should be carried, not rejected");
 
-        assert_eq!(req.runtime.render_metadata, None);
         assert_eq!(
             req.runtime.handling_mode,
             meerkat_core::types::HandlingMode::Queue
         );
-        assert_eq!(req.runtime.skill_references, None);
         assert_eq!(req.runtime.flow_tool_overlay, None);
         assert_eq!(
             req.runtime.typed_turn_appends,
@@ -1033,11 +1011,11 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
-            render_metadata: None,
-            system_prompt: Some("surface runtime regression".to_string()),
+            system_prompt: crate::SystemPromptOverride::Set(
+                "surface runtime regression".to_string(),
+            ),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -1051,7 +1029,10 @@ mod tests {
             .unwrap_or_default()
             .applied()
             .iter()
-            .any(|append| append.source.as_deref() == Some(source) && append.text.contains(text))
+            .any(|append| {
+                append.source.as_deref() == Some(source)
+                    && append.content.render_text().contains(text)
+            })
     }
 
     fn runtime_output_session_snapshot(output: &CoreApplyOutput) -> Session {
@@ -2058,7 +2039,7 @@ mod tests {
 
         match failed {
             AgentEvent::RunFailed {
-                error_report: Some(report),
+                error_report: report,
                 ..
             } => {
                 assert_eq!(report.class, meerkat_core::event::AgentErrorClass::Llm);
@@ -2106,7 +2087,9 @@ mod tests {
         .await
         .expect("materialize session");
 
-        configure_peer_ingress(&adapter, &service, &result.session_id, true).await;
+        configure_peer_ingress(&adapter, &service, &result.session_id, true)
+            .await
+            .expect("configure peer ingress");
         expect_prompt_completion(&adapter, &result.session_id, "peer ingress prompt").await;
         service
             .discard_live_session(&result.session_id)
@@ -2141,7 +2124,9 @@ mod tests {
         .await
         .expect("materialize session");
 
-        configure_peer_ingress(&adapter, &service, &result.session_id, false).await;
+        configure_peer_ingress(&adapter, &service, &result.session_id, false)
+            .await
+            .expect("configure peer ingress");
         let persisted = service
             .export_live_session(&result.session_id)
             .await

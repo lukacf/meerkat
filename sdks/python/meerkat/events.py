@@ -29,6 +29,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .errors import MeerkatError
+from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
 if TYPE_CHECKING:
     from .types import SkillKey
 
@@ -277,7 +280,6 @@ class ToolExecutionCompleted(Event):
 
     id: str = ""
     name: str = ""
-    result: str = ""
     content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
     duration_ms: int | None = None
@@ -318,7 +320,9 @@ class CompactionCompleted(Event):
 class CompactionFailed(Event):
     """Context compaction failed."""
 
-    error: str = ""
+    # Typed failure reason object ({"kind": ..., ...}); mirrors the Rust
+    # CompactionFailureReason tagged enum (was a bare `error` string).
+    reason: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +437,6 @@ class SkillResolutionFailed(Event):
 
     skill_key: SkillKey | None = None
     reason: SkillResolutionFailureReason | None = None
-    reference: str = ""
-    error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +522,6 @@ class ToolConfigChangedPayload:
 
     operation: str | None = None
     target: str | None = None
-    status: str | None = None
     status_info: ToolConfigChangeStatus | None = None
     persisted: bool | None = None
     applied_at_turn: int | None = None
@@ -541,7 +542,6 @@ class BackgroundJobCompleted(Event):
     display_name: str
     terminal_status: BackgroundJobTerminalStatus
     detail: str
-    legacy_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -879,7 +879,6 @@ _TURN_TERMINAL_CAUSE_KINDS = {
 
 def _parse_skill_resolution_failure_reason(
     raw: Any,
-    fallback_message: str,
 ) -> SkillResolutionFailureReason | None:
     if not isinstance(raw, dict):
         return None
@@ -915,7 +914,7 @@ def _parse_skill_resolution_failure_reason(
         reason_type=normalized_reason_type,
         key=key,
         capability=capability if isinstance(capability, str) else "",
-        message=str(raw.get("message", fallback_message)),
+        message=str(raw.get("message", "")),
         source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
         skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
         existing_fingerprint=str(
@@ -987,7 +986,6 @@ _STRING_FIELDS = {
     "point",
     "reason_code",
     "message",
-    "reference",
     "interaction_id",
 }
 
@@ -1028,11 +1026,11 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_result_received": ("id", "name", "is_error"),
         "turn_completed": ("stop_reason", "usage"),
         "tool_execution_started": ("id", "name"),
-        "tool_execution_completed": ("id", "name", "result"),
+        "tool_execution_completed": ("id", "name", "content"),
         "tool_execution_timed_out": ("id", "name", "timeout_ms"),
         "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
-        "compaction_failed": ("error",),
+        "compaction_failed": ("reason",),
         "budget_warning": ("budget_type", "used", "limit", "percent"),
         "retrying": ("attempt", "max_attempts", "error", "delay_ms"),
         "hook_started": ("hook_id", "point"),
@@ -1040,7 +1038,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "hook_failed": ("hook_id", "point", "error"),
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
         "skills_resolved": ("skills", "injection_bytes"),
-        "skill_resolution_failed": ("reference", "error"),
         "interaction_complete": ("interaction_id", "result"),
         "interaction_failed": ("interaction_id", "error"),
         "stream_truncated": ("reason",),
@@ -1066,7 +1063,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if operation not in {"add", "remove", "reload"}:
             raise ValueError("payload.operation must be add, remove, or reload")
         _require_str(payload, "target")
-        _require_str(payload, "status")
         _require_bool(payload, "persisted")
         return
     if event_type == "turn_completed":
@@ -1104,6 +1100,9 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
+        elif field_name == "content" and event_type == "tool_execution_completed":
+            if not isinstance(raw.get("content"), list):
+                raise ValueError("content must be an array of content blocks")
         elif field_name in _STRING_FIELDS:
             _require_str(raw, field_name)
         elif field_name in _NUMBER_FIELDS:
@@ -1115,8 +1114,12 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
 def parse_event(raw: dict[str, Any]) -> Event:
     """Parse a raw event dict (from the wire) into a typed :class:`Event`.
 
-    Unknown event types are returned as :class:`UnknownEvent` for
-    forward-compatibility with newer server versions.
+    Fails CLOSED on an unknown discriminant: a ``type`` that is not in the
+    generated :data:`KNOWN_AGENT_EVENT_TYPES` inventory raises
+    :class:`~meerkat.errors.MeerkatError`. A type that is in the inventory but
+    has no parser class in this SDK version is surfaced as :class:`UnknownEvent`
+    for forward-compatibility; a known type with a malformed payload is
+    preserved as a ``malformed_event`` :class:`UnknownEvent`.
     """
     if "event" in raw and ("scope_id" in raw or "scope_path" in raw):
         inner_raw = raw.get("event")
@@ -1142,7 +1145,26 @@ def parse_event(raw: dict[str, Any]) -> Event:
     event_type = raw.get("type", "")
     cls = _EVENT_MAP.get(event_type)
     if cls is None:
-        return UnknownEvent(type=event_type, data=raw)
+        if not event_type:
+            # Row #283: a frame with no `type` discriminant is malformed — it is
+            # NOT a typed event, so preserve it as `malformed_event` rather than
+            # fabricating an UnknownEvent from a missing discriminant (and rather
+            # than rejecting a control/keepalive frame outright).
+            return _malformed(raw, "missing event type discriminant")
+        if event_type in KNOWN_AGENT_EVENT_TYPES:
+            # A schema-known event type this SDK version has no parser class for
+            # yet: a genuine forward-compatible event, surfaced as an explicit
+            # UnknownEvent marker (raw preserved) — not a fabricated typed event.
+            return UnknownEvent(type=event_type, data=raw)
+        # Fail CLOSED: a present `type` absent from the schema-derived
+        # KNOWN_AGENT_EVENT_TYPES inventory is a contract violation for a
+        # version-matched client and is rejected, not laundered. (Version skew is
+        # handled separately by the contract-version check.)
+        raise MeerkatError(
+            "UNKNOWN_EVENT_TYPE",
+            f"unknown agent event type {event_type!r}",
+            details=raw,
+        )
 
     try:
         _validate_known_event(event_type, raw)
@@ -1154,7 +1176,7 @@ def parse_event(raw: dict[str, Any]) -> Event:
             elif f == "content" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["content"] = _parse_content_blocks(
                     raw.get("content"),
-                    raw.get("result") if cls is ToolExecutionCompleted else None,
+                    None,
                 )
             elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
@@ -1169,7 +1191,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
             elif f == "reason" and cls is SkillResolutionFailed:
                 kwargs["reason"] = _parse_skill_resolution_failure_reason(
                     raw.get("reason"),
-                    raw["error"],
                 )
             elif f == "payload" and cls is ToolConfigChanged:
                 payload_raw = raw["payload"]
@@ -1178,7 +1199,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["payload"] = ToolConfigChangedPayload(
                     operation=payload_raw["operation"],
                     target=payload_raw["target"],
-                    status=payload_raw["status"],
                     status_info=_parse_tool_config_change_status(
                         payload_raw.get("status_info")
                     ),
@@ -1188,11 +1208,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                         if isinstance(applied_at_turn_raw, int)
                         else None
                     ),
-                )
-            elif f == "legacy_status" and cls is BackgroundJobCompleted:
-                legacy_status = raw.get("status")
-                kwargs["legacy_status"] = (
-                    legacy_status if isinstance(legacy_status, str) else None
                 )
             elif f == "terminal_status" and cls is BackgroundJobCompleted:
                 kwargs["terminal_status"] = cast(

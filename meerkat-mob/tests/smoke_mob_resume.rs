@@ -141,8 +141,13 @@ fn joke_mob_definition(model: String) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: model.clone(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,
@@ -155,12 +160,17 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model,
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,
@@ -173,7 +183,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("joke-smoke"));
@@ -229,7 +239,6 @@ async fn assistant_history_blob(
         .messages
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant(message) => Some(message.content.clone()),
             Message::BlockAssistant(message) => {
                 Some(message.text_blocks().collect::<Vec<_>>().join("\n"))
             }

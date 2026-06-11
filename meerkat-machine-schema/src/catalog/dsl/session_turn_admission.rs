@@ -62,6 +62,40 @@ pub enum PendingContinuationDisposition {
     NoPendingBoundary,
 }
 
+/// Tri-state runtime keep-alive request carried into the admission machine.
+///
+/// This is the canonical typed decision the shell previously collapsed into an
+/// `Option<bool>`: `Some(true)` -> [`Enable`](RuntimeKeepAliveRequest::Enable),
+/// `Some(false)` -> [`Disable`](RuntimeKeepAliveRequest::Disable), and absent
+/// -> [`Preserve`](RuntimeKeepAliveRequest::Preserve). `Disable` is distinct
+/// from `Preserve`: both resolve `persist_keep_alive = false`, but `Disable`
+/// records an explicit operator intent to turn keep-alive off, whereas
+/// `Preserve` leaves the prior keep-alive standing unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAliveRequest {
+    Enable,
+    Disable,
+    #[default]
+    Preserve,
+}
+
+/// Machine-resolved keep-alive persistence decision.
+///
+/// The former `persist_keep_alive: bool` effect payload collapsed `Disable`
+/// (persist keep-alive = false) and `Preserve` (leave the existing setting
+/// unchanged) into the same `false`, so an explicit disable could never reach
+/// the durable session metadata. This closed tri-state is the canonical
+/// decision the shell mirrors: `PersistEnabled` writes `keep_alive = true`,
+/// `PersistDisabled` writes `keep_alive = false`, `PreserveExisting` writes
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeKeepAlivePersistenceDecision {
+    PersistEnabled,
+    PersistDisabled,
+    #[default]
+    PreserveExisting,
+}
+
 machine! {
     machine SessionTurnAdmissionMachine {
         version: 1,
@@ -102,7 +136,7 @@ machine! {
             AuthorizeStartTurnDispatch,
             AuthorizeCancelAfterBoundary,
             ResolveLastStartTurnPublicTerminal,
-            ResolveRuntimeKeepAlive { keep_alive_policy_present: bool },
+            ResolveRuntimeKeepAlive { keep_alive_request: Enum<RuntimeKeepAliveRequest> },
             ResolveStartTurnDisposition {
                 execution_kind_present: bool,
                 execution_kind: Enum<StartTurnExecutionKind>,
@@ -124,7 +158,7 @@ machine! {
             CancelAfterBoundaryAuthorized,
             StartTurnDispositionResolved { disposition: Enum<StartTurnDisposition> },
             StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
-            RuntimeKeepAliveResolved { persist_keep_alive: bool },
+            RuntimeKeepAliveResolved { decision: Enum<RuntimeKeepAlivePersistenceDecision> },
         }
 
         helper is_active_phase(phase: TurnAdmissionPhase) -> bool {
@@ -139,13 +173,13 @@ machine! {
             self.lifecycle_phase != Phase::ShuttingDown || is_active_phase(self.lifecycle_phase) == false
         }
 
-        disposition TurnAdmissionProjected => local,
-        disposition TurnInterruptRequested => local,
-        disposition StartTurnDispatchResolved => local,
-        disposition CancelAfterBoundaryAuthorized => local,
-        disposition StartTurnDispositionResolved => local,
-        disposition StartTurnPublicTerminalResolved => local,
-        disposition RuntimeKeepAliveResolved => local,
+        disposition TurnAdmissionProjected => local seam NoOwnerRealization,
+        disposition TurnInterruptRequested => local seam NoOwnerRealization,
+        disposition StartTurnDispatchResolved => local seam NoOwnerRealization,
+        disposition CancelAfterBoundaryAuthorized => local seam NoOwnerRealization,
+        disposition StartTurnDispositionResolved => local seam NoOwnerRealization,
+        disposition StartTurnPublicTerminalResolved => local seam NoOwnerRealization,
+        disposition RuntimeKeepAliveResolved => local seam NoOwnerRealization,
 
         transition ProjectTurnAdmission {
             per_phase [Idle, Admitted, Running, Completing, ShuttingDown]
@@ -544,19 +578,36 @@ machine! {
         }
 
         transition ResolveRuntimeKeepAliveEnable {
-            on input ResolveRuntimeKeepAlive { keep_alive_policy_present }
-            guard { self.lifecycle_phase == Phase::Admitted && keep_alive_policy_present }
+            on input ResolveRuntimeKeepAlive { keep_alive_request }
+            guard {
+                self.lifecycle_phase == Phase::Admitted
+                && keep_alive_request == RuntimeKeepAliveRequest::Enable
+            }
             update {}
             to Admitted
-            emit RuntimeKeepAliveResolved { persist_keep_alive: true }
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PersistEnabled }
+        }
+
+        transition ResolveRuntimeKeepAliveDisable {
+            on input ResolveRuntimeKeepAlive { keep_alive_request }
+            guard {
+                self.lifecycle_phase == Phase::Admitted
+                && keep_alive_request == RuntimeKeepAliveRequest::Disable
+            }
+            update {}
+            to Admitted
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PersistDisabled }
         }
 
         transition ResolveRuntimeKeepAlivePreserve {
-            on input ResolveRuntimeKeepAlive { keep_alive_policy_present }
-            guard { self.lifecycle_phase == Phase::Admitted && keep_alive_policy_present == false }
+            on input ResolveRuntimeKeepAlive { keep_alive_request }
+            guard {
+                self.lifecycle_phase == Phase::Admitted
+                && keep_alive_request == RuntimeKeepAliveRequest::Preserve
+            }
             update {}
             to Admitted
-            emit RuntimeKeepAliveResolved { persist_keep_alive: false }
+            emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting }
         }
 
         transition ResolveLastStartTurnPublicTerminalNoPending {

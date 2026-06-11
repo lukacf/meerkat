@@ -364,7 +364,7 @@ The current CLI is strongest for helper-style workflows on an existing mob:
 
 ```bash
 rkat mob spawn-helper release-triage "Join as lead-1 and summarize the release status." --profile lead --agent-identity lead-1
-rkat mob fork-helper release-triage lead-1 "Investigate the flaky test history." --profile analyst
+rkat mob fork-helper release-triage lead-1 "Investigate the flaky test history." --profile analyst --agent-identity analyst-2
 rkat mob member-status release-triage lead-1 --json
 rkat mob respawn release-triage analyst-2 --initial-message "Resume with a fresh runtime."
 rkat mob wait-kickoff release-triage --json

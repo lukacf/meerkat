@@ -82,14 +82,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_startup_binding_requested`: `Set<AgentRuntimeId>`
 - `member_startup_runtime_ready`: `Set<AgentRuntimeId>`
 - `member_startup_ready`: `Set<AgentRuntimeId>`
-- `member_kickoff_pending`: `Set<String>`
-- `member_kickoff_starting`: `Set<String>`
-- `member_kickoff_callback_pending`: `Set<String>`
-- `member_kickoff_started`: `Set<String>`
-- `member_kickoff_failed`: `Set<String>`
-- `member_kickoff_cancelled`: `Set<String>`
-- `member_kickoff_error`: `Map<String, String>`
+- `member_kickoff_pending`: `Set<AgentIdentity>`
+- `member_kickoff_starting`: `Set<AgentIdentity>`
+- `member_kickoff_callback_pending`: `Set<AgentIdentity>`
+- `member_kickoff_started`: `Set<AgentIdentity>`
+- `member_kickoff_failed`: `Set<AgentIdentity>`
+- `member_kickoff_cancelled`: `Set<AgentIdentity>`
+- `member_kickoff_error`: `Map<AgentIdentity, String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
+- `member_revival_pending`: `Set<AgentIdentity>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
@@ -140,72 +141,31 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resource_claim_owner_present`: `Map<ResourceClaimId, Bool>`
 - `resource_claim_expires_at_ms`: `Map<ResourceClaimId, Option<u64>>`
 - `coordination_event_next_sequence`: `u64`
+- `topology_default_policy`: `PolicyDecision`
+- `external_member_rebind_capability`: `Map<AgentIdentity, ExternalMemberRebindCapability>`
+- `orphan_budget`: `u64`
+- `desired_members`: `Set<AgentIdentity>`
+- `members_to_spawn`: `Set<AgentIdentity>`
+- `members_to_retire`: `Set<AgentIdentity>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>, output_recorded: Map<FlowNodeId, Bool>, node_condition_results: Map<FlowNodeId, Option<Bool>>, last_admitted_node: Option<FlowNodeId>)
-- `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
-- `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
-- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
-- `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `ClassifyFlowRunTerminality`(run_id: RunId, status: FlowRunStatus)
-- `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
-- `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
-- `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
-- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
-- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
-- `ClassifyMemberWait`(agent_identity: AgentIdentity)
-- `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
-- `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
-- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
-- `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
-- `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
-- `ResolveCreateMobAdmission`(can_create_mobs: Bool)
-- `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
-- `ClassifyMemberOperationEligibility`
-- `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
-- `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
-- `RetireAbsent`(agent_identity: AgentIdentity)
-- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
-- `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `WireMembers`(edge: WiringEdge)
 - `WireMembersWithTrust`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
-- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
-- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
-- `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
-- `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
-- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
 - `Resume`
 - `Complete`
@@ -219,31 +179,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SubscribeAgentEvents`(agent_identity: AgentIdentity)
 - `SubscribeAllAgentEvents`(session_bound_runtimes: Set<AgentRuntimeId>)
 - `SubscribeMobEvents`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
-- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
-- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEvents`
-- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
 - `SetSpawnPolicy`(enabled: Bool)
-- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
-- `KickoffMarkPending`(member_id: String)
-- `KickoffMarkStarting`(member_id: String)
-- `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `KickoffResolveStarted`(member_id: String)
-- `KickoffResolveCallbackPending`(member_id: String)
-- `KickoffResolveFailed`(member_id: String, error: String)
-- `KickoffCancelRequested`(member_id: String)
-- `KickoffClear`(member_id: String)
-- `RecordCoordinationWorkIntent`(intent_id: WorkIntentId, requested_status: MobCoordinationWorkIntentStatus, owner_present: Bool, summary_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
-- `RecordCoordinationResourceClaim`(claim_id: ResourceClaimId, requested_kind: MobCoordinationResourceClaimKind, requested_status: MobCoordinationResourceClaimStatus, owner_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
-- `UpdateCoordinationWorkIntentStatus`(intent_id: WorkIntentId, expected_revision: u64, requested_status: MobCoordinationWorkIntentStatus, now_ms: u64)
-- `UpdateCoordinationResourceClaimStatus`(claim_id: ResourceClaimId, expected_revision: u64, requested_status: MobCoordinationResourceClaimStatus, now_ms: u64)
-- `ObserveCoordinationResourceClaimOverlap`(claim_id: ResourceClaimId, now_ms: u64, candidate_overlap_ids: Seq<ResourceClaimId>)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -256,6 +198,82 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PollEvents`
 - `ReplayAllEvents`
 - `GetMember`
+
+## Runtime-Internal Inputs
+- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>, output_recorded: Map<FlowNodeId, Bool>, node_condition_results: Map<FlowNodeId, Option<Bool>>, last_admitted_node: Option<FlowNodeId>)
+- `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
+- `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
+- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
+- `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
+- `ClassifyFlowRunTerminality`(run_id: RunId, status: FlowRunStatus)
+- `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
+- `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
+- `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
+- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
+- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
+- `ClassifyMemberWait`(agent_identity: AgentIdentity)
+- `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
+- `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
+- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
+- `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
+- `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
+- `ResolveCreateMobAdmission`(can_create_mobs: Bool)
+- `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
+- `ClassifyMemberOperationEligibility`
+- `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
+- `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
+- `RetireAbsent`(agent_identity: AgentIdentity)
+- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
+- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
+- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
+- `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
+- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
+- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
+- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
+- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
+- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
+- `KickoffMarkPending`(member_id: AgentIdentity)
+- `KickoffMarkStarting`(member_id: AgentIdentity)
+- `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `KickoffResolveStarted`(member_id: AgentIdentity)
+- `KickoffResolveCallbackPending`(member_id: AgentIdentity)
+- `KickoffResolveFailed`(member_id: AgentIdentity, error: String)
+- `KickoffCancelRequested`(member_id: AgentIdentity)
+- `KickoffClear`(member_id: AgentIdentity)
+- `ProbeMemberAdmission`(agent_identity: AgentIdentity)
+- `ComputeRespawnGeneration`(agent_identity: AgentIdentity)
+- `ClassifyStepOutputFault`(run_id: RunId, step_id: StepId, target_retry_key: String, fault: StepOutputFaultKind, attempt: u32, max_retries: u32)
+- `EscalateToSupervisor`(run_id: RunId, step_id: StepId, supervisor_identity: AgentIdentity, turn_timeout_ms: u64)
+- `EscalateToSupervisorNoEligibleTarget`(run_id: RunId, step_id: StepId)
+- `EvaluateTopologyEdge`(from_role: String, to_role: String, rule_match: Option<PolicyDecision>)
+- `SetExternalMemberRebindCapability`(agent_identity: AgentIdentity, capability: ExternalMemberRebindCapability)
+- `ClassifyTurnTimeoutDisposition`(timed_out_run_id: RunId, retryable: Bool)
+- `SeedOrphanBudget`(budget: u64)
+- `RecordCoordinationWorkIntent`(intent_id: WorkIntentId, requested_status: MobCoordinationWorkIntentStatus, owner_present: Bool, summary_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
+- `RecordCoordinationResourceClaim`(claim_id: ResourceClaimId, requested_kind: MobCoordinationResourceClaimKind, requested_status: MobCoordinationResourceClaimStatus, owner_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
+- `UpdateCoordinationWorkIntentStatus`(intent_id: WorkIntentId, expected_revision: u64, requested_status: MobCoordinationWorkIntentStatus, now_ms: u64)
+- `UpdateCoordinationResourceClaimStatus`(claim_id: ResourceClaimId, expected_revision: u64, requested_status: MobCoordinationResourceClaimStatus, now_ms: u64)
+- `ObserveCoordinationResourceClaimOverlap`(claim_id: ResourceClaimId, now_ms: u64, candidate_overlap_ids: Seq<ResourceClaimId>)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -273,7 +291,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
-- `RecoverMemberKickoff`(member_id: String, phase: KickoffPhase, error: Option<String>)
+- `RecoverMemberKickoff`(member_id: AgentIdentity, phase: KickoffPhase, error: Option<String>)
 - `RecoverRosterWiring`(edge: WiringEdge)
 - `RecoverRosterUnwire`(edge: WiringEdge)
 - `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
@@ -281,6 +299,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
 - `RecoverOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
+- `ClassifyMemberLiveMaterialization`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, reason: String)
+- `ResolveMemberRevivalSucceeded`(agent_identity: AgentIdentity)
+- `ResolveMemberRevivalFailed`(agent_identity: AgentIdentity, reason: String)
 - `AdmitDestroyCleanup`
 - `AdmitDestroyStorageFinalizing`
 - `MarkCompleted`
@@ -336,12 +357,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitMemberTerminalNotice`
 - `AdmitPeerInput`
 - `EmitProgressNote`
-- `PersistKickoffUpdate`(member_id: String, phase: KickoffPhase)
-- `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
-- `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
+- `PersistKickoffUpdate`(member_id: AgentIdentity, phase: KickoffPhase)
+- `PersistKickoffFailureUpdate`(member_id: AgentIdentity, phase: KickoffPhase, error: String)
+- `EmitKickoffLifecycleNotice`(member_id: AgentIdentity, intent: KickoffIntent)
+- `MemberAdmissionProbed`(agent_identity: AgentIdentity, verdict: MemberAdmissionVerdictKind)
+- `RespawnGenerationComputed`(agent_identity: AgentIdentity, next_generation: Generation)
+- `StepOutputFaultClassified`(run_id: RunId, step_id: StepId, target_retry_key: String, disposition: StepFaultDispositionKind, terminal_cause: StepOutputFaultKind)
+- `SupervisorEscalationRequested`(run_id: RunId, step_id: StepId, supervisor_identity: AgentIdentity, turn_timeout_ms: u64)
+- `SupervisorEscalationFailed`(run_id: RunId, step_id: StepId, cause: SupervisorEscalationFailureCause)
+- `TopologyEdgeVerdictResolved`(from_role: String, to_role: String, verdict: PolicyDecision)
+- `TurnTimeoutDispositionClassified`(timed_out_run_id: RunId, disposition: TurnTimeoutDisposition)
+- `MemberSpawnRequired`(agent_identity: AgentIdentity)
+- `MemberRetainRequired`(agent_identity: AgentIdentity)
+- `MemberRetireRequired`(agent_identity: AgentIdentity)
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `OwnerBridgeSessionBound`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
+- `MemberLiveMaterializationClassified`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, verdict: MemberRevivalVerdictKind, reason: String)
 - `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
 - `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
 - `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
@@ -2588,6 +2620,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `coordinator_bound`
   - `identity_present`
+- Emits: `MemberRetainRequired`
 - To: `Running`
 
 ### `EnsureMemberRunningMissing`
@@ -2596,6 +2629,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `coordinator_bound`
   - `identity_absent`
+- Emits: `MemberSpawnRequired`
 - To: `Running`
 
 ### `RecoverRosterMemberRunning`
@@ -2736,6 +2770,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `Reconcile`(desired, retire_stale)
 - To: `Completed`
+
+### `ReconcileDestroyed`
+- From: `Destroyed`
+- On: `Reconcile`(desired, retire_stale)
+- To: `Destroyed`
 
 ### `ObserveRuntimeReady`
 - From: `Running`
@@ -2927,6 +2966,470 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `KickoffClear`(member_id)
 - To: `Completed`
+
+### `ProbeMemberAdmissionDuplicateRunning`
+- From: `Running`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_already_bound_or_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Running`
+
+### `ProbeMemberAdmissionDuplicateStopped`
+- From: `Stopped`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_already_bound_or_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Stopped`
+
+### `ProbeMemberAdmissionDuplicateCompleted`
+- From: `Completed`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_already_bound_or_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Completed`
+
+### `ProbeMemberAdmissionDuplicateDestroyed`
+- From: `Destroyed`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_already_bound_or_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Destroyed`
+
+### `ProbeMemberAdmissionAdmittedRunning`
+- From: `Running`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_not_bound_and_not_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Running`
+
+### `ProbeMemberAdmissionAdmittedStopped`
+- From: `Stopped`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_not_bound_and_not_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Stopped`
+
+### `ProbeMemberAdmissionAdmittedCompleted`
+- From: `Completed`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_not_bound_and_not_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Completed`
+
+### `ProbeMemberAdmissionAdmittedDestroyed`
+- From: `Destroyed`
+- On: `ProbeMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_not_bound_and_not_pending`
+- Emits: `MemberAdmissionProbed`
+- To: `Destroyed`
+
+### `ComputeRespawnGenerationRunning`
+- From: `Running`
+- On: `ComputeRespawnGeneration`(agent_identity)
+- Emits: `RespawnGenerationComputed`
+- To: `Running`
+
+### `ComputeRespawnGenerationStopped`
+- From: `Stopped`
+- On: `ComputeRespawnGeneration`(agent_identity)
+- Emits: `RespawnGenerationComputed`
+- To: `Stopped`
+
+### `ComputeRespawnGenerationCompleted`
+- From: `Completed`
+- On: `ComputeRespawnGeneration`(agent_identity)
+- Emits: `RespawnGenerationComputed`
+- To: `Completed`
+
+### `ComputeRespawnGenerationDestroyed`
+- From: `Destroyed`
+- On: `ComputeRespawnGeneration`(agent_identity)
+- Emits: `RespawnGenerationComputed`
+- To: `Destroyed`
+
+### `ClassifyStepOutputFaultRetryRunning`
+- From: `Running`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_remaining`
+- Emits: `StepOutputFaultClassified`
+- To: `Running`
+
+### `ClassifyStepOutputFaultRetryStopped`
+- From: `Stopped`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_remaining`
+- Emits: `StepOutputFaultClassified`
+- To: `Stopped`
+
+### `ClassifyStepOutputFaultRetryCompleted`
+- From: `Completed`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_remaining`
+- Emits: `StepOutputFaultClassified`
+- To: `Completed`
+
+### `ClassifyStepOutputFaultRetryDestroyed`
+- From: `Destroyed`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_remaining`
+- Emits: `StepOutputFaultClassified`
+- To: `Destroyed`
+
+### `ClassifyStepOutputFaultTerminalRunning`
+- From: `Running`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_exhausted`
+- Emits: `StepOutputFaultClassified`
+- To: `Running`
+
+### `ClassifyStepOutputFaultTerminalStopped`
+- From: `Stopped`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_exhausted`
+- Emits: `StepOutputFaultClassified`
+- To: `Stopped`
+
+### `ClassifyStepOutputFaultTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_exhausted`
+- Emits: `StepOutputFaultClassified`
+- To: `Completed`
+
+### `ClassifyStepOutputFaultTerminalDestroyed`
+- From: `Destroyed`
+- On: `ClassifyStepOutputFault`(run_id, step_id, target_retry_key, fault, attempt, max_retries)
+- Guards:
+  - `attempts_exhausted`
+- Emits: `StepOutputFaultClassified`
+- To: `Destroyed`
+
+### `EscalateToSupervisorTargetFoundRunning`
+- From: `Running`
+- On: `EscalateToSupervisor`(run_id, step_id, supervisor_identity, turn_timeout_ms)
+- Emits: `SupervisorEscalationRequested`
+- To: `Running`
+
+### `EscalateToSupervisorTargetFoundStopped`
+- From: `Stopped`
+- On: `EscalateToSupervisor`(run_id, step_id, supervisor_identity, turn_timeout_ms)
+- Emits: `SupervisorEscalationRequested`
+- To: `Stopped`
+
+### `EscalateToSupervisorTargetFoundCompleted`
+- From: `Completed`
+- On: `EscalateToSupervisor`(run_id, step_id, supervisor_identity, turn_timeout_ms)
+- Emits: `SupervisorEscalationRequested`
+- To: `Completed`
+
+### `EscalateToSupervisorTargetFoundDestroyed`
+- From: `Destroyed`
+- On: `EscalateToSupervisor`(run_id, step_id, supervisor_identity, turn_timeout_ms)
+- Emits: `SupervisorEscalationRequested`
+- To: `Destroyed`
+
+### `EscalateToSupervisorTargetMissingRunning`
+- From: `Running`
+- On: `EscalateToSupervisorNoEligibleTarget`(run_id, step_id)
+- Emits: `SupervisorEscalationFailed`
+- To: `Running`
+
+### `EscalateToSupervisorTargetMissingStopped`
+- From: `Stopped`
+- On: `EscalateToSupervisorNoEligibleTarget`(run_id, step_id)
+- Emits: `SupervisorEscalationFailed`
+- To: `Stopped`
+
+### `EscalateToSupervisorTargetMissingCompleted`
+- From: `Completed`
+- On: `EscalateToSupervisorNoEligibleTarget`(run_id, step_id)
+- Emits: `SupervisorEscalationFailed`
+- To: `Completed`
+
+### `EscalateToSupervisorTargetMissingDestroyed`
+- From: `Destroyed`
+- On: `EscalateToSupervisorNoEligibleTarget`(run_id, step_id)
+- Emits: `SupervisorEscalationFailed`
+- To: `Destroyed`
+
+### `EvaluateTopologyEdgeRuleAllowRunning`
+- From: `Running`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Running`
+
+### `EvaluateTopologyEdgeRuleAllowStopped`
+- From: `Stopped`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Stopped`
+
+### `EvaluateTopologyEdgeRuleAllowCompleted`
+- From: `Completed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Completed`
+
+### `EvaluateTopologyEdgeRuleAllowDestroyed`
+- From: `Destroyed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Destroyed`
+
+### `EvaluateTopologyEdgeRuleDenyRunning`
+- From: `Running`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_denies_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Running`
+
+### `EvaluateTopologyEdgeRuleDenyStopped`
+- From: `Stopped`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_denies_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Stopped`
+
+### `EvaluateTopologyEdgeRuleDenyCompleted`
+- From: `Completed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_denies_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Completed`
+
+### `EvaluateTopologyEdgeRuleDenyDestroyed`
+- From: `Destroyed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `rule_denies_edge`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Destroyed`
+
+### `EvaluateTopologyEdgeDefaultAllowRunning`
+- From: `Running`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_allow`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Running`
+
+### `EvaluateTopologyEdgeDefaultAllowStopped`
+- From: `Stopped`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_allow`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Stopped`
+
+### `EvaluateTopologyEdgeDefaultAllowCompleted`
+- From: `Completed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_allow`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Completed`
+
+### `EvaluateTopologyEdgeDefaultAllowDestroyed`
+- From: `Destroyed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_allow`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Destroyed`
+
+### `EvaluateTopologyEdgeDefaultDenyRunning`
+- From: `Running`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_deny`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Running`
+
+### `EvaluateTopologyEdgeDefaultDenyStopped`
+- From: `Stopped`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_deny`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Stopped`
+
+### `EvaluateTopologyEdgeDefaultDenyCompleted`
+- From: `Completed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_deny`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Completed`
+
+### `EvaluateTopologyEdgeDefaultDenyDestroyed`
+- From: `Destroyed`
+- On: `EvaluateTopologyEdge`(from_role, to_role, rule_match)
+- Guards:
+  - `no_rule_and_default_deny`
+- Emits: `TopologyEdgeVerdictResolved`
+- To: `Destroyed`
+
+### `SetExternalMemberRebindCapabilityRunning`
+- From: `Running`
+- On: `SetExternalMemberRebindCapability`(agent_identity, capability)
+- To: `Running`
+
+### `SetExternalMemberRebindCapabilityStopped`
+- From: `Stopped`
+- On: `SetExternalMemberRebindCapability`(agent_identity, capability)
+- To: `Stopped`
+
+### `SetExternalMemberRebindCapabilityCompleted`
+- From: `Completed`
+- On: `SetExternalMemberRebindCapability`(agent_identity, capability)
+- To: `Completed`
+
+### `SetExternalMemberRebindCapabilityDestroyed`
+- From: `Destroyed`
+- On: `SetExternalMemberRebindCapability`(agent_identity, capability)
+- To: `Destroyed`
+
+### `SeedOrphanBudgetRunning`
+- From: `Running`
+- On: `SeedOrphanBudget`(budget)
+- To: `Running`
+
+### `SeedOrphanBudgetStopped`
+- From: `Stopped`
+- On: `SeedOrphanBudget`(budget)
+- To: `Stopped`
+
+### `SeedOrphanBudgetCompleted`
+- From: `Completed`
+- On: `SeedOrphanBudget`(budget)
+- To: `Completed`
+
+### `SeedOrphanBudgetDestroyed`
+- From: `Destroyed`
+- On: `SeedOrphanBudget`(budget)
+- To: `Destroyed`
+
+### `ClassifyTurnTimeoutDispositionRetryableRunning`
+- From: `Running`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `timeout_is_retryable`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Running`
+
+### `ClassifyTurnTimeoutDispositionRetryableStopped`
+- From: `Stopped`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `timeout_is_retryable`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Stopped`
+
+### `ClassifyTurnTimeoutDispositionRetryableCompleted`
+- From: `Completed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `timeout_is_retryable`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Completed`
+
+### `ClassifyTurnTimeoutDispositionRetryableDestroyed`
+- From: `Destroyed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `timeout_is_retryable`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Destroyed`
+
+### `ClassifyTurnTimeoutDispositionDetachedRunning`
+- From: `Running`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_with_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Running`
+
+### `ClassifyTurnTimeoutDispositionDetachedStopped`
+- From: `Stopped`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_with_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Stopped`
+
+### `ClassifyTurnTimeoutDispositionDetachedCompleted`
+- From: `Completed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_with_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Completed`
+
+### `ClassifyTurnTimeoutDispositionDetachedDestroyed`
+- From: `Destroyed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_with_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Destroyed`
+
+### `ClassifyTurnTimeoutDispositionCanceledRunning`
+- From: `Running`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_without_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Running`
+
+### `ClassifyTurnTimeoutDispositionCanceledStopped`
+- From: `Stopped`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_without_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Stopped`
+
+### `ClassifyTurnTimeoutDispositionCanceledCompleted`
+- From: `Completed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_without_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Completed`
+
+### `ClassifyTurnTimeoutDispositionCanceledDestroyed`
+- From: `Destroyed`
+- On: `ClassifyTurnTimeoutDisposition`(timed_out_run_id, retryable)
+- Guards:
+  - `non_retryable_without_budget`
+- Emits: `TurnTimeoutDispositionClassified`
+- To: `Destroyed`
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`
@@ -3334,6 +3837,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RecoverMemberRestoreFailureRunning`
 - From: `Running`
 - On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Running`
+
+### `ClassifyMemberLiveMaterializationRevivable`
+- From: `Running`
+- On: `ClassifyMemberLiveMaterialization`(agent_identity, observation, reason)
+- Guards:
+  - `identity_present`
+  - `session_binding_present`
+  - `not_broken`
+  - `durable_snapshot_present`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ClassifyMemberLiveMaterializationTerminal`
+- From: `Running`
+- On: `ClassifyMemberLiveMaterialization`(agent_identity, observation, reason)
+- Guards:
+  - `identity_present`
+  - `session_binding_present`
+  - `not_broken`
+  - `durable_snapshot_missing`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ResolveMemberRevivalSucceededRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalSucceeded`(agent_identity)
+- Guards:
+  - `revival_pending`
+- To: `Running`
+
+### `ResolveMemberRevivalFailedRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalFailed`(agent_identity, reason)
+- Guards:
+  - `revival_pending`
 - To: `Running`
 
 ### `AdmitDestroyCleanup`
@@ -5772,11 +6311,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
-- `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
-- `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
-- `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
-- `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
+- `mob_handle_surface` (machine `MobMachine`): `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
+- `mob_actor_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
+- `mob_coordination_board_authority` (machine `MobMachine`): `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
+- `mob_operator_admission_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
+- `mob_membership_classifier_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
@@ -5788,3 +6329,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
 - `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, surface peer-exposed member inputs, and resolve operator create mob admission and profile mutation admission verdicts the tool surface mirrors
+- `membership-admission-respawn-reconcile-rebind-timeout` — probe member admission duplicate or admitted, compute respawn generation, reconcile desired members to spawn retain or retire emitting member spawn required member retain required and member retire required, set and observe external member rebind capability available or unavailable, classify turn timeout disposition detached canceled or retryable, and seed orphan budget
+- `flow-fault-topology-supervisor-escalation` — classify step output fault retry or terminal malformed json into a step fault disposition, evaluate topology edge rule allow deny or default into a policy decision verdict resolved, and escalate to supervisor target found with eligible supervisor identity or no eligible target emitting supervisor escalation requested or failed

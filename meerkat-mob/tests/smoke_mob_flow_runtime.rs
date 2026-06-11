@@ -109,7 +109,7 @@ fn gemini_api_key() -> Option<String> {
 }
 
 fn default_gemini_flow_smoke_model() -> &'static str {
-    meerkat_core::model_profile::catalog::default_model("gemini")
+    meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Gemini)
         .expect("Gemini must have a catalog default model")
 }
 
@@ -117,7 +117,7 @@ fn default_gemini_flow_smoke_model() -> &'static str {
 fn flow_runtime_smoke_gemini_default_tracks_catalog() {
     assert_eq!(
         default_gemini_flow_smoke_model(),
-        meerkat_core::model_profile::catalog::default_model("gemini")
+        meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Gemini)
             .expect("Gemini must have a catalog default model")
     );
     assert_eq!(default_gemini_flow_smoke_model(), "gemini-3.5-flash");
@@ -249,6 +249,11 @@ fn persistent_service(
 fn flow_profile(model: &str, peer_description: &str) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             comms: true,
@@ -438,19 +443,28 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(flow_profile(&models.lead, "Lead flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(&models.lead, "Lead flow responder"))),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        ProfileBinding::Inline(flow_profile(&models.worker, "Worker flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.worker,
+            "Worker flow responder",
+        ))),
     );
     profiles.insert(
         ProfileName::from("reviewer"),
-        ProfileBinding::Inline(flow_profile(&models.reviewer, "Reviewer flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.reviewer,
+            "Reviewer flow responder",
+        ))),
     );
     profiles.insert(
         ProfileName::from("analyst"),
-        ProfileBinding::Inline(flow_profile(&models.analyst, "Analyst flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.analyst,
+            "Analyst flow responder",
+        ))),
     );
 
     let mut flows = BTreeMap::new();
@@ -662,11 +676,11 @@ Return exactly:
         ]),
     };
 
-    FlowSpec {
-        description: Some("fanout + sibling + review loop smoke".to_string()),
+    FlowSpec::new(
+        Some("fanout + sibling + review loop smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_dual_loops_join_flow() -> FlowSpec {
@@ -740,11 +754,11 @@ Return exactly:
         ]),
     };
 
-    FlowSpec {
-        description: Some("dual sibling loops with downstream join smoke".to_string()),
+    FlowSpec::new(
+        Some("dual sibling loops with downstream join smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_branch_then_review_loop_flow() -> FlowSpec {
@@ -830,11 +844,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("branch winner feeding a two-pass review loop".to_string()),
+    FlowSpec::new(
+        Some("branch winner feeding a two-pass review loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_parallel_body_siblings_join_flow() -> FlowSpec {
@@ -926,11 +940,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("parallel loop-body siblings with per-iteration join".to_string()),
+    FlowSpec::new(
+        Some("parallel loop-body siblings with per-iteration join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_nested_outer_inner_loop_flow() -> FlowSpec {
@@ -1029,11 +1043,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("nested outer/inner loop smoke".to_string()),
+    FlowSpec::new(
+        Some("nested outer/inner loop smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_fanin_after_parallel_loops_flow() -> FlowSpec {
@@ -1143,11 +1157,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("parallel loops feeding a fan-in aggregate".to_string()),
+    FlowSpec::new(
+        Some("parallel loops feeding a fan-in aggregate".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_conditional_skip_inside_body_loop_flow() -> FlowSpec {
@@ -1231,11 +1245,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("conditional skip behavior inside a body loop".to_string()),
+    FlowSpec::new(
+        Some("conditional skip behavior inside a body loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_three_way_branch_loop_audit_flow() -> FlowSpec {
@@ -1353,11 +1367,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three-way branch feeding a review loop and analyst audit".to_string()),
+    FlowSpec::new(
+        Some("three-way branch feeding a review loop and analyst audit".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_sequential_loop_chain_flow() -> FlowSpec {
@@ -1457,11 +1471,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("one loop feeding a bridge that feeds a second loop".to_string()),
+    FlowSpec::new(
+        Some("one loop feeding a bridge that feeds a second loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_three_sibling_loops_join_flow() -> FlowSpec {
@@ -1581,11 +1595,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three sibling loops converging in a downstream join".to_string()),
+    FlowSpec::new(
+        Some("three sibling loops converging in a downstream join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_outer_branch_inner_loop_flow() -> FlowSpec {
@@ -1709,11 +1723,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("root branch feeding an outer loop that hosts an inner loop".to_string()),
+    FlowSpec::new(
+        Some("root branch feeding an outer loop that hosts an inner loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_maximal_matrix_flow() -> FlowSpec {
@@ -1909,7 +1923,7 @@ Return exactly this JSON object and nothing else:
             "branch + fanout + nested loop + fanin + parallel sibling maximal smoke".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2035,7 +2049,7 @@ Return exactly this JSON object and nothing else:
             "branch + sibling note + persisted two-iteration review loop".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2133,11 +2147,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("two persisted loops feeding a fan-in aggregate".to_string()),
+    FlowSpec::new(
+        Some("two persisted loops feeding a fan-in aggregate".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_sequential_loop_chain_flow() -> FlowSpec {
@@ -2230,11 +2244,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("sequential chain of two persisted loops".to_string()),
+    FlowSpec::new(
+        Some("sequential chain of two persisted loops".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_three_sibling_loops_join_flow() -> FlowSpec {
@@ -2345,11 +2359,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three sibling persisted loops with downstream join".to_string()),
+    FlowSpec::new(
+        Some("three sibling persisted loops with downstream join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_branch_dual_loops_audit_flow() -> FlowSpec {
@@ -2497,7 +2511,7 @@ Return exactly this JSON object and nothing else:
             "branch-gated sibling persisted loops feeding an analyst fanout".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2577,7 +2591,8 @@ impl ProductionExternalTcpTarget {
     }
 
     async fn shutdown(&self) {
-        self.adapter.abort_comms_drain(&self.session_id).await;
+        // Teardown: tolerate already-stopped/unknown drains (typed result).
+        let _aborted: Result<(), _> = self.adapter.abort_comms_drain(&self.session_id).await;
     }
 }
 
@@ -2599,8 +2614,13 @@ fn external_tcp_smoke_definition(
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: "claude-haiku-4-5-20251001".to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
             skills: vec![],
             tools: ToolConfig {
                 comms: true,
@@ -2614,7 +2634,7 @@ fn external_tcp_smoke_definition(
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
 
     let mut definition = MobDefinition::explicit(mob_id);
@@ -2662,7 +2682,10 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
     // generated owner"). A real session-backed external member gets this wiring
     // from its SessionRuntimeBindings; this simulation installs it explicitly.
     let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     adapter
         .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
         .await
@@ -2700,7 +2723,8 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
             true,
             Some(runtime.clone() as Arc<dyn meerkat_core::agent::CommsRuntime>),
         )
-        .await;
+        .await
+        .expect("update_peer_ingress_context must succeed");
     assert!(spawned, "target must run production comms_drain");
 
     ProductionExternalTcpTarget {
@@ -2708,7 +2732,7 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
             peer_id,
             address,
             bootstrap_token: Some(bootstrap_token.into()),
-            pubkey: Some(pubkey),
+            pubkey,
         },
         adapter,
         session_id,
@@ -2869,11 +2893,11 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let trusted = target.runtime.trusted_peers_shared();
     assert!(
         trusted
-            .peers()
+            .entries()
             .iter()
-            .any(|peer| peer.addr == supervisor_advertised_address),
+            .any(|peer| peer.address.to_string() == supervisor_advertised_address),
         "target runtime must install the advertised supervisor bridge as sendable trust; trusted={:?}",
-        trusted.peers()
+        trusted.entries()
     );
 
     handle

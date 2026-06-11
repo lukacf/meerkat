@@ -78,9 +78,9 @@ machine! {
             self.planning_cursor_utc_ms == None || self.next_occurrence_ordinal > 0
         }
 
-        disposition EmitScheduleNotice => external,
-        disposition SupersedePendingOccurrences => routed [OccurrenceLifecycleMachine],
-        disposition PlanningWindowRecorded => local,
+        disposition EmitScheduleNotice => external seam OwnerRealizationOnly,
+        disposition SupersedePendingOccurrences => routed [OccurrenceLifecycleMachine] seam NoOwnerRealization,
+        disposition PlanningWindowRecorded => local seam NoOwnerRealization,
 
         // --- Create (only from Active, self-loop) ---
 

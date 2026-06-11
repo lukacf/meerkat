@@ -165,7 +165,7 @@ class LiveChannel:
         )
 
     async def commit_input(
-        self, response_modality: str | None = None
+        self, response_modality: Literal["audio", "text"] | None = None
     ) -> dict[str, Any]:
         """Commit buffered input on the channel. Calls ``live/commit_input``.
 

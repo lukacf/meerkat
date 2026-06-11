@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# GOVERNANCE CLASSIFICATION: deliberately text-level tombstone gate.
+# These are deleted legacy public-surface names (including wire-route
+# strings); re-introducing them ANYWHERE — code, comments, docs, or string
+# literals — is the violation, so raw text (not AST structure) is the
+# contract being enforced. Structural source-shape governance lives in the
+# xtask syn-AST gates (rmat-audit, effect-authority, machine-check-drift).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

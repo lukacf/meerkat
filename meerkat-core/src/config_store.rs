@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 /// Resolved paths attached to a config store context.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigResolvedPaths {
     pub root: String,
@@ -218,8 +219,13 @@ impl ConfigStore for FileConfigStore {
     }
 }
 
-/// Internal utility for JSON merge patch application
-pub(crate) fn merge_patch(base: &mut Value, patch: Value) {
+/// Canonical RFC 7386 JSON merge-patch application.
+///
+/// This is the single owner of config patch acceptance/rejection semantics:
+/// a `null` patch value removes the key, an object recurses, and any other
+/// value replaces. All surfaces (RPC, REST, MCP) MUST route through this and
+/// [`apply_config_patch_preview`] rather than re-deriving the merge rules.
+pub fn merge_patch(base: &mut Value, patch: Value) {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
             for (k, v) in patch_map {
@@ -236,9 +242,63 @@ pub(crate) fn merge_patch(base: &mut Value, patch: Value) {
     }
 }
 
+/// Compute the [`Config`] that would result from applying `patch` to `config`,
+/// without persisting it.
+///
+/// This is the canonical preview used by every surface's "config patch" entry
+/// point. The patch is applied via [`merge_patch`] and re-deserialized into a
+/// typed [`Config`]; a malformed patch (one that no longer deserializes) yields
+/// a typed [`ConfigError::Json`] that surfaces map onto their own error type —
+/// none re-implement the merge or the (de)serialization.
+pub fn apply_config_patch_preview(config: &Config, patch: Value) -> Result<Config, ConfigError> {
+    let mut value = serde_json::to_value(config).map_err(ConfigError::Json)?;
+    merge_patch(&mut value, patch);
+    serde_json::from_value(value).map_err(ConfigError::Json)
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_patch_removes_keys_on_null_and_merges_nested_objects() {
+        let mut base = serde_json::json!({
+            "keep": 1,
+            "drop": "gone",
+            "nested": { "a": 1, "b": 2 },
+        });
+        let patch = serde_json::json!({
+            "drop": null,
+            "nested": { "b": 20, "c": 3 },
+            "added": true,
+        });
+        merge_patch(&mut base, patch);
+        assert_eq!(
+            base,
+            serde_json::json!({
+                "keep": 1,
+                "nested": { "a": 1, "b": 20, "c": 3 },
+                "added": true,
+            }),
+            "null removes a key, nested objects merge recursively, scalars replace"
+        );
+    }
+
+    #[test]
+    fn apply_config_patch_preview_applies_patch_without_mutating_input() {
+        let config = Config::default();
+        let original_max_tokens = config.max_tokens;
+        let bumped = original_max_tokens.saturating_add(1);
+        let previewed =
+            apply_config_patch_preview(&config, serde_json::json!({ "max_tokens": bumped }))
+                .expect("scalar patch should preview cleanly");
+        assert_eq!(previewed.max_tokens, bumped, "preview reflects the patch");
+        assert_eq!(
+            config.max_tokens, original_max_tokens,
+            "input config is not mutated by preview"
+        );
+    }
 
     #[tokio::test]
     async fn file_config_store_set_skips_null_backend_options()
@@ -252,7 +312,9 @@ mod tests {
             "openai_chatgpt".to_string(),
             crate::BackendProfileConfig {
                 provider: "openai".to_string(),
-                backend_kind: "chatgpt_backend".to_string(),
+                backend_kind: crate::provider_matrix::OpenAiBackendKind::ChatGptBackend
+                    .as_str()
+                    .to_string(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -261,7 +323,9 @@ mod tests {
             "openai_oauth".to_string(),
             crate::AuthProfileConfig {
                 provider: "openai".to_string(),
-                auth_method: "managed_chatgpt_oauth".to_string(),
+                auth_method: crate::provider_matrix::OpenAiAuthMethod::ManagedChatGptOauth
+                    .as_str()
+                    .to_string(),
                 source: crate::CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),

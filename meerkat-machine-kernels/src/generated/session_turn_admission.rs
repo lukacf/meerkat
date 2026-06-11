@@ -79,6 +79,116 @@ impl std::fmt::Display for PendingContinuationDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeKeepAlivePersistenceDecision {
+    #[default]
+    #[serde(rename = "PersistEnabled")]
+    PersistEnabled,
+    #[serde(rename = "PersistDisabled")]
+    PersistDisabled,
+    #[serde(rename = "PreserveExisting")]
+    PreserveExisting,
+}
+impl RuntimeKeepAlivePersistenceDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PersistEnabled => "PersistEnabled",
+            Self::PersistDisabled => "PersistDisabled",
+            Self::PreserveExisting => "PreserveExisting",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeKeepAlivePersistenceDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PersistEnabled" => Ok(Self::PersistEnabled),
+            "PersistDisabled" => Ok(Self::PersistDisabled),
+            "PreserveExisting" => Ok(Self::PreserveExisting),
+            other => Err(format!(
+                "invalid RuntimeKeepAlivePersistenceDecision value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeKeepAlivePersistenceDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeKeepAlivePersistenceDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeKeepAliveRequest {
+    #[default]
+    #[serde(rename = "Enable")]
+    Enable,
+    #[serde(rename = "Disable")]
+    Disable,
+    #[serde(rename = "Preserve")]
+    Preserve,
+}
+impl RuntimeKeepAliveRequest {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Preserve => "Preserve",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeKeepAliveRequest {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Enable" => Ok(Self::Enable),
+            "Disable" => Ok(Self::Disable),
+            "Preserve" => Ok(Self::Preserve),
+            other => Err(format!("invalid RuntimeKeepAliveRequest value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeKeepAliveRequest {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeKeepAliveRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum StartTurnDispatchAuthorization {
     #[default]
     #[serde(rename = "Authorized")]
@@ -384,7 +494,7 @@ pub mod inputs {
     pub struct ResolveLastStartTurnPublicTerminal {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeKeepAlive {
-        pub keep_alive_policy_present: bool,
+        pub keep_alive_request: RuntimeKeepAliveRequest,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveStartTurnDisposition {
@@ -480,7 +590,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeKeepAliveResolved {
-        pub persist_keep_alive: bool,
+        pub decision: RuntimeKeepAlivePersistenceDecision,
     }
 }
 
@@ -539,6 +649,7 @@ pub enum TransitionId {
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
     ResolveRuntimeKeepAliveEnable,
+    ResolveRuntimeKeepAliveDisable,
     ResolveRuntimeKeepAlivePreserve,
     ResolveLastStartTurnPublicTerminalNoPendingIdle,
     ResolveLastStartTurnPublicTerminalNoPendingAdmitted,

@@ -151,11 +151,6 @@ impl GoogleAuthAuthorizer {
         Self::with_env_lookup(chain, Arc::new(|k| std::env::var(k).ok()))
     }
 
-    /// Backwards-compat alias for `with_process_env`.
-    pub fn new(chain: GoogleAuthChain) -> Self {
-        Self::with_process_env(chain)
-    }
-
     pub fn with_env_lookup(chain: GoogleAuthChain, env_lookup: EnvLookup) -> Self {
         let label = match chain {
             GoogleAuthChain::Default => "google-adc".into(),

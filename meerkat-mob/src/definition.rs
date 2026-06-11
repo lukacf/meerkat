@@ -13,9 +13,11 @@ use crate::MobBackendKind;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
 use crate::profile::{Profile, ProfileBinding};
 use indexmap::IndexMap;
+use meerkat_core::schema::MeerkatSchema;
 use meerkat_core::types::ContentInput;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 /// Orchestrator configuration within a mob definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,9 +171,39 @@ pub enum ConditionExpr {
 }
 
 /// A frame is a DAG of nodes that executes as a unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSpec {
     pub nodes: IndexMap<FlowNodeId, FlowNodeSpec>,
+}
+
+impl FrameSpec {
+    /// Compile flat-authored steps into the canonical root frame.
+    ///
+    /// Flat `steps` remain a valid authoring ergonomic only because they are
+    /// compiled into the execution root exactly once, at the decode/construct
+    /// boundary; the runtime sees a single structure owner.
+    #[must_use]
+    pub fn from_flat_steps(steps: &IndexMap<StepId, FlowStepSpec>) -> Self {
+        let nodes = steps
+            .iter()
+            .map(|(step_id, step)| {
+                (
+                    FlowNodeId::from(step_id.as_str()),
+                    FlowNodeSpec::Step(FrameStepSpec {
+                        step_id: step_id.clone(),
+                        depends_on: step
+                            .depends_on
+                            .iter()
+                            .map(|dependency| FlowNodeId::from(dependency.as_str()))
+                            .collect(),
+                        depends_on_mode: step.depends_on_mode.clone(),
+                        branch: step.branch.clone(),
+                    }),
+                )
+            })
+            .collect();
+        Self { nodes }
+    }
 }
 
 /// A node in a FrameSpec: either a step or a repeat_until loop.
@@ -202,6 +234,129 @@ pub struct RepeatUntilSpec {
     pub max_iterations: u32,
 }
 
+/// Named (non-inline) reference to a step output schema.
+///
+/// The runtime resolves a `Named` ref against the host environment (today: a
+/// filesystem path read at execution time). The newtype keeps the resolution
+/// vocabulary typed and prevents accidental mixing with arbitrary strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SchemaName(String);
+
+impl SchemaName {
+    /// Borrow the raw reference name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SchemaName {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SchemaName {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl std::fmt::Display for SchemaName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Failure parsing an `expected_schema_ref` string into a typed [`FlowSchemaRef`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FlowSchemaRefParseError {
+    /// The ref is empty, which is never a valid inline schema or named ref.
+    #[error("expected_schema_ref must not be empty")]
+    Empty,
+    /// The ref looked like inline JSON but was not a valid Meerkat schema.
+    #[error("inline schema is invalid: {message}")]
+    InvalidInlineSchema {
+        /// Display text of the underlying [`meerkat_core::schema::SchemaError`].
+        message: String,
+    },
+}
+
+/// Typed reference to the schema used to validate a step's structured output.
+///
+/// Parsed once at flow-definition load (parse-at-boundary): a ref that parses
+/// as a JSON object is an [`FlowSchemaRef::Inline`] schema; any other non-empty
+/// ref is a [`FlowSchemaRef::Named`] reference resolved by the runtime. The type
+/// serializes transparently to a string so the persisted `FlowSpec`/
+/// `MobDefinition` payload and the `MobFlowStepInput` wire shape remain a plain
+/// `string`. `Named` refs round-trip byte-identically; `Inline` schemas
+/// round-trip to their normalized canonical JSON-string form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowSchemaRef {
+    /// An inline Meerkat schema parsed from JSON at the boundary.
+    Inline(MeerkatSchema),
+    /// A named reference (e.g. a filesystem path) resolved by the runtime.
+    Named(SchemaName),
+}
+
+impl FlowSchemaRef {
+    /// Parse a raw `expected_schema_ref` string into a typed ref.
+    ///
+    /// A string that parses as a JSON object becomes [`FlowSchemaRef::Inline`];
+    /// any other non-empty string is treated as a [`FlowSchemaRef::Named`] ref.
+    pub fn parse(raw: &str) -> Result<Self, FlowSchemaRefParseError> {
+        if raw.trim().is_empty() {
+            return Err(FlowSchemaRefParseError::Empty);
+        }
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value) if value.is_object() => {
+                let schema = MeerkatSchema::new(value).map_err(|error| {
+                    FlowSchemaRefParseError::InvalidInlineSchema {
+                        message: error.to_string(),
+                    }
+                })?;
+                Ok(Self::Inline(schema))
+            }
+            _ => Ok(Self::Named(SchemaName::from(raw))),
+        }
+    }
+
+    /// Render the ref back to its raw string form (inverse of [`FlowSchemaRef::parse`]).
+    pub fn as_raw(&self) -> String {
+        match self {
+            Self::Inline(schema) => schema.as_value().to_string(),
+            Self::Named(name) => name.as_str().to_string(),
+        }
+    }
+}
+
+impl FromStr for FlowSchemaRef {
+    type Err = FlowSchemaRefParseError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl Serialize for FlowSchemaRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.as_raw())
+    }
+}
+
+impl<'de> Deserialize<'de> for FlowSchemaRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Per-step flow execution configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowStepSpec {
@@ -218,7 +373,7 @@ pub struct FlowStepSpec {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
-    pub expected_schema_ref: Option<String>,
+    pub expected_schema_ref: Option<FlowSchemaRef>,
     #[serde(default)]
     pub branch: Option<BranchId>,
     #[serde(default)]
@@ -232,15 +387,54 @@ pub struct FlowStepSpec {
 }
 
 /// Flow definition for a named workflow.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct FlowSpec {
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub steps: IndexMap<StepId, FlowStepSpec>,
-    /// v2 flows carry a FrameSpec as the execution root. v1 flows omit this field.
+    /// Canonical execution root. Always present: flat-authored specs are
+    /// compiled into a root frame once at the decode/construct boundary.
+    pub root: FrameSpec,
+}
+
+impl FlowSpec {
+    /// Canonicalizing constructor.
+    ///
+    /// When `root` is omitted, the flat `steps` are compiled into the
+    /// canonical root frame here — the single boundary where flat authoring
+    /// becomes execution structure.
+    #[must_use]
+    pub fn new(
+        description: Option<String>,
+        steps: IndexMap<StepId, FlowStepSpec>,
+        root: Option<FrameSpec>,
+    ) -> Self {
+        let root = root.unwrap_or_else(|| FrameSpec::from_flat_steps(&steps));
+        Self {
+            description,
+            steps,
+            root,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FlowSpecDe {
     #[serde(default)]
-    pub root: Option<FrameSpec>,
+    description: Option<String>,
+    #[serde(default)]
+    steps: IndexMap<StepId, FlowStepSpec>,
+    #[serde(default)]
+    root: Option<FrameSpec>,
+}
+
+impl<'de> Deserialize<'de> for FlowSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let de = FlowSpecDe::deserialize(deserializer)?;
+        Ok(Self::new(de.description, de.steps, de.root))
+    }
 }
 
 /// Topology enforcement mode.
@@ -272,6 +466,11 @@ pub struct TopologySpec {
 pub struct SupervisorSpec {
     pub role: ProfileName,
     pub escalation_threshold: u32,
+    /// Escalation turn timeout in milliseconds. Declared flow policy — the
+    /// typed owner of the escalation deadline — rather than a hard-coded
+    /// runtime constant. Absent means the runtime default applies.
+    #[serde(default)]
+    pub escalation_turn_timeout_ms: Option<u64>,
 }
 
 /// Runtime guardrails for flow execution.
@@ -343,6 +542,20 @@ pub struct MobDefinition {
     /// realm-scoped reusable profile.
     #[serde(default)]
     pub profiles: BTreeMap<ProfileName, ProfileBinding>,
+    /// Mob-scoped custom model registry entries (`[models.<id>]`).
+    ///
+    /// Reuses the typed config owner [`meerkat_core::config::CustomModelConfig`]:
+    /// one definition feeds provider inference, compaction scaling, capability
+    /// gates, and call timeouts through the effective model registry at member
+    /// build time.
+    #[serde(default)]
+    pub models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    /// Mob-level default provider for `Auto` image-generation targets.
+    ///
+    /// Profiles may override per-profile via
+    /// `Profile::image_generation_provider`.
+    #[serde(default)]
+    pub image_generation_provider: Option<meerkat_core::Provider>,
     /// Wiring rules for automatic peer connections.
     #[serde(default)]
     pub wiring: WiringRules,
@@ -397,6 +610,10 @@ struct TomlDefinition {
     #[serde(default)]
     profiles: BTreeMap<ProfileName, ProfileBinding>,
     #[serde(default)]
+    models: BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+    #[serde(default)]
+    image_generation_provider: Option<meerkat_core::Provider>,
+    #[serde(default)]
     wiring: WiringRules,
     #[serde(default)]
     skills: BTreeMap<String, SkillSource>,
@@ -423,6 +640,8 @@ impl MobDefinition {
             id: id.into(),
             orchestrator: None,
             profiles: BTreeMap::new(),
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
@@ -449,8 +668,13 @@ impl MobDefinition {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: model.to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: crate::profile::ToolConfig {
                     comms: true,
@@ -463,12 +687,14 @@ impl MobDefinition {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         Self {
             id: mob_id,
             orchestrator: None,
             profiles,
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: WiringRules {
                 auto_wire_orchestrator: false,
                 role_wiring: Vec::new(),
@@ -497,6 +723,8 @@ impl MobDefinition {
             id: raw.mob.id,
             orchestrator,
             profiles: raw.profiles,
+            models: raw.models,
+            image_generation_provider: raw.image_generation_provider,
             wiring: raw.wiring,
             skills: raw.skills,
             backend: raw.backend,
@@ -530,7 +758,7 @@ impl MobDefinition {
         realm_profile_store: Option<&std::sync::Arc<dyn crate::store::RealmProfileStore>>,
     ) -> Result<Profile, crate::error::MobError> {
         match self.profiles.get(name) {
-            Some(ProfileBinding::Inline(p)) => Ok(p.clone()),
+            Some(ProfileBinding::Inline(p)) => Ok((**p).clone()),
             Some(ProfileBinding::RealmRef { realm_profile }) => {
                 let store = realm_profile_store.ok_or_else(|| {
                     crate::error::MobError::Internal(
@@ -606,6 +834,73 @@ path = "skills/reviewer.md"
     }
 
     #[test]
+    fn test_mob_definition_from_toml_parses_models_and_image_provider() {
+        // `image_generation_provider` is a top-level definition fact (the
+        // `[mob]` table only owns id/orchestrator), so it precedes the tables.
+        let toml_str = r#"
+image_generation_provider = "gemini"
+
+[mob]
+id = "custom-models"
+
+[models.claude-internal-preview]
+provider = "anthropic"
+display_name = "Claude Internal Preview"
+context_window = 500000
+max_output_tokens = 16384
+vision = true
+call_timeout_secs = 900
+
+[profiles.worker]
+model = "claude-internal-preview"
+
+[profiles.worker.tools]
+comms = true
+"#;
+        let def = MobDefinition::from_toml(toml_str).unwrap();
+        assert_eq!(
+            def.image_generation_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+        let model = def
+            .models
+            .get("claude-internal-preview")
+            .expect("custom model entry parses");
+        assert_eq!(model.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(model.context_window, Some(500_000));
+        assert_eq!(model.max_output_tokens, Some(16_384));
+        assert_eq!(model.vision, Some(true));
+        assert_eq!(model.web_search, None);
+        assert_eq!(model.call_timeout_secs, Some(900));
+
+        // Round-trips through serde (definitions are stored in MobCreated events).
+        let json = serde_json::to_string(&def).unwrap();
+        let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, def);
+    }
+
+    #[test]
+    fn test_mob_definition_custom_model_provider_is_fail_closed() {
+        let toml_str = r#"
+[mob]
+id = "custom-models"
+
+[models.mystery-model]
+provider = "mystery"
+
+[profiles.worker]
+model = "mystery-model"
+
+[profiles.worker.tools]
+comms = true
+"#;
+        assert!(
+            MobDefinition::from_toml(toml_str).is_err(),
+            "unknown custom-model provider names must fail closed at mob load"
+        );
+    }
+
+    #[test]
     fn test_mob_definition_from_toml() {
         let def = MobDefinition::from_toml(example_toml()).unwrap();
         assert_eq!(def.id.as_str(), "code-review");
@@ -665,12 +960,19 @@ path = "skills/reviewer.md"
             orchestrator: Some(OrchestratorConfig {
                 profile: ProfileName::from("lead"),
             }),
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             profiles: {
                 let mut m = BTreeMap::new();
                 m.insert(
                     ProfileName::from("lead"),
-                    ProfileBinding::Inline(Profile {
+                    ProfileBinding::Inline(Box::new(Profile {
                         model: "claude-opus-4-8".to_string(),
+                        provider: None,
+                        self_hosted_server_id: None,
+                        image_generation_provider: None,
+                        auto_compact_threshold: None,
+                        resume_overrides: Vec::new(),
                         skills: vec!["skill-a".to_string()],
                         tools: ToolConfig::default(),
                         peer_description: "The leader".to_string(),
@@ -680,7 +982,7 @@ path = "skills/reviewer.md"
                         max_inline_peer_notifications: None,
                         output_schema: None,
                         provider_params: None,
-                    }),
+                    })),
                 );
                 m
             },
@@ -1113,23 +1415,131 @@ include_patterns = ["text_complete"]
 
     #[test]
     fn test_flow_spec_with_root_roundtrip_json() {
-        let spec = FlowSpec {
-            description: Some("test flow".into()),
-            steps: indexmap::IndexMap::new(),
-            root: Some(FrameSpec {
+        let spec = FlowSpec::new(
+            Some("test flow".into()),
+            indexmap::IndexMap::new(),
+            Some(FrameSpec {
                 nodes: indexmap::IndexMap::new(),
             }),
-        };
+        );
         let encoded = serde_json::to_string(&spec).expect("serialize");
         let decoded: FlowSpec = serde_json::from_str(&encoded).expect("deserialize");
-        assert!(decoded.root.is_some());
+        assert_eq!(decoded.root, spec.root);
     }
 
     #[test]
-    fn test_flow_spec_without_root_deserializes_none() {
-        // Legacy FlowSpec without root field deserializes with root: None
-        let json = r#"{"description":null,"steps":{}}"#;
-        let decoded: FlowSpec = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(decoded.root, None);
+    fn test_flow_spec_without_root_synthesizes_root_from_flat_steps() {
+        // Flat-authored specs are canonicalized at the decode boundary: the
+        // omitted root is compiled from `steps` exactly once, here.
+        let mut steps = indexmap::IndexMap::new();
+        steps.insert(
+            StepId::from("a"),
+            FlowStepSpec {
+                role: ProfileName::from("worker"),
+                message: ContentInput::from("go".to_string()),
+                depends_on: Vec::new(),
+                dispatch_mode: DispatchMode::default(),
+                collection_policy: CollectionPolicy::default(),
+                condition: None,
+                timeout_ms: None,
+                expected_schema_ref: None,
+                branch: None,
+                depends_on_mode: DependencyMode::default(),
+                allowed_tools: None,
+                blocked_tools: None,
+                output_format: StepOutputFormat::default(),
+            },
+        );
+        let mut value =
+            serde_json::to_value(FlowSpec::new(None, steps.clone(), None)).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("flow spec serializes as object")
+            .remove("root");
+        let decoded: FlowSpec = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded.root, FrameSpec::from_flat_steps(&steps));
+        assert!(decoded.root.nodes.contains_key(&FlowNodeId::from("a")));
+    }
+
+    #[test]
+    fn test_flow_schema_ref_parses_named_from_path() {
+        let parsed = FlowSchemaRef::parse("schemas/join.json").expect("named ref");
+        assert_eq!(
+            parsed,
+            FlowSchemaRef::Named(SchemaName::from("schemas/join.json"))
+        );
+        assert_eq!(parsed.as_raw(), "schemas/join.json");
+    }
+
+    #[test]
+    fn test_flow_schema_ref_parses_inline_json_object() {
+        let raw = r#"{"type":"object"}"#;
+        let parsed = FlowSchemaRef::parse(raw).expect("inline ref");
+        assert!(matches!(parsed, FlowSchemaRef::Inline(_)));
+    }
+
+    #[test]
+    fn test_flow_schema_ref_rejects_empty() {
+        assert_eq!(
+            FlowSchemaRef::parse("   "),
+            Err(FlowSchemaRefParseError::Empty)
+        );
+    }
+
+    #[test]
+    fn test_flow_schema_ref_named_serializes_transparently_as_string() {
+        let step_json = serde_json::json!({
+            "role": "worker",
+            "message": "go",
+            "expected_schema_ref": "schemas/join.json"
+        });
+        let step: FlowStepSpec = serde_json::from_value(step_json).expect("decode step");
+        assert_eq!(
+            step.expected_schema_ref,
+            Some(FlowSchemaRef::Named(SchemaName::from("schemas/join.json")))
+        );
+        let reencoded = serde_json::to_value(&step).expect("encode step");
+        assert_eq!(reencoded["expected_schema_ref"], "schemas/join.json");
+    }
+
+    #[test]
+    fn test_flow_schema_ref_inline_roundtrips_as_string() {
+        let inline = FlowSchemaRef::parse(r#"{"type":"object"}"#).expect("inline ref");
+        let encoded = serde_json::to_value(&inline).expect("encode");
+        // Inline schema serializes back to its JSON-string form, parseable again.
+        let decoded: FlowSchemaRef = serde_json::from_value(encoded).expect("decode");
+        assert!(matches!(decoded, FlowSchemaRef::Inline(_)));
+    }
+
+    #[test]
+    fn test_flow_and_topology_roundtrip_preserves_named_schema_ref() {
+        let definition = MobDefinition::from_toml(
+            r#"
+[mob]
+id = "schema-mob"
+
+[profiles.lead]
+model = "claude-sonnet-4-5"
+
+[flows.demo.steps.join]
+role = "lead"
+message = "join"
+expected_schema_ref = "schemas/join.json"
+            "#,
+        )
+        .unwrap();
+        let step = definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .and_then(|flow| flow.steps.get(&StepId::from("join")))
+            .expect("join step exists");
+        assert_eq!(
+            step.expected_schema_ref,
+            Some(FlowSchemaRef::Named(SchemaName::from("schemas/join.json")))
+        );
+
+        let encoded = serde_json::to_string(&definition).unwrap();
+        let decoded: MobDefinition = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, definition);
     }
 }

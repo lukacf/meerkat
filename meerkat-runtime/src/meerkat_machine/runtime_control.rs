@@ -591,12 +591,10 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
                     channel_id: effect_channel_id,
                     status,
-                    refresh_enqueued,
                     sequence,
                     queue_acceptance_sequence,
                 } if *effect_channel_id == channel_id => Some(LiveRefreshResultAuthority {
                     status: *status,
-                    refresh_enqueued: *refresh_enqueued,
                     sequence: *sequence,
                     queue_acceptance_sequence: *queue_acceptance_sequence,
                 }),
@@ -633,7 +631,6 @@ impl MeerkatMachine {
             crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCloseResultResolved {
                 channel_id: effect_channel_id,
                 status,
-                closed,
                 sequence,
                 close_observation_sequence,
             } if *effect_channel_id == channel_id
@@ -642,7 +639,6 @@ impl MeerkatMachine {
                 Some(LiveCloseResultAuthority::from_generated_effect(
                     channel_id.clone(),
                     *status,
-                    *closed,
                     *sequence,
                     *close_observation_sequence,
                 ))
@@ -685,7 +681,6 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCommandResultResolved {
                     channel_id: effect_channel_id,
                     command: effect_command,
-                    accepted,
                     sequence,
                     command_acceptance_sequence,
                 } if *effect_channel_id == channel_id
@@ -694,7 +689,6 @@ impl MeerkatMachine {
                 {
                     Some(LiveCommandResultAuthority {
                         command: *effect_command,
-                        accepted: *accepted,
                         sequence: *sequence,
                         command_acceptance_sequence: *command_acceptance_sequence,
                     })
@@ -1286,12 +1280,18 @@ impl MeerkatMachine {
             {
                 Ok(staged) => staged,
                 Err(_) => {
-                    return Err(RuntimeDriverError::NotReady {
-                        state: self
-                            .existing_session_runtime_state(session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed),
-                    });
+                    // Stage-first classification (dispatch_user_interrupt
+                    // shape): the machine rejected the input; a Destroyed
+                    // binding surfaces as the terminal `Destroyed` truth,
+                    // every other phase as `NotReady`.
+                    let state = self
+                        .existing_session_runtime_state(session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed);
+                    if state == RuntimeState::Destroyed {
+                        return Err(RuntimeDriverError::Destroyed);
+                    }
+                    return Err(RuntimeDriverError::NotReady { state });
                 }
             };
             let projected_effect =
@@ -1367,7 +1367,7 @@ impl MeerkatMachine {
                 });
             };
             let gate_guard = Arc::clone(&gate).lock_owned().await;
-            let staged = self
+            let staged = match self
                 .stage_session_dsl_transition(
                     session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
@@ -1376,7 +1376,16 @@ impl MeerkatMachine {
                     "StopRuntimeExecutor",
                 )
                 .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            {
+                Ok(staged) => staged,
+                Err(reason) => {
+                    // Stage-first classification: a rejection on a Destroyed
+                    // binding surfaces as the terminal `Destroyed` truth.
+                    return Err(self
+                        .classify_session_dsl_rejection(session_id, reason)
+                        .await);
+                }
+            };
             let projected_effect =
                 crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
                     .map_err(RuntimeDriverError::Internal)?;
@@ -1499,74 +1508,6 @@ impl MeerkatMachine {
         // dead attachment capabilities that may still be published.
         self.clear_dead_runtime_attachment(session_id).await;
         Ok(())
-    }
-
-    /// Accept an input and execute it synchronously through the runtime driver.
-    ///
-    /// Used by surfaces that need the request/response shape while still
-    /// preserving v9 input lifecycle semantics.
-    pub async fn accept_input_and_run<T, F, Fut>(
-        &self,
-        session_id: &SessionId,
-        input: Input,
-        op: F,
-    ) -> Result<T, RuntimeDriverError>
-    where
-        F: FnOnce(RunId, meerkat_core::lifecycle::run_primitive::RunPrimitive) -> Fut,
-        Fut: Future<Output = Result<(T, CoreApplyOutput), RuntimeDriverError>>,
-    {
-        let MeerkatMachineRunPrepared {
-            input_id,
-            run_id,
-            primitive,
-        } = match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::Prepare {
-                    session_id: session_id.clone(),
-                    input,
-                },
-            )
-            .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::Prepared(prepared) => prepared,
-            other => {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "unexpected command result preparing Meerkat run: {other:?}"
-                )));
-            }
-        };
-
-        match op(run_id.clone(), primitive).await {
-            Ok((result, output)) => {
-                self.execute_meerkat_machine_command(
-                    None,
-                    MeerkatMachineCommand::Commit {
-                        session_id: session_id.clone(),
-                        input_id,
-                        run_id,
-                        output,
-                    },
-                )
-                .await
-                .map_err(MeerkatMachine::driver_error_from_command_error)?;
-                Ok(result)
-            }
-            Err(err) => {
-                self.execute_meerkat_machine_command(
-                    None,
-                    MeerkatMachineCommand::Fail {
-                        session_id: session_id.clone(),
-                        run_id,
-                        failure: MeerkatMachineRunFailure::new(err.to_string()),
-                    },
-                )
-                .await
-                .map_err(MeerkatMachine::driver_error_from_command_error)?;
-                Err(err)
-            }
-        }
     }
 
     /// Accept an input and return a completion handle that resolves when the

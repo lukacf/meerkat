@@ -75,6 +75,15 @@ fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
         )
 }
 
+/// Deserialize a persisted session-snapshot blob through typed serde, matching
+/// the SQLite runtime store read path. `Session::deserialize` validates the
+/// mandatory envelope version against the generated persistence version
+/// authority, so a missing or non-current (v0/v1) row fails closed instead of
+/// silently defaulting or upgrading on read.
+fn deserialize_persisted_session(bytes: &[u8]) -> Result<meerkat_core::Session, RuntimeStoreError> {
+    serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
@@ -122,10 +131,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let previous = inner
             .sessions
             .get(&runtime_id.0)
-            .map(|snapshot| {
-                serde_json::from_slice::<meerkat_core::Session>(snapshot)
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-            })
+            .map(|snapshot| deserialize_persisted_session(snapshot))
             .transpose()?;
         meerkat_core::session_store::run_boundary_snapshot_save_guard(&incoming, previous.as_ref())
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -148,10 +154,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let previous = inner
             .sessions
             .get(&runtime_id.0)
-            .map(|snapshot| {
-                serde_json::from_slice::<meerkat_core::Session>(snapshot)
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-            })
+            .map(|snapshot| deserialize_persisted_session(snapshot))
             .transpose()?;
         meerkat_core::session_store::transcript_rewrite_save_guard(
             &incoming,
@@ -185,7 +188,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // All writes in one lock acquisition (atomic for in-memory)
         let rid = runtime_id.0.clone();
 
-        // Session delta
+        // Session delta. The supersession verdict computed here keys the
+        // entire commit: if the incoming session snapshot is classified as
+        // superseded (the persisted head is already a valid append-extension
+        // of it), the snapshot write is skipped AND so are the receipt + input
+        // writes, so receipt/input ordering identity never advances past the
+        // retained session truth.
+        let mut session_snapshot_superseded = false;
         if let Some(delta) = session_delta {
             let incoming_session =
                 serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
@@ -200,9 +209,10 @@ impl RuntimeStore for InMemoryRuntimeStore {
                             actual: incoming_session.id().clone(),
                         });
                     }
-                    let previous_session = inner.sessions.get(&rid).and_then(|snapshot| {
-                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
-                    });
+                    let previous_session = inner
+                        .sessions
+                        .get(&rid)
+                        .and_then(|snapshot| deserialize_persisted_session(snapshot).ok());
                     if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         &incoming_session,
                         previous_session.as_ref(),
@@ -220,6 +230,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
                             .is_ok()
                         }) {
                             persist_session_snapshot = false;
+                            session_snapshot_superseded = true;
                         } else {
                             return Err(RuntimeStoreError::WriteFailed(err.to_string()));
                         }
@@ -230,11 +241,23 @@ impl RuntimeStore for InMemoryRuntimeStore {
                         "session snapshot for {session_store_key} is not a Session: {err}"
                     )));
                 }
-                (Err(_), None) => {}
+                (Err(err), None) => {
+                    return Err(RuntimeStoreError::WriteFailed(format!(
+                        "session snapshot is not a Session: {err}"
+                    )));
+                }
             }
             if persist_session_snapshot {
                 inner.sessions.insert(rid.clone(), delta.session_snapshot);
             }
+        }
+
+        // When the session snapshot was superseded and skipped, the boundary
+        // receipt and input-state updates for that boundary must also be
+        // skipped: advancing them against a retained (older) session snapshot
+        // would split receipt/input ordering identity from session truth.
+        if session_snapshot_superseded {
+            return Ok(());
         }
 
         // Receipt
@@ -464,12 +487,13 @@ mod tests {
         let bundle = StoredInputState::new_accepted(input_id.clone());
         let receipt = make_receipt(run_id.clone(), 0);
 
+        let session = session_with_user("hello");
+        let session_snapshot = serde_json::to_vec(&session).unwrap();
+
         store
             .atomic_apply(
                 &rid,
-                Some(SessionDelta {
-                    session_snapshot: b"session-data".to_vec(),
-                }),
+                Some(SessionDelta { session_snapshot }),
                 receipt.clone(),
                 vec![persistable(bundle)],
                 None,
@@ -485,6 +509,42 @@ mod tests {
         // Load receipt
         let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_rejects_non_session_snapshot_without_owner_context() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test-runtime");
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+
+        let bundle = StoredInputState::new_accepted(input_id);
+        let receipt = make_receipt(run_id, 0);
+
+        // Owner-context absence is not a license to store arbitrary bytes as a
+        // session snapshot: a non-deserializable snapshot must fail closed.
+        let err = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: b"session-data".to_vec(),
+                }),
+                receipt,
+                vec![persistable(bundle)],
+                None,
+            )
+            .await
+            .expect_err("non-Session snapshot must be rejected");
+
+        match err {
+            RuntimeStoreError::WriteFailed(message) => {
+                assert!(
+                    message.contains("not a Session"),
+                    "unexpected WriteFailed message: {message}"
+                );
+            }
+            other => panic!("expected WriteFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -767,12 +827,13 @@ mod tests {
         let rid = LogicalRuntimeId::new("runtime-superseded-terminal");
         let incoming = session_with_user("turn input");
         let mut current = incoming.clone();
-        current.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "peer response already applied".to_string(),
-                tool_calls: Vec::new(),
+        current.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -806,13 +867,75 @@ mod tests {
             store.load_session_snapshot(&rid).await.unwrap(),
             Some(current_snapshot)
         );
+        // The session snapshot was classified superseded and skipped, so the
+        // boundary receipt for that boundary must NOT advance against the
+        // retained (more-advanced) session snapshot.
         assert_eq!(
             store
                 .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
                 .await
                 .unwrap(),
-            Some(receipt)
+            None
         );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_skips_inputs_when_session_snapshot_superseded() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-superseded-inputs");
+        let incoming = session_with_user("turn input");
+        let mut current = incoming.clone();
+        current.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+        let current_snapshot = serde_json::to_vec(&current).unwrap();
+        let receipt = make_receipt(RunId::new(), 21);
+        let input_id = InputId::new();
+        let bundle = StoredInputState::new_accepted(input_id.clone());
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: current_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                }),
+                receipt.clone(),
+                vec![persistable(bundle)],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        // Snapshot retained, receipt + input-state writes skipped as a unit.
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(current_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.load_input_states(&rid).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -888,12 +1011,13 @@ mod tests {
         previous.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Turn 1 request".to_string()),
         ));
-        previous.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Turn 1 answer".to_string(),
-                tool_calls: Vec::new(),
+        previous.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Turn 1 answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -908,12 +1032,13 @@ mod tests {
         for message in previous.messages()[1..].iter().cloned() {
             incoming.push(message);
         }
-        incoming.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Turn 2 generated answer".to_string(),
-                tool_calls: Vec::new(),
+        incoming.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Turn 2 generated answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));

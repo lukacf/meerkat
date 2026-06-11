@@ -77,7 +77,7 @@ pub struct CreateSessionParams {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
-    pub system_prompt: Option<String>,
+    pub system_prompt: meerkat::SystemPromptOverride,
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
@@ -125,7 +125,7 @@ pub struct CreateSessionParams {
     pub budget_limits: Option<BudgetLimits>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Override the realm-scoped auth binding for this session.
     #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
@@ -199,6 +199,29 @@ pub async fn handle_create(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
+    create_session_with_params(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+}
+
+/// Typed `session/create` entrypoint shared with identity-native callers
+/// (`help/ask`). Takes a fully-formed [`CreateSessionParams`] so callers
+/// route typed params without re-serializing through a hand-shaped JSON
+/// payload (K17: handlers speak typed params/results only).
+pub async fn create_session_with_params(
+    id: Option<RpcId>,
+    params: CreateSessionParams,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
@@ -210,14 +233,19 @@ pub async fn handle_create(
     }
 
     let model_was_explicit = params.model.is_some();
-    let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
-        config_runtime
-            .get()
-            .await
-            .ok()
-            .map(|snapshot| snapshot.config.agent.model)
-    } else {
-        None
+    // When the caller does not pin a model, the runtime's configured default is
+    // resolved through the catalog-owned `resolve_create_session_default_model`
+    // ladder (provider-priority -> config.agent.model -> catalog global default)
+    // — the single owner of the create-session default-model fact. Surfaces MUST
+    // NOT re-derive their own default ladder from `config.agent.model`.
+    let runtime_default_model = match runtime.config_runtime() {
+        Some(config_runtime) => match config_runtime.get().await {
+            Ok(snapshot) => Some(meerkat::resolve_create_session_default_model(
+                &snapshot.config,
+            )),
+            Err(_) => None,
+        },
+        None => None,
     };
     let model_name = match params.model.clone().or(runtime_default_model) {
         Some(model) => model,
@@ -281,14 +309,10 @@ pub async fn handle_create(
     );
     build_config.override_web_search =
         ToolCategoryOverride::from_override(params.enable_web_search);
-    if let Some(tool_filter) = params.tool_filter
-        && let Err(err) = build_config.set_initial_tool_filter(tool_filter)
-    {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("Invalid tool_filter: {err}"),
-        );
+    if let Some(tool_filter) = params.tool_filter {
+        // The typed tool filter is carried directly now (no string side
+        // channel that could fail to serialize), so this is infallible.
+        build_config.set_initial_tool_filter(tool_filter);
     }
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
@@ -365,9 +389,7 @@ pub async fn handle_create(
     // Deferred creates register on-demand through the session/* router entry
     // points; eagerly attaching here is redundant and can recurse through the
     // runtime control path before the pending session has ever been exercised.
-    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
-        && params.initial_turn != Some(InitialTurn::Deferred)
-    {
+    if params.initial_turn != Some(InitialTurn::Deferred) {
         let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
             runtime.clone(),
             session_id.clone(),
@@ -590,9 +612,11 @@ pub async fn handle_list(
         ..Default::default()
     };
 
-    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = runtime
-        .list_sessions_rich(query)
-        .await
+    let summaries = match runtime.list_sessions_rich(query).await {
+        Ok(s) => s,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = summaries
         .into_iter()
         .map(|mut ws| {
             ws.session_ref = runtime
@@ -632,17 +656,19 @@ pub async fn handle_read(
     };
 
     match runtime.read_session_rich(&session_id).await {
-        Some(mut info) => {
+        // Row #98: a store fault must NOT be reported as SESSION_NOT_FOUND.
+        Ok(Some(mut info)) => {
             info.session_ref = runtime
                 .realm_id()
                 .map(|realm| meerkat_contracts::format_session_ref(&realm, &info.session_id));
             RpcResponse::success(id, info)
         }
-        None => RpcResponse::error(
+        Ok(None) => RpcResponse::error(
             id,
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
         ),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }
 
@@ -674,6 +700,7 @@ mod tests {
                     handshake_failed: false,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
         let wire: CreateSessionResult = run.into();
@@ -782,7 +809,7 @@ pub async fn handle_inject_context(
     };
 
     let req = meerkat_core::AppendSystemContextRequest {
-        text: params.text,
+        content: params.content,
         source: params.source,
         idempotency_key: params.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,

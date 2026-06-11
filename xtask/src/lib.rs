@@ -1,4 +1,7 @@
 pub mod audit_generated_headers;
+pub mod bridge_classifier;
+pub mod effect_authority;
+pub mod machine_alphabet;
 #[cfg(feature = "machine-authority")]
 pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
@@ -10,10 +13,12 @@ pub mod public_contracts;
 pub mod rmat_audit;
 pub mod rmat_policy;
 pub mod seam_inventory;
+pub mod typed_carrier;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
+use crate::machine_alphabet::MachineAlphabetArgs;
 #[cfg(feature = "machine-authority")]
 use crate::machines::HopcroftArgs;
 use crate::machines::{SelectionArgs, VerifyArgs};
@@ -46,12 +51,26 @@ enum Commands {
     ProtocolCodegen,
     #[command(name = "rmat-audit")]
     RmatAudit(RmatAuditArgs),
+    /// Structural effect-authority audit: runtime interrupt / runtime-effect
+    /// authority must stay machine-owned (syn AST port of the former
+    /// `scripts/audit-effect-authority.sh` gate).
+    #[command(name = "effect-authority")]
+    EffectAuthority,
+    /// W2-F structural bridge-classifier gate: production bridge code must
+    /// not re-interpret `ResponseStatus` (syn AST port of the former
+    /// `scripts/pre-push-bridge-no-responsestatus.sh` grep gate).
+    #[command(name = "bridge-classifier")]
+    BridgeClassifier,
     #[command(name = "ownership-ledger")]
     OwnershipLedger(OwnershipLedgerArgs),
     /// Verify every `@generated` header corresponds to a codegen-emit path
     /// and every codegen-emit path carries `@generated`. Errors on mismatch.
     #[command(name = "audit-generated-headers")]
     AuditGeneratedHeaders,
+    /// Emit the canonical machine alphabet (phase/input/signal variant names
+    /// per canonical machine) as JSON for the machine-poster content gate.
+    #[command(name = "machine-alphabet")]
+    MachineAlphabet(MachineAlphabetArgs),
 }
 
 pub fn run() -> Result<()> {
@@ -72,9 +91,19 @@ pub fn run() -> Result<()> {
         Commands::SeamInventory(args) => seam_inventory::run_seam_inventory(args),
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
-        Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
+        Commands::EffectAuthority => effect_authority::run_effect_authority(),
+        Commands::BridgeClassifier => bridge_classifier::run_bridge_classifier(),
+        // The ownership ledger resolves anchors against the canonical machine
+        // catalog; constructing the DSL schemas needs the same deep stack as
+        // the other machine-authority tasks.
+        Commands::OwnershipLedger(args) => {
+            run_machine_authority_task(move || ownership_ledger::run_ownership_ledger(args))
+        }
         Commands::AuditGeneratedHeaders => {
             run_machine_authority_task(run_audit_generated_headers_command)
+        }
+        Commands::MachineAlphabet(args) => {
+            run_machine_authority_task(move || machine_alphabet::run_machine_alphabet(args))
         }
     }
 }

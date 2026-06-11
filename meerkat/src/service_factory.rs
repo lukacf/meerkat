@@ -314,8 +314,8 @@ impl SessionAgent for FactoryAgent {
             .await
     }
 
-    fn sync_system_context_state(&mut self) {
-        self.agent.sync_system_context_state_to_session();
+    fn sync_system_context_state(&mut self) -> Result<(), meerkat_core::SystemContextStateError> {
+        self.agent.sync_system_context_state_to_session()
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -384,7 +384,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel();
     }
 
-    fn cancel_after_boundary_handle(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+    fn cancel_after_boundary_handle(&self) -> Option<meerkat_core::CancelAfterBoundarySender> {
         Some(self.agent.cancel_after_boundary_handle())
     }
 
@@ -414,7 +414,10 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
-    fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
+    fn execution_snapshot(
+        &self,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::SnapshotProjectionError>
+    {
         self.agent.execution_snapshot()
     }
 
@@ -435,7 +438,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.external_tool_surface_snapshot()
     }
 
-    fn session_clone(&self) -> Session {
+    fn session_clone(&self) -> Result<Session, meerkat_core::SystemContextStateError> {
         self.agent.session_with_system_context_state()
     }
 
@@ -597,7 +600,10 @@ impl FactoryAgentBuilder {
 
     /// Create a new builder that resolves config from a store on each build.
     ///
-    /// If the store read fails, the builder falls back to `initial_config`.
+    /// A store read failure is propagated as a typed error on build; the
+    /// builder never serves the stale `initial_config` behind a store failure.
+    /// `initial_config` is the snapshot returned by [`Self::config`] and is used
+    /// only when no config store is configured.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_config_store(
         factory: AgentFactory,
@@ -628,17 +634,22 @@ impl FactoryAgentBuilder {
         self
     }
 
-    async fn resolve_config(&self) -> Config {
+    /// Resolve the effective config for this build.
+    ///
+    /// When a config store is configured, the latest durable config is read
+    /// from it and a read failure is propagated as a typed error — the builder
+    /// never serves a stale `config_snapshot` behind a store failure. The
+    /// in-memory `config_snapshot` is returned only when no store is configured.
+    async fn resolve_config(&self) -> Result<Config, SessionError> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(store) = &self.config_store {
-            match store.get().await {
-                Ok(config) => return config,
-                Err(err) => {
-                    tracing::warn!("Failed to read latest config from store: {err}");
-                }
-            }
+            return store.get().await.map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(format!(
+                    "failed to read latest config from store: {err}"
+                )))
+            });
         }
-        self.config_snapshot.clone()
+        Ok(self.config_snapshot.clone())
     }
 
     /// Get a reference to the factory.
@@ -661,8 +672,12 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
     ) -> Option<bool> {
+        // A config-store read failure yields `None` (capability unknown) rather
+        // than a stale-snapshot assertion: we never claim inline-video support
+        // from a config we could not freshly read.
         self.resolve_config()
             .await
+            .ok()?
             .model_registry()
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
@@ -750,7 +765,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.image_generation_executor_override = Some(executor);
         }
 
-        let config = self.resolve_config().await;
+        let config = self.resolve_config().await?;
 
         // Capture the session_context handle before build_agent consumes the
         // RuntimeBuildMode. Needed so the session task can fire
@@ -905,8 +920,6 @@ mod tests {
                 transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: meerkat_core::SelfHostedApiStyle::Responses,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -959,6 +972,67 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    struct FailingConfigStore;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl meerkat_core::ConfigStore for FailingConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+        async fn set(&self, _config: Config) -> Result<(), meerkat_core::config::ConfigError> {
+            Ok(())
+        }
+        async fn patch(
+            &self,
+            _delta: meerkat_core::config::ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn build_agent_fails_closed_on_config_store_read_error() {
+        let initial_config = self_hosted_inline_video_config(false);
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(FailingConfigStore);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(
+            AgentFactory::minimal(),
+            initial_config,
+            store,
+        );
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let req = CreateSessionRequest {
+            model: "video-alias".to_string(),
+            prompt: "fail closed on stale config".to_string().into(),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        };
+
+        let result = builder.build_agent(&req, event_tx).await;
+        // `FactoryAgent` is not `Debug`, so match the error out rather than
+        // `expect_err` (which would require the `Ok` type to be `Debug`).
+        let Err(err) = result else {
+            panic!("build must fail closed on config-store read error");
+        };
+        assert!(
+            err.to_string()
+                .contains("failed to read latest config from store"),
+            "expected a typed config-store error, got: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn session_service_live_identity_matches_factory_resolved_metadata() -> Result<(), String>
     {
@@ -972,11 +1046,9 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "video-alias".to_string(),
                 prompt: "defer identity parity".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -1089,7 +1161,7 @@ mod tests {
                 .await
         }
 
-        fn provider(&self) -> &'static str {
+        fn provider(&self) -> meerkat_core::Provider {
             self.inner.provider()
         }
 
@@ -1238,12 +1310,10 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1332,12 +1402,10 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -1441,11 +1509,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1510,11 +1576,9 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -1560,6 +1624,7 @@ mod tests {
         .await?;
 
         let snapshot = SessionAgent::execution_snapshot(&agent)
+            .map_err(|err| format!("snapshot should project: {err}"))?
             .ok_or_else(|| "factory agent should expose execution snapshot".to_string())?;
 
         assert_eq!(
@@ -1705,12 +1770,10 @@ mod tests {
         CreateSessionRequest {
             model: model.to_string(),
             prompt: "test".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,

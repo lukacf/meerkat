@@ -206,7 +206,6 @@ const typedEventEnvelope: EventEnvelope = {
     type: 'session',
     session_id: '00000000-0000-4000-8000-000000000001',
   },
-  source_id: 'session:not-a-uuid',
   seq: 1,
   timestamp_ms: 1710000000000,
   payload: {
@@ -217,10 +216,16 @@ const typedEventEnvelope: EventEnvelope = {
 if (typedEventEnvelope.source.type === 'session') {
   typedEventEnvelope.source.session_id;
 }
-// @ts-expect-error source_id alone is only an inert compatibility projection.
+// The legacy envelope-level source_id string was deleted; the typed source
+// identity is the only event-source carrier and it is required.
 const sourceIdOnlyEventEnvelope: EventEnvelope = {
   event_id: '00000000-0000-0000-0000-000000000001',
+  // @ts-expect-error a legacy source_id string is not part of the envelope.
   source_id: 'session:00000000-0000-4000-8000-000000000001',
+  source: {
+    type: 'session',
+    session_id: '00000000-0000-4000-8000-000000000001',
+  },
   seq: 1,
   timestamp_ms: 1710000000000,
   payload: {
@@ -307,9 +312,14 @@ spawnSpecWithoutGeneration.generation = 1;
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
     case 'run_started':
-      return typeof event.prompt === 'string'
-        ? event.prompt
-        : event.prompt
+      // K3: the run boundary carries the typed `RunInput` — a content-bearing
+      // run exposes its content; a pending-continuation run has no prompt.
+      if (event.input.kind !== 'content') {
+        return '';
+      }
+      return typeof event.input.content === 'string'
+        ? event.input.content
+        : event.input.content
             .map((block) => ('type' in block && block.type === 'text' ? block.text : ''))
             .join('');
     case 'hook_started':
@@ -317,7 +327,7 @@ function handleEvent(event: AgentEvent): string {
     case 'hook_completed':
       return `${event.hook_id}:${event.duration_ms}`;
     case 'hook_failed':
-      return event.error;
+      return event.reason.reason_code;
     case 'hook_denied':
       return `${event.reason_code}:${event.message}`;
     case 'text_delta':
@@ -335,7 +345,8 @@ function handleEvent(event: AgentEvent): string {
     case 'run_completed':
       return event.result;
     case 'run_failed':
-      return event.error;
+      // K3: the typed error report is the authority.
+      return event.error_report.message;
     case 'tool_execution_started':
       return `exec:${event.name}`;
     case 'tool_execution_completed':
@@ -347,23 +358,23 @@ function handleEvent(event: AgentEvent): string {
     case 'compaction_completed':
       return `compact:${event.summary_tokens}`;
     case 'compaction_failed':
-      return event.error;
+      return JSON.stringify(event.reason);
     case 'budget_warning':
       return `${event.budget_type}:${event.percent}`;
     case 'retrying':
-      return `${event.attempt}/${event.max_attempts}`;
+      return `${event.retry.plan.attempt}/${event.retry.plan.max_retries}`;
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':
-      return event.reference ?? '';
+      return event.reason ? JSON.stringify(event.reason) : '';
     case 'interaction_complete':
       return event.result;
     case 'interaction_callback_pending':
       return `${event.tool_name}:${event.interaction_id}`;
     case 'interaction_failed':
-      return event.error;
+      return event.reason.kind;
     case 'stream_truncated':
-      return event.reason;
+      return event.reason.kind;
     case 'tool_config_changed':
       return event.payload.target;
     case 'background_job_completed':
@@ -372,6 +383,16 @@ function handleEvent(event: AgentEvent): string {
       return event.delta;
     case 'reasoning_complete':
       return event.content;
+    case 'extraction_succeeded':
+      return event.session_id;
+    case 'extraction_failed':
+      return event.reason;
+    case 'server_tool_content':
+      return event.kind.kind;
+    case 'assistant_image_appended':
+      return event.type;
+    case 'transcript_rewrite_committed':
+      return event.type;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -387,12 +408,13 @@ const backgroundJobWithoutLegacyStatus: AgentEvent = {
   detail: 'exit_code: 1',
 };
 
-// @ts-expect-error terminal_status is required; status is only a legacy display mirror.
 const backgroundJobStringOnly: AgentEvent = {
   type: 'background_job_completed',
   job_id: 'j_123',
   display_name: 'sleep 2',
+  // @ts-expect-error `status` was the legacy display mirror and is no longer a field; terminal_status is authoritative.
   status: 'completed',
+  terminal_status: 'failed',
   detail: 'exit_code: 0',
 };
 
@@ -428,15 +450,24 @@ const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'd
 declare const mob: Mob;
 const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
 const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
-const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const helperResult: Promise<MobHelperResult> = mob.spawnHelper(
+  'Summarize the latest findings.',
+  { agentIdentity: 'helper-1' },
+);
 const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
-  { authBinding: { realm: 'default', binding: 'openai', profile: 'work' } },
+  {
+    agentIdentity: 'helper-2',
+    authBinding: { realm: 'default', binding: 'openai', profile: 'work' },
+  },
 );
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
-  { authBinding: { realm: 'default', binding: 'anthropic' } },
+  {
+    agentIdentity: 'fork-1',
+    authBinding: { realm: 'default', binding: 'anthropic' },
+  },
 );
 const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();

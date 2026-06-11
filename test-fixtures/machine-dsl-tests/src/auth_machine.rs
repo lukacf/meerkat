@@ -65,8 +65,8 @@ machine! {
             WakeRefreshLoop,
         }
 
-        disposition EmitLifecycleEvent => external,
-        disposition WakeRefreshLoop => local,
+        disposition EmitLifecycleEvent => external seam OwnerRealizationOnly,
+        disposition WakeRefreshLoop => local seam NoOwnerRealization,
 
         // --- Transitions ---
 

@@ -25,7 +25,8 @@ Attach an Ed25519 signature at pack time for trust verification on deploy.
 ```bash
 rkat mob pack ./mobs/release-triage \
   -o ./dist/release-triage.mobpack \
-  --sign ./keys/release.key
+  --sign ./keys/release.key \
+  --signer-id team@example.com
 ```
 
 ## Inspect a pack

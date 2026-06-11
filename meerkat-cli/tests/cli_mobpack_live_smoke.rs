@@ -314,12 +314,6 @@ async fn write_turn_probe_mobpack_fixture(
       "tools":{{"comms":true}},
       "external_addressable":true,
       "peer_description":"Turn-driven worker"
-    }},
-    "broken":{{
-      "model":"definitely-invalid-live-smoke-model",
-      "tools":{{"comms":true}},
-      "external_addressable":true,
-      "peer_description":"Deterministic failure worker"
     }}
   }},
   "wiring":{{"auto_wire_orchestrator":false,"role_wiring":[]}},
@@ -1413,52 +1407,66 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         "removed mob/send route should reject member turn probes: {send_err}"
     );
 
-    match rpc_call(
-        &mut surface,
-        206,
-        "mob/spawn",
-        json!({
-            "mob_id": mob_id,
-            "profile": "broken",
-            "agent_identity": "broken-1",
-            "runtime_mode": "turn_driven"
-        }),
-        20,
+    // Load-time model validation: a definition whose profile model is
+    // neither catalogued, custom-defined ([models.<id>]), nor
+    // provider-annotated fails fast at mob deploy instead of bricking the
+    // member at first delivery.
+    let broken_mob_id = "scenario-29-broken";
+    let broken_dir = project_dir.join(format!("{broken_mob_id}-fixture"));
+    tokio::fs::create_dir_all(&broken_dir).await?;
+    tokio::fs::write(
+        broken_dir.join("manifest.toml"),
+        format!("[mobpack]\nname = \"{broken_mob_id}\"\nversion = \"1.0.0\"\n"),
     )
-    .await
-    {
-        Err(spawn_err) => {
-            assert!(
-                spawn_err
-                    .to_string()
-                    .contains("definitely-invalid-live-smoke-model"),
-                "broken member spawn should fail with the invalid model error: {spawn_err}"
-            );
-        }
-        Ok(broken) => {
-            assert!(
-                broken["agent_identity"].as_str().is_some(),
-                "broken spawn should still return agent_identity: {broken}"
-            );
-            let broken_send_err = rpc_call(
-                &mut surface,
-                207,
-                "mob/send",
-                json!({
-                    "mob_id": mob_id,
-                    "agent_identity": "broken-1",
-                    "content": "This turn must fail because the member model is invalid."
-                }),
-                60,
-            )
-            .await
-            .expect_err("mob/send should be removed before broken-member execution");
-            assert!(
-                broken_send_err.to_string().contains("Method not found"),
-                "unexpected broken member error: {broken_send_err}"
-            );
-        }
-    }
+    .await?;
+    tokio::fs::write(
+        broken_dir.join("definition.json"),
+        format!(
+            r#"{{
+  "id":"{broken_mob_id}",
+  "profiles":{{
+    "broken":{{
+      "model":"definitely-invalid-live-smoke-model",
+      "tools":{{"comms":true}},
+      "external_addressable":true,
+      "peer_description":"Deterministic failure worker"
+    }}
+  }},
+  "wiring":{{"auto_wire_orchestrator":false,"role_wiring":[]}},
+  "skills":{{}}
+}}"#
+        ),
+    )
+    .await?;
+    let broken_pack = project_dir.join("scenario-29-broken.mobpack");
+    let broken_pack_args = [
+        "mob".to_string(),
+        "pack".to_string(),
+        broken_dir.display().to_string(),
+        "-o".to_string(),
+        broken_pack.display().to_string(),
+    ];
+    let broken_pack_refs: Vec<&str> = broken_pack_args.iter().map(String::as_str).collect();
+    let broken_pack_out = run_rkat(&rkat, &project_dir, &broken_pack_refs, Some(&api_key)).await?;
+    let _ = output_ok_or_err(broken_pack_out, &broken_pack_refs).map_err(std::io::Error::other)?;
+    let broken_deploy_args = [
+        "mob".to_string(),
+        "deploy".to_string(),
+        broken_pack.display().to_string(),
+        "bootstrap".to_string(),
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
+    ];
+    let broken_deploy_refs: Vec<&str> = broken_deploy_args.iter().map(String::as_str).collect();
+    let broken_deploy_out =
+        run_rkat(&rkat, &project_dir, &broken_deploy_refs, Some(&api_key)).await?;
+    let broken_deploy_err = output_ok_or_err(broken_deploy_out, &broken_deploy_refs)
+        .expect_err("deploying a definition with an unknown model must fail fast at load");
+    assert!(
+        broken_deploy_err.contains("unknown_model")
+            && broken_deploy_err.contains("definitely-invalid-live-smoke-model"),
+        "broken deploy should fail with the load-time unknown_model diagnostic: {broken_deploy_err}"
+    );
 
     let _ = rpc_call(
         &mut surface,

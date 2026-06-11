@@ -11,7 +11,8 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
-    Provider, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult, Usage,
+    Provider, ServerToolKind, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult,
+    Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
@@ -145,7 +146,10 @@ fn anthropic_tag(request: &LlmRequest) -> Option<&AnthropicProviderTag> {
     }
 }
 
-fn catalog_beta_value(request: &LlmRequest, feature: &str) -> Option<&'static str> {
+fn catalog_beta_value(
+    request: &LlmRequest,
+    feature: meerkat_core::model_profile::capabilities::BetaFeature,
+) -> Option<&'static str> {
     meerkat_core::model_profile::capabilities::capabilities_for(
         Provider::Anthropic,
         &request.model,
@@ -248,11 +252,6 @@ fn project_anthropic_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistan
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -324,13 +323,6 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_anthropic_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -498,33 +490,8 @@ impl AnthropicClient {
                         }));
                     }
                 }
-                Message::Assistant(a) => {
-                    // Legacy format: flat content + tool_calls
-                    let mut content = Vec::new();
-
-                    if !a.content.is_empty() {
-                        content.push(serde_json::json!({
-                            "type": "text",
-                            "text": a.content
-                        }));
-                    }
-
-                    for tc in &a.tool_calls {
-                        content.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.args
-                        }));
-                    }
-
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content
-                    }));
-                }
                 Message::BlockAssistant(a) => {
-                    // New format: ordered blocks with thinking support
+                    // Ordered blocks with thinking support
                     let mut content = Vec::new();
 
                     for block in &a.blocks {
@@ -587,7 +554,7 @@ impl AnthropicClient {
                             }
                             meerkat_core::AssistantBlock::ServerToolContent {
                                 id,
-                                name,
+                                kind,
                                 content: server_content,
                                 ..
                             } => {
@@ -597,7 +564,8 @@ impl AnthropicClient {
                                     content.push(serde_json::json!({
                                         "type": "server_tool_use",
                                         "id": id,
-                                        "name": name,
+                                        // Provider-native name derived from the typed kind.
+                                        "name": kind.provider_name(),
                                         "input": server_content
                                             .get("input")
                                             .cloned()
@@ -988,14 +956,20 @@ impl LlmClient for AnthropicClient {
                 .and_then(|t| t.get("type"))
                 .and_then(|t| t.as_str());
             if thinking_type == Some("enabled")
-                && let Some(beta) = catalog_beta_value(request, "interleaved_thinking")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::InterleavedThinking,
+                )
             {
                 betas.push(beta.to_string());
             }
 
             // Structured output format requires beta header
             if body.get("output_config").and_then(|c| c.get("format")).is_some()
-                && let Some(beta) = catalog_beta_value(request, "structured_output")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::StructuredOutput,
+                )
             {
                 betas.push(beta.to_string());
             }
@@ -1010,7 +984,10 @@ impl LlmClient for AnthropicClient {
 
             // Compaction API (beta)
             if body.get("context_management").is_some()
-                && let Some(beta) = catalog_beta_value(request, "compaction")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::Compaction,
+                )
             {
                 betas.push(beta.to_string());
             }
@@ -1155,7 +1132,7 @@ impl LlmClient for AnthropicClient {
                                         if let Some(citations) = content_block.extra.get("citations") {
                                             yield LlmEvent::ServerToolContent {
                                                 id: None,
-                                                name: "web_search_citations".to_string(),
+                                                kind: ServerToolKind::WebSearch,
                                                 content: serde_json::json!({
                                                     "type": "text_citations",
                                                     "citations": citations
@@ -1200,7 +1177,7 @@ impl LlmClient for AnthropicClient {
                                     "web_search_tool_result" => {
                                         yield LlmEvent::ServerToolContent {
                                             id: content_block.tool_use_id.clone(),
-                                            name: "web_search".to_string(),
+                                            kind: ServerToolKind::WebSearch,
                                             content: content_block.extra.clone(),
                                             meta: None,
                                         };
@@ -1271,10 +1248,17 @@ impl LlmClient for AnthropicClient {
                                     let name = current_server_tool_name
                                         .take()
                                         .unwrap_or_else(|| "server_tool".to_string());
+                                    // Parse-at-boundary: known semantic tools map to
+                                    // typed kinds; any other server-tool name is
+                                    // provider-native and round-trips verbatim.
+                                    let kind = match name.as_str() {
+                                        "web_search" => ServerToolKind::WebSearch,
+                                        _ => ServerToolKind::ProviderNative { name },
+                                    };
                                     accumulated_server_tool_input.clear();
                                     yield LlmEvent::ServerToolContent {
                                         id,
-                                        name,
+                                        kind,
                                         content: serde_json::json!({
                                             "type": "server_tool_use",
                                             "input": input
@@ -1755,7 +1739,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("srv_1".to_string()),
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "server_tool_use",
                             "input": {"query": "m"}
@@ -1764,7 +1748,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search_citations".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "text_citations",
                             "citations": []
@@ -2967,9 +2951,9 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream event") {
                 LlmEvent::ServerToolContent {
-                    id, name, content, ..
+                    id, kind, content, ..
                 } => {
-                    server_blocks.push((id, name, content));
+                    server_blocks.push((id, kind, content));
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}
@@ -2979,7 +2963,7 @@ mod tests {
 
         assert_eq!(server_blocks.len(), 2);
         assert_eq!(server_blocks[0].0.as_deref(), Some("srvtoolu_1"));
-        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(server_blocks[0].1, ServerToolKind::WebSearch);
         assert_eq!(
             server_blocks[0].2["input"]["query"],
             "latest meerkat runtime"

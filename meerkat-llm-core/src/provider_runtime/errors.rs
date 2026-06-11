@@ -31,6 +31,17 @@ pub enum ProviderAuthError {
     ExternalResolverMissing(String),
     #[error("no runtime registered for provider: {0:?}")]
     NoRuntimeRegistered(meerkat_core::Provider),
+    /// The registry resolved a connection whose provider identity does not
+    /// match the provider the caller asked to resolve for. This is a typed
+    /// invariant breach of the binding → connection seam, not a config
+    /// validation failure.
+    #[error(
+        "auth binding resolved a connection for provider {resolved:?}, expected provider {expected:?}"
+    )]
+    ResolvedProviderMismatch {
+        expected: meerkat_core::Provider,
+        resolved: meerkat_core::Provider,
+    },
 }
 
 impl PartialEq for ProviderAuthError {
@@ -41,6 +52,16 @@ impl PartialEq for ProviderAuthError {
             (Self::SourceResolutionFailed(a), Self::SourceResolutionFailed(b)) => a == b,
             (Self::ExternalResolverMissing(a), Self::ExternalResolverMissing(b)) => a == b,
             (Self::NoRuntimeRegistered(a), Self::NoRuntimeRegistered(b)) => a == b,
+            (
+                Self::ResolvedProviderMismatch {
+                    expected: ae,
+                    resolved: ar,
+                },
+                Self::ResolvedProviderMismatch {
+                    expected: be,
+                    resolved: br,
+                },
+            ) => ae == be && ar == br,
             _ => false,
         }
     }

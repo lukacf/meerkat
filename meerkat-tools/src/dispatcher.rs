@@ -3,14 +3,16 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::DispatchError;
 use async_trait::async_trait;
+#[cfg(test)]
+use meerkat_core::ToolCallability;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ToolUnavailableReason;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::types::ToolResult;
 use meerkat_core::types::{ToolCallView, ToolDef};
 use meerkat_core::{AgentToolDispatcher, ToolDispatchContext};
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::{ToolCallability, ToolUnavailableReason};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::registry::{ToolIdentityEntry, ToolIdentityRegistry, ToolRegistry};
+use crate::registry::{ToolIdentityEntry, ToolIdentityRegistry};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::error::ToolValidationError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,7 +62,7 @@ impl ToolDispatcher {
         Self {
             router,
             identity_registry: RwLock::new(ToolIdentityRegistry::from_catalog(&initial_catalog)),
-            default_timeout: Duration::from_secs(30),
+            default_timeout: crate::timeout::ToolTimeoutPolicy::default().default_timeout(),
         }
     }
 
@@ -95,13 +97,13 @@ impl ToolDispatcher {
         for entry in catalog {
             registry.register(Arc::clone(&entry.tool));
         }
-    }
-
-    fn registry_contains(&self, name: &str) -> bool {
-        match self.identity_registry.read() {
-            Ok(registry) => registry.contains(name),
-            Err(poisoned) => poisoned.into_inner().contains(name),
-        }
+        // Reconcile against the live catalog: any previously-admitted tool the
+        // live catalog no longer claims is retired (vanished from the source
+        // set), so it is never republished as `NotCurrentlyCallable` catalog
+        // truth and dispatch resolves it as `NotFound`. Tools that are listed
+        // but momentarily uncallable remain in the live catalog carrying their
+        // own callability and are unaffected here.
+        registry.reconcile_to_live(catalog.iter().map(|entry| entry.tool.name.as_str()));
     }
 
     fn registry_entries(&self) -> Vec<ToolIdentityEntry> {
@@ -117,18 +119,19 @@ impl ToolDispatcher {
 
         let mut emitted = HashSet::new();
         let mut catalog = Vec::new();
+        // Live registry entries are, by reconciliation, a subset of the live
+        // catalog: emit them (in admission order) carrying their real
+        // callability. A retired (vanished) tool is not in `registry_entries()`
+        // anymore, so it is never republished as an unavailable catalog entry.
         for registry_entry in self.registry_entries() {
             let name = registry_entry.identity.name.as_str();
             if let Some(live_entry) = live_catalog
                 .iter()
                 .find(|entry| entry.tool.name == name)
                 .cloned()
+                && emitted.insert(name.to_string())
             {
-                emitted.insert(name.to_string());
                 catalog.push(live_entry);
-            } else {
-                emitted.insert(name.to_string());
-                catalog.push(Self::unavailable_entry(&registry_entry));
             }
         }
 
@@ -165,21 +168,12 @@ impl ToolDispatcher {
             return Ok(entry.tool);
         }
 
-        if self.registry_contains(name) {
-            return Err(ToolError::unavailable(
-                name,
-                ToolUnavailableReason::NotCurrentlyCallable,
-            ));
-        }
-
+        // The live catalog no longer claims this tool. After reconciliation a
+        // registered identity is only retained as `Live` while it remains in the
+        // live catalog, so a name absent here has vanished from the source set:
+        // resolve as NotFound rather than fabricating NotCurrentlyCallable for a
+        // tool that no longer exists.
         Err(ToolError::NotFound { name: name.into() })
-    }
-
-    fn unavailable_entry(entry: &ToolIdentityEntry) -> ToolCatalogEntry {
-        ToolCatalogEntry::session_inline_with_callability(
-            Arc::clone(&entry.tool),
-            ToolCallability::unavailable(ToolUnavailableReason::NotCurrentlyCallable),
-        )
     }
 
     fn validate_args_for_tool(
@@ -187,7 +181,7 @@ impl ToolDispatcher {
         name: &str,
         args: &Value,
     ) -> Result<(), ToolValidationError> {
-        ToolRegistry::validate_tool_def(tool, name, args)
+        crate::registry::validate_tool_def(tool, name, args)
     }
 
     /// Dispatch a tool call
@@ -905,14 +899,19 @@ mod tests {
             .collect();
         assert_eq!(live_names, vec!["late".to_string()]);
 
+        // A tool removed from the router's source set has VANISHED: it is
+        // retired in the identity registry and must NOT be republished as an
+        // unavailable catalog entry (that would advertise dead truth). The
+        // admitted catalog now contains only the still-live tool.
         let catalog = dispatcher.tool_catalog();
-        assert_eq!(catalog.len(), 2);
-        assert!(
-            !catalog
-                .iter()
-                .find(|entry| entry.tool.name == "initial")
-                .expect("initial remains admitted")
-                .currently_callable()
+        let catalog_names: Vec<_> = catalog
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect();
+        assert_eq!(
+            catalog_names,
+            vec!["late".to_string()],
+            "a vanished tool must not be emitted as an unavailable catalog entry"
         );
         assert!(
             catalog
@@ -922,10 +921,12 @@ mod tests {
                 .currently_callable()
         );
 
+        // Dispatch of a vanished tool resolves as NotFound, not a fabricated
+        // NotCurrentlyCallable.
         let result = dispatcher.dispatch(make_call("initial", &args_raw)).await;
         assert!(
-            matches!(result, Err(ToolError::Unavailable { .. })),
-            "previously admitted identities use live router callability instead of returning NotFound"
+            matches!(result, Err(ToolError::NotFound { .. })),
+            "a tool removed from the source set must resolve as NotFound, got {result:?}"
         );
     }
 
@@ -1106,6 +1107,50 @@ mod tests {
         assert!(
             matches!(shell_result, Err(ToolError::AccessDenied { .. })),
             "shell dispatch should fail with AccessDenied"
+        );
+    }
+
+    /// Gate (#79): the dispatcher enforcement default and the shell config
+    /// default both flow from the single [`ToolTimeoutPolicy`] owner. There is
+    /// no divergent hardcoded literal: the dispatcher's `Duration` default and
+    /// the shell config's `u64`-seconds default are the same value expressed in
+    /// two units, both sourced from the one policy.
+    #[test]
+    fn timeout_default_is_single_sourced_across_call_sites() {
+        use crate::builtin::shell::ShellConfig;
+        use crate::timeout::ToolTimeoutPolicy;
+
+        let policy = ToolTimeoutPolicy::default();
+
+        // Dispatcher default reads from the policy.
+        let dispatcher = ToolDispatcher::new(Arc::new(EmptyToolDispatcher));
+        assert_eq!(
+            dispatcher.default_timeout,
+            policy.default_timeout(),
+            "dispatcher default must be sourced from ToolTimeoutPolicy"
+        );
+
+        // Shell config default reads from the same policy.
+        let shell = ShellConfig::default();
+        assert_eq!(
+            shell.default_timeout_secs,
+            policy.default_timeout_secs(),
+            "shell config default must be sourced from ToolTimeoutPolicy"
+        );
+
+        // The two call sites therefore agree (no divergent defaults).
+        assert_eq!(
+            Duration::from_secs(shell.default_timeout_secs),
+            dispatcher.default_timeout,
+            "dispatcher and shell defaults must not diverge"
+        );
+
+        // Builder config default also flows from the policy.
+        let builder_default = crate::builder::ToolDispatcherConfig::default();
+        assert_eq!(
+            builder_default.default_timeout,
+            policy.default_timeout(),
+            "builder config default must be sourced from ToolTimeoutPolicy"
         );
     }
 }

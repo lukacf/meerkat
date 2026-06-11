@@ -460,6 +460,108 @@
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
       },
+      "CompactionFailureReason": {
+        "description": "Typed, serializable cause of a non-fatal compaction failure.\n\nCompaction is best-effort: when it fails the agent continues with the\nuncompacted history. This enum is the wire-stable projection of the\nin-flight [`crate::agent::compact::CompactionError`] plus the post-summary\ncommit failures (memory indexing, transcript rewrite) surfaced from the\nagent loop. Each variant carries the typed cause; the [`Display`] impl\nrenders the human-facing message consumers used to read off the old\n`error: String` field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The LLM call summarizing the history failed.",
+            "properties": {
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass",
+                "description": "Typed classification of the underlying agent error."
+              },
+              "kind": {
+                "const": "llm_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the underlying agent error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error_class",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The LLM returned an empty summary, so there was nothing to commit.",
+            "properties": {
+              "kind": {
+                "const": "empty_summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Token estimation over the history failed before summarization.",
+            "properties": {
+              "kind": {
+                "const": "estimation_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the serialization error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The memory store rejected indexing the discarded history, so the\noriginal (uncompacted) transcript was preserved.",
+            "properties": {
+              "attempted_entries": {
+                "description": "Number of discard entries that were attempted.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "memory_indexing_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the rejection error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attempted_entries",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Committing the post-summary transcript rewrite failed, so the original\nhistory was preserved.",
+            "properties": {
+              "kind": {
+                "const": "transcript_rewrite_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the commit error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -576,6 +678,46 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -600,7 +742,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -612,7 +754,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -653,6 +795,79 @@
         ],
         "type": "object"
       },
+      "HookFailureReason": {
+        "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The hook runtime did not complete within its configured timeout.",
+            "properties": {
+              "reason_code": {
+                "const": "timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_code",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook runtime executed but failed.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the underlying execution error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook configuration was rejected.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the configuration error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A `pre_*` background hook attempted a non-observe action (patch or deny),\nwhich is not permitted for observe-only background hooks.",
+            "properties": {
+              "reason_code": {
+                "const": "observe_only_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -681,6 +896,60 @@
           "runtime_error"
         ],
         "type": "string"
+      },
+      "InteractionFailureReason": {
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The interaction was cancelled before completing.",
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction was abandoned (runtime terminated, dropped, or abandoned\nwith an error) before completing.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the abandonment detail.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction's main run completed but turn finalization failed.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the finalization error.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "finalization_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -853,10 +1122,10 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -881,7 +1150,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -972,6 +1241,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -991,6 +1295,54 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolKind": {
+        "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
+        "oneOf": [
+          {
+            "description": "Provider-hosted web search (Anthropic `web_search*`, OpenAI\n`web_search*`). Sub-event detail lives in the evidence `content`.",
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Gemini grounding via Google Search (grounding metadata block).",
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A provider-native server tool whose exact name must round-trip verbatim\n(Anthropic `server_tool_use` dynamic name and any unrecognized future\nserver tool). The `name` is provider-owned and replayed unchanged.",
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
@@ -1275,6 +1627,64 @@
           }
         ]
       },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SystemTime": {
         "properties": {
           "nanos_since_epoch": {
@@ -1415,7 +1825,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -1451,9 +1861,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -1464,11 +1871,14 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
@@ -1693,8 +2103,9 @@
       {
         "description": "Agent run started",
         "properties": {
-          "prompt": {
-            "$ref": "#/$defs/ContentInput"
+          "input": {
+            "$ref": "#/$defs/RunInput",
+            "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -1707,7 +2118,7 @@
         "required": [
           "type",
           "session_id",
-          "prompt"
+          "input"
         ],
         "type": "object"
       },
@@ -1816,22 +2227,9 @@
       {
         "description": "Agent run failed",
         "properties": {
-          "error": {
-            "description": "Display projection of `error_report.message`.",
-            "type": "string"
-          },
-          "error_class": {
-            "$ref": "#/$defs/AgentErrorClass"
-          },
           "error_report": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/AgentErrorReport"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/AgentErrorReport",
+            "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -1854,8 +2252,7 @@
         "required": [
           "type",
           "session_id",
-          "error_class",
-          "error"
+          "error_report"
         ],
         "type": "object"
       },
@@ -1910,14 +2307,15 @@
       {
         "description": "Hook invocation failed.",
         "properties": {
-          "error": {
-            "type": "string"
-          },
           "hook_id": {
             "$ref": "#/$defs/HookId"
           },
           "point": {
             "$ref": "#/$defs/HookPoint"
+          },
+          "reason": {
+            "$ref": "#/$defs/HookFailureReason",
+            "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
           },
           "type": {
             "const": "hook_failed",
@@ -1928,7 +2326,7 @@
           "type",
           "hook_id",
           "point",
-          "error"
+          "reason"
         ],
         "type": "object"
       },
@@ -2059,8 +2457,9 @@
               "null"
             ]
           },
-          "name": {
-            "type": "string"
+          "kind": {
+            "$ref": "#/$defs/ServerToolKind",
+            "description": "Typed provider server-tool kind, carried as a nested tagged object\n(`{\"kind\":\"web_search\"}`, or `{\"kind\":\"provider_native\",\"name\":...}`\nfor the verbatim escape hatch). Nested (not flattened) so SDK\ncodegen emits a typed `kind` field instead of an inlined enum."
           },
           "type": {
             "const": "server_tool_content",
@@ -2069,7 +2468,7 @@
         },
         "required": [
           "type",
-          "name",
+          "kind",
           "content"
         ],
         "type": "object"
@@ -2143,6 +2542,7 @@
           "type",
           "id",
           "name",
+          "content",
           "is_error"
         ],
         "type": "object"
@@ -2193,7 +2593,7 @@
         "description": "Tool execution completed",
         "properties": {
           "content": {
-            "description": "Canonical typed tool-result content.",
+            "description": "Canonical typed tool-result content. Display text is derived from\nthese blocks at the consumer edge, never carried beside them.",
             "items": {
               "$ref": "#/$defs/ContentBlock"
             },
@@ -2213,10 +2613,6 @@
           "name": {
             "type": "string"
           },
-          "result": {
-            "description": "Legacy text projection retained for existing event consumers.",
-            "type": "string"
-          },
           "type": {
             "const": "tool_execution_completed",
             "type": "string"
@@ -2226,7 +2622,7 @@
           "type",
           "id",
           "name",
-          "result",
+          "content",
           "is_error",
           "duration_ms"
         ],
@@ -2330,8 +2726,8 @@
       {
         "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
         "properties": {
-          "error": {
-            "type": "string"
+          "reason": {
+            "$ref": "#/$defs/CompactionFailureReason"
           },
           "type": {
             "const": "compaction_failed",
@@ -2340,7 +2736,7 @@
         },
         "required": [
           "type",
-          "error"
+          "reason"
         ],
         "type": "object"
       },
@@ -2379,35 +2775,10 @@
         "type": "object"
       },
       {
-        "description": "Retrying after error",
+        "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
         "properties": {
-          "attempt": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "delay_ms": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "error": {
-            "type": "string"
-          },
-          "max_attempts": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
           "retry": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/LlmRetrySchedule"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/LlmRetrySchedule"
           },
           "type": {
             "const": "retrying",
@@ -2416,10 +2787,7 @@
         },
         "required": [
           "type",
-          "attempt",
-          "max_attempts",
-          "error",
-          "delay_ms"
+          "retry"
         ],
         "type": "object"
       },
@@ -2452,23 +2820,9 @@
       {
         "description": "A skill reference could not be resolved.",
         "properties": {
-          "error": {
-            "default": "",
-            "description": "Legacy display mirror for consumers still reading string errors.",
-            "type": "string"
-          },
           "reason": {
             "$ref": "#/$defs/SkillResolutionFailureReason",
-            "default": {
-              "message": "",
-              "reason_type": "unknown"
-            },
-            "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-          },
-          "reference": {
-            "default": "",
-            "description": "Legacy display mirror for consumers still reading string references.",
-            "type": "string"
+            "description": "Structured reason for the failure. Display text is the `Display`\nprojection of this typed reason, never a separately-carried field."
           },
           "skill_key": {
             "anyOf": [
@@ -2487,7 +2841,8 @@
           }
         },
         "required": [
-          "type"
+          "type",
+          "reason"
         ],
         "type": "object"
       },
@@ -2541,11 +2896,12 @@
       {
         "description": "An interaction failed (terminal event for tap subscribers).",
         "properties": {
-          "error": {
-            "type": "string"
-          },
           "interaction_id": {
             "$ref": "#/$defs/InteractionId"
+          },
+          "reason": {
+            "$ref": "#/$defs/InteractionFailureReason",
+            "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
           },
           "type": {
             "const": "interaction_failed",
@@ -2555,7 +2911,7 @@
         "required": [
           "type",
           "interaction_id",
-          "error"
+          "reason"
         ],
         "type": "object"
       },
@@ -2563,7 +2919,7 @@
         "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
         "properties": {
           "reason": {
-            "type": "string"
+            "$ref": "#/$defs/StreamTruncationReason"
           },
           "type": {
             "const": "stream_truncated",
@@ -2604,13 +2960,6 @@
           },
           "job_id": {
             "type": "string"
-          },
-          "status": {
-            "description": "Legacy display mirror for consumers still rendering string status.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "terminal_status": {
             "$ref": "#/$defs/BackgroundJobTerminalStatus"
@@ -3033,8 +3382,9 @@
           {
             "description": "Agent run started",
             "properties": {
-              "prompt": {
-                "$ref": "#/$defs/ContentInput"
+              "input": {
+                "$ref": "#/$defs/RunInput",
+                "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -3047,7 +3397,7 @@
             "required": [
               "type",
               "session_id",
-              "prompt"
+              "input"
             ],
             "type": "object"
           },
@@ -3156,22 +3506,9 @@
           {
             "description": "Agent run failed",
             "properties": {
-              "error": {
-                "description": "Display projection of `error_report.message`.",
-                "type": "string"
-              },
-              "error_class": {
-                "$ref": "#/$defs/AgentErrorClass"
-              },
               "error_report": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AgentErrorReport"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/AgentErrorReport",
+                "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -3194,8 +3531,7 @@
             "required": [
               "type",
               "session_id",
-              "error_class",
-              "error"
+              "error_report"
             ],
             "type": "object"
           },
@@ -3250,14 +3586,15 @@
           {
             "description": "Hook invocation failed.",
             "properties": {
-              "error": {
-                "type": "string"
-              },
               "hook_id": {
                 "$ref": "#/$defs/HookId"
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason",
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "hook_failed",
@@ -3268,7 +3605,7 @@
               "type",
               "hook_id",
               "point",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -3399,8 +3736,9 @@
                   "null"
                 ]
               },
-              "name": {
-                "type": "string"
+              "kind": {
+                "$ref": "#/$defs/ServerToolKind",
+                "description": "Typed provider server-tool kind, carried as a nested tagged object\n(`{\"kind\":\"web_search\"}`, or `{\"kind\":\"provider_native\",\"name\":...}`\nfor the verbatim escape hatch). Nested (not flattened) so SDK\ncodegen emits a typed `kind` field instead of an inlined enum."
               },
               "type": {
                 "const": "server_tool_content",
@@ -3409,7 +3747,7 @@
             },
             "required": [
               "type",
-              "name",
+              "kind",
               "content"
             ],
             "type": "object"
@@ -3483,6 +3821,7 @@
               "type",
               "id",
               "name",
+              "content",
               "is_error"
             ],
             "type": "object"
@@ -3533,7 +3872,7 @@
             "description": "Tool execution completed",
             "properties": {
               "content": {
-                "description": "Canonical typed tool-result content.",
+                "description": "Canonical typed tool-result content. Display text is derived from\nthese blocks at the consumer edge, never carried beside them.",
                 "items": {
                   "$ref": "#/$defs/ContentBlock"
                 },
@@ -3553,10 +3892,6 @@
               "name": {
                 "type": "string"
               },
-              "result": {
-                "description": "Legacy text projection retained for existing event consumers.",
-                "type": "string"
-              },
               "type": {
                 "const": "tool_execution_completed",
                 "type": "string"
@@ -3566,7 +3901,7 @@
               "type",
               "id",
               "name",
-              "result",
+              "content",
               "is_error",
               "duration_ms"
             ],
@@ -3670,8 +4005,8 @@
           {
             "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
             "properties": {
-              "error": {
-                "type": "string"
+              "reason": {
+                "$ref": "#/$defs/CompactionFailureReason"
               },
               "type": {
                 "const": "compaction_failed",
@@ -3680,7 +4015,7 @@
             },
             "required": [
               "type",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -3719,35 +4054,10 @@
             "type": "object"
           },
           {
-            "description": "Retrying after error",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
             "properties": {
-              "attempt": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "delay_ms": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "error": {
-                "type": "string"
-              },
-              "max_attempts": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
               "retry": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/LlmRetrySchedule"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/LlmRetrySchedule"
               },
               "type": {
                 "const": "retrying",
@@ -3756,10 +4066,7 @@
             },
             "required": [
               "type",
-              "attempt",
-              "max_attempts",
-              "error",
-              "delay_ms"
+              "retry"
             ],
             "type": "object"
           },
@@ -3792,23 +4099,9 @@
           {
             "description": "A skill reference could not be resolved.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string errors.",
-                "type": "string"
-              },
               "reason": {
                 "$ref": "#/$defs/SkillResolutionFailureReason",
-                "default": {
-                  "message": "",
-                  "reason_type": "unknown"
-                },
-                "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-              },
-              "reference": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string references.",
-                "type": "string"
+                "description": "Structured reason for the failure. Display text is the `Display`\nprojection of this typed reason, never a separately-carried field."
               },
               "skill_key": {
                 "anyOf": [
@@ -3827,7 +4120,8 @@
               }
             },
             "required": [
-              "type"
+              "type",
+              "reason"
             ],
             "type": "object"
           },
@@ -3881,11 +4175,12 @@
           {
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
-              "error": {
-                "type": "string"
-              },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "reason": {
+                "$ref": "#/$defs/InteractionFailureReason",
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "interaction_failed",
@@ -3895,7 +4190,7 @@
             "required": [
               "type",
               "interaction_id",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -3903,7 +4198,7 @@
             "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
             "properties": {
               "reason": {
-                "type": "string"
+                "$ref": "#/$defs/StreamTruncationReason"
               },
               "type": {
                 "const": "stream_truncated",
@@ -3944,13 +4239,6 @@
               },
               "job_id": {
                 "type": "string"
-              },
-              "status": {
-                "description": "Legacy display mirror for consumers still rendering string status.",
-                "type": [
-                  "string",
-                  "null"
-                ]
               },
               "terminal_status": {
                 "$ref": "#/$defs/BackgroundJobTerminalStatus"
@@ -4079,6 +4367,108 @@
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
       },
+      "CompactionFailureReason": {
+        "description": "Typed, serializable cause of a non-fatal compaction failure.\n\nCompaction is best-effort: when it fails the agent continues with the\nuncompacted history. This enum is the wire-stable projection of the\nin-flight [`crate::agent::compact::CompactionError`] plus the post-summary\ncommit failures (memory indexing, transcript rewrite) surfaced from the\nagent loop. Each variant carries the typed cause; the [`Display`] impl\nrenders the human-facing message consumers used to read off the old\n`error: String` field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The LLM call summarizing the history failed.",
+            "properties": {
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass",
+                "description": "Typed classification of the underlying agent error."
+              },
+              "kind": {
+                "const": "llm_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the underlying agent error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error_class",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The LLM returned an empty summary, so there was nothing to commit.",
+            "properties": {
+              "kind": {
+                "const": "empty_summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Token estimation over the history failed before summarization.",
+            "properties": {
+              "kind": {
+                "const": "estimation_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the serialization error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The memory store rejected indexing the discarded history, so the\noriginal (uncompacted) transcript was preserved.",
+            "properties": {
+              "attempted_entries": {
+                "description": "Number of discard entries that were attempted.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "memory_indexing_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the rejection error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attempted_entries",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Committing the post-summary transcript rewrite failed, so the original\nhistory was preserved.",
+            "properties": {
+              "kind": {
+                "const": "transcript_rewrite_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the commit error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -4195,6 +4585,46 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4219,7 +4649,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -4231,7 +4661,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -4272,6 +4702,79 @@
         ],
         "type": "object"
       },
+      "HookFailureReason": {
+        "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The hook runtime did not complete within its configured timeout.",
+            "properties": {
+              "reason_code": {
+                "const": "timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_code",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook runtime executed but failed.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the underlying execution error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook configuration was rejected.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the configuration error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A `pre_*` background hook attempted a non-observe action (patch or deny),\nwhich is not permitted for observe-only background hooks.",
+            "properties": {
+              "reason_code": {
+                "const": "observe_only_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -4300,6 +4803,60 @@
           "runtime_error"
         ],
         "type": "string"
+      },
+      "InteractionFailureReason": {
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The interaction was cancelled before completing.",
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction was abandoned (runtime terminated, dropped, or abandoned\nwith an error) before completing.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the abandonment detail.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction's main run completed but turn finalization failed.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the finalization error.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "finalization_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -4472,10 +5029,10 @@
         "type": "object"
       },
       "Provider": {
-        "description": "Supported LLM providers.",
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -4500,7 +5057,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -4591,6 +5148,41 @@
         ],
         "type": "string"
       },
+      "RunInput": {
+        "description": "Typed input fact for a run boundary.\n\nA run either starts from caller-provided content or resumes from tool\nresults already staged at the session's pending-continuation boundary.\nThe pending-tail case is its own typed variant — run-boundary events and\nhooks never fabricate an empty-string prompt to stand in for it.",
+        "oneOf": [
+          {
+            "description": "The run starts from caller-provided content (text or blocks).",
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "kind": {
+                "const": "content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run resumes a pending continuation whose transcript tail is a\nstaged tool-results message; there is no caller prompt.",
+            "properties": {
+              "kind": {
+                "const": "pending_tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -4610,6 +5202,54 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolKind": {
+        "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
+        "oneOf": [
+          {
+            "description": "Provider-hosted web search (Anthropic `web_search*`, OpenAI\n`web_search*`). Sub-event detail lives in the evidence `content`.",
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Gemini grounding via Google Search (grounding metadata block).",
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A provider-native server tool whose exact name must round-trip verbatim\n(Anthropic `server_tool_use` dynamic name and any unrecognized future\nserver tool). The `name` is provider-owned and replayed unchanged.",
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
@@ -4937,6 +5577,64 @@
           }
         ]
       },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live transport failed to deliver queued output-audio packets\n(e.g. WebRTC RTP pacing-queue backpressure). K16: delivery\ndegradation is a typed, session-observable fact — never a\ntransport-local counter.",
+            "properties": {
+              "dropped": {
+                "description": "Cumulative count of output-audio packets dropped on this\nsession's live channel.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "output_audio_degraded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SystemTime": {
         "properties": {
           "nanos_since_epoch": {
@@ -5077,7 +5775,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -5113,9 +5811,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -5126,11 +5821,14 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",

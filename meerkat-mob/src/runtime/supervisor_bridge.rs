@@ -32,6 +32,40 @@ pub(crate) struct MobSupervisorBridge {
     request_lock: Mutex<()>,
 }
 
+/// Typed reachability domain for the supervisor bridge's advertised
+/// self-address. The bridge advertises one address per domain — in-process
+/// loopback (the inproc registry, keyed by participant name) or routable
+/// network (the bind/advertised address). The domain is a function of the
+/// recipient's *transport* (a reachability fact), never of the recipient's
+/// identity, so two recipients on the same transport always receive the same
+/// self-address.
+enum SupervisorReachability<'a> {
+    /// The peer shares this runtime and routes through the inproc registry.
+    InProcess,
+    /// The peer is reachable only over the network bind/advertised address.
+    Routable(&'a meerkat_comms::CommsRuntime),
+}
+
+impl<'a> SupervisorReachability<'a> {
+    /// Classify the reachability domain a recipient on `transport` lives in.
+    /// Inproc recipients can only route via in-process loopback; UDS/TCP
+    /// recipients require the routable network address.
+    fn for_recipient_transport(
+        transport: PeerTransport,
+        runtime: &'a meerkat_comms::CommsRuntime,
+    ) -> Self {
+        match transport {
+            // Only confirmed in-process recipients use loopback. Every network
+            // transport — UDS, TCP, and any future `#[non_exhaustive]` variant —
+            // resolves via the routable address (which itself fails closed on an
+            // unspecified bind), never fabricating a loopback for a non-inproc
+            // peer.
+            PeerTransport::Inproc => Self::InProcess,
+            _ => Self::Routable(runtime),
+        }
+    }
+}
+
 pub(crate) struct PreparedSupervisorBridgeRotation {
     authority: SupervisorAuthorityRecord,
     prebuilt: Option<(
@@ -413,6 +447,68 @@ impl MobSupervisorBridge {
             })
     }
 
+    /// Fail-closed rollback mirror of [`Self::apply_bridge_trust`]. Drives the
+    /// generated `RemoveDirectPeerEndpoint` transition and reconciles the
+    /// resulting removal obligation against the live comms runtime so the DSL
+    /// authority and the comms trust set never diverge. No-ops if the recipient
+    /// is not currently a trusted direct peer endpoint.
+    async fn remove_bridge_trust(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
+        recipient: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
+        if !dsl
+            .snapshot_state()
+            .direct_peer_endpoints
+            .contains(&endpoint)
+        {
+            return Ok(());
+        }
+        let transition = dsl
+            .apply_input_with_transition(
+                mm_dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint { endpoint },
+                "mob_supervisor_bridge::untrust_recipient",
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge DSL rejected recipient trust removal projection: {error}"
+                ))
+            })?;
+        let obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                dsl.peer_projection_freshness_authority(),
+            );
+        let obligation = match obligations.as_slice() {
+            [obligation] => obligation.clone(),
+            [] => {
+                return Err(MobError::Internal(
+                    "supervisor bridge trust removal projection emitted no reconcile request"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(MobError::Internal(
+                    "supervisor bridge trust removal projection emitted multiple reconcile requests"
+                        .to_string(),
+                ));
+            }
+        };
+        let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
+        let reconciler =
+            meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
+        reconciler
+            .reconcile(&obligation)
+            .await
+            .map(|_report| ())
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge generated trust removal reconciliation failed: {error}"
+                ))
+            })
+    }
+
     fn local_endpoint_for_runtime(
         runtime: &dyn CoreCommsRuntime,
     ) -> Result<mm_dsl::PeerEndpoint, MobError> {
@@ -442,13 +538,15 @@ impl MobSupervisorBridge {
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
-        self.supervisor_spec_with_address(&authority, format!("inproc://{}", self.participant_name))
+        let address = self.resolve_self_address(SupervisorReachability::InProcess)?;
+        self.supervisor_spec_with_address(&authority, address)
     }
 
     pub(crate) async fn routable_supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
         let runtime = self.runtime().await;
-        let address = self.supervisor_routable_address(runtime.as_ref())?;
+        let address =
+            self.resolve_self_address(SupervisorReachability::Routable(runtime.as_ref()))?;
         self.supervisor_spec_with_address(&authority, address)
     }
 
@@ -465,15 +563,30 @@ impl MobSupervisorBridge {
         authority: &SupervisorAuthorityRecord,
         recipient: &TrustedPeerDescriptor,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        if recipient.address.transport() == PeerTransport::Inproc {
-            self.supervisor_spec_with_address(
-                authority,
-                format!("inproc://{}", self.participant_name),
-            )
-        } else {
-            let runtime = self.runtime().await;
-            let address = self.supervisor_routable_address(runtime.as_ref())?;
-            self.supervisor_spec_with_address(authority, address)
+        let runtime = self.runtime().await;
+        let reachability = SupervisorReachability::for_recipient_transport(
+            recipient.address.transport(),
+            runtime.as_ref(),
+        );
+        let address = self.resolve_self_address(reachability)?;
+        self.supervisor_spec_with_address(authority, address)
+    }
+
+    /// Resolve the single typed self-address the bridge advertises for the
+    /// given reachability domain. The bridge identity (peer id, public key,
+    /// participant name) is invariant across recipients; only the reachable
+    /// address differs, and it differs *only* by reachability domain (in-process
+    /// loopback vs. routable network), never by who is asking. In-process peers
+    /// reach the bridge through the inproc registry by participant name; network
+    /// peers reach it through the routable bind/advertised address, which fails
+    /// closed on an unspecified interface.
+    fn resolve_self_address(
+        &self,
+        reachability: SupervisorReachability<'_>,
+    ) -> Result<String, MobError> {
+        match reachability {
+            SupervisorReachability::InProcess => Ok(format!("inproc://{}", self.participant_name)),
+            SupervisorReachability::Routable(runtime) => self.supervisor_routable_address(runtime),
         }
     }
 
@@ -618,6 +731,19 @@ impl MobSupervisorBridge {
         let runtime = self.runtime().await;
         let dsl = self.dsl.read().await.clone();
         Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await
+    }
+
+    /// Fail-closed rollback for [`Self::trust_recipient`]: removes the recipient
+    /// from the bridge trust set (DSL + reconciled comms runtime) when an
+    /// install-before-send must be undone (e.g. supervisor authorization was
+    /// rejected after trust was installed for transport).
+    pub(crate) async fn untrust_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let runtime = self.runtime().await;
+        let dsl = self.dsl.read().await.clone();
+        Self::remove_bridge_trust(&runtime, &dsl, recipient.clone()).await
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(
@@ -1033,7 +1159,7 @@ mod tests {
             .peer_interaction_handle()
             .expect("supervisor runtime installs peer interaction authority");
         handle
-            .request_sent(corr_id, "worker-peer".to_string())
+            .request_sent(corr_id)
             .expect("request should be recorded by generated authority");
 
         MobSupervisorBridge::record_response_terminal(
@@ -1069,7 +1195,7 @@ mod tests {
             .peer_interaction_handle()
             .expect("supervisor runtime installs peer interaction authority");
         handle
-            .request_sent(corr_id, "worker-peer".to_string())
+            .request_sent(corr_id)
             .expect("request should be recorded by generated authority");
 
         MobSupervisorBridge::record_request_timed_out(&runtime, request_envelope_id)
@@ -1207,6 +1333,103 @@ mod tests {
             value.is_none(),
             "response for a different envelope must not satisfy the current wait"
         );
+    }
+
+    fn recipient_with_transport(
+        name: &str,
+        transport: PeerTransport,
+        endpoint: &str,
+    ) -> TrustedPeerDescriptor {
+        let mut pubkey = [0u8; 32];
+        for (index, byte) in name.bytes().enumerate() {
+            let slot = index % pubkey.len();
+            pubkey[slot] = pubkey[slot].wrapping_add(byte).wrapping_add(index as u8);
+        }
+        if pubkey == [0u8; 32] {
+            pubkey[0] = 1;
+        }
+        let address = PeerAddress::new(transport, endpoint);
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+            pubkey,
+            address.to_string(),
+        )
+        .expect("valid non-zero test recipient descriptor")
+    }
+
+    #[tokio::test]
+    async fn supervisor_self_address_is_invariant_across_recipients_within_a_transport() {
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let bridge = MobSupervisorBridge::new(
+            &crate::MobId::from("mob/self-address-test"),
+            authority,
+            None,
+        )
+        .await
+        .expect("supervisor bridge should build");
+
+        // Two distinct inproc recipients must receive the SAME self-address:
+        // the advertised address is the bridge's identity-scoped reachability
+        // fact, not a function of who is asking.
+        let inproc_a = recipient_with_transport("member-a", PeerTransport::Inproc, "member-a");
+        let inproc_b = recipient_with_transport("member-b", PeerTransport::Inproc, "member-b");
+        let spec_a = bridge
+            .supervisor_spec_for_recipient(&inproc_a)
+            .await
+            .expect("inproc recipient a self-address");
+        let spec_b = bridge
+            .supervisor_spec_for_recipient(&inproc_b)
+            .await
+            .expect("inproc recipient b self-address");
+        assert_eq!(
+            spec_a.address, spec_b.address,
+            "inproc self-address must not depend on which recipient is asking"
+        );
+
+        // Inproc loopback must still route through the inproc registry by the
+        // bridge participant name (the historical loopback contract).
+        assert_eq!(
+            spec_a.address.transport(),
+            PeerTransport::Inproc,
+            "inproc recipients must receive an inproc loopback self-address"
+        );
+        assert_eq!(
+            spec_a.address.to_string(),
+            format!("inproc://{}/__mob_supervisor__", "mob/self-address-test"),
+            "inproc loopback must route to the supervisor bridge participant name"
+        );
+
+        // Two distinct TCP recipients must also receive the SAME self-address,
+        // and it must be the routable network address — a different reachability
+        // domain than inproc loopback.
+        let tcp_a = recipient_with_transport("remote-a", PeerTransport::Tcp, "10.0.0.1:9000");
+        let tcp_b = recipient_with_transport("remote-b", PeerTransport::Tcp, "10.0.0.2:9000");
+        let routable_a = bridge
+            .supervisor_spec_for_recipient(&tcp_a)
+            .await
+            .expect("tcp recipient a self-address");
+        let routable_b = bridge
+            .supervisor_spec_for_recipient(&tcp_b)
+            .await
+            .expect("tcp recipient b self-address");
+        assert_eq!(
+            routable_a.address, routable_b.address,
+            "routable self-address must not depend on which recipient is asking"
+        );
+        assert_ne!(
+            routable_a.address, spec_a.address,
+            "inproc loopback and routable network are distinct reachability domains"
+        );
+
+        // The bridge identity (peer id, public key, name) is constant across
+        // every recipient and reachability domain.
+        assert_eq!(spec_a.peer_id, routable_a.peer_id);
+        assert_eq!(spec_a.pubkey, routable_a.pubkey);
+        assert_eq!(spec_a.name, routable_a.name);
     }
 
     #[test]

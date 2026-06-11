@@ -1124,8 +1124,13 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -1135,7 +1140,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = MobDefinition::explicit("mob");
         definition.profiles = profiles;
@@ -1609,7 +1614,7 @@ mod tests {
                 address: "inproc://worker-1".to_string(),
                 bootstrap_token: None,
                 session_id: None,
-                pubkey: None,
+                pubkey: [7u8; 32],
             }),
             bootstrap_token: None,
             status: crate::store::ExternalBindingOverlayStatus::Normalized,

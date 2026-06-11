@@ -13,20 +13,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
-    LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams,
-    LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
-    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
-    WireLiveAdapterStatus, WireLiveDegradationReason,
+    LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveCommitInputResult,
+    LiveInputChunkWire, LiveInterruptResult, LiveOpenParams, LiveOpenResult, LiveOpenTransport,
+    LiveRefreshResult, LiveSendInputParams, LiveSendInputResult, LiveStatusResult,
+    LiveTruncateParams, LiveTruncateResult, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult,
+    RealtimeCapabilities, RealtimeTurningMode, WireLiveAdapterStatus, WireLiveDegradationReason,
 };
 use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
-    LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
+    LiveAdapterCommand, LiveAudioConfig, LiveChannelCapabilities, LiveContinuityMode,
     LiveProjectionSnapshot, LiveTransportBootstrap,
 };
-use meerkat_core::types::{Message, SessionId};
+use meerkat_core::types::SessionId;
 #[cfg(feature = "live-webrtc")]
 use meerkat_live::{LIVE_WEBRTC_ANSWER_METHOD, LiveWebrtcState};
-use meerkat_live::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId, LiveWsState};
+use meerkat_live::{
+    LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation, LiveChannelId, LiveWsState,
+    live_input_chunk_from_wire,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error;
@@ -50,33 +54,27 @@ fn live_webrtc_duration_ms(duration: std::time::Duration) -> Result<u64, String>
 
 fn live_refresh_result_from_machine_authority(
     authority: &meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority,
-) -> Result<LiveRefreshResult, String> {
+) -> LiveRefreshResult {
+    // Exhaustive: generated authority emits only `Queued` today. A future
+    // generated status variant forces a compile error here, so the wire
+    // projection can never silently misreport an unmapped authority class.
     match authority.status {
-        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued
-            if authority.refresh_enqueued =>
-        {
-            Ok(LiveRefreshResult::queued())
+        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued => {
+            LiveRefreshResult::queued()
         }
-        other => Err(format!(
-            "LiveRefreshResultResolved emitted unsupported status {other:?} with refresh_enqueued={}",
-            authority.refresh_enqueued
-        )),
     }
 }
 
 fn live_close_result_from_machine_authority(
     authority: &meerkat_runtime::meerkat_machine::LiveCloseResultAuthority,
-) -> Result<LiveCloseResult, String> {
+) -> LiveCloseResult {
+    // Exhaustive: generated authority emits only `Closed` today. A future
+    // generated status variant forces a compile error here, so the wire
+    // projection can never silently misreport an unmapped authority class.
     match authority.status {
-        meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed
-            if authority.closed =>
-        {
-            Ok(LiveCloseResult::closed())
+        meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed => {
+            LiveCloseResult::closed()
         }
-        other => Err(format!(
-            "LiveCloseResultResolved emitted unsupported status {other:?} with closed={}",
-            authority.closed
-        )),
     }
 }
 
@@ -86,19 +84,32 @@ fn live_command_result_from_machine_authority(
 ) -> Result<serde_json::Value, String> {
     use meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind;
 
-    if authority.command != expected || !authority.accepted {
+    if authority.command != expected {
         return Err(format!(
-            "LiveCommandResultResolved emitted command {:?} accepted={} for expected {:?}",
-            authority.command, authority.accepted, expected
+            "LiveCommandResultResolved emitted command {:?} for expected {:?}",
+            authority.command, expected
         ));
     }
 
+    // #234: return typed result shapes (mirroring the `LiveCloseResult`
+    // precedent) instead of ad-hoc `json!` blobs. The typed struct carries a
+    // typed `status` discriminator, so SDK codegen sees a named shape rather
+    // than `Value` / `Any`. Serde failures surface as `String` so the caller
+    // maps them onto the RPC error channel.
     match expected {
-        LiveCommandPublicKind::SendInput => Ok(serde_json::json!({"sent": true})),
-        LiveCommandPublicKind::CommitInput => Ok(serde_json::json!({"committed": true})),
-        LiveCommandPublicKind::Interrupt => Ok(serde_json::json!({"interrupted": true})),
+        LiveCommandPublicKind::SendInput => serde_json::to_value(LiveSendInputResult::sent())
+            .map_err(|err| format!("failed to serialize LiveSendInputResult: {err}")),
+        LiveCommandPublicKind::CommitInput => {
+            serde_json::to_value(LiveCommitInputResult::committed())
+                .map_err(|err| format!("failed to serialize LiveCommitInputResult: {err}"))
+        }
+        LiveCommandPublicKind::Interrupt => {
+            serde_json::to_value(LiveInterruptResult::interrupted())
+                .map_err(|err| format!("failed to serialize LiveInterruptResult: {err}"))
+        }
         LiveCommandPublicKind::TruncateAssistantOutput => {
-            Ok(serde_json::json!({"truncated": true}))
+            serde_json::to_value(LiveTruncateResult::truncated())
+                .map_err(|err| format!("failed to serialize LiveTruncateResult: {err}"))
         }
     }
 }
@@ -336,11 +347,13 @@ fn live_webrtc_answer_rejection_reason(
             LiveChannelRequestRejectionReason::ChannelNotFound
         }
         meerkat_live::LiveWebrtcError::Json(_) => LiveChannelRequestRejectionReason::InvalidPayload,
-        meerkat_live::LiveWebrtcError::Webrtc(_)
-        | meerkat_live::LiveWebrtcError::Audio(_)
-        | meerkat_live::LiveWebrtcError::MissingLocalDescription => {
-            LiveChannelRequestRejectionReason::WebrtcAnswerError
-        }
+        // All WebRTC answer-phase faults (codec registration / peer creation /
+        // set-remote-description / create-answer / data-channel send / audio)
+        // and a missing local description map to the generated WebrtcAnswerError
+        // rejection reason. The enum is #[non_exhaustive]; future phase variants
+        // fall here too. (Per-phase generated rejection reasons are a tracked
+        // machine-schema follow-up for #124.)
+        _ => LiveChannelRequestRejectionReason::WebrtcAnswerError,
     }
 }
 
@@ -579,59 +592,49 @@ fn wire_live_degradation_reason_from_machine_authority(
     }
 }
 
-/// P1#4: pinned audio format for the live WebSocket transport.
+/// #176: project the provider's typed realtime audio policy into the typed
+/// [`LiveAudioConfig`] the snapshot carries.
 ///
-/// Today every realtime provider we ship ([`OpenAiRealtimeSession`]) negotiates
-/// `pcm_24k_mono` (16-bit signed little-endian PCM, 24 kHz, mono) — the only
-/// value [`meerkat_live::transport::WsConnectParams`] currently parses.
-/// `live/open` returns a WS URL that includes `&format=` so that binary audio
-/// frames are accepted by the WS server post-handshake; without this query
-/// parameter the WS server would reject every binary frame because no format
-/// was negotiated at upgrade time.
-///
-/// `audio_format`: pin to provider default until per-session negotiation lands.
-/// When the runtime starts surfacing per-session audio policy (see
-/// [`LiveProjectionSnapshot::audio_config`]) this constant becomes a fallback
-/// rather than the source of truth.
-const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
+/// The provider/model audio policy is owned by the realtime factory and
+/// published as a typed [`RealtimeCapabilities`] (`audio_input_format` /
+/// `audio_output_format`, each a [`RealtimeAudioFormat`]). The surface does
+/// not decide the format — it reads it here. Returns `None` when the factory
+/// declines to advertise both directions of audio (e.g. a text-only realtime
+/// product), so the caller fails closed rather than inventing a sample rate.
+fn live_audio_config_from_capabilities(
+    capabilities: &RealtimeCapabilities,
+) -> Option<LiveAudioConfig> {
+    let input = capabilities.audio_input_format.as_ref()?;
+    let output = capabilities.audio_output_format.as_ref()?;
+    Some(LiveAudioConfig {
+        input_sample_rate_hz: input.sample_rate_hz,
+        input_channels: u16::from(input.channels),
+        output_sample_rate_hz: output.sample_rate_hz,
+        output_channels: u16::from(output.channels),
+    })
+}
 
-/// R10: extract the root system prompt from a projected `seed_messages`
-/// vector for use in `LiveProjectionSnapshot.system_prompt`.
+/// #176: derive the WS `&format=` query token from the typed audio policy.
 ///
-/// `RealtimeSessionOpenConfig` does not yet model `system_prompt` as a
-/// typed field — the resolved root prompt is materialized into
-/// `seed_messages[0]` as a `Message::System` by `realtime_projection_messages`
-/// in `session_runtime.rs`. The OpenAI Refresh path needs the prompt as a
-/// distinct field so it can rebuild the realtime `session.update`
-/// instructions field correctly; without this extractor every refresh would
-/// wipe the system prompt because the history-event projector explicitly
-/// drops `Message::System` and `Message::SystemNotice` entries on the
-/// seed-events path.
-///
-/// **Why both `System` AND `SystemNotice` are valid lead messages.** The
-/// projector at `realtime_projection_messages` (`session_runtime.rs:435-444`)
-/// only rewrites `seed_messages[0]` when `realtime_projection_root_system_message`
-/// returns `Some` (i.e. the session has a resolved root system prompt or
-/// build instructions). When that returns `None`, the original first
-/// message is left in place — and the canonical session transcript can
-/// legitimately lead with a `Message::SystemNotice` (e.g. a typed MCP-pending
-/// notice from an idle pre-prompt session).
-/// Without honoring `SystemNotice` here, a refresh whose snapshot leads
-/// with one would silently emit empty instructions and wipe whatever the
-/// realtime provider had in its session-level `instructions` field.
-///
-/// We use `SystemNoticeMessage::model_projection_text()` so the provider sees
-/// the internal projection without making rendered prose part of the transcript
-/// contract.
-///
-/// We deliberately consult only `seed_messages[0]` (matching the projector's
-/// invariant) and ignore any later `Message::System` / `Message::SystemNotice`
-/// entries that might appear in fragmented histories.
-fn extract_system_prompt_from_seed_messages(seed_messages: &[Message]) -> Option<String> {
-    match seed_messages.first()? {
-        Message::System(system) => Some(system.content.clone()),
-        Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-        _ => None,
+/// The live WS transport (`meerkat_live::transport`) negotiates the binary
+/// frame layout at upgrade time via this query token, and stamps the
+/// inbound binary-chunk `sample_rate_hz` from whatever token it parses. The
+/// only binary format that transport accepts today is 16-bit signed
+/// little-endian PCM, 24 kHz, mono (`pcm_24k_mono`). We map the resolved
+/// typed config to that token and **fail closed** (return `None`) when the
+/// resolved policy does not match a token the WS server can parse — a
+/// mismatch would otherwise have the server silently stamp the wrong rate
+/// onto every binary frame. Surface only reads the typed config; it never
+/// pins the token independently.
+fn live_ws_audio_format_param(audio: &LiveAudioConfig) -> Option<&'static str> {
+    const PCM_24K_MONO_RATE_HZ: u32 = 24_000;
+    const PCM_24K_MONO_CHANNELS: u16 = 1;
+    if audio.input_sample_rate_hz == PCM_24K_MONO_RATE_HZ
+        && audio.input_channels == PCM_24K_MONO_CHANNELS
+    {
+        Some("pcm_24k_mono")
+    } else {
+        None
     }
 }
 
@@ -647,32 +650,30 @@ fn extract_system_prompt_from_seed_messages(seed_messages: &[Message]) -> Option
 fn build_live_projection_snapshot(
     session_id: &SessionId,
     open_config: &RealtimeSessionOpenConfig,
+    audio_config: Option<LiveAudioConfig>,
 ) -> LiveProjectionSnapshot {
     LiveProjectionSnapshot {
         session_id: session_id.clone(),
         snapshot_version: 0,
         seed_messages: open_config.seed_messages.clone(),
         visible_tools: open_config.visible_tools.clone(),
-        // R10: extract the root system prompt from the first
-        // `Message::System` entry in `seed_messages`.
-        // `RealtimeSessionOpenConfig` does not model `system_prompt` as a
-        // typed field today; `realtime_projection_messages` (in
-        // `session_runtime.rs`) guarantees that when a session has a
-        // resolved system prompt it sits at `seed_messages[0]` as a
-        // `Message::System`. Pre-fix this field was always `None`, which
-        // caused the OpenAI Refresh `session.update` instructions field to
-        // be built only from `runtime_system_context` and silently wipe
-        // the actual Meerkat system prompt on every refresh. The history-
-        // event projector explicitly drops `Message::System` so leaving
-        // this on the seed-history path alone loses it on refresh.
-        system_prompt: extract_system_prompt_from_seed_messages(&open_config.seed_messages),
+        // R10: read the typed root system prompt directly from the resolved
+        // `RealtimeSessionOpenConfig.system_prompt` field — the producer
+        // (`live_orchestration::propagate`/projection in the facade) populates
+        // it from `realtime_projection_root_system_message` at projection time.
+        // Consumers MUST NOT re-derive the prompt from `seed_messages[0]`: the
+        // history-event projector explicitly drops `Message::System`, so the
+        // seed-history is not an authoritative source for the prompt on the
+        // refresh path. The typed field is the single owner of this fact.
+        system_prompt: open_config.system_prompt.clone(),
         model_id: open_config.llm_identity.model.clone(),
         provider_id: open_config.llm_identity.provider,
-        // Audio config is not part of the open config today; the live
-        // adapter inherits provider defaults. When the runtime starts
-        // surfacing per-session audio policy, this becomes
-        // `Some(LiveAudioConfig { ... })` with the resolved values.
-        audio_config: None,
+        // #176: typed audio policy resolved from the realtime factory's
+        // `RealtimeCapabilities` (the provider/model audio-format owner).
+        // The surface reads this; it never pins a format. `None` only when
+        // the resolving caller had no factory-published audio policy to
+        // read (degraded/test config without a wired factory).
+        audio_config,
         // R3: forward the typed runtime system-context entries so the
         // adapter can fold them into its provider session as authoritative
         // system instructions (peer terminal context, ops_lifecycle
@@ -727,45 +728,33 @@ async fn close_live_channel_after_open_failure(
     session_id: &SessionId,
     channel_id: &LiveChannelId,
 ) {
+    // #355: open-failure cleanup is fail-closed, not best-effort. A graceful
+    // close (`reserve` -> generated close authority -> host commit) clears the
+    // machine-owned channel binding (`live_active_channel_by_session` /
+    // `live_channel_session_by_channel` / `live_channel_identity_by_channel`)
+    // only on a *committed* close. If the generated close authority rejects,
+    // omits the host commit handoff, or the host commit itself fails, the
+    // binding stays installed — a half-installed channel for an open that never
+    // succeeded. In every such case we fall through to
+    // `abandon_live_open_admission`, the same generated eviction the
+    // `ChannelNotFound` arm already uses, so a failed open never leaves an
+    // orphaned `by_session` / `channels` entry behind. The graceful close is
+    // attempted first because it retains a queryable closed-channel status; the
+    // abandon path is the harder fail-closed eviction reserved for the failure
+    // arms (and for a channel the host never registered).
     match host.reserve_channel_close_observation(channel_id).await {
         Ok(observation) => {
-            let authority = match runtime
-                .runtime_adapter()
-                .resolve_live_close_result(session_id, &observation)
-                .await
-            {
-                Ok(authority) => authority,
-                Err(err) => {
-                    tracing::warn!(
-                        target: "meerkat_rpc::handlers::live",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "generated live-close authority rejected open-failure cleanup"
-                    );
-                    return;
-                }
-            };
-            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
-                tracing::warn!(
-                    target: "meerkat_rpc::handlers::live",
-                    ?channel_id,
-                    ?session_id,
-                    "generated live-close result omitted host commit authority"
-                );
-                return;
-            };
-            if let Err(err) = host
-                .commit_channel_close_observation(&observation, close_commit_authority)
-                .await
-            {
-                tracing::warn!(
-                    target: "meerkat_rpc::handlers::live",
-                    ?channel_id,
-                    ?session_id,
-                    ?err,
-                    "host live-close commit failed after generated open-failure cleanup"
-                );
+            let committed = commit_live_close_for_open_failure(
+                host,
+                runtime,
+                session_id,
+                channel_id,
+                &observation,
+            )
+            .await;
+            if !committed {
+                // The binding was not cleared by a committed close; evict it.
+                abandon_live_open_admission(runtime, session_id, channel_id).await;
             }
         }
         Err(LiveAdapterHostError::ChannelNotFound(_)) => {
@@ -777,10 +766,67 @@ async fn close_live_channel_after_open_failure(
                 ?channel_id,
                 ?session_id,
                 ?err,
-                "failed to close live channel after open failure"
+                "failed to close live channel after open failure; evicting admission"
             );
+            abandon_live_open_admission(runtime, session_id, channel_id).await;
         }
     }
+}
+
+/// Attempt a generated graceful close for an open-failure cleanup.
+///
+/// Returns `true` only when the host commit succeeded (the machine-owned
+/// channel binding is now cleared). Returns `false` — after logging the typed
+/// cause — when the generated close authority rejected, omitted the host commit
+/// handoff, or the host commit failed; the caller then fail-closes by abandoning
+/// the open admission so no half-installed binding survives (#355).
+async fn commit_live_close_for_open_failure(
+    host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    observation: &LiveChannelCloseObservation,
+) -> bool {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_close_result(session_id, observation)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(err) => {
+            tracing::warn!(
+                target: "meerkat_rpc::handlers::live",
+                ?channel_id,
+                ?session_id,
+                ?err,
+                "generated live-close authority rejected open-failure cleanup; evicting admission"
+            );
+            return false;
+        }
+    };
+    let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+        tracing::warn!(
+            target: "meerkat_rpc::handlers::live",
+            ?channel_id,
+            ?session_id,
+            "generated live-close result omitted host commit authority; evicting admission"
+        );
+        return false;
+    };
+    if let Err(err) = host
+        .commit_channel_close_observation(observation, close_commit_authority)
+        .await
+    {
+        tracing::warn!(
+            target: "meerkat_rpc::handlers::live",
+            ?channel_id,
+            ?session_id,
+            ?err,
+            "host live-close commit failed after generated open-failure cleanup; evicting admission"
+        );
+        return false;
+    }
+    true
 }
 
 pub struct LiveOpenHandlerContext<'a> {
@@ -825,16 +871,34 @@ pub async fn handle_live_open(
     // B17: validate the session exists before minting a channel.
     // Without this, a nonexistent-session call mints a channel that the
     // adapter then can't bind to anything truthful, leaving stale infra
-    // handles behind.
-    if runtime.session_state(&session_id).await.is_none()
-        && !runtime.pending_session_exists(&session_id).await
-    {
+    // handles behind. Row #98: a store fault is surfaced as a typed error,
+    // not silently treated as "session present".
+    let session_state = match runtime.session_state(&session_id).await {
+        Ok(state) => state,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    if session_state.is_none() && !runtime.pending_session_exists(&session_id).await {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
             format!("session {session_id} not found"),
         );
     }
+
+    // #302: refuse the open up front when no realtime session factory is
+    // wired into this build. Without a factory there is no provider adapter
+    // to attach, so an opened channel could only report all-false
+    // capabilities and would reject every real command later. Fail closed
+    // *before* `resolve_live_open_admission` / `open_channel_with_authority`
+    // run so we never register or open a channel that cannot serve traffic.
+    let Some(session_factory) = session_factory else {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "live open requires a realtime session factory; none is wired in this build"
+                .to_string(),
+        );
+    };
 
     // R3-1 (P1): honor the caller's optional `turning_mode` override.
     // Default = `ProviderManaged` (back-compat with pre-R3-1 callers).
@@ -847,36 +911,20 @@ pub async fn handle_live_open(
     let turning_mode = parsed
         .turning_mode
         .unwrap_or(RealtimeTurningMode::ProviderManaged);
-    let prepared_open_config = if session_factory.is_some() {
-        match runtime
-            .live_open_config_for_session(&session_id, turning_mode)
-            .await
-        {
-            Ok(config) => Some(config),
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to build session config: {err}"),
-                );
-            }
+    let prepared_open_config = match runtime
+        .live_open_config_for_session(&session_id, turning_mode)
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to build session config: {err}"),
+            );
         }
-    } else {
-        None
     };
-    let live_open_identity = match prepared_open_config.as_ref() {
-        Some(config) => config.llm_identity.clone(),
-        None => match runtime.live_llm_identity_for_session(&session_id).await {
-            Ok(identity) => identity,
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to resolve live channel identity: {err}"),
-                );
-            }
-        },
-    };
+    let live_open_identity = prepared_open_config.llm_identity.clone();
 
     let candidate_channel_id = LiveChannelId::random_uuid();
     let open_authority = match runtime
@@ -948,26 +996,25 @@ pub async fn handle_live_open(
         }
     };
 
-    // A8: continuity is computed from the projection snapshot built when a
-    // factory is wired; without a factory (e.g. degraded test config) the
-    // channel still opens but reports `Fresh` — there is no seeded state.
-    let mut continuity = LiveContinuityMode::Fresh;
-    // P2#3: capture the adapter's real capability set for the response.
-    // Only meaningful when a factory wired the channel; otherwise the
-    // conservative all-false placeholder remains (no adapter, no claims).
-    let mut capabilities = LiveChannelCapabilities {
-        audio_in: false,
-        audio_out: false,
-        text_in: false,
-        text_out: false,
-        image_in: false,
-        video_in: false,
-        transcript_supported: false,
-        barge_in_supported: false,
-        provider_native_resume: false,
-    };
+    // A8: continuity is computed from the projection snapshot built for this
+    // channel. #302 makes a wired realtime factory a precondition, so the
+    // factory block below always runs and assigns these on the success path
+    // (every error path early-returns) — they are assigned exactly once, with
+    // no dead placeholder fallback.
+    //
+    // - `continuity` honestly reports `Fresh` for empty seed history and
+    //   `TranscriptOnly` once seeded (from `continuity_from_snapshot`).
+    // - `resolved_audio_config` (#176) is the typed audio policy resolved from
+    //   the factory's `RealtimeCapabilities` (provider/model audio owner); the
+    //   WS `&format=` token and the snapshot `audio_config` both read it.
+    // - `capabilities` (P2#3) is the adapter's real capability set.
+    let continuity: LiveContinuityMode;
+    let resolved_audio_config: Option<LiveAudioConfig>;
+    let capabilities: LiveChannelCapabilities;
 
-    if let Some(factory) = session_factory {
+    {
+        let factory = session_factory;
+        let open_config = &prepared_open_config;
         // B18: refuse providers without a wired live adapter and models that
         // lack realtime capability before reaching the factory. Without this,
         // a Gemini Live session would route through the OpenAI realtime
@@ -994,18 +1041,15 @@ pub async fn handle_live_open(
             return RpcResponse::error(id, code, message);
         }
 
-        let Some(open_config) = prepared_open_config.as_ref() else {
-            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                "session factory was wired without a prepared live open config".to_string(),
-            );
-        };
         // E25: open a provider-native `LiveAdapter` directly. The OpenAI
         // factory implements `open_live_adapter` to bypass the
         // `Box<dyn RealtimeSession>` boxing layer that the legacy
         // `ProviderSessionAdapter` wrapper required.
+        // #176: resolve the typed audio policy from the factory's
+        // `RealtimeCapabilities` (the provider/model audio-format owner)
+        // before opening the adapter. The WS `&format=` token and the
+        // snapshot `audio_config` both read this single typed value.
+        resolved_audio_config = live_audio_config_from_capabilities(&factory.capabilities());
         match factory.open_live_adapter(open_config).await {
             Ok(adapter) => {
                 // P2#3: query the adapter's real capability set before
@@ -1034,7 +1078,11 @@ pub async fn handle_live_open(
                 // (resume, cross-session attach) where no factory-time
                 // seeding has happened yet — `live/open` relies on
                 // factory-time seeding.
-                let snapshot = build_live_projection_snapshot(&session_id, open_config);
+                let snapshot = build_live_projection_snapshot(
+                    &session_id,
+                    open_config,
+                    resolved_audio_config.clone(),
+                );
                 continuity = continuity_from_snapshot(&snapshot);
             }
             Err(err) => {
@@ -1102,15 +1150,45 @@ pub async fn handle_live_open(
                 }
             };
             let token_str = token.to_string();
+            // #176: derive the WS `&format=` token from the resolved typed
+            // audio policy (provider/model owner via `RealtimeCapabilities`),
+            // not a surface-pinned constant. Fail closed when no audio policy
+            // resolved (no wired factory) or it does not map to a token the
+            // WS server can parse — otherwise the server would silently stamp
+            // the wrong sample rate onto every binary frame.
+            let Some(audio_config) = resolved_audio_config.as_ref() else {
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    "live websocket transport requires a resolved audio policy; no realtime \
+                     factory audio format was available"
+                        .to_string(),
+                );
+            };
+            let Some(format_param) = live_ws_audio_format_param(audio_config) else {
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "resolved live audio policy (input {}Hz/{}ch) has no websocket binary \
+                         format the transport can negotiate",
+                        audio_config.input_sample_rate_hz, audio_config.input_channels,
+                    ),
+                );
+            };
             // G38: pin the bearer token to the channel via a `channel` query
             // param so a leaked token cannot be replayed against a different
-            // channel. P1#4: append `&format=...` so binary audio frames are
-            // negotiated as provider-default PCM 24 kHz mono.
+            // channel. #176: `&format=` is the typed audio policy projected
+            // into the WS server's binary-frame negotiation token; the server
+            // stamps inbound binary-chunk sample rates from this token.
             LiveTransportBootstrap::Websocket {
                 url: format!(
-                    "{base_url}{path}?token={token_str}&channel={channel_id}&format={format}",
+                    "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}",
                     path = meerkat_live::LIVE_WS_PATH,
-                    format = LIVE_WS_DEFAULT_AUDIO_FORMAT,
                 ),
                 token: token_str,
             }
@@ -1215,8 +1293,9 @@ pub async fn handle_live_open(
     let transport: meerkat_contracts::WireLiveTransportBootstrap = transport.into();
 
     // P2#3: capabilities now reflect the adapter's real `capabilities()`
-    // (queried in the factory branch above). Without a factory the
-    // conservative all-false defaults are kept — no adapter, no claims.
+    // (queried in the factory branch above). #302 makes a wired factory a
+    // precondition for reaching this point, so the all-false defaults are
+    // always overwritten with the adapter's real capability set.
     //
     // A8: continuity is computed from the projection snapshot above; it
     // honestly reports `Fresh` for empty seed history, `TranscriptOnly` for
@@ -1334,6 +1413,12 @@ pub async fn handle_live_webrtc_answer(
             {
                 Ok(authority) => authority,
                 Err(error) => {
+                    // #346: answer_offer already installed the transport peer in
+                    // the WebRTC registry. The generated answer-result authority
+                    // rejected the result, so fail closed: tear the just-inserted
+                    // peer back out rather than leaving an orphaned peer with no
+                    // accepted answer behind it.
+                    live_webrtc.close_peer(&channel_id).await;
                     return RpcResponse::error(
                         id,
                         error::INTERNAL_ERROR,
@@ -1347,7 +1432,12 @@ pub async fn handle_live_webrtc_answer(
                         .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
                 }) {
                 Ok(value) => RpcResponse::success(id, value),
-                Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err),
+                Err(err) => {
+                    // #346: the peer is installed but we cannot hand back a valid
+                    // answer result — fail closed by removing the orphaned peer.
+                    live_webrtc.close_peer(&channel_id).await;
+                    RpcResponse::error(id, error::INTERNAL_ERROR, err)
+                }
             }
         }
         Err(err) => {
@@ -1489,10 +1579,7 @@ pub async fn handle_live_close(
                     format!("live close host commit failed after generated authority: {error}"),
                 );
             }
-            let result = match live_close_result_from_machine_authority(&authority) {
-                Ok(result) => result,
-                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
-            };
+            let result = live_close_result_from_machine_authority(&authority);
             let body = match serde_json::to_value(result) {
                 Ok(body) => body,
                 Err(error) => {
@@ -1548,8 +1635,8 @@ pub async fn handle_live_close(
 /// apply mutable config live should either no-op or surface a typed error
 /// observation.
 ///
-/// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
-/// not `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
+/// **R7 — honest response shape.** The reply is `status: queued`, not
+/// `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
 /// the adapter command channel and returns typed queue-acceptance evidence;
 /// generated MeerkatMachine authority projects that evidence to the public
 /// result class. The adapter pump applies the refresh asynchronously. Callers
@@ -1599,7 +1686,11 @@ pub async fn handle_live_refresh(
     // pull the next value here so adapters that gate on `snapshot_version`
     // for stale-refresh detection see strictly increasing generations
     // instead of every refresh stamped `0`.
-    let mut snapshot = build_live_projection_snapshot(&session_id, &open_config);
+    // #176: refresh does not rebuild the WS transport URL and has no
+    // factory in scope to publish a `RealtimeCapabilities` audio policy, so
+    // the snapshot carries no audio_config here. The format the channel
+    // negotiated at open time stays in force on the live transport.
+    let mut snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
     match host.next_snapshot_version(&channel_id).await {
         Ok(v) => snapshot.snapshot_version = v,
         Err(err) => {
@@ -1617,9 +1708,9 @@ pub async fn handle_live_refresh(
 
     match host.enqueue_refresh(&channel_id, snapshot).await {
         // R7 + Dogma #1: host queue acceptance is an observation only. The
-        // public `status: queued` discriminator and the back-compat
-        // `refresh_enqueued` mirror are emitted by generated MeerkatMachine
-        // authority before the RPC surface projects the wire payload.
+        // public `status: queued` discriminator is emitted by generated
+        // MeerkatMachine authority before the RPC surface projects the wire
+        // payload.
         Ok(acceptance) => {
             let authority = match runtime
                 .runtime_adapter()
@@ -1635,10 +1726,7 @@ pub async fn handle_live_refresh(
                     );
                 }
             };
-            let result = match live_refresh_result_from_machine_authority(&authority) {
-                Ok(result) => result,
-                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
-            };
+            let result = live_refresh_result_from_machine_authority(&authority);
             let body = match serde_json::to_value(result) {
                 Ok(body) => body,
                 Err(error) => {
@@ -1661,82 +1749,6 @@ pub async fn handle_live_refresh(
                 &err,
             )
             .await
-        }
-    }
-}
-
-/// `live/send_input` parameters.
-///
-/// **`BREAKING_LIVE_WIRE_FORMAT_V1`** (H48): the chunk previously appeared as
-/// flattened sibling fields next to `channel_id`. It is now a nested object
-/// under the `chunk` field. WS protocol clients that piggyback on this shape
-/// must update accordingly.
-/// Errors returned when admitting a wire-format input chunk.
-///
-/// D24: previously a malformed base64 audio payload silently decoded to a
-/// zero-length chunk indistinguishable from real silence. Decode failures
-/// now propagate as a typed error and the RPC handler returns
-/// `INVALID_PARAMS` to the caller instead of swallowing the malformed input.
-#[derive(Debug, thiserror::Error)]
-pub enum LiveSendInputError {
-    #[error("invalid base64 audio payload: {0}")]
-    InvalidAudioBase64(base64::DecodeError),
-    #[error("invalid base64 image payload: {0}")]
-    InvalidImageBase64(base64::DecodeError),
-    #[error("invalid base64 video-frame payload: {0}")]
-    InvalidVideoFrameBase64(base64::DecodeError),
-}
-
-/// Decode a wire-format input chunk into the core `LiveInputChunk` shape.
-///
-/// Handler-local conversion (the wire type lives in `meerkat-contracts`, the
-/// core domain type lives in `meerkat-core::live_adapter`; the base64 decode
-/// is the only step that needs to fail with a typed error and is therefore
-/// kept here in the handler crate).
-fn live_input_chunk_from_wire(
-    wire: LiveInputChunkWire,
-) -> Result<LiveInputChunk, LiveSendInputError> {
-    match wire {
-        LiveInputChunkWire::Audio {
-            data,
-            sample_rate_hz,
-            channels,
-        } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidAudioBase64)?;
-            Ok(LiveInputChunk::Audio {
-                data: decoded,
-                sample_rate_hz,
-                channels,
-            })
-        }
-        LiveInputChunkWire::Text { text } => Ok(LiveInputChunk::Text { text }),
-        LiveInputChunkWire::Image { mime, data } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidImageBase64)?;
-            Ok(LiveInputChunk::Image {
-                mime,
-                data: decoded,
-            })
-        }
-        LiveInputChunkWire::VideoFrame {
-            codec,
-            data,
-            timestamp_ms,
-        } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidVideoFrameBase64)?;
-            Ok(LiveInputChunk::VideoFrame {
-                codec,
-                data: decoded,
-                timestamp_ms,
-            })
         }
     }
 }
@@ -2030,8 +2042,9 @@ pub async fn handle_live_truncate(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    //! H46 round-trip tests + D24 base64-decode error tests + H48 nested
-    //! `chunk` shape tests for the `live/*` wire types.
+    //! H46 round-trip tests + H48 nested `chunk` shape tests for the
+    //! `live/*` wire types. (D24 base64-decode rejection is owned by
+    //! `meerkat_live::wire_input` and tested there.)
 
     use super::*;
     use meerkat_core::live_adapter::{
@@ -2053,7 +2066,10 @@ mod tests {
         session_id: meerkat_core::types::SessionId,
     ) -> meerkat_live::LiveChannelId {
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let authority = machine
@@ -2078,73 +2094,57 @@ mod tests {
     }
 
     #[test]
-    fn extract_system_prompt_returns_first_system_message_content() {
-        // R10: when the canonical projection placed a `Message::System`
-        // at index 0 of the seed history (the realtime-projection invariant
-        // in `session_runtime.rs::realtime_projection_messages`), the
-        // snapshot builder must surface that prompt as the typed
-        // `system_prompt` field; otherwise the OpenAI Refresh
-        // `session.update` rebuilds instructions only from runtime context
-        // and wipes the actual Meerkat system prompt.
-        use meerkat_core::types::{Message, SystemMessage};
-
-        let messages = vec![
-            Message::System(SystemMessage::new("you are a helpful meerkat")),
-            Message::User(meerkat_core::types::UserMessage::text("hi".to_string())),
-        ];
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages(&messages),
-            Some("you are a helpful meerkat".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_system_prompt_returns_model_projection_for_first_system_notice() {
-        // R10 (review-3 follow-up): when the canonical projection leaves a
-        // `Message::SystemNotice` at index 0 of the seed history (e.g. a
-        // pre-prompt session whose only lead message is a runtime-injected
-        // typed MCP-pending notice — `realtime_projection_messages`
-        // in `session_runtime.rs:435-444` does NOT rewrite the slot when
-        // `realtime_projection_root_system_message` returns `None`), the
-        // snapshot builder must surface the notice's *rendered* text as the
-        // typed `system_prompt` field. Without this arm, the OpenAI Refresh
-        // `session.update` rebuilds instructions only from
-        // `runtime_system_context` and silently wipes whatever instructions
-        // the realtime provider already had at session level. We use
-        // `model_projection_text()` to match the provider-facing projection
-        // without persisting prefix prose as transcript content.
-        use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage};
-
-        let notice =
-            SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
-        let expected = notice.model_projection_text();
-        let messages = vec![
-            Message::SystemNotice(notice),
-            Message::User(meerkat_core::types::UserMessage::text("hi".to_string())),
-        ];
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages(&messages),
-            Some(expected),
-        );
-    }
-
-    #[test]
-    fn extract_system_prompt_returns_none_when_no_system_message() {
-        // R10: a session without a resolved root system prompt still flows
-        // through this builder; the absence is honest and must surface as
-        // `None`, not as an empty string the adapter would have to guard
-        // against on the instruction-rebuild path.
+    fn snapshot_reads_typed_system_prompt_field_not_seed_messages() {
+        // R10 (D209): the snapshot builder MUST surface the typed
+        // `RealtimeSessionOpenConfig.system_prompt` field directly — the
+        // single owner of the live-session prompt populated by the runtime
+        // projection — instead of re-deriving it from `seed_messages[0]`.
+        // The history-event projector drops `Message::System`, so inference
+        // from seed history silently wipes the prompt on the OpenAI Refresh
+        // `session.update` path. To prove the source is the typed field and
+        // NOT the seed history, the seed messages here lead with a NON-system
+        // user message while the typed field carries the resolved prompt.
         use meerkat_core::types::{Message, UserMessage};
 
-        let messages = vec![Message::User(UserMessage::text("hi"))];
+        let resolved_prompt = "you are a helpful meerkat".to_string();
+        let open_config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            test_live_identity(),
+            Vec::new(),
+            vec![Message::User(UserMessage::text("hi".to_string()))],
+        )
+        .with_system_prompt(Some(resolved_prompt.clone()));
+        let session_id = SessionId::new();
+        let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
         assert_eq!(
-            super::extract_system_prompt_from_seed_messages(&messages),
-            None
+            snapshot.system_prompt,
+            Some(resolved_prompt),
+            "snapshot.system_prompt must read the typed open_config field, not infer from seed_messages[0]"
         );
-        let empty: Vec<Message> = Vec::new();
+    }
+
+    #[test]
+    fn snapshot_system_prompt_is_none_when_typed_field_absent() {
+        // R10 (D209): a session without a resolved root system prompt must
+        // surface `None` honestly. Even when a `Message::System` happens to
+        // lead the seed history, the snapshot must NOT resurrect it as the
+        // prompt — the typed field is the only authority, and its absence is
+        // an honest `None` (not an empty string the adapter must guard).
+        use meerkat_core::types::{Message, SystemMessage};
+
+        let open_config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            test_live_identity(),
+            Vec::new(),
+            vec![Message::System(SystemMessage::new(
+                "stray seed system message",
+            ))],
+        );
+        let session_id = SessionId::new();
+        let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
         assert_eq!(
-            super::extract_system_prompt_from_seed_messages(&empty),
-            None
+            snapshot.system_prompt, None,
+            "snapshot.system_prompt must mirror the absent typed field, not infer from seed_messages[0]"
         );
     }
 
@@ -2323,7 +2323,10 @@ mod tests {
         ));
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let open_authority = machine
@@ -2350,14 +2353,66 @@ mod tests {
             "generated live close authority should carry host commit handoff"
         );
 
-        let reply = serde_json::to_value(
-            live_close_result_from_machine_authority(&authority)
-                .expect("generated close authority should project to wire"),
-        )
-        .expect("LiveCloseResult must round-trip through serde");
+        let reply = serde_json::to_value(live_close_result_from_machine_authority(&authority))
+            .expect("LiveCloseResult must round-trip through serde");
 
         assert_eq!(reply["status"], "closed");
-        assert_eq!(reply["closed"], true);
+        assert!(
+            reply.get("closed").is_none(),
+            "deleted legacy `closed` boolean must not be on the wire"
+        );
+    }
+
+    /// #355: open-failure cleanup is fail-closed. When the graceful close path
+    /// cannot commit (generated close authority rejects, omits the host commit
+    /// handoff, or the host commit fails), `close_live_channel_after_open_failure`
+    /// falls back to `abandon_live_open_admission` so the machine-owned channel
+    /// binding is evicted and never leaves a half-installed channel behind.
+    ///
+    /// This pins the underlying eviction contract the cleanup now routes to: an
+    /// admitted open installs a binding observable via
+    /// `live_session_for_active_channel`; abandoning the admission (the
+    /// fail-closed action the failure arms take) clears it, so a non-committed
+    /// close cannot orphan a `by_session` / `channels` entry.
+    #[tokio::test]
+    async fn open_failure_abandon_evicts_half_installed_channel_binding() {
+        let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let channel_id = LiveChannelId::random_uuid();
+        let identity = test_live_identity();
+        let open_authority = machine
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("generated live open admission");
+        assert!(
+            open_authority.channel_open_authority().is_some(),
+            "admitted open must carry the generated host handoff"
+        );
+
+        // Binding is installed: the half-installed state a failed open leaves
+        // behind when the graceful close cannot commit.
+        assert_eq!(
+            machine.live_session_for_active_channel(&channel_id).await,
+            Some(session_id.clone()),
+            "admitted open must install a channel binding"
+        );
+
+        // Fail-closed eviction the cleanup falls back to on a non-committed
+        // close (authority reject / missing commit handoff / commit failure).
+        machine
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("abandon must evict the half-installed admission");
+
+        assert_eq!(
+            machine.live_session_for_active_channel(&channel_id).await,
+            None,
+            "#355: open-failure abandon must leave no orphaned channel binding"
+        );
     }
 
     #[test]
@@ -2393,44 +2448,6 @@ mod tests {
             "wire format must NOT flatten kind to top-level"
         );
         assert_eq!(round_trip(&v), v);
-    }
-
-    #[test]
-    fn into_chunk_audio_decodes_valid_base64() {
-        let wire = LiveInputChunkWire::Audio {
-            data: "AAEC".into(), // base64 for [0, 1, 2]
-            sample_rate_hz: 24_000,
-            channels: 1,
-        };
-        let chunk = live_input_chunk_from_wire(wire).expect("valid base64 should decode");
-        match chunk {
-            LiveInputChunk::Audio { data, .. } => assert_eq!(data, vec![0u8, 1, 2]),
-            other => panic!("expected Audio, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn into_chunk_audio_rejects_invalid_base64() {
-        // D24: malformed base64 must NOT silently produce empty PCM.
-        let wire = LiveInputChunkWire::Audio {
-            data: "!!!not-base64!!!".into(),
-            sample_rate_hz: 24_000,
-            channels: 1,
-        };
-        let err = live_input_chunk_from_wire(wire).expect_err("invalid base64 must error");
-        assert!(matches!(err, LiveSendInputError::InvalidAudioBase64(_)));
-    }
-
-    #[test]
-    fn into_chunk_text_passes_through() {
-        let wire = LiveInputChunkWire::Text {
-            text: "hello".into(),
-        };
-        let chunk = live_input_chunk_from_wire(wire).unwrap();
-        match chunk {
-            LiveInputChunk::Text { text } => assert_eq!(text, "hello"),
-            other => panic!("expected Text, got {other:?}"),
-        }
     }
 
     // -- A7 wire round-trips --
@@ -2469,19 +2486,28 @@ mod tests {
     // is admitted post-handshake.
     // ---------------------------------------------------------------------
 
-    /// P1#4: regression — the format-string path used by `handle_live_open`
-    /// must produce a URL that contains `?token=`, `&channel=`, and
-    /// `&format=pcm_24k_mono` in that order. Reconstruct it with the same
-    /// constant the handler uses; if a future refactor drops the `format=`
-    /// query parameter, the WS server will fail closed on every binary
-    /// frame and audio will appear to "vanish" mid-call.
+    /// P1#4 + #176: regression — the format-string path used by
+    /// `handle_live_open` must produce a URL that contains `?token=`,
+    /// `&channel=`, and `&format=pcm_24k_mono` in that order, and the
+    /// `&format=` token must derive from the resolved typed audio policy
+    /// (not a surface-pinned constant). If a future refactor drops the
+    /// `format=` query parameter, the WS server fails closed on every binary
+    /// frame and audio appears to "vanish" mid-call.
     #[test]
     fn live_open_url_carries_token_and_format_params() {
         let base_url = "ws://localhost:9999";
         let path = meerkat_live::LIVE_WS_PATH;
         let token_str = "tok_abc";
         let channel_id = "live_42";
-        let format_param = LIVE_WS_DEFAULT_AUDIO_FORMAT;
+        // #176: token derives from the typed audio policy, not a constant.
+        let audio = LiveAudioConfig {
+            input_sample_rate_hz: 24_000,
+            input_channels: 1,
+            output_sample_rate_hz: 24_000,
+            output_channels: 1,
+        };
+        let format_param =
+            live_ws_audio_format_param(&audio).expect("24kHz mono must map to a WS format token");
         let url = format!(
             "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}"
         );
@@ -2495,10 +2521,71 @@ mod tests {
             url.contains("&format=pcm_24k_mono"),
             "URL must include &format=pcm_24k_mono so the WS server accepts binary audio frames: {url}"
         );
-        // The format constant is the only value `WsConnectParams` parses
-        // today; pin it here so accidentally introducing a different
-        // format string fails this regression.
-        assert_eq!(LIVE_WS_DEFAULT_AUDIO_FORMAT, "pcm_24k_mono");
+    }
+
+    /// #176 gate: the WS `&format=` token and the snapshot `audio_config`
+    /// both derive from the resolved typed [`LiveAudioConfig`] (sourced from
+    /// the realtime factory's `RealtimeCapabilities`), and `audio_config` is
+    /// `Some` on open. Pre-fix the snapshot pinned `audio_config: None` and
+    /// the URL pinned a `pcm_24k_mono` constant; this test fails against that
+    /// shape.
+    #[test]
+    fn live_open_audio_format_and_snapshot_derive_from_resolved_audio_config() {
+        use meerkat_contracts::RealtimeAudioFormat;
+
+        // The provider/model audio policy seam: a factory's typed
+        // `RealtimeCapabilities` carrying PCM 24 kHz mono in both directions.
+        let capabilities = RealtimeCapabilities {
+            audio_input_format: Some(RealtimeAudioFormat::pcm(24_000, 1)),
+            audio_output_format: Some(RealtimeAudioFormat::pcm(24_000, 1)),
+            ..RealtimeCapabilities::default()
+        };
+        let resolved = live_audio_config_from_capabilities(&capabilities)
+            .expect("PCM in+out must resolve to a typed LiveAudioConfig");
+        assert_eq!(resolved.input_sample_rate_hz, 24_000);
+        assert_eq!(resolved.input_channels, 1);
+
+        // The WS `&format=` token derives from the typed config.
+        let format_param = live_ws_audio_format_param(&resolved)
+            .expect("resolved 24kHz mono must map to the WS format token");
+        assert_eq!(format_param, "pcm_24k_mono");
+
+        // The snapshot carries the resolved config (Some, not None).
+        let open_config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            test_live_identity(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let session_id = SessionId::new();
+        let snapshot =
+            build_live_projection_snapshot(&session_id, &open_config, Some(resolved.clone()));
+        assert_eq!(
+            snapshot.audio_config.as_ref(),
+            Some(&resolved),
+            "snapshot.audio_config must be the resolved typed config, not None"
+        );
+
+        // Fail-closed: an audio policy the WS transport cannot negotiate
+        // yields no token (no silent wrong-rate stamping).
+        let unsupported = LiveAudioConfig {
+            input_sample_rate_hz: 16_000,
+            input_channels: 1,
+            output_sample_rate_hz: 16_000,
+            output_channels: 1,
+        };
+        assert!(
+            live_ws_audio_format_param(&unsupported).is_none(),
+            "16kHz must fail closed: the WS transport has no matching binary format token"
+        );
+
+        // A text-only realtime product (no audio formats) resolves to None,
+        // so the WS open path fails closed instead of inventing a rate.
+        let text_only = RealtimeCapabilities::default();
+        assert!(
+            live_audio_config_from_capabilities(&text_only).is_none(),
+            "a factory advertising no audio formats must resolve to no audio config"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -2711,50 +2798,42 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // R7: live/refresh's reply field is `refresh_enqueued`, not
-    // `refreshed`, because `LiveAdapterHost::enqueue_refresh` returns typed
-    // evidence that the command was queued on the adapter command channel —
-    // not that the pump has applied it. The field name documents the honest
+    // R7: live/refresh's reply is `status: queued`, not `refreshed`,
+    // because `LiveAdapterHost::enqueue_refresh` returns typed evidence
+    // that the command was queued on the adapter command channel — not
+    // that the pump has applied it. The status name documents the honest
     // semantics; the realtime stream is the source of truth for the actual
     // outcome.
     // ---------------------------------------------------------------------
 
     /// R7: reconstruct the success-reply shape `handle_live_refresh` emits
-    /// on the host-accepted path. The reply must carry `refresh_enqueued:
-    /// true` (back-compat) and must NOT contain a `refreshed` key.
-    ///
-    /// R4-5 (P3): the same payload now also carries the typed
-    /// `status: "queued"` discriminator projected from generated authority.
+    /// on the host-accepted path. The reply must carry the typed
+    /// `status: "queued"` discriminator projected from generated authority
+    /// and must NOT contain a `refreshed` key.
     #[test]
-    fn live_refresh_success_reply_is_refresh_enqueued_not_refreshed() {
+    fn live_refresh_success_reply_is_status_queued_not_refreshed() {
         let authority = meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority {
             status: meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued,
-            refresh_enqueued: true,
             sequence: 1,
             queue_acceptance_sequence: 1,
         };
-        let reply = serde_json::to_value(
-            live_refresh_result_from_machine_authority(&authority)
-                .expect("generated queued authority should project to wire"),
-        )
-        .expect("LiveRefreshResult must round-trip through serde");
-        assert_eq!(
-            reply.get("refresh_enqueued"),
-            Some(&serde_json::json!(true)),
-            "back-compat `refresh_enqueued: true` must remain on the wire"
-        );
+        let reply = serde_json::to_value(live_refresh_result_from_machine_authority(&authority))
+            .expect("LiveRefreshResult must round-trip through serde");
         assert!(
             reply.get("refreshed").is_none(),
             "post-R7 reply must not advertise `refreshed: true` — the adapter \
              pump is async and the field name was a lie about completion timing"
         );
-        // R4-5 (P3): typed status discriminator coexists with the legacy
-        // boolean. SDKs fail closed for statuses outside their generated
-        // contract.
+        assert!(
+            reply.get("refresh_enqueued").is_none(),
+            "deleted legacy `refresh_enqueued` boolean must not be on the wire"
+        );
+        // SDKs route on the typed status discriminator and fail closed for
+        // statuses outside their generated contract.
         assert_eq!(
             reply.get("status"),
             Some(&serde_json::Value::String("queued".into())),
-            "typed `status: queued` must be present alongside the legacy field"
+            "typed `status: queued` must be the reply discriminator"
         );
     }
 

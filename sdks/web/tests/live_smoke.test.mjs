@@ -287,12 +287,6 @@ test(
             peer_description: "Reviewer",
             external_addressable: true,
           },
-          broken: {
-            model: "definitely-invalid-live-smoke-model",
-            tools: { comms: true },
-            peer_description: "Deterministic failure worker",
-            external_addressable: true,
-          },
         },
         wiring: {
           auto_wire_orchestrator: false,
@@ -354,18 +348,27 @@ test(
       assert.ok(Array.isArray(ledger));
       assert.ok(ledger.length >= 1);
 
-      const brokenSpawn = await mob.spawn([
-        {
-          profile: "broken",
-          agent_identity: "broken-1",
-          runtime_mode: "turn_driven",
-        },
-      ]);
-      assert.ok(brokenSpawn[0]?.member_ref);
+      // Load-time model validation: a profile model that is neither
+      // catalogued, custom-defined ([models.<id>]), nor provider-annotated
+      // fails fast at mob create instead of bricking the member at first
+      // delivery.
       await assert.rejects(
-        () => mob.member("broken-1").send(
-          "This turn must fail because the member model is invalid.",
-        ),
+        () => runtime.createMob({
+          id: `wasm-mob-47-broken-${Date.now()}`,
+          profiles: {
+            broken: {
+              model: "definitely-invalid-live-smoke-model",
+              tools: { comms: true },
+              peer_description: "Deterministic failure worker",
+              external_addressable: true,
+            },
+          },
+        }),
+        (error) => {
+          assert.match(String(error), /unknown_model/);
+          assert.match(String(error), /definitely-invalid-live-smoke-model/);
+          return true;
+        },
       );
     });
   },
@@ -484,11 +487,11 @@ test(
 
       await mob.lifecycle("stop");
       const stopped = await mob.status();
-      assert.equal(stopped.state, "Stopped");
+      assert.equal(stopped.status, "Stopped");
 
       await mob.lifecycle("resume");
       const resumed = await mob.status();
-      assert.equal(resumed.state, "Running");
+      assert.equal(resumed.status, "Running");
 
       const events = await mob.events("", 300);
       assert.ok(events.length >= 2);

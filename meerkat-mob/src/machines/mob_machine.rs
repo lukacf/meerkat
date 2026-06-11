@@ -7,8 +7,10 @@
 
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
-    FlowFrameReducerCommandKind, FlowRunPublicResultClassKind, FlowRunReducerCommandKind,
-    LoopIterationReducerCommandKind, MobLifecycleJournalKind,
+    ExternalMemberRebindCapability, FlowFrameReducerCommandKind, FlowRunPublicResultClassKind,
+    FlowRunReducerCommandKind, LoopIterationReducerCommandKind, MemberAdmissionVerdictKind,
+    MobLifecycleJournalKind, PolicyDecision, StepFaultDispositionKind, StepOutputFaultKind,
+    SupervisorEscalationFailureCause, TurnTimeoutDisposition,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -844,6 +846,27 @@ pub enum RespawnTopologyRestoreResultKind {
     TopologyRestoreFailed,
 }
 
+/// Typed shell observation of a member's live materialization at the dispatch
+/// boundary: the member's current bridge session has no live runtime, and the
+/// durable session snapshot is either still present (revivable) or gone
+/// (terminal). The shell observes; MobMachine owns the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    DurableSnapshotPresent,
+    DurableSnapshotMissing,
+}
+
+/// Machine-owned verdict for a member live-materialization observation:
+/// authorize exactly one shell revival attempt, or record the terminal Broken
+/// classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    ReviveAuthorized,
+    BrokenRecorded,
+}
+
 /// Typed shell observation for a per-row `mob/spawn_many` failure.
 /// MobMachine maps this observation to the public failure cause before any
 /// surface can serialize the row.
@@ -1653,30 +1676,33 @@ impl MobMachineState {
         &self,
         member_id: &str,
     ) -> Option<MobMemberKickoffMaterial> {
+        // Kickoff phase sets/maps are `AgentIdentity`-keyed; build the typed key
+        // once for all lookups.
+        let identity = AgentIdentity::from(member_id);
         let mut phase = None;
         for (contains, candidate) in [
             (
-                self.member_kickoff_pending.contains(member_id),
+                self.member_kickoff_pending.contains(&identity),
                 KickoffPhase::Pending,
             ),
             (
-                self.member_kickoff_starting.contains(member_id),
+                self.member_kickoff_starting.contains(&identity),
                 KickoffPhase::Starting,
             ),
             (
-                self.member_kickoff_callback_pending.contains(member_id),
+                self.member_kickoff_callback_pending.contains(&identity),
                 KickoffPhase::CallbackPending,
             ),
             (
-                self.member_kickoff_started.contains(member_id),
+                self.member_kickoff_started.contains(&identity),
                 KickoffPhase::Started,
             ),
             (
-                self.member_kickoff_failed.contains(member_id),
+                self.member_kickoff_failed.contains(&identity),
                 KickoffPhase::Failed,
             ),
             (
-                self.member_kickoff_cancelled.contains(member_id),
+                self.member_kickoff_cancelled.contains(&identity),
                 KickoffPhase::Cancelled,
             ),
         ] {
@@ -1688,7 +1714,7 @@ impl MobMachineState {
         }
         let phase = phase?;
         let error = match phase {
-            KickoffPhase::Failed => Some(self.member_kickoff_error.get(member_id)?.clone()),
+            KickoffPhase::Failed => Some(self.member_kickoff_error.get(&identity)?.clone()),
             KickoffPhase::Pending
             | KickoffPhase::Starting
             | KickoffPhase::CallbackPending
@@ -3820,7 +3846,7 @@ mod tests {
     #[test]
     fn kickoff_cancelled_outcome_uses_machine_cancelled_truth() {
         let mut authority = MobMachineAuthority::new();
-        let member_id = "worker".to_string();
+        let member_id = AgentIdentity::from("worker");
 
         MobMachineMutator::apply(
             &mut authority,
@@ -3872,7 +3898,7 @@ mod tests {
     #[test]
     fn recovered_kickoff_lifecycle_is_machine_owned() {
         let mut authority = MobMachineAuthority::new();
-        let member_id = "worker".to_string();
+        let member_id = AgentIdentity::from("worker");
 
         authority
             .apply_signal(MobMachineSignal::RecoverMemberKickoff {
@@ -3882,7 +3908,9 @@ mod tests {
             })
             .expect("recovered starting kickoff should be accepted");
         assert_eq!(
-            authority.state().kickoff_material_for_member_id(&member_id),
+            authority
+                .state()
+                .kickoff_material_for_member_id(member_id.0.as_str()),
             Some(MobMemberKickoffMaterial {
                 phase: KickoffPhase::Starting,
                 error: None,
@@ -3897,7 +3925,9 @@ mod tests {
             })
             .expect("recovered failed kickoff should be accepted");
         assert_eq!(
-            authority.state().kickoff_material_for_member_id(&member_id),
+            authority
+                .state()
+                .kickoff_material_for_member_id(member_id.0.as_str()),
             Some(MobMemberKickoffMaterial {
                 phase: KickoffPhase::Failed,
                 error: Some("runtime failed".to_string()),

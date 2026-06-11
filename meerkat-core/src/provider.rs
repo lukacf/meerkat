@@ -1,13 +1,26 @@
 //! Provider enumeration shared across interfaces.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Supported LLM providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+///
+/// `JsonSchema` is derived unconditionally (schemars is a non-optional
+/// meerkat-core dependency): config-owned types such as
+/// [`crate::config::CustomModelConfig`] embed the typed provider directly and
+/// derive their schemas without the `schema` feature.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,
+    // `rename_all = "snake_case"` mangles `OpenAI` into `"open_a_i"`, which
+    // diverges from the canonical `as_str()` name `"openai"` that every other
+    // seam (and durable data) uses. Pin the canonical wire/schema name on the
+    // variant so the derived `Serialize`/`Deserialize` and the generated
+    // `schemars` schema all agree on `"openai"` — one representation, no shim.
+    #[serde(rename = "openai")]
     OpenAI,
     Gemini,
     SelfHosted,
@@ -68,14 +81,16 @@ impl Provider {
     ];
 }
 
-/// Serde helper that (de)serializes a [`Provider`] using its canonical
-/// [`Provider::as_str`] names (`"openai"`, `"self_hosted"`, …) rather than the
-/// derived `#[serde(rename_all = "snake_case")]` output (which mangles
-/// `OpenAI` into `"open_a_i"`).
+/// Serde helper for seams that carry the provider as a plain `String` on the
+/// wire (e.g. `LiveProjectionSnapshot.provider_id`, whose JSON schema is
+/// `String`) but hold a typed [`Provider`] in memory.
 ///
-/// Use this at typed seams that previously carried the provider as a canonical
-/// `String` and must keep that exact wire/durable shape after being retyped to
-/// the [`Provider`] enum (e.g. `LiveProjectionSnapshot.provider_id`).
+/// Serialization matches the canonical [`Provider::as_str`] names — identical
+/// to the enum's own derived output now that [`Provider::OpenAI`] is pinned to
+/// `"openai"`. Deserialization is intentionally lenient (`Provider::from_name`,
+/// unknown → [`Provider::Other`]) so an opaque provider string carried by such
+/// a seam round-trips into the catch-all variant rather than failing closed —
+/// the leniency the plain-`String` carrier had before it was retyped.
 pub mod provider_canonical_str {
     use super::Provider;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -93,5 +108,32 @@ pub mod provider_canonical_str {
     {
         let name = String::deserialize(deserializer)?;
         Ok(Provider::from_name(&name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Provider;
+
+    #[test]
+    fn parse_strict_fails_closed_where_from_name_coerces_to_other() {
+        // Pins the two distinct provider-name boundaries the codebase relies on:
+        // `from_name` maps an unrecognized label to the typed `Other` variant
+        // (correct where a non-catalog provider is legitimate, e.g. a
+        // caller-supplied custom AgentLlmClient), whereas `parse_strict` returns
+        // None so fail-closed seams (e.g. catalog-default / session-create
+        // provider resolution) can surface a typed error instead of minting a
+        // catalog identity from an arbitrary string.
+        assert_eq!(
+            Provider::from_name("totally-unknown-provider"),
+            Provider::Other
+        );
+        assert_eq!(Provider::parse_strict("totally-unknown-provider"), None);
+        // Canonical names still resolve through the strict path.
+        assert_eq!(
+            Provider::parse_strict("anthropic"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(Provider::parse_strict("openai"), Some(Provider::OpenAI));
     }
 }

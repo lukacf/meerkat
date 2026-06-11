@@ -518,109 +518,22 @@ impl ShellState {
         Ok(transition.into_effects())
     }
 
-    /// Split a domain terminal outcome into a `(discriminant, payload)` pair
-    /// suitable for the DSL's typed `op_terminal_outcomes` +
-    /// `op_terminal_payload` fields.
-    ///
-    /// The discriminant is a typed DSL enum mirror; the payload is the JSON
-    /// encoding of the outcome's *inner* payload (e.g., the `OperationResult`
-    /// for `Completed`, the error string for `Failed`, the optional reason
-    /// for `Aborted` / `Cancelled`, the reason string for `Terminated`). For
-    /// `Retired` the payload is empty — it carries no data.
-    ///
-    /// The shell rehydrates the typed domain outcome via
-    /// [`Self::terminal_outcome`], pairing the DSL discriminant with the
-    /// companion payload entry.
-    fn split_outcome(
-        outcome: &OperationTerminalOutcome,
-    ) -> (mm_dsl::OperationTerminalOutcomeKind, String) {
-        match outcome {
-            OperationTerminalOutcome::Completed(result) => (
-                mm_dsl::OperationTerminalOutcomeKind::Completed,
-                serde_json::to_string(result).unwrap_or_default(),
-            ),
-            OperationTerminalOutcome::Failed { error } => (
-                mm_dsl::OperationTerminalOutcomeKind::Failed,
-                serde_json::to_string(error).unwrap_or_default(),
-            ),
-            OperationTerminalOutcome::Aborted { reason } => (
-                mm_dsl::OperationTerminalOutcomeKind::Aborted,
-                serde_json::to_string(reason).unwrap_or_default(),
-            ),
-            OperationTerminalOutcome::Cancelled { reason } => (
-                mm_dsl::OperationTerminalOutcomeKind::Cancelled,
-                serde_json::to_string(reason).unwrap_or_default(),
-            ),
-            OperationTerminalOutcome::Retired => {
-                (mm_dsl::OperationTerminalOutcomeKind::Retired, String::new())
-            }
-            OperationTerminalOutcome::Terminated { reason } => (
-                mm_dsl::OperationTerminalOutcomeKind::Terminated,
-                serde_json::to_string(reason).unwrap_or_default(),
-            ),
-        }
-    }
-
-    fn terminal_outcome_from_parts(
+    /// Fail-closed read of a typed terminal payload entry: the payload IS the
+    /// domain [`OperationTerminalOutcome`] (K8b fold — no JSON codec), but the
+    /// shell still refuses to surface a payload whose variant disagrees with
+    /// the recorded discriminant.
+    fn checked_terminal_payload(
         kind: mm_dsl::OperationTerminalOutcomeKind,
-        payload: &str,
+        payload: &OperationTerminalOutcome,
         authority: &str,
         operation_id: &str,
     ) -> Result<OperationTerminalOutcome, OpsLifecycleError> {
-        match kind {
-            mm_dsl::OperationTerminalOutcomeKind::Completed => {
-                serde_json::from_str::<OperationResult>(payload)
-                    .map(OperationTerminalOutcome::Completed)
-                    .map_err(|error| {
-                        OpsLifecycleError::Internal(format!(
-                            "{authority} has invalid Completed payload for {operation_id}: {error}"
-                        ))
-                    })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Failed => serde_json::from_str::<String>(payload)
-                .map(|error| OperationTerminalOutcome::Failed { error })
-                .map_err(|error| {
-                    OpsLifecycleError::Internal(format!(
-                        "{authority} has invalid Failed payload for {operation_id}: {error}"
-                    ))
-                }),
-            mm_dsl::OperationTerminalOutcomeKind::Aborted => {
-                serde_json::from_str::<Option<String>>(payload)
-                    .map(|reason| OperationTerminalOutcome::Aborted { reason })
-                    .map_err(|error| {
-                        OpsLifecycleError::Internal(format!(
-                            "{authority} has invalid Aborted payload for {operation_id}: {error}"
-                        ))
-                    })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Cancelled => {
-                serde_json::from_str::<Option<String>>(payload)
-                    .map(|reason| OperationTerminalOutcome::Cancelled { reason })
-                    .map_err(|error| {
-                        OpsLifecycleError::Internal(format!(
-                            "{authority} has invalid Cancelled payload for {operation_id}: {error}"
-                        ))
-                    })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Retired => {
-                if payload.is_empty() {
-                    Ok(OperationTerminalOutcome::Retired)
-                } else {
-                    Err(OpsLifecycleError::Internal(format!(
-                        "{authority} has non-empty Retired payload for {operation_id}"
-                    )))
-                }
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Terminated => {
-                serde_json::from_str::<String>(payload)
-                    .map(|reason| OperationTerminalOutcome::Terminated { reason })
-                    .map_err(|error| {
-                        OpsLifecycleError::Internal(format!(
-                            "{authority} has invalid Terminated payload for {operation_id}: {error}"
-                        ))
-                    })
-            }
+        if mm_dsl::OperationTerminalOutcomeKind::from(payload) != kind {
+            return Err(OpsLifecycleError::Internal(format!(
+                "{authority} payload variant for {operation_id} does not match terminal outcome discriminant"
+            )));
         }
+        Ok(payload.clone())
     }
 
     /// Read the DSL operation status for `id`, or `None` if not registered.
@@ -760,16 +673,12 @@ impl ShellState {
                 "generated op terminal authority has terminal outcome for non-terminal {id}"
             )));
         }
-        let payload = state
-            .op_terminal_payload
-            .get(&id_key)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                OpsLifecycleError::Internal(format!(
-                    "generated op terminal authority missing terminal payload for {id}"
-                ))
-            })?;
-        Self::terminal_outcome_from_parts(kind, payload, "generated op terminal authority", &id_key)
+        let payload = state.op_terminal_payload.get(&id_key).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op terminal authority missing terminal payload for {id}"
+            ))
+        })?;
+        Self::checked_terminal_payload(kind, payload, "generated op terminal authority", &id_key)
             .map(Some)
     }
 
@@ -934,7 +843,7 @@ impl ShellState {
                         "generated completion feed authority missing terminal payload for {id_key}"
                     ))
                 })?;
-            let terminal_outcome = Self::terminal_outcome_from_parts(
+            let terminal_outcome = Self::checked_terminal_payload(
                 outcome_kind,
                 payload,
                 "generated completion feed authority",
@@ -2073,14 +1982,14 @@ impl RuntimeOpsLifecycleRegistry {
         entry: &CompletionFeedCanonicalState,
     ) -> Result<(), OpsLifecycleError> {
         let expected_operation_id = mm_dsl::OperationId::from_domain(operation_id).0;
-        let (terminal_outcome, terminal_payload) =
-            ShellState::split_outcome(&entry.terminal_outcome);
+        let terminal_outcome_kind =
+            mm_dsl::OperationTerminalOutcomeKind::from(&entry.terminal_outcome);
         let effects = shell.dsl_apply_with_effects(
             mm_dsl::MeerkatMachineInput::RecoverCompletionFeedEntry {
                 operation_id: expected_operation_id.clone(),
                 kind: mm_dsl::OperationKind::from(entry.kind),
-                terminal_outcome,
-                terminal_payload,
+                terminal_outcome: terminal_outcome_kind,
+                terminal_payload: entry.terminal_outcome.clone(),
                 completion_sequence: entry.seq,
             },
             "RecoverCompletionFeedEntry",
@@ -2097,7 +2006,7 @@ impl RuntimeOpsLifecycleRegistry {
                 *seq,
                 OperationKind::from(*kind),
                 *terminal_outcome,
-                terminal_payload.as_str(),
+                terminal_payload,
             )),
             _ => None,
         });
@@ -2106,16 +2015,11 @@ impl RuntimeOpsLifecycleRegistry {
                 "generated completion-feed recovery emitted no recovered entry".into(),
             ));
         };
-        let recovered_outcome = ShellState::terminal_outcome_from_parts(
-            terminal_outcome,
-            terminal_payload,
-            "generated completion-feed recovery authority",
-            operation_id,
-        )?;
         if operation_id != &expected_operation_id
             || seq != entry.seq
             || kind != entry.kind
-            || recovered_outcome != entry.terminal_outcome
+            || terminal_outcome != terminal_outcome_kind
+            || terminal_payload != &entry.terminal_outcome
         {
             return Err(OpsLifecycleError::Internal(format!(
                 "generated completion-feed recovery drifted for {operation_id}"
@@ -2170,12 +2074,11 @@ impl RuntimeOpsLifecycleRegistry {
         // projected into shell/public feed state.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
         for (op_id, op_state) in authority_operations {
-            let (terminal_outcome, terminal_payload) = op_state
+            let terminal_outcome = op_state
                 .terminal_outcome
                 .as_ref()
-                .map(ShellState::split_outcome)
-                .map(|(kind, payload)| (Some(kind), Some(payload)))
-                .unwrap_or((None, None));
+                .map(mm_dsl::OperationTerminalOutcomeKind::from);
+            let terminal_payload = op_state.terminal_outcome.clone();
             let disposition = ShellState::recovered_operation_record_disposition(
                 &op_id,
                 op_state.status,
@@ -2806,7 +2709,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -2814,7 +2717,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::Fail,
         )?;
@@ -2896,7 +2799,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -2904,7 +2807,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::CompleteOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::Complete,
         )?;
@@ -2918,7 +2821,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -2926,7 +2829,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::Fail,
         )?;
@@ -2944,7 +2847,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -2952,7 +2855,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::AbortOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::Abort,
         )?;
@@ -2970,7 +2873,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -2978,7 +2881,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::CancelOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::Cancel,
         )?;
@@ -3006,7 +2909,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Retired;
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
         apply_op_transition(
             &mut state,
@@ -3014,7 +2917,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::MeerkatMachineInput::RetireCompletedOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_kind,
-                payload: outcome_payload,
+                payload: terminal_outcome,
             },
             mm_dsl::OpLifecycleActionKind::RetireCompleted,
         )?;
@@ -3111,7 +3014,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
-            let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+            let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
             apply_op_transition(
                 &mut state,
@@ -3119,7 +3022,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 mm_dsl::MeerkatMachineInput::TerminateOp {
                     operation_id: mm_dsl::OperationId::from_domain(op_id).0,
                     outcome: outcome_kind,
-                    payload: outcome_payload,
+                    payload: terminal_outcome,
                 },
                 mm_dsl::OpLifecycleActionKind::Terminate,
             )?;
@@ -3379,6 +3282,147 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
+    }
+
+    /// K8b pinning test: the terminal payload carried through the generated
+    /// machine IS the typed domain outcome — no JSON codec exists in either
+    /// direction. Every variant classifies to its matching discriminant, the
+    /// fail-closed read returns the exact payload when the discriminant
+    /// matches, and rejects any discriminant/variant disagreement.
+    #[test]
+    fn typed_terminal_payload_classifies_and_reads_back_each_variant() {
+        let op_id = OperationId::new();
+        let outcomes = vec![
+            (
+                OperationTerminalOutcome::Completed(OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 7,
+                    tokens_used: 42,
+                }),
+                mm_dsl::OperationTerminalOutcomeKind::Completed,
+            ),
+            (
+                OperationTerminalOutcome::Failed {
+                    error: "boom".into(),
+                },
+                mm_dsl::OperationTerminalOutcomeKind::Failed,
+            ),
+            (
+                OperationTerminalOutcome::Aborted {
+                    reason: Some("user aborted".into()),
+                },
+                mm_dsl::OperationTerminalOutcomeKind::Aborted,
+            ),
+            (
+                OperationTerminalOutcome::Aborted { reason: None },
+                mm_dsl::OperationTerminalOutcomeKind::Aborted,
+            ),
+            (
+                OperationTerminalOutcome::Cancelled {
+                    reason: Some("cancelled".into()),
+                },
+                mm_dsl::OperationTerminalOutcomeKind::Cancelled,
+            ),
+            (
+                OperationTerminalOutcome::Cancelled { reason: None },
+                mm_dsl::OperationTerminalOutcomeKind::Cancelled,
+            ),
+            (
+                OperationTerminalOutcome::Retired,
+                mm_dsl::OperationTerminalOutcomeKind::Retired,
+            ),
+            (
+                OperationTerminalOutcome::Terminated {
+                    reason: "owner stopped".into(),
+                },
+                mm_dsl::OperationTerminalOutcomeKind::Terminated,
+            ),
+        ];
+
+        for (outcome, expected_kind) in &outcomes {
+            assert_eq!(
+                mm_dsl::OperationTerminalOutcomeKind::from(outcome),
+                *expected_kind,
+                "typed payload {outcome:?} must classify to {expected_kind:?}"
+            );
+            let read = ShellState::checked_terminal_payload(
+                *expected_kind,
+                outcome,
+                "test authority",
+                "test-op",
+            )
+            .expect("matching discriminant must read back the exact payload");
+            assert_eq!(&read, outcome);
+        }
+
+        // Discriminant/variant disagreement fails closed.
+        let err = ShellState::checked_terminal_payload(
+            mm_dsl::OperationTerminalOutcomeKind::Completed,
+            &OperationTerminalOutcome::Retired,
+            "test authority",
+            "test-op",
+        )
+        .expect_err("variant mismatch must be rejected");
+        assert!(matches!(err, OpsLifecycleError::Internal(_)));
+    }
+
+    /// K8b machine-ownership pin: a terminal payload whose variant disagrees
+    /// with the transition's terminal kind is rejected by the generated
+    /// machine guard (`payload_variant_matches_kind`) — not by any shell
+    /// decode step. Drives the DSL input directly to prove the guard owns
+    /// the invariant.
+    #[test]
+    fn generated_guard_rejects_terminal_payload_variant_mismatch() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("variant-mismatch");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let mut state = registry.write_state().unwrap();
+        let err = state
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::CompleteOp {
+                    operation_id: mm_dsl::OperationId::from_domain(&op_id).0,
+                    outcome: mm_dsl::OperationTerminalOutcomeKind::Completed,
+                    // Variant mismatch: Completed kind with a Retired payload.
+                    payload: OperationTerminalOutcome::Retired,
+                },
+                "CompleteOp",
+            )
+            .expect_err("machine must reject payload variant mismatch");
+        // The kernel reports guard rejections without naming the guard; the
+        // discriminating pin is the pair: identical input EXCEPT the payload
+        // variant is guard-rejected here, then accepted below. Status
+        // (`Running`) and discriminant (`Completed`) are identical in both
+        // calls, so `payload_variant_matches_kind` is the only differing
+        // guard.
+        assert!(
+            matches!(
+                &err,
+                OpsLifecycleError::Internal(message)
+                    if message.contains("GuardRejected") && message.contains("CompleteOp")
+            ),
+            "expected generated guard rejection for CompleteOp, got: {err:?}"
+        );
+        drop(state);
+
+        // RetireCompletedOp requires the unit Retired payload; a data-carrying
+        // payload is rejected by the same guard shape.
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("matching variant must complete");
     }
 
     #[test]
@@ -4242,7 +4286,7 @@ mod tests {
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state
                 .op_terminal_payload
-                .insert(operation_id_key, "not-json".into());
+                .insert(operation_id_key, OperationTerminalOutcome::Retired);
             state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
             ));
@@ -4253,14 +4297,14 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("payload variant") && message.contains("does not match terminal outcome discriminant")),
             "unexpected watcher error: {err:?}"
         );
         let err = registry
             .snapshot(&operation_id)
             .expect_err("invalid generated terminal payload must reject public snapshot");
         assert!(
-            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("invalid Completed payload")),
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("does not match terminal outcome discriminant")),
             "unexpected public snapshot error: {err:?}"
         );
 
@@ -4272,7 +4316,7 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("payload variant") && message.contains("does not match terminal outcome discriminant")),
             "unexpected snapshot error: {err:?}"
         );
 
@@ -4281,7 +4325,7 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("payload variant") && message.contains("does not match terminal outcome discriminant")),
             "unexpected collection error: {err:?}"
         );
     }

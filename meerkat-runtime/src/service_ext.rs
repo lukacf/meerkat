@@ -18,25 +18,13 @@ use crate::meerkat_machine_types::{
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
-/// Runtime mode for a session service instance.
-///
-/// This branch is runtime-backed only. All sessions use v9 runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeMode {
-    /// Full v9 runtime-backed mode.
-    V9Compliant,
-}
-
 /// v9 runtime extensions for SessionService.
 ///
-/// Surfaces query this to decide whether to expose v9 runtime methods.
-/// Legacy-mode surfaces MUST NOT advertise v9 capabilities.
+/// This branch is runtime-backed only: every implementation is a v9
+/// runtime surface, so the methods below are unconditionally available.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SessionServiceRuntimeExt: Send + Sync {
-    /// Get the runtime mode.
-    fn runtime_mode(&self) -> RuntimeMode;
-
     /// Accept an input for a session.
     async fn accept_input(
         &self,
@@ -214,9 +202,4 @@ mod tests {
 
     // Verify trait is object-safe
     fn _assert_object_safe(_: &dyn SessionServiceRuntimeExt) {}
-
-    #[test]
-    fn runtime_mode_equality() {
-        assert_eq!(RuntimeMode::V9Compliant, RuntimeMode::V9Compliant);
-    }
 }

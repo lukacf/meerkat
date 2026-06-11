@@ -130,9 +130,13 @@ impl RestScheduleContext {
         let mut build_config = AgentBuildConfig::new(create.model.clone());
         build_config.provider = create.provider;
         build_config.max_tokens = create.max_tokens;
-        build_config.system_prompt = prompt_system_prompt
+        build_config.system_prompt = match prompt_system_prompt
             .map(str::to_owned)
-            .or_else(|| create.system_prompt.clone());
+            .or_else(|| create.system_prompt.clone())
+        {
+            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+            None => meerkat::SystemPromptOverride::Inherit,
+        };
         build_config.output_schema = create.output_schema.clone();
         build_config.structured_output_retries = create.structured_output_retries;
         build_config.provider_params = create.provider_params.clone();
@@ -156,8 +160,9 @@ impl RestScheduleContext {
             .or_else(|| self.runtime.instance_id.clone());
         build_config.backend = create
             .backend
-            .clone()
-            .or_else(|| Some(self.runtime.backend.clone()));
+            .as_deref()
+            .and_then(meerkat_core::RecoveryBackendKind::parse)
+            .or_else(|| meerkat_core::RecoveryBackendKind::parse(&self.runtime.backend));
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
         build_config.resume_session = Some(pre_session);
@@ -180,11 +185,9 @@ impl RestScheduleContext {
         let create_req = SvcCreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: build_config.system_prompt.clone(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build_config.to_session_build_options()),
@@ -415,7 +418,8 @@ async fn update_peer_ingress_context(
         .runtime
         .runtime_adapter
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-        .await;
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     Ok(())
 }
 

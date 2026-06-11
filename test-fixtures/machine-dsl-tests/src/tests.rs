@@ -45,9 +45,9 @@ mod e2e_tla {
                 self.phase != Phase::Unlocked || self.coin_count > 0
             }
 
-            disposition CoinAccepted => local,
-            disposition PersonPassed => local,
-            disposition PushRejected => external,
+            disposition CoinAccepted => local seam NoOwnerRealization,
+            disposition PersonPassed => local seam NoOwnerRealization,
+            disposition PushRejected => external seam OwnerRealizationOnly,
 
             transition InsertCoinLocked {
                 on input InsertCoin
@@ -336,7 +336,7 @@ mod traffic_light {
                 Switched,
             }
 
-            disposition Switched => local,
+            disposition Switched => local seam NoOwnerRealization,
 
             transition ToggleGreen {
                 on input Toggle
@@ -462,6 +462,10 @@ mod counter {
                 LimitReached { value: u64, limit: u64 },
                 CounterStopped { final_value: u64 },
             }
+
+            disposition Started => local seam NoOwnerRealization,
+            disposition LimitReached => local seam NoOwnerRealization,
+            disposition CounterStopped => local seam NoOwnerRealization,
 
             transition StartIdle {
                 on input Start
@@ -706,12 +710,12 @@ mod order_lifecycle {
                 RetryAttempted { attempt: u64 },
             }
 
-            disposition OrderSubmitted => local,
-            disposition OrderAssigned => local,
-            disposition OrderPaid => local,
-            disposition OrderCompleted => external,
-            disposition OrderCancelled => external,
-            disposition RetryAttempted => local,
+            disposition OrderSubmitted => local seam NoOwnerRealization,
+            disposition OrderAssigned => local seam NoOwnerRealization,
+            disposition OrderPaid => local seam NoOwnerRealization,
+            disposition OrderCompleted => external seam OwnerRealizationOnly,
+            disposition OrderCancelled => external seam OwnerRealizationOnly,
+            disposition RetryAttempted => local seam NoOwnerRealization,
 
             helper is_active_phase(p: OrderPhase) -> bool {
                 p == Phase::Draft || p == Phase::Submitted || p == Phase::Assigned || p == Phase::Paid

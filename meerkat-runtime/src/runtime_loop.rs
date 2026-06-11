@@ -320,7 +320,12 @@ fn resolve_completion_waiters_from_authority(
             }
         }
         RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
-            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
+            // The class authority still requires that output was produced (a
+            // RunResult terminal), but the produced result is deliberately NOT
+            // forwarded to waiters: finalization (durable commit) failed, so the
+            // run is not durably terminal and the output must not be surfaced as
+            // a usable success result.
+            let Some(CoreApplyTerminal::RunResult(_result)) = terminal else {
                 fail_closed_completion_waiters(
                     registry,
                     input_ids,
@@ -339,7 +344,6 @@ fn resolve_completion_waiters_from_authority(
             for input_id in input_ids {
                 registry.resolve_completed_with_finalization_failure_authorized(
                     input_id,
-                    result.as_ref().clone(),
                     error.clone(),
                     authority.clone(),
                 );
@@ -715,6 +719,7 @@ pub(crate) fn input_to_primitive(
     inputs_to_primitive(&[(input_id, input.clone())])
 }
 
+#[cfg(test)]
 pub(crate) fn admitted_input_to_primitive(
     input: &Input,
     input_id: InputId,
@@ -928,7 +933,22 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 }
                             }
                         }
-                        None => break,
+                        None => {
+                            // Closed effect receiver is NOT an applied stop —
+                            // route through the canonical stop/terminalize
+                            // path so the DSL executor-exit, durable
+                            // runtime-state commit, and waiter terminalization
+                            // all fire (same shape as the ready-effect drain
+                            // ChannelClosed arm).
+                            let _ = stop_runtime_loop_executor_from_dsl_effect(
+                                &driver,
+                                completions.as_ref(),
+                                &mut *executor,
+                                "runtime effect channel closed".to_string(),
+                            )
+                            .await;
+                            break;
+                        }
                     }
                 }
                 maybe_wake = wake_rx.recv() => {
@@ -976,7 +996,20 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 FeedWakeOutcome::Noop => {}
                             }
                         }
-                        None => break,
+                        None => {
+                            // Closed wake channel is NOT an applied stop —
+                            // terminalize through the canonical
+                            // StopRuntimeExecutor path rather than silently
+                            // exiting the loop.
+                            let _ = stop_runtime_loop_executor_from_dsl_effect(
+                                &driver,
+                                completions.as_ref(),
+                                &mut *executor,
+                                "runtime wake channel closed".to_string(),
+                            )
+                            .await;
+                            break;
+                        }
                     }
                 }
                 () = idle_wake => {
@@ -1036,6 +1069,41 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Check for new background op completions and inject a continuation if needed.
 ///
 /// Called after queue processing completes (session has returned to idle).
+/// Cursor-advance plan for the quiescent detached-wake injection tail.
+///
+/// A successful injection advances BOTH the injected and observed cursors so
+/// the completion is recorded as delivered. A failed injection must advance
+/// NEITHER: the completion stays visible at the unchanged observed cursor so
+/// the next wake re-presents it for retry instead of laundering a failed
+/// injection into a watermark advance that hides the completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedWakeCursorPlan {
+    /// Injection succeeded: advance the injected then the observed cursor.
+    AdvanceInjectedAndObserved,
+    /// Injection failed: leave both cursors untouched so the completion is
+    /// re-presented on the next wake.
+    LeaveVisibleForRetry,
+}
+
+impl DetachedWakeCursorPlan {
+    /// Decide the cursor-advance plan from the injection outcome.
+    fn from_injection(injection_succeeded: bool) -> Self {
+        if injection_succeeded {
+            Self::AdvanceInjectedAndObserved
+        } else {
+            Self::LeaveVisibleForRetry
+        }
+    }
+
+    /// Test-only convenience query: the runtime path itself matches on the
+    /// plan variants directly (see the `match` at the detached-wake site), so
+    /// this boolean projection exists only for the unit tests.
+    #[cfg(test)]
+    fn advances_observed_cursor(self) -> bool {
+        matches!(self, Self::AdvanceInjectedAndObserved)
+    }
+}
+
 /// Distinguishes ordinary no-op from stale-authority shutdown so cursor
 /// projection cannot advance after the runtime loop loses current ownership.
 fn advance_runtime_completion_cursor(
@@ -1157,30 +1225,45 @@ async fn maybe_inject_feed_wake(
         crate::input::ContinuationInput::detached_background_op_completed(),
     );
     let mut d = driver.lock().await;
-    if d.as_driver_mut().accept_input(input).await.is_ok() {
-        let advanced = match advance_runtime_completion_cursor(
-            Some(registry),
-            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
-            batch.watermark,
-            epoch_cursor_state,
-        ) {
-            Ok(cursor) => cursor,
-            Err(outcome) => return outcome,
-        };
-        *last_injected_seq = advanced;
+    let injection_succeeded = d.as_driver_mut().accept_input(input).await.is_ok();
+    drop(d);
+
+    match DetachedWakeCursorPlan::from_injection(injection_succeeded) {
+        DetachedWakeCursorPlan::LeaveVisibleForRetry => {
+            // Injection failed: do NOT advance either cursor. Mirror the
+            // non-quiescent branch above and leave the completion visible so
+            // the next wake re-presents it for retry instead of laundering the
+            // failed injection into a watermark advance that hides the
+            // completion.
+            FeedWakeOutcome::Noop
+        }
+        DetachedWakeCursorPlan::AdvanceInjectedAndObserved => {
+            // Injection succeeded: advance both the injected and observed
+            // cursors so the completion is recorded as delivered and the loop
+            // does not hot-spin on it.
+            let injected = match advance_runtime_completion_cursor(
+                Some(registry),
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                batch.watermark,
+                epoch_cursor_state,
+            ) {
+                Ok(cursor) => cursor,
+                Err(outcome) => return outcome,
+            };
+            *last_injected_seq = injected;
+            let observed = match advance_runtime_completion_cursor(
+                Some(registry),
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+                batch.watermark,
+                epoch_cursor_state,
+            ) {
+                Ok(cursor) => cursor,
+                Err(outcome) => return outcome,
+            };
+            *observed_seq = observed;
+            FeedWakeOutcome::Injected
+        }
     }
-    // Advance cursor after injection attempt (quiescent path).
-    let advanced = match advance_runtime_completion_cursor(
-        Some(registry),
-        meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
-        batch.watermark,
-        epoch_cursor_state,
-    ) {
-        Ok(cursor) => cursor,
-        Err(outcome) => return outcome,
-    };
-    *observed_seq = advanced;
-    FeedWakeOutcome::Injected
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -1208,8 +1291,23 @@ async fn process_queue(
         )
         .await
         {
-            Ok(true) => return true,
-            Ok(false) => {}
+            Ok(crate::control_plane::EffectDrainOutcome::AppliedStop) => return true,
+            Ok(crate::control_plane::EffectDrainOutcome::Empty) => {}
+            Ok(crate::control_plane::EffectDrainOutcome::ChannelClosed) => {
+                // The effect sender was dropped: the control plane is gone.
+                // Closure is NOT an applied stop — route through the canonical
+                // stop/terminalize path so the DSL executor-exit, durable
+                // stopped truth, and completion waiters cannot split before the
+                // loop exits.
+                drop(effect_authority_guard);
+                return stop_runtime_loop_executor_from_dsl_effect(
+                    driver,
+                    completions,
+                    executor,
+                    "runtime effect channel closed".to_string(),
+                )
+                .await;
+            }
             Err(error) => {
                 tracing::error!(
                     error = %error,
@@ -1800,6 +1898,51 @@ mod tests {
         );
     }
 
+    /// Regression for #287: dropping the effect sender mid-run must drive the
+    /// loop through the canonical stop/terminalize path (StopRuntimeExecutor),
+    /// NOT exit bare as if a stop effect had already been applied. Before the
+    /// fix, channel closure returned `Ok(true)` directly and `stop_calls`
+    /// stayed at 0 — the executor stop was never invoked.
+    #[tokio::test]
+    async fn runtime_loop_effect_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("effect-channel-closed-stop");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        // Drop the effect sender so the drain observes a disconnected channel
+        // without any stop effect ever being delivered.
+        let (effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
+        drop(effect_tx);
+
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let should_stop = process_queue(
+            &driver,
+            &mut executor,
+            &mut effect_rx,
+            None,
+            &authority_binding,
+        )
+        .await;
+
+        assert!(
+            should_stop,
+            "a closed effect channel must stop the runtime loop"
+        );
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            0,
+            "channel closure must not fall through to ordinary queue processing"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_loop_direct_effect_failure_exits_loop_with_channels_open() {
         let driver = make_shared_ephemeral_driver("direct-effect-fail-closed");
@@ -1840,6 +1983,90 @@ mod tests {
         drop((wake_tx, effect_tx));
     }
 
+    /// Row #58 residual gate: dropping the effect sender while the loop is
+    /// blocked in its main `select!` (NOT inside the ready-effect drain) must
+    /// also route through the canonical StopRuntimeExecutor terminalize path —
+    /// never exit the loop bare.
+    #[tokio::test]
+    async fn runtime_loop_direct_effect_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("direct-effect-channel-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            None,
+            None,
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        drop(effect_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("runtime loop must exit after effect channel closure")
+            .expect("runtime loop task should not panic");
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "effect channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+        drop(wake_tx);
+    }
+
+    /// Row #58 residual gate (sibling): dropping the wake sender must also
+    /// terminalize through the canonical StopRuntimeExecutor path.
+    #[tokio::test]
+    async fn runtime_loop_wake_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("wake-channel-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            None,
+            None,
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        drop(wake_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("runtime loop must exit after wake channel closure")
+            .expect("runtime loop task should not panic");
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "wake channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+        drop(effect_tx);
+    }
+
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(PromptInput {
             header: InputHeader {
@@ -1852,8 +2079,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: text.into(),
-            blocks: None,
+            content: text.into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
@@ -1883,9 +2109,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: None,
-            body: "peer message".into(),
+            content: "peer message".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
@@ -1909,9 +2134,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "plain body payload".into(),
+            content: "plain body payload".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
 
@@ -1939,9 +2163,8 @@ mod tests {
                 request_id: "req-123".into(),
                 intent: "checksum_token".into(),
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({"subject": "alpha beta gamma"})),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -1977,13 +2200,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2029,13 +2251,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2186,13 +2407,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -2215,7 +2435,7 @@ mod tests {
         };
         assert_eq!(staged.boundary, RunApplyBoundary::Immediate);
         assert_eq!(staged.contributing_input_ids, vec![input_id]);
-        assert!(staged.appends.is_empty());
+        assert_eq!(staged.appends.len(), 1);
         assert_eq!(staged.context_appends.len(), 1);
         assert_eq!(
             staged.context_appends[0].key,
@@ -2263,13 +2483,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2280,11 +2499,68 @@ mod tests {
             other => return Err(format!("expected staged input, got {other:?}")),
         };
         assert_eq!(staged.boundary, RunApplyBoundary::RunStart);
-        // Terminal peer payload still routes through the context-append
-        // path (not user-visible appends) since `input_to_append` returns
-        // None for the ResponseTerminal convention.
-        assert!(staged.appends.is_empty());
+        // Terminal peer responses carry both the typed comms notice append
+        // (the model-visible content of the mandatory requester reaction
+        // turn) and the keyed runtime context append.
+        assert_eq!(staged.appends.len(), 1);
         assert_eq!(staged.context_appends.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn queued_peer_response_terminal_reaction_turn_has_model_visible_content() -> Result<(), String>
+    {
+        // Regression lock for the live mob bug where a block-less terminal
+        // peer response staged a context-only primitive: the mandatory
+        // `AppendContextAndRun` reaction turn then ran with a fabricated
+        // empty user prompt, which Anthropic rejects with HTTP 400
+        // ("user messages must have non-empty content"). The terminal
+        // LlmFailure tore down the member's live session (and its comms
+        // runtime), which later surfaced as
+        // "wire requires comms runtime for '<peer>'" during respawn.
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
+                    display_identity: Some("analyst-rt".into()),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            content: String::new().into(),
+            payload: None,
+            handling_mode: None,
+        });
+        let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
+            .expect("single input metadata cannot conflict");
+        assert!(primitive.is_peer_response_terminal_context_and_run());
+        let staged = match &primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(
+            staged.appends.len(),
+            1,
+            "block-less terminal response must carry its typed comms notice append"
+        );
+        let provider_prompt =
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &staged.appends,
+            );
+        assert!(
+            !provider_prompt.text_content().trim().is_empty(),
+            "the mandatory requester reaction turn must have non-empty model-visible content"
+        );
         Ok(())
     }
 
@@ -2309,13 +2585,12 @@ mod tests {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
         let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
@@ -2343,7 +2618,7 @@ mod tests {
                 );
                 assert_eq!(
                     admitted_content_shape,
-                    crate::meerkat_machine::dsl::ContentShape::Context
+                    crate::meerkat_machine::dsl::ContentShape::ConversationAndContext
                 );
                 Ok(())
             }
@@ -2373,13 +2648,12 @@ mod tests {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2444,9 +2718,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: body.into(),
+            content: body.into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -2471,9 +2744,8 @@ mod tests {
                 request_id: request_id.into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -2587,9 +2859,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "see this image".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -2647,9 +2918,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "caption text".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -2701,9 +2971,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: String::new(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -2732,7 +3001,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_image_only_blocks_preserve_rendered_body_text() -> Result<(), String> {
+    fn peer_image_only_blocks_are_the_notice_content() -> Result<(), String> {
         let blocks = vec![meerkat_core::types::ContentBlock::Image {
             media_type: "image/png".into(),
             data: "abc123".into(),
@@ -2754,9 +3023,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "Please describe the attached image.".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -2777,13 +3045,9 @@ mod tests {
                     peer.as_ref().map(|peer| peer.id),
                     Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
                 );
-                assert_eq!(
-                    content.first(),
-                    Some(&meerkat_core::types::ContentBlock::Text {
-                        text: "Please describe the attached image.".into(),
-                    })
-                );
-                assert_eq!(content.get(1), Some(&blocks[0]));
+                // Single-owner semantics: the typed blocks ARE the content;
+                // no synthesized caption text is merged in beside them.
+                assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
@@ -2816,8 +3080,7 @@ mod tests {
                 correlation_id: None,
             },
             step_id: "step-1".into(),
-            instructions: "analyze this screenshot".into(),
-            blocks: Some(blocks),
+            content: meerkat_core::types::ContentInput::Blocks(blocks),
             turn_metadata: None,
         });
         let input_id = input.id().clone();
@@ -2834,7 +3097,9 @@ mod tests {
                 assert!(matches!(
                     got.first(),
                     Some(meerkat_core::types::SystemNoticeBlock::RuntimeNotice { category, detail, .. })
-                        if category == "flow_step" && detail.as_deref() == Some("analyze this screenshot")
+                        if category == "flow_step"
+                            && detail.as_deref()
+                                == Some("analyze this screenshot\n[image: image/png]")
                 ));
             }
             other => return Err(format!("expected typed content, got {other:?}")),
@@ -2969,14 +3234,14 @@ mod tests {
 
     #[test]
     fn plain_event_and_direct_runtime_external_event_share_projection() -> Result<(), String> {
-        use crate::comms_bridge::peer_input_candidate_to_runtime_input;
+        use crate::comms_bridge::classified_interaction_to_runtime_input;
         use crate::identifiers::LogicalRuntimeId;
         use meerkat_core::interaction::{
             InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass,
         };
 
         let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
-        let from_comms = peer_input_candidate_to_runtime_input(
+        let from_comms = classified_interaction_to_runtime_input(
             &PeerInputCandidate {
                 lifecycle_peer: None,
                 response_terminality: None,
@@ -3208,7 +3473,10 @@ mod tests {
 
         let mut guard = driver.lock().await;
         assert_eq!(guard.as_driver().active_input_ids().len(), 1);
-        let (_input_id, input) = guard
+        let crate::meerkat_machine::DriverEntry::Ephemeral(ephemeral) = &mut *guard else {
+            panic!("test uses an ephemeral driver");
+        };
+        let (_input_id, input) = ephemeral
             .dequeue_next()
             .expect("continuation should be queued inline");
         match input {
@@ -3405,6 +3673,35 @@ mod tests {
         assert_eq!(last_injected_seq, 0);
     }
 
+    /// Regression for #182: a detached wake whose continuation injection fails
+    /// must leave the observed cursor UNCHANGED so the completion is
+    /// re-presented on the next wake. A successful injection advances both
+    /// cursors. The old code advanced the observed cursor unconditionally,
+    /// laundering a failed injection into a watermark advance that hid the
+    /// completion from retry.
+    #[test]
+    fn detached_wake_cursor_plan_leaves_completion_visible_on_injection_failure() {
+        // Failed injection: leave both cursors untouched (completion stays
+        // visible for retry).
+        let failed = DetachedWakeCursorPlan::from_injection(false);
+        assert_eq!(failed, DetachedWakeCursorPlan::LeaveVisibleForRetry);
+        assert!(
+            !failed.advances_observed_cursor(),
+            "a failed injection must NOT advance the observed cursor"
+        );
+
+        // Successful injection: advance both injected and observed cursors.
+        let succeeded = DetachedWakeCursorPlan::from_injection(true);
+        assert_eq!(
+            succeeded,
+            DetachedWakeCursorPlan::AdvanceInjectedAndObserved
+        );
+        assert!(
+            succeeded.advances_observed_cursor(),
+            "a successful injection must advance the observed cursor"
+        );
+    }
+
     // --- execution_kind stamping tests ---
 
     #[test]
@@ -3470,6 +3767,7 @@ mod tests {
                 execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
+                live_interrupt_required: false,
             },
         )
         .expect("single input metadata cannot conflict");
@@ -3504,9 +3802,8 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let id = input.id().clone();
@@ -3542,9 +3839,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: "msg".into(),
+            content: "msg".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let continuation =

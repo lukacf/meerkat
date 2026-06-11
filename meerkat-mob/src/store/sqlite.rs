@@ -1287,6 +1287,90 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    async fn cas_run_snapshot_and_append_terminal_event_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+        _events: &dyn MobEventStore,
+        terminal_event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        // The mob run table and the mob event log live in the same SQLite
+        // database file, so the terminal snapshot and the terminal event are
+        // committed in ONE transaction — no divergence window between terminal
+        // run-status truth and terminal-event truth. The `_events` handle is
+        // unused: any event store for this storage bundle shares this database
+        // path, and the committed event is broadcast on the per-path bus.
+        validate_mob_event_write_authority(&terminal_event.kind)?;
+        if terminal_event_identity(&terminal_event.kind).is_none() {
+            return Err(MobStoreError::Internal(
+                "cas_run_snapshot_and_append_terminal_event_with_authority requires a terminal flow event".to_string(),
+            ));
+        }
+        let path = self.path.clone();
+        let key = run_id.to_string();
+        let terminality_run_id = run_id.clone();
+        let expected_flow_state = expected_flow_state.clone();
+        let next_flow_state = next_flow_state.clone();
+        let event_bus = sqlite_event_bus_for_path(self.path.clone())?;
+        let stored = run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let bytes = load_run_bytes(&tx, &key)?;
+            let Some(bytes) = bytes else {
+                return Ok(None);
+            };
+            let mut run: MobRun = decode_json(&bytes)?;
+            let current_terminal =
+                mob_machine_run_status_is_terminal(&terminality_run_id, &run.status)
+                    .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            if run.status != expected_status
+                || current_terminal
+                || run.flow_state != expected_flow_state
+            {
+                return Ok(None);
+            }
+            let terminal = mob_machine_run_status_is_terminal(&terminality_run_id, &next_status)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            run.status = next_status;
+            run.flow_state = next_flow_state;
+            if terminal && run.completed_at.is_none() {
+                run.completed_at = Some(Utc::now());
+            }
+            run.append_flow_authority_inputs(authority_inputs)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            write_run_json(&tx, &key, &run)?;
+
+            let cursor = next_event_cursor(&tx)?;
+            let stored = MobEvent {
+                cursor,
+                timestamp: terminal_event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: terminal_event.mob_id,
+                kind: terminal_event.kind,
+            };
+            let encoded = encode_stored_mob_event(&stored)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
+                params![cursor_to_i64(cursor)?, encoded],
+            )
+            .map_err(se)?;
+            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            tx.commit().map_err(se)?;
+            Ok(Some(stored))
+        })
+        .await?;
+        if let Some(stored) = stored.as_ref() {
+            event_bus.publish_committed(stored.clone());
+        }
+        Ok(stored)
+    }
+
     async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
@@ -2223,8 +2307,13 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: "worker".to_string(),
@@ -2234,7 +2323,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = MobDefinition::explicit("mob");
         definition.profiles = profiles;
@@ -2242,11 +2331,7 @@ mod tests {
             let mut flows = std::collections::BTreeMap::new();
             flows.insert(
                 FlowId::from("flow-a"),
-                FlowSpec {
-                    description: None,
-                    steps: IndexMap::new(),
-                    root: None,
-                },
+                FlowSpec::new(None, IndexMap::new(), None),
             );
             flows
         };
@@ -2662,6 +2747,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sqlite_terminal_snapshot_and_event_commit_atomically() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let store = stores.run_store();
+        let events = stores.event_store();
+
+        let run = sample_run(MobRunStatus::Running);
+        let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
+        let (completed_flow_state, completed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
+        store.create_run(run).await.unwrap();
+
+        let stored = store
+            .cas_run_snapshot_and_append_terminal_event_with_authority(
+                &run_id,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                MobRunStatus::Completed,
+                &completed_flow_state,
+                vec![completed_authority_input.clone()],
+                &events,
+                crate::event::NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: None,
+                    kind: crate::event::MobEventKind::FlowCompleted {
+                        run_id: run_id.clone(),
+                        flow_id: FlowId::from("flow-a"),
+                        structured_output: None,
+                    },
+                },
+            )
+            .await
+            .expect("atomic terminal commit");
+        assert!(stored.is_some(), "winning CAS must commit the event");
+
+        // Both sides committed: run is terminal AND the terminal event exists.
+        let run = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(run.status, MobRunStatus::Completed);
+        assert!(run.completed_at.is_some());
+        let replayed = events.replay_all().await.unwrap();
+        assert!(replayed.iter().any(|event| matches!(
+            &event.kind,
+            crate::event::MobEventKind::FlowCompleted { run_id: event_run, .. } if event_run == &run_id
+        )));
+
+        // A second (stale) attempt loses the CAS and appends NOTHING — the
+        // terminal event cannot exist twice or without its snapshot.
+        let lost = store
+            .cas_run_snapshot_and_append_terminal_event_with_authority(
+                &run_id,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                MobRunStatus::Completed,
+                &completed_flow_state,
+                vec![completed_authority_input],
+                &events,
+                crate::event::NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: None,
+                    kind: crate::event::MobEventKind::FlowCompleted {
+                        run_id: run_id.clone(),
+                        flow_id: FlowId::from("flow-a"),
+                        structured_output: None,
+                    },
+                },
+            )
+            .await
+            .expect("lost CAS is not an error");
+        assert!(lost.is_none());
+        assert_eq!(
+            events.replay_all().await.unwrap().len(),
+            1,
+            "a lost CAS must not append a terminal event"
+        );
+    }
+
+    #[tokio::test]
     async fn test_sqlite_spec_store_revision_conflict() {
         let (_dir, path) = temp_db_path();
         let store = SqliteMobStores::open(&path).unwrap().spec_store();
@@ -2705,7 +2873,7 @@ mod tests {
                 address: "tcp://worker-1".to_string(),
                 bootstrap_token: None,
                 session_id: None,
-                pubkey: None,
+                pubkey: [7u8; 32],
             }),
             bootstrap_token: None,
             status: ExternalBindingOverlayStatus::Normalized,
@@ -3061,6 +3229,11 @@ mod tests {
             let store = SqliteRealmProfileStore::open(&db_path).unwrap();
             let profile = Profile {
                 model: "claude-sonnet-4-5".into(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
                 peer_description: String::new(),

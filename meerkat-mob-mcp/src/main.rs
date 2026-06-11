@@ -78,11 +78,18 @@ mod app {
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 match meerkat_mob_mcp::handle_public_tools_call(state, name, &arguments).await {
-                    Ok(result) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": meerkat_mob_mcp::wrap_public_tool_payload(result)
-                    }),
+                    Ok(result) => match meerkat_mob_mcp::wrap_public_tool_payload(result) {
+                        Ok(payload) => json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": payload
+                        }),
+                        Err(message) => json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32603, "message": message}
+                        }),
+                    },
                     Err(err) => {
                         let mut e = json!({"code": err.code, "message": err.message});
                         if let Some(data) = err.data {

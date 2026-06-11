@@ -21,10 +21,14 @@ pub enum ToolCatalogMode {
 }
 
 /// Whether a catalog entry may be deferred behind the control plane.
+///
+/// Deferred eligibility carries the typed provenance owner directly. The
+/// string witness key is a read-only projection obtained on demand via
+/// [`stable_owner_key_from_provenance`], never stored beside the owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCatalogDeferredEligibility {
     InlineOnly,
-    DeferredEligible { stable_owner_key: String },
+    DeferredEligible { provenance: ToolProvenance },
 }
 
 /// Precedence-resolved catalog entry for one canonical tool name.
@@ -76,27 +80,25 @@ impl ToolCatalogEntry {
     pub fn session_deferred(
         tool: Arc<ToolDef>,
         currently_callable: bool,
-        stable_owner_key: String,
+        provenance: ToolProvenance,
     ) -> Self {
         Self::session_deferred_with_callability(
             tool,
             ToolCallability::from_bool(currently_callable),
-            stable_owner_key,
+            provenance,
         )
     }
 
     pub fn session_deferred_with_callability(
         tool: Arc<ToolDef>,
         callability: ToolCallability,
-        stable_owner_key: String,
+        provenance: ToolProvenance,
     ) -> Self {
         Self {
             tool,
             plane: ToolPlaneClass::Session,
             callability,
-            deferred_eligibility: ToolCatalogDeferredEligibility::DeferredEligible {
-                stable_owner_key,
-            },
+            deferred_eligibility: ToolCatalogDeferredEligibility::DeferredEligible { provenance },
         }
     }
 
@@ -300,4 +302,37 @@ pub struct ToolCatalogLoadResolution {
     pub accepted_noop: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_reason: Option<ToolCatalogLoadRejectedReason>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_eligibility_owner_is_typed_provenance_with_projected_key() {
+        let provenance = ToolProvenance {
+            kind: ToolSourceKind::Callback,
+            source_id: "owner-a".into(),
+        };
+        let tool = Arc::new(ToolDef::new(
+            "deferred",
+            "deferred tool",
+            serde_json::json!({ "type": "object" }),
+        ));
+        let entry = ToolCatalogEntry::session_deferred(tool, true, provenance.clone());
+
+        // The eligibility tag owns the typed provenance; the string key is a
+        // read-only projection derived on demand, never a stored fact.
+        let ToolCatalogDeferredEligibility::DeferredEligible { provenance: stored } =
+            entry.deferred_eligibility
+        else {
+            panic!("session_deferred entry must be deferred eligible");
+        };
+        assert_eq!(stored, provenance);
+        assert_eq!(
+            stable_owner_key_from_provenance(&stored),
+            "callback:owner-a"
+        );
+    }
 }

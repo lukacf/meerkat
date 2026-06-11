@@ -518,7 +518,15 @@ fn parse_effect_emit(input: ParseStream) -> Result<EffectEmitDef> {
 }
 
 // ---------------------------------------------------------------------------
-// disposition EffectName => local | external | routed [Machine1, ...] [handoff ProtocolName]
+// disposition EffectName => local | external | routed [Machine1, ...]
+//     [handoff ProtocolName]
+//     seam NoOwnerRealization | OwnerRealizationOnly
+//        | OwnerRealizationPlusFeedback | SurfaceResultAlignment
+//
+// The trailing `seam <Classification>` clause is REQUIRED for every
+// disposition: the seam-inventory audit reads this classification straight off
+// the generated schema, so every effect must declare its ownership-boundary
+// seam by construction (fail-closed — an unclassified effect cannot exist).
 // ---------------------------------------------------------------------------
 
 fn parse_disposition(input: ParseStream) -> Result<DispositionDef> {
@@ -550,6 +558,35 @@ fn parse_disposition(input: ParseStream) -> Result<DispositionDef> {
     } else {
         None
     };
+    // Required trailing `seam <Classification>` clause.
+    let seam_kw: Ident = input.parse().map_err(|_| {
+        syn::Error::new(
+            effect.span(),
+            "disposition requires a trailing `seam <Classification>` clause \
+             (NoOwnerRealization | OwnerRealizationOnly | OwnerRealizationPlusFeedback \
+             | SurfaceResultAlignment)",
+        )
+    })?;
+    if seam_kw != "seam" {
+        return Err(syn::Error::new(
+            seam_kw.span(),
+            "expected `seam` keyword before the disposition's seam classification",
+        ));
+    }
+    let class_ident: Ident = input.parse()?;
+    let seam_classification = match class_ident.to_string().as_str() {
+        "NoOwnerRealization" => SeamClass::NoOwnerRealization,
+        "OwnerRealizationOnly" => SeamClass::OwnerRealizationOnly,
+        "OwnerRealizationPlusFeedback" => SeamClass::OwnerRealizationPlusFeedback,
+        "SurfaceResultAlignment" => SeamClass::SurfaceResultAlignment,
+        _ => {
+            return Err(syn::Error::new(
+                class_ident.span(),
+                "expected one of `NoOwnerRealization`, `OwnerRealizationOnly`, \
+                 `OwnerRealizationPlusFeedback`, or `SurfaceResultAlignment`",
+            ));
+        }
+    };
     // Optional trailing comma
     if input.peek(Token![,]) {
         let _: Token![,] = input.parse()?;
@@ -558,6 +595,7 @@ fn parse_disposition(input: ParseStream) -> Result<DispositionDef> {
         effect,
         kind,
         handoff_protocol,
+        seam_classification,
     })
 }
 
@@ -765,10 +803,10 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     value: Box::new(expr),
                     enum_name,
                     variant,
-                    tuple_variant: false,
+                    data_variant: false,
                 };
             }
-            "is_tuple_variant" => {
+            "is_data_variant" => {
                 let paren;
                 syn::parenthesized!(paren in input);
                 let (enum_name, variant) = parse_enum_variant_ref(&paren)?;
@@ -776,7 +814,7 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     value: Box::new(expr),
                     enum_name,
                     variant,
-                    tuple_variant: true,
+                    data_variant: true,
                 };
             }
             "string_set_payload" => {

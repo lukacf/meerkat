@@ -8,9 +8,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `schedule_bundle`
 
 ### Code Anchors
-- `schedule_service`: `meerkat-schedule/src/service.rs` — schedule service precursor for revision supersession, rolling planning, occurrence materialization, pause resume, and delete lifecycle routing
-- `schedule_store`: `meerkat-schedule/src/store.rs` — schedule store contract precursor for transactional claim, supersede persistence, occurrence progress, and revision-aware planning cursor updates
-- `schedule_bundle_schema`: `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule bundle composition
+- `schedule_service` (route `revision_supersede_enters_occurrence_authority`): `meerkat-schedule/src/service.rs` — schedule service precursor for revision supersession, rolling planning, occurrence materialization, pause resume, and delete lifecycle routing
+- `schedule_store` (route `revision_supersede_enters_occurrence_authority`): `meerkat-schedule/src/store.rs` — schedule store contract precursor for transactional claim, supersede persistence, occurrence progress, and revision-aware planning cursor updates
+- `schedule_bundle_schema` (route `revision_supersede_enters_occurrence_authority`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule bundle composition
 
 ### Scenarios
 - `revision-supersede-route` — revision-affecting schedule updates supersede pending future occurrences through the explicit route
@@ -19,25 +19,25 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Routes
 - `revision_supersede_enters_occurrence_authority`
-  - anchors: `schedule_store`
-  - scenarios: `revision-supersede-route`, `rolling-planning-occurrence-materialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `occurrence_supersede_ack_returns_to_schedule`
-  - anchors: `schedule_store`
-  - scenarios: `revision-supersede-route`, `rolling-planning-occurrence-materialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Scheduler Rules
 - `(none)`
 
 ### Invariants
 - `schedule_revision_supersede_route_present`
-  - anchors: `schedule_store`
-  - scenarios: `revision-supersede-route`, `rolling-planning-occurrence-materialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `superseded_occurrence_originates_from_schedule_revision`
-  - anchors: `schedule_service`, `schedule_store`
-  - scenarios: `revision-supersede-route`, `rolling-planning-occurrence-materialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `occurrence_supersede_ack_route_present`
-  - anchors: `schedule_store`
-  - scenarios: `revision-supersede-route`, `rolling-planning-occurrence-materialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

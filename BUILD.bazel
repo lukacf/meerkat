@@ -130,7 +130,6 @@ filegroup(
         "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob-pack:package_runfiles",
         "//meerkat-mob:package_runfiles",
-        "//meerkat-models:package_runfiles",
         "//meerkat-openai:package_runfiles",
         "//meerkat-providers:package_runfiles",
         "//meerkat-rest:package_runfiles",
@@ -151,16 +150,6 @@ filegroup(
         "//xtask:package_runfiles",
     ],
     visibility = ["//visibility:public"],
-)
-
-sh_test(
-    name = "audit_effect_authority_test",
-    srcs = ["scripts/audit-effect-authority.sh"],
-    data = [":workspace_runfiles"],
-    size = "small",
-    tags = [
-        "fast",
-    ],
 )
 
 sh_test(
@@ -241,6 +230,7 @@ test_suite(
         "//meerkat-auth-core:oauth_flow_test",
         "//meerkat-auth-core:refresh_coordinator_crossproc_test",
         "//meerkat-auth-core:refresh_coordinator_inproc_test",
+        "//meerkat-auth-core:token_lifecycle_clear_test",
         "//meerkat-auth-core:token_store_contract_test",
         "//meerkat-capabilities:meerkat_capabilities_unit_test",
         "//meerkat-cli:auth_binding_single_parser_test",
@@ -311,8 +301,6 @@ test_suite(
         "//meerkat-mob:member_session_bindings_test",
         "//meerkat-mob:mob_orchestrator_kernel_test",
         "//meerkat-mob:shadow_state_absent_test",
-        "//meerkat-models:guards_test",
-        "//meerkat-models:meerkat_models_unit_test",
         "//meerkat-openai:meerkat_openai_unit_test",
         "//meerkat-openai:mock_realtime_ws_selftest_test",
         "//meerkat-openai:oauth_resolve_test",
@@ -399,6 +387,7 @@ test_suite(
         "//tests/integration:meerkat_integration_tests_unit_test",
         "//xtask:buildbuddy_static_lanes_test",
         "//xtask:ci_gate_requires_rmat_test",
+        "//xtask:effect_authority_test",
         "//xtask:protocol_codegen_drift_test",
         "//xtask:rmat_audit_test",
         "//xtask:rmat_strict_test",

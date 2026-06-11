@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionTurnAdmissionMachine`
 
 ### Code Anchors
-- `session_turn_admission_authority`: `meerkat-session/src/generated/session_turn_admission.rs` — generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariant shutdown_phase_is_not_active
+- `session_turn_admission_authority` (machine `SessionTurnAdmissionMachine`): `meerkat-session/src/generated/session_turn_admission.rs` — generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariant shutdown_phase_is_not_active
 
 ### Scenarios
 - `turn_admission_claim_run_finalize` — ClaimTurn, BeginTurn, ResolveTurn, FinalizeTurnToIdle, FinalizeTurnToShutdown, AbortClaim, and ProjectTurnAdmission own the Idle/Admitted/Running/Completing/ShuttingDown turn-admission phase and emit TurnAdmissionProjected without handwritten phase mutation
@@ -111,24 +111,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeKeepAliveEnable`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `ResolveRuntimeKeepAliveDisable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeKeepAlivePreserve`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
 - `ResolveLastStartTurnPublicTerminalNoPendingIdle`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingAdmitted`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingRunning`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingCompleting`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingShuttingDown`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 
 ### Effects
 - `TurnAdmissionProjected`
@@ -156,7 +159,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Invariants
 - `shutdown_phase_is_not_active`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_interrupt_and_shutdown`
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

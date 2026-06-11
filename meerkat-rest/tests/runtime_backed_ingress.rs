@@ -121,7 +121,6 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     ));
     let state = AppState {
         store_path: store_path.clone(),
-        default_model: config.agent.model.clone().into(),
         max_tokens: config.agent.max_tokens_per_turn,
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,

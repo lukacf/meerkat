@@ -5,7 +5,7 @@
 //! types and handles interleaved reasoning/tool-use blocks correctly.
 
 use indexmap::IndexMap;
-use meerkat_core::{AssistantBlock, ProviderMeta};
+use meerkat_core::{AssistantBlock, ProviderMeta, ServerToolKind};
 use serde_json::value::RawValue;
 
 /// Errors that can occur during stream assembly.
@@ -258,14 +258,14 @@ impl BlockAssembler {
     pub fn on_server_tool_content(
         &mut self,
         id: Option<String>,
-        name: String,
+        kind: ServerToolKind,
         content: serde_json::Value,
         meta: Option<Box<ProviderMeta>>,
     ) {
         self.slots.push(BlockSlot::Finalized(Box::new(
             AssistantBlock::ServerToolContent {
                 id,
-                name,
+                kind,
                 content,
                 meta,
             },

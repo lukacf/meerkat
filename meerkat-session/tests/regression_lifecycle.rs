@@ -19,6 +19,7 @@ use meerkat_core::service::{
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
 };
+use meerkat_core::{SnapshotProjectionError, SystemContextStateError};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::PersistentSessionService;
 use meerkat_session::ephemeral::SessionSnapshot;
@@ -86,9 +87,11 @@ impl SessionAgent for MockAgent {
             let _ = event_tx
                 .send(AgentEvent::RunFailed {
                     session_id: self.session_id.clone(),
-                    error_class: meerkat_core::event::AgentErrorClass::Internal,
-                    error: "simulated failure".to_string(),
-                    error_report: None,
+                    error_report: meerkat_core::event::AgentErrorReport {
+                        class: meerkat_core::event::AgentErrorClass::Internal,
+                        reason: None,
+                        message: "simulated failure".to_string(),
+                    },
                     terminal_cause_kind: None,
                 })
                 .await;
@@ -100,7 +103,9 @@ impl SessionAgent for MockAgent {
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id: self.session_id.clone(),
-                prompt: meerkat_core::ContentInput::Text("test".to_string()),
+                input: meerkat_core::types::RunInput::Content {
+                    content: meerkat_core::ContentInput::Text("test".to_string()),
+                },
             })
             .await;
 
@@ -180,12 +185,12 @@ impl SessionAgent for MockAgent {
         }
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -193,14 +198,20 @@ impl SessionAgent for MockAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        let mut session = self.session_clone();
+        let mut session = self
+            .session_clone()
+            .expect("test session clone should succeed");
         session.append_system_context_blocks(appends);
         self.message_count = session.messages().len();
         self.system_context_state
@@ -269,8 +280,10 @@ impl SessionAgent for SnapshotAgent {
         }
     }
 
-    fn execution_snapshot(&self) -> Option<AgentExecutionSnapshot> {
-        Some(self.execution_snapshot.clone())
+    fn execution_snapshot(
+        &self,
+    ) -> Result<Option<AgentExecutionSnapshot>, SnapshotProjectionError> {
+        Ok(Some(self.execution_snapshot.clone()))
     }
 
     fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
@@ -281,12 +294,12 @@ impl SessionAgent for SnapshotAgent {
         self.external_tool_surface_snapshot.clone()
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -294,7 +307,11 @@ impl SessionAgent for SnapshotAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
@@ -517,12 +534,12 @@ impl SessionAgent for RecordingTurnAgent {
         }
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -530,7 +547,11 @@ impl SessionAgent for RecordingTurnAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
@@ -601,12 +622,10 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        render_metadata: None,
-        system_prompt: None,
+        system_prompt: meerkat_core::SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
 
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
@@ -1130,7 +1149,9 @@ async fn inject_context_applied_when_idle() {
         .append_system_context(
             &sid,
             AppendSystemContextRequest {
-                text: "New runtime context".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "New runtime context".to_string(),
+                ),
                 source: Some("test".to_string()),
                 idempotency_key: Some("ctx-idle-1".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1163,7 +1184,9 @@ async fn inject_context_duplicate_idempotent() {
     let sid = created.session_id;
 
     let req = AppendSystemContextRequest {
-        text: "Idempotent context".to_string(),
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+            "Idempotent context".to_string(),
+        ),
         source: Some("test".to_string()),
         idempotency_key: Some("ctx-dedup-1".to_string()),
         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1210,15 +1233,18 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 system_prompt: None,
                 event_tx: None,
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                    Some(RenderMetadata {
-                        class: RenderClass::ExternalEvent,
-                        salience: RenderSalience::Urgent,
-                    }),
                     HandlingMode::Steer,
                     None,
-                    None,
                     Vec::new(),
-                    None,
+                    Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            render_metadata: Some(RenderMetadata {
+                                class: RenderClass::ExternalEvent,
+                                salience: RenderSalience::Urgent,
+                            }),
+                            ..Default::default()
+                        },
+                    ),
                 ),
             },
         )
@@ -1291,13 +1317,13 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         applied_cursor: 17,
     };
     let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec!["alpha".to_string(), "beta".to_string()],
-        visible_names: vec!["beta".to_string()],
+        known_base_names: vec!["alpha".into(), "beta".into()],
+        visible_names: vec!["beta".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["alpha".to_string()].into_iter().collect(),
         ),
-        active_turn_allow: Some(vec!["beta".to_string()]),
+        active_turn_allow: Some(vec!["beta".into()]),
         active_turn_deny: Vec::new(),
         active_revision: meerkat_core::ToolScopeRevision(3),
         staged_external_filter: meerkat_core::ToolFilter::Deny(
@@ -1347,18 +1373,14 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         applied_cursor: 0,
     };
     let expected = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec![
-            "read_file".to_string(),
-            "search".to_string(),
-            "write_file".to_string(),
-        ],
-        visible_names: vec!["read_file".to_string(), "search".to_string()],
+        known_base_names: vec!["read_file".into(), "search".into(), "write_file".into()],
+        visible_names: vec!["read_file".into(), "search".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["write_file".to_string()].into_iter().collect(),
         ),
         active_turn_allow: None,
-        active_turn_deny: vec!["write_file".to_string()],
+        active_turn_deny: vec!["write_file".into()],
         active_revision: meerkat_core::ToolScopeRevision(4),
         staged_external_filter: meerkat_core::ToolFilter::Allow(
             ["read_file".to_string(), "search".to_string()]
@@ -1409,8 +1431,8 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         applied_cursor: 0,
     };
     let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec!["mcp__planner".to_string()],
-        visible_names: vec!["mcp__planner".to_string()],
+        known_base_names: vec!["mcp__planner".into()],
+        visible_names: vec!["mcp__planner".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::All,
         active_turn_allow: None,

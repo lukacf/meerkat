@@ -11,14 +11,16 @@ pub mod host;
 pub mod transport;
 #[cfg(feature = "webrtc")]
 pub mod webrtc;
+pub mod wire_input;
 
 pub use host::{
-    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError,
+    DEFAULT_LIVE_TOOL_TIMEOUT, DeltaIdentity, LiveAdapterHost, LiveAdapterHostError,
     LiveChannelCloseCommitAuthority, LiveChannelCloseObservation, LiveChannelId,
     LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
     LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionError, LiveProjectionSink,
-    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatcher, LiveTranscriptIdentity,
-    NoOpProjectionSink, ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
+    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatchTimeout, LiveToolDispatcher,
+    LiveTranscriptIdentity, LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome,
+    ObservationRouting, ToolDispatchSkipReason,
 };
 pub use transport::{
     LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,
@@ -31,6 +33,7 @@ pub use webrtc::{
     LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcAnswerAccepted, LiveWebrtcError,
     LiveWebrtcState, WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
 };
+pub use wire_input::{LiveInputChunkDecodeError, live_input_chunk_from_wire};
 
 // E26 regression: `meerkat-live` must not depend on `meerkat-runtime`. The
 // dependency direction is: `meerkat-live` owns the live-adapter host

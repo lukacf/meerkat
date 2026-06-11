@@ -124,7 +124,7 @@ impl UserMobConfig {
             let skill_key = format!("{name}-skill");
             profiles.insert(
                 ProfileName::from(name.as_str()),
-                ProfileBinding::Inline(Profile {
+                ProfileBinding::Inline(Box::new(Profile {
                     model: resolve_model(model_overrides, name, &agent.model),
                     skills: vec![skill_key.clone()],
                     tools: tools.clone(),
@@ -139,7 +139,7 @@ impl UserMobConfig {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: provider_params.cloned(),
-                }),
+                })),
             );
             skills.insert(
                 skill_key,
@@ -197,11 +197,7 @@ impl UserMobConfig {
                 }
                 flows.insert(
                     FlowId::from(flow_name.as_str()),
-                    FlowSpec {
-                        description: None,
-                        steps: step_specs,
-                        root: None,
-                    },
+                    FlowSpec::new(None, step_specs, None),
                 );
             }
         }

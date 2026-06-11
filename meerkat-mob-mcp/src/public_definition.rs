@@ -13,10 +13,10 @@ use meerkat_mob::{
     Profile, ProfileBinding, ProfileName, StepId, ToolConfig,
     definition::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
-        EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
-        FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode, RepeatUntilSpec, RoleWiringRule,
-        SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorBridgeEndpointConfig,
-        SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
+        EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSchemaRef, FlowSpec,
+        FlowStepSpec, FrameSpec, FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode,
+        RepeatUntilSpec, RoleWiringRule, SkillSource, SpawnPolicyConfig, StepOutputFormat,
+        SupervisorBridgeEndpointConfig, SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
     },
 };
 use std::convert::TryFrom;
@@ -35,6 +35,10 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
         .into_iter()
         .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
         .collect::<Result<_, _>>()?;
+    // `models` reuses the typed core config owner on both sides of the wire;
+    // no re-derivation, just a move.
+    definition.models = input.models;
+    definition.image_generation_provider = input.image_generation_provider;
     definition.wiring = WiringRules {
         auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
         role_wiring: input
@@ -62,6 +66,7 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
     definition.supervisor = input.supervisor.map(|supervisor| SupervisorSpec {
         role: ProfileName::from(supervisor.role),
         escalation_threshold: supervisor.escalation_threshold,
+        escalation_turn_timeout_ms: supervisor.escalation_turn_timeout_ms,
     });
     definition.limits = input.limits.map(decode_limits);
     definition.spawn_policy = input.spawn_policy.map(decode_spawn_policy);
@@ -82,8 +87,24 @@ fn decode_profile_binding(
             let profile = decode_profile(profile_input)?;
             Ok((
                 ProfileName::from(profile_name),
-                ProfileBinding::Inline(profile),
+                ProfileBinding::Inline(Box::new(profile)),
             ))
+        }
+    }
+}
+
+fn decode_resume_override_field(
+    input: meerkat_contracts::WireMobResumeOverrideField,
+) -> meerkat_mob::ResumeOverrideField {
+    match input {
+        meerkat_contracts::WireMobResumeOverrideField::Model => {
+            meerkat_mob::ResumeOverrideField::Model
+        }
+        meerkat_contracts::WireMobResumeOverrideField::Provider => {
+            meerkat_mob::ResumeOverrideField::Provider
+        }
+        meerkat_contracts::WireMobResumeOverrideField::ProviderParams => {
+            meerkat_mob::ResumeOverrideField::ProviderParams
         }
     }
 }
@@ -91,6 +112,15 @@ fn decode_profile_binding(
 fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
     Ok(Profile {
         model: input.model,
+        provider: input.provider,
+        self_hosted_server_id: input.self_hosted_server_id,
+        image_generation_provider: input.image_generation_provider,
+        auto_compact_threshold: input.auto_compact_threshold,
+        resume_overrides: input
+            .resume_overrides
+            .into_iter()
+            .map(decode_resume_override_field)
+            .collect(),
         skills: input.skills,
         tools: ToolConfig {
             builtins: input.tools.builtins,
@@ -109,14 +139,10 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
         backend: input.backend.map(decode_backend_kind),
         runtime_mode: decode_runtime_mode(input.runtime_mode),
         max_inline_peer_notifications: input.max_inline_peer_notifications,
-        output_schema: input
-            .output_schema
-            .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
-            .transpose()?,
-        provider_params: input
-            .provider_params
-            .map(|wire| serde_json::to_value(wire).map_err(|error| error.to_string()))
-            .transpose()?,
+        // The wire input already carries a typed, validated OutputSchema; keep
+        // its typed MeerkatSchema instead of erasing it back to JSON.
+        output_schema: input.output_schema.map(|schema| schema.schema),
+        provider_params: input.provider_params.map(Into::into),
     })
 }
 
@@ -162,15 +188,15 @@ fn decode_flow_spec(
 ) -> Result<(FlowId, FlowSpec), String> {
     Ok((
         FlowId::from(flow_id),
-        FlowSpec {
-            description: input.description,
-            steps: input
+        FlowSpec::new(
+            input.description,
+            input
                 .steps
                 .into_iter()
                 .map(|(step_id, step)| decode_flow_step(step_id, step))
                 .collect::<Result<IndexMap<_, _>, _>>()?,
-            root: input.root.map(decode_frame_spec).transpose()?,
-        },
+            input.root.map(decode_frame_spec).transpose()?,
+        ),
     ))
 }
 
@@ -189,7 +215,11 @@ fn decode_flow_step(
             collection_policy: decode_collection_policy(input.collection_policy),
             condition: input.condition.map(decode_condition).transpose()?,
             timeout_ms: input.timeout_ms,
-            expected_schema_ref: input.expected_schema_ref,
+            expected_schema_ref: input
+                .expected_schema_ref
+                .map(|raw| FlowSchemaRef::parse(&raw))
+                .transpose()
+                .map_err(|error| format!("invalid expected_schema_ref: {error}"))?,
             branch: input.branch.map(BranchId::from),
             depends_on_mode: decode_dependency_mode(input.depends_on_mode),
             allowed_tools: input.allowed_tools,
@@ -369,6 +399,11 @@ mod tests {
             "lead".to_string(),
             MobProfileBindingInput::Inline(MobProfileInput {
                 model: "gpt-5.4".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
                 skills: vec!["triage".to_string()],
                 tools: MobToolConfigInput {
                     comms: true,
@@ -453,6 +488,8 @@ mod tests {
             id: "triage".to_string(),
             orchestrator: None,
             profiles,
+            models: BTreeMap::new(),
+            image_generation_provider: None,
             wiring: Default::default(),
             skills: BTreeMap::new(),
             backend: MobBackendConfigInput::default(),
@@ -488,7 +525,7 @@ mod tests {
             .get(&FlowId::from("main"))
             .expect("main flow");
         assert_eq!(flow.description.as_deref(), Some("main flow"));
-        assert!(flow.root.is_some());
+        assert!(!flow.root.nodes.is_empty());
         let step = flow.steps.get(&StepId::from("plan")).expect("plan step");
         assert_eq!(step.branch, Some(BranchId::from("winner")));
         assert_eq!(step.output_format, StepOutputFormat::Text);

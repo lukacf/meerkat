@@ -793,6 +793,60 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_aliases_and_projection_w
     );
 }
 
+/// The CAS store-write denial is an AST method-call rule, not a line-text
+/// scan: a `cas_*` token inside a comment or string literal must not flag,
+/// while a real call split across lines and the UFCS call form must flag.
+#[test]
+fn live_flow_cas_write_ratchet_is_ast_shaped_not_token_shaped() {
+    let dir = tempdir().expect("tempdir");
+    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    fs::create_dir_all(&runtime).expect("create runtime dir");
+    fs::write(
+        runtime.join("cas_shapes.rs"),
+        concat!(
+            "// commentary mentioning .cas_flow_state( must not flag\n",
+            "const DOC: &str = \"docs about .cas_run_snapshot( in a string\";\n",
+            "async fn multi_line(store: Store) {\n",
+            "    let _ = store\n",
+            "        .cas_loop_state(&id, &old, &new)\n",
+            "        .await;\n",
+            "}\n",
+            "async fn ufcs(store: Store) {\n",
+            "    let _ = Store::cas_frame_state(&store, &id, &old, &new).await;\n",
+            "}\n",
+        ),
+    )
+    .expect("write cas shapes");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow reducer transition mismatches");
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_loop_state(")
+                && mismatch.contains("cas_shapes.rs:5")),
+        "expected multi-line CAS call to flag at the method ident line, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_frame_state(")),
+        "expected UFCS CAS call form to flag, got {mismatches:#?}"
+    );
+    assert!(
+        !mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains(".cas_run_snapshot(")),
+        "string-literal CAS token must not flag, got {mismatches:#?}"
+    );
+    assert!(
+        !mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("cas_shapes.rs:1")),
+        "comment CAS token must not flag, got {mismatches:#?}"
+    );
+}
+
 #[test]
 fn mob_runtime_catalog_command_gate_ratchet_rejects_missing_and_warning_only_gates() {
     let dir = tempdir().expect("tempdir");
@@ -1010,5 +1064,147 @@ async fn commit_flow_frame_store_plan_in_actor(
     assert!(
         mismatches.is_empty(),
         "expected actor-gated store plan commits to be accepted, got {mismatches:#?}"
+    );
+}
+
+/// The `run.rs` direct-use allow-list is AST-shaped (K22(b)): the reducer
+/// apply wrapper is allowed only when the enclosing function *structurally*
+/// requires the family's flow authority before the transition, and the
+/// `into_input` adapter is allowed only on the family command type with the
+/// structural `-> <module>::Input` return type.
+#[test]
+fn flow_reducer_run_rs_direct_use_allow_list_is_ast_shaped() {
+    let dir = tempdir().expect("tempdir");
+    let mob_src = dir.path().join("meerkat-mob/src");
+    fs::create_dir_all(&mob_src).expect("create mob src dir");
+    fs::write(
+        mob_src.join("run.rs"),
+        concat!(
+            "pub(crate) fn apply_mob_machine_flow_run_command(\n",
+            "    state: &flow_run::State,\n",
+            "    command: MobMachineFlowRunCommand,\n",
+            "    authority: MobMachineFlowAuthorityToken,\n",
+            ") -> Result<flow_run::Outcome, MobError> {\n",
+            "    authority.require(\n",
+            "        MobMachineFlowAuthorityKind::FlowRun(command.kind()),\n",
+            "    )?;\n",
+            "    flow_run::transition(state, command, &ctx)\n",
+            "}\n",
+            "impl MobMachineFlowFrameCommand {\n",
+            "    fn into_input(self) -> flow_frame::Input {\n",
+            "        flow_frame::Input::SealFrame(payload)\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("write allowed run.rs shapes");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow reducer transition mismatches");
+    assert!(
+        mismatches.is_empty(),
+        "structurally-authorized run.rs wrapper/adapter shapes must be allowed, got {mismatches:#?}"
+    );
+}
+
+/// Evasion case: an `authority.require(..)` that exists only inside a
+/// comment or string literal must NOT satisfy the allow-list — the prior
+/// line-window scan would have accepted it.
+#[test]
+fn flow_reducer_run_rs_allow_list_rejects_comment_and_string_authority() {
+    let dir = tempdir().expect("tempdir");
+    let mob_src = dir.path().join("meerkat-mob/src");
+    fs::create_dir_all(&mob_src).expect("create mob src dir");
+    fs::write(
+        mob_src.join("run.rs"),
+        concat!(
+            "pub(crate) fn apply_mob_machine_flow_run_command(\n",
+            "    state: &flow_run::State,\n",
+            "    command: MobMachineFlowRunCommand,\n",
+            ") -> Result<flow_run::Outcome, MobError> {\n",
+            "    // authority.require(MobMachineFlowAuthorityKind::FlowRun(command.kind()))?;\n",
+            "    let doc = \"authority.require(MobMachineFlowAuthorityKind::FlowRun)\";\n",
+            "    flow_run::transition(state, command, &ctx)\n",
+            "}\n",
+        ),
+    )
+    .expect("write unauthorized run.rs wrapper");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow reducer transition mismatches");
+    assert!(
+        mismatches.iter().any(
+            |mismatch| mismatch.contains("direct live-flow reducer transition")
+                && mismatch.contains("meerkat-mob/src/run.rs")
+        ),
+        "comment/string authority.require must not satisfy the allow-list, got {mismatches:#?}"
+    );
+}
+
+/// The allow-list keys on structural facts, not file-local text: the same
+/// wrapper shape outside `meerkat-mob/src/run.rs`, a wrapper requiring the
+/// *wrong* authority family, and an `into_input` adapter on the wrong impl
+/// type must all stay rejected.
+#[test]
+fn flow_reducer_direct_use_allow_list_rejects_wrong_structural_facts() {
+    let dir = tempdir().expect("tempdir");
+    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    fs::create_dir_all(&runtime).expect("create runtime dir");
+    // Right shape, wrong file.
+    fs::write(
+        runtime.join("wrong_file.rs"),
+        concat!(
+            "pub(crate) fn apply_mob_machine_flow_run_command(\n",
+            "    state: &flow_run::State,\n",
+            "    authority: MobMachineFlowAuthorityToken,\n",
+            ") -> Result<flow_run::Outcome, MobError> {\n",
+            "    authority.require(MobMachineFlowAuthorityKind::FlowRun(kind))?;\n",
+            "    flow_run::transition(state, command, &ctx)\n",
+            "}\n",
+        ),
+    )
+    .expect("write wrong-file wrapper");
+    let mob_src = dir.path().join("meerkat-mob/src");
+    // Wrong authority family + wrong adapter impl type, right file.
+    fs::write(
+        mob_src.join("run.rs"),
+        concat!(
+            "pub(crate) fn apply_mob_machine_flow_run_command(\n",
+            "    state: &flow_run::State,\n",
+            "    authority: MobMachineFlowAuthorityToken,\n",
+            ") -> Result<flow_run::Outcome, MobError> {\n",
+            "    authority.require(MobMachineFlowAuthorityKind::FlowFrame(kind))?;\n",
+            "    flow_run::transition(state, command, &ctx)\n",
+            "}\n",
+            "impl SomeOtherType {\n",
+            "    fn into_input(self) -> flow_frame::Input {\n",
+            "        flow_frame::Input::SealFrame(payload)\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("write wrong-facts run.rs");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow reducer transition mismatches");
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("meerkat-mob/src/runtime/wrong_file.rs")),
+        "wrapper shape outside run.rs must stay rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches.iter().any(
+            |mismatch| mismatch.contains("direct live-flow reducer transition")
+                && mismatch.contains("meerkat-mob/src/run.rs")
+        ),
+        "wrapper requiring the wrong authority family must stay rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches.iter().any(
+            |mismatch| mismatch.contains("direct live-flow reducer input")
+                && mismatch.contains("meerkat-mob/src/run.rs")
+        ),
+        "adapter on the wrong impl type must stay rejected, got {mismatches:#?}"
     );
 }

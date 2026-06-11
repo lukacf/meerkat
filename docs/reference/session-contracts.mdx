@@ -10,7 +10,7 @@ This page is the canonical settled-state contract for session and runtime behavi
 
 Meerkat has one canonical semantic path:
 
-- **runtime-backed surfaces** own `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, and request/turn commit semantics
+- **the runtime control plane** (`MeerkatMachine` in `meerkat-runtime`) owns `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, and request/turn commit semantics; runtime-backed surfaces reach those semantics only by lowering into it
 - **`SessionService`** is the substrate lifecycle seam used by those surfaces
 - **`EphemeralSessionService` / `build_ephemeral_service`** remain valid for testing, embedded use, and WASM internals, but they are not the primary product path and do not own runtime semantics
 

@@ -1,10 +1,10 @@
 #![allow(clippy::field_reassign_with_default, clippy::panic)]
 
 use meerkat_core::{
-    AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookCapability,
-    HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation, HookLlmRequest,
-    HookOutcome, HookPatch, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeConfig,
-    HookRuntimeKind, HooksConfig, SessionId,
+    AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookAdapterConfig,
+    HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation,
+    HookLlmRequest, HookOutcome, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeKind,
+    HooksConfig, RunInput, SessionId,
 };
 use serde_json::json;
 
@@ -21,7 +21,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Guardrail,
             priority: 5,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::InProcess,
                 Some(json!({"name": "guard_pre_tool", "config": {"mode": "strict"}})),
             )?,
@@ -44,19 +44,33 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         point: HookPoint::PreLlmRequest,
         session_id: SessionId::new(),
         turn_number: Some(1),
-        prompt_input: Some(ContentInput::Text("hello typed prompt".to_string())),
-        prompt: Some("legacy prompt projection".to_string()),
+        prompt_input: Some(RunInput::Content {
+            content: ContentInput::Text("hello typed prompt".to_string()),
+        }),
         error_report: Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
             reason: None,
             message: "typed failure".to_string(),
         }),
         error_class: Some(AgentErrorClass::Llm),
-        error: Some("legacy failure projection".to_string()),
         llm_request: Some(HookLlmRequest {
             max_tokens: 512,
             temperature: Some(0.1),
-            provider_params: Some(json!({"reasoning_effort": "high"})),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    provider_tag: Some(
+                        meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                            meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                                reasoning_effort: Some(
+                                    meerkat_core::lifecycle::run_primitive::ReasoningEffort::High,
+                                ),
+                                ..Default::default()
+                            },
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ),
             message_count: 2,
         }),
         llm_response: None,
@@ -70,19 +84,30 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         priority: 1,
         registration_index: 0,
         decision: Some(HookDecision::Allow),
-        patches: vec![],
-        published_patches: vec![],
-        error: None,
+        failure_reason: None,
         duration_ms: Some(2),
     };
 
-    let inv_rt: HookInvocation = serde_json::from_value(serde_json::to_value(invocation.clone())?)?;
+    let encoded = serde_json::to_value(invocation.clone())?;
+    // The wire envelope carries serialize-only projections of the typed
+    // owners for external hook consumers.
+    assert_eq!(
+        encoded.get("prompt").and_then(|v| v.as_str()),
+        Some("hello typed prompt")
+    );
+    assert_eq!(
+        encoded.get("error").and_then(|v| v.as_str()),
+        Some("typed failure")
+    );
+    let inv_rt: HookInvocation = serde_json::from_value(encoded)?;
     let out_rt: HookOutcome = serde_json::from_value(serde_json::to_value(outcome.clone())?)?;
 
     assert_eq!(inv_rt, invocation);
     assert_eq!(
         inv_rt.prompt_input,
-        Some(ContentInput::Text("hello typed prompt".to_string()))
+        Some(RunInput::Content {
+            content: ContentInput::Text("hello typed prompt".to_string()),
+        })
     );
     assert_eq!(
         inv_rt.error_report,
@@ -93,33 +118,6 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         })
     );
     assert_eq!(out_rt, outcome);
-    Ok(())
-}
-
-#[test]
-fn legacy_semantic_hook_patch_payloads_are_rejected_contract()
--> Result<(), Box<dyn std::error::Error>> {
-    let payloads = [
-        json!({
-            "patch_type": "llm_request",
-            "max_tokens": 256,
-            "temperature": 0.2,
-            "provider_params": {"reasoning_effort": "low"}
-        }),
-        json!({"patch_type": "assistant_text", "text": "patched"}),
-        json!({"patch_type": "tool_args", "args": {"query": "patched"}}),
-        json!({"patch_type": "tool_result", "content": "patched", "is_error": false}),
-        json!({"patch_type": "run_result", "text": "patched"}),
-    ];
-
-    for payload in payloads {
-        let result = serde_json::from_value::<HookPatch>(payload.clone());
-        assert!(
-            result.is_err(),
-            "legacy semantic HookPatch payload must be rejected: {payload}"
-        );
-    }
-
     Ok(())
 }
 
@@ -308,7 +306,7 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Guardrail,
             priority: 1,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::InProcess,
                 Some(json!({"name": "run_guardrail"})),
             )?,

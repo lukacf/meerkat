@@ -693,7 +693,7 @@ impl MobOperatorToolDispatcher {
         &self,
         identity: &AgentIdentity,
     ) -> Result<serde_json::Value, MobError> {
-        let entry = self.handle.get_member(identity).await.ok_or_else(|| {
+        let entry = self.handle.get_member(identity).await?.ok_or_else(|| {
             MobError::Internal(format!(
                 "spawn succeeded but roster entry missing for '{identity}'"
             ))
@@ -710,7 +710,7 @@ impl MobOperatorToolDispatcher {
         &self,
         identity: &AgentIdentity,
     ) -> Result<meerkat_contracts::MobSpawnManyResultEntry, MobError> {
-        let entry = self.handle.get_member(identity).await.ok_or_else(|| {
+        let entry = self.handle.get_member(identity).await?.ok_or_else(|| {
             MobError::Internal(format!(
                 "spawn succeeded but roster entry missing for '{identity}'"
             ))

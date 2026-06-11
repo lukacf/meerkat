@@ -3,11 +3,15 @@ use crate::manifest::MobpackManifest;
 use crate::signing::{PackSignature, sign_digest};
 use crate::targz::{create_targz, extract_targz_safe, normalize_for_archive};
 use crate::validate::PackValidationError;
+use crate::vocabulary::{
+    ArchiveSection, Ed25519PublicKeyHex, Ed25519SignatureHex, Rfc3339Timestamp, SignerId,
+};
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackResult {
@@ -65,12 +69,18 @@ pub fn pack_directory_with_excludes(
         let digest = compute_archive_digest(&unsigned_archive)?;
         let signing_key = load_signing_key(request.key_path)?;
         let signature = sign_digest(&signing_key, digest);
+        let signer_id = SignerId::from_str(request.signer_id).map_err(|err| {
+            PackValidationError::InvalidSignature(format!("invalid signer id: {err}"))
+        })?;
+        let timestamp =
+            Rfc3339Timestamp::from_str(&Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+                .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?;
         let signature_toml = toml::to_string(&PackSignature {
-            signer_id: request.signer_id.to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            signer_id,
+            public_key: Ed25519PublicKeyHex::from_verifying_key(signing_key.verifying_key()),
             digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            signature: Ed25519SignatureHex::from_signature(signature),
+            timestamp,
         })
         .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         files.insert("signature.toml".to_string(), signature_toml.into_bytes());
@@ -188,7 +198,7 @@ fn validate_skill_paths(
                 reason: format!("must use canonical archive path `{normalized_path}`"),
             });
         }
-        if !normalized_path.starts_with("skills/") {
+        if ArchiveSection::classify(&normalized_path) != Some(ArchiveSection::Skills) {
             return Err(PackValidationError::InvalidSkillPath {
                 skill_name: skill_name.clone(),
                 path: path.clone(),
@@ -295,7 +305,6 @@ fn load_signing_key(path: &Path) -> Result<SigningKey, PackValidationError> {
 mod tests {
     use super::*;
     use crate::signing::verify_digest;
-    use ed25519_dalek::{Signature, VerifyingKey};
     use tempfile::TempDir;
 
     #[test]
@@ -375,19 +384,14 @@ mod tests {
         let recomputed = compute_archive_digest(&packed.archive_bytes).unwrap();
         assert_eq!(recomputed, packed.digest);
         assert_eq!(signature.digest, packed.digest);
-        assert_eq!(signature.signer_id, "test-signer");
+        assert_eq!(signature.signer_id.as_str(), "test-signer");
 
-        let vk_bytes: [u8; 32] = hex::decode(signature.public_key)
-            .unwrap()
-            .try_into()
-            .expect("public key bytes");
-        let verifying_key = VerifyingKey::from_bytes(&vk_bytes).unwrap();
-        let sig_bytes: [u8; 64] = hex::decode(signature.signature)
-            .unwrap()
-            .try_into()
-            .expect("sig bytes");
-        let ed_sig = Signature::from_bytes(&sig_bytes);
-        verify_digest(&verifying_key, signature.digest, &ed_sig).unwrap();
+        verify_digest(
+            signature.public_key.verifying_key(),
+            signature.digest,
+            signature.signature.signature(),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -560,11 +560,14 @@ The `limit` is capped at 20 regardless of the requested value.
   {
     "content": "The project codename is AURORA-7",
     "score": 0.87,
-    "session_id": "<uuid>",
-    "turn": 3
+    "source_range": { "start": 3, "end": 4 }
   }
 ]
 ```
+
+`source_range` is the half-open `[start, end)` offset range of the source
+message(s) the entry was indexed from. Memory is scoped to a single session;
+results do not carry a `session_id`, and there is no cross-session recall.
 
 Returns an empty array if no matches are found.
 
@@ -704,7 +707,7 @@ Generate or edit an assistant-owned image through the session image-generation s
 
 **Supported universal options:** `size` accepts `auto`, `1024x1024`, `1024x1536`, `1536x1024`, or `WIDTHxHEIGHT`; `quality` accepts `auto`, `low`, `medium`, `high`; `format` accepts `auto`, `png`, `jpeg`, `jpg`, `webp`; `count` is currently limited to `1`.
 
-**Provider params:** Use top-level `size`, `quality`, `format`, and `intent` for normal requests; these are Meerkat fields, not raw provider params. For the current `gpt-image-2` default, OpenAI `provider_params` should normally be limited to `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; `background` is `auto` or `opaque` only, `output_compression` applies when `format` is `jpeg`/`webp`, `moderation` is `auto` or `low`, `action` is usually omitted in favor of top-level `intent`, and `input_fidelity` is not accepted by Meerkat 0.6.23. Gemini accepts `aspect_ratio` and `image_size`.
+**Provider params:** Use top-level `size`, `quality`, `format`, and `intent` for normal requests; these are Meerkat fields, not raw provider params. For the current `gpt-image-2` default, OpenAI `provider_params` should normally be limited to `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; `background` is `auto` or `opaque` only, `output_compression` applies when `format` is `jpeg`/`webp`, `moderation` is `auto` or `low`, `action` is usually omitted in favor of top-level `intent`, and `input_fidelity` is not accepted by Meerkat. Gemini accepts `aspect_ratio` and `image_size`.
 
 **Returns:** `ImageGenerationToolResult` JSON containing `operation_id`, `terminal`, `images`, `provider_text`, `revised_prompt`, `native_metadata`, and `warnings`. Each generated image includes `blob_ref.blob_id`, which can be saved from inside the session with `blob_save_file` or fetched externally with `rkat blob get <blob_id> --output image.png`.
 

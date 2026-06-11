@@ -193,15 +193,10 @@ fn peer_reply_classified_effect(
 }
 
 impl PeerInteractionHandle for RuntimePeerInteractionHandle {
-    fn request_sent(
-        &self,
-        corr_id: PeerCorrelationId,
-        to: String,
-    ) -> Result<(), DslTransitionError> {
+    fn request_sent(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestSent {
                 corr_id: corr_id.into(),
-                to,
             },
             "PeerInteractionHandle::request_sent",
         )
@@ -245,6 +240,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
                 corr_id: corr_id.into(),
             },
             "PeerInteractionHandle::request_timed_out",
+        )
+    }
+
+    fn request_send_failed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        self.apply_input_and_dispatch_cleanup(
+            mm_dsl::MeerkatMachineInput::PeerRequestSendFailed {
+                corr_id: corr_id.into(),
+            },
+            "PeerInteractionHandle::request_send_failed",
         )
     }
 

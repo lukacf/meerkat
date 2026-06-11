@@ -45,9 +45,9 @@ use meerkat_core::types::{AssistantBlock, ContentInput, SessionId, StopReason, U
 use meerkat_live::{
     LiveChannelCloseFeedback, LiveChannelCloseObservation, LiveChannelId,
     LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
-    LiveProjectionSink, LiveTokenString, LiveTranscriptIdentity, LiveWsTokenAdmission,
-    LiveWsTokenAdmissionPublicErrorClass, LiveWsTokenAdmissionRejection, LiveWsTokenAuthority,
-    LiveWsTokenIssue,
+    LiveProjectionSink, LiveTokenString, LiveTranscriptIdentity, LiveTranscriptIdentityError,
+    LiveWsTokenAdmission, LiveWsTokenAdmissionPublicErrorClass, LiveWsTokenAdmissionRejection,
+    LiveWsTokenAuthority, LiveWsTokenIssue,
 };
 
 use crate::session_runtime::SessionRuntime;
@@ -170,36 +170,59 @@ impl SessionServiceProjectionSink {
 /// Build the realtime-transcript event the production sink stages on the
 /// **display-text** lane. Extracted so unit tests can assert the exact
 /// event shape without spinning a full `SessionRuntime`.
+///
+/// #199: the required delta identity triple (`response_id` / `delta_id` /
+/// `item_id`) is resolved through the canonical fail-closed accessor
+/// [`LiveTranscriptIdentity::require_delta_identity`] rather than coalesced to
+/// empty strings with `unwrap_or_default()`. A delta missing any required id
+/// yields a typed [`LiveTranscriptIdentityError`] so the projection rejects the
+/// malformed delta instead of emitting empty-string identity truth.
 fn build_assistant_text_delta_event(
     delta: &str,
     identity: LiveTranscriptIdentity<'_>,
-) -> RealtimeTranscriptEvent {
-    RealtimeTranscriptEvent::AssistantTextDelta {
-        response_id: identity.response_id.unwrap_or_default().to_string(),
-        delta_id: identity.delta_id.unwrap_or_default().to_string(),
-        item_id: identity.provider_item_id.unwrap_or_default().to_string(),
-        previous_item_id: identity.previous_item_id.map(|s| s.to_string()),
-        content_index: identity.content_index.unwrap_or(0),
+) -> Result<RealtimeTranscriptEvent, LiveTranscriptIdentityError> {
+    let resolved = identity.require_delta_identity()?;
+    Ok(RealtimeTranscriptEvent::AssistantTextDelta {
+        response_id: resolved.response_id.to_string(),
+        delta_id: resolved.delta_id.to_string(),
+        item_id: resolved.item_id.to_string(),
+        previous_item_id: resolved.previous_item_id.map(|s| s.to_string()),
+        content_index: resolved.content_index.unwrap_or(0),
         delta: delta.to_string(),
-    }
+    })
 }
 
 /// Build the realtime-transcript event the production sink stages on the
 /// **spoken-transcript** lane. Extracted so unit tests can pin the
 /// `AssistantTranscriptDelta` variant (T9/T10) without a full
 /// `SessionRuntime`.
+///
+/// #199: identity is resolved via the fail-closed
+/// [`LiveTranscriptIdentity::require_delta_identity`] accessor; a missing
+/// required id yields a typed [`LiveTranscriptIdentityError`].
 fn build_assistant_transcript_delta_event(
     delta: &str,
     identity: LiveTranscriptIdentity<'_>,
-) -> RealtimeTranscriptEvent {
-    RealtimeTranscriptEvent::AssistantTranscriptDelta {
-        response_id: identity.response_id.unwrap_or_default().to_string(),
-        delta_id: identity.delta_id.unwrap_or_default().to_string(),
-        item_id: identity.provider_item_id.unwrap_or_default().to_string(),
-        previous_item_id: identity.previous_item_id.map(|s| s.to_string()),
-        content_index: identity.content_index.unwrap_or(0),
+) -> Result<RealtimeTranscriptEvent, LiveTranscriptIdentityError> {
+    let resolved = identity.require_delta_identity()?;
+    Ok(RealtimeTranscriptEvent::AssistantTranscriptDelta {
+        response_id: resolved.response_id.to_string(),
+        delta_id: resolved.delta_id.to_string(),
+        item_id: resolved.item_id.to_string(),
+        previous_item_id: resolved.previous_item_id.map(|s| s.to_string()),
+        content_index: resolved.content_index.unwrap_or(0),
         delta: delta.to_string(),
-    }
+    })
+}
+
+/// Map a typed [`LiveTranscriptIdentityError`] into a [`LiveProjectionError`].
+///
+/// A malformed delta (missing required identity) is a projection rejection,
+/// not an internal fault: it lands in [`LiveProjectionError::Rejected`] carrying
+/// the typed cause's message, mirroring the `SessionError::Unsupported`
+/// classification rather than collapsing into an opaque internal error.
+fn identity_error_to_projection(err: LiveTranscriptIdentityError) -> LiveProjectionError {
+    LiveProjectionError::Rejected(err.to_string())
 }
 
 /// Collapse arrival-order display-text fragments into a single
@@ -223,17 +246,19 @@ fn collapse_pending_blocks(buffered: Vec<PendingAssistantContent>) -> Vec<Assist
     }]
 }
 
+/// Classify a [`meerkat_core::SessionError`] into a typed
+/// [`LiveProjectionError`].
+///
+/// Routes through the single canonical classification owner
+/// [`LiveProjectionError::from_session_error`] (meerkat-live) so every
+/// `SessionError` variant lands in a distinct typed `LiveProjectionError`
+/// carrying the session error's stable `code()` — no variant is collapsed into
+/// a prose-only `Internal(to_string())` at this surface.
 fn session_error_to_projection(
     err: meerkat_core::SessionError,
     id: &SessionId,
 ) -> LiveProjectionError {
-    match err {
-        meerkat_core::SessionError::NotFound { .. } => {
-            LiveProjectionError::SessionNotFound(id.clone())
-        }
-        meerkat_core::SessionError::Unsupported(reason) => LiveProjectionError::Rejected(reason),
-        other => LiveProjectionError::Internal(other.to_string()),
-    }
+    LiveProjectionError::from_session_error(id, err)
 }
 
 #[async_trait]
@@ -472,7 +497,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // plumbed end-to-end via `LiveTranscriptIdentity`.
         // T6: this lane is **display text** (`AssistantBlock::Text`); the
         // spoken-transcript lane is `append_assistant_transcript_delta`.
-        let event = build_assistant_text_delta_event(delta, identity);
+        let event = build_assistant_text_delta_event(delta, identity)
+            .map_err(identity_error_to_projection)?;
         self.runtime
             .append_realtime_transcript_event(session_id, event)
             .await
@@ -495,7 +521,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // instead of `AssistantBlock::Text` — fixing the Phase-2 follow-up
         // where transcript deltas were collapsing onto the display-text
         // staging path.
-        let event = build_assistant_transcript_delta_event(delta, identity);
+        let event = build_assistant_transcript_delta_event(delta, identity)
+            .map_err(identity_error_to_projection)?;
         self.runtime
             .append_realtime_transcript_event(session_id, event)
             .await
@@ -802,14 +829,11 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         code: LiveAdapterErrorCode,
         message: &str,
     ) -> Result<(), LiveProjectionError> {
-        // Surface a tracing event so operators can correlate. The host has
-        // already terminalized the channel state (status=Closed + reap timer);
-        // session-level lifecycle remains in caller hands. A future enhancement
-        // could route this to the runtime's session-event stream once a
-        // canonical terminal-error seam exists on `SessionService`.
         // R6: drop ALL buffered finals across every response_id slot —
         // terminal error invalidates every in-flight response.
         self.drain_all_pending_turns(session_id);
+        // Surface a tracing event so operators can correlate. The host has
+        // already terminalized the channel state (status=Closed + reap timer).
         tracing::warn!(
             target: "meerkat_rpc::live_projection",
             session_id = %session_id,
@@ -817,7 +841,29 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             message,
             "live adapter terminal error",
         );
-        Ok(())
+        // Route the typed terminal cause onto the session's owned event stream
+        // via the canonical `SessionService::record_live_terminal_error` seam
+        // rather than laundering it into a warning + `Ok(())`. The fault is now
+        // observable to session subscribers, not only in tracing.
+        self.runtime
+            .record_live_terminal_error(session_id, code)
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
+    async fn signal_output_audio_degraded(
+        &self,
+        session_id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), LiveProjectionError> {
+        // K16: transport delivery degradation is a typed session-observable
+        // fact, projected onto the session's owned event stream through the
+        // canonical seam — mirroring `signal_terminal_error`, never a
+        // transport-local counter or a tracing-only warning.
+        self.runtime
+            .record_live_output_audio_degraded(session_id, dropped)
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_realtime_transcript(
@@ -843,15 +889,59 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
 mod tests {
     use super::*;
 
+    use meerkat_core::ToolCallId;
     use meerkat_core::live_adapter::{
         LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterObservation,
         LiveAdapterStatus,
     };
     use meerkat_core::ops::ToolDispatchOutcome;
-    use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
-    use meerkat_core::{AgentToolDispatcher, ToolDef};
-    use meerkat_live::LiveAdapterHost;
+    use meerkat_core::types::{ContentBlock, ToolCall, ToolName, ToolResult};
+    use meerkat_live::{LiveAdapterHost, LiveToolDispatchError, LiveToolDispatcher};
     use std::sync::Mutex as StdMutex;
+
+    /// #301: the surface mapper routes through the canonical typed owner so
+    /// distinct `SessionError` variants land in distinct typed
+    /// `LiveProjectionError` variants — no collapse into `Internal(to_string())`.
+    #[test]
+    fn session_error_maps_to_distinct_typed_projection_variants() {
+        let id = SessionId::new();
+
+        assert!(matches!(
+            session_error_to_projection(
+                meerkat_core::SessionError::NotFound { id: id.clone() },
+                &id,
+            ),
+            LiveProjectionError::SessionNotFound(_)
+        ));
+
+        assert!(matches!(
+            session_error_to_projection(
+                meerkat_core::SessionError::Unsupported("nope".to_string()),
+                &id,
+            ),
+            LiveProjectionError::Rejected(_)
+        ));
+
+        assert!(matches!(
+            session_error_to_projection(meerkat_core::SessionError::Busy { id: id.clone() }, &id,),
+            LiveProjectionError::SessionBusy(_)
+        ));
+
+        assert!(matches!(
+            session_error_to_projection(
+                meerkat_core::SessionError::NotRunning { id: id.clone() },
+                &id,
+            ),
+            LiveProjectionError::SessionNotRunning(_)
+        ));
+
+        // Capability-disabled and the catch-all both retain the stable typed
+        // code rather than being flattened into a prose-only Internal.
+        assert!(matches!(
+            session_error_to_projection(meerkat_core::SessionError::PersistenceDisabled, &id),
+            LiveProjectionError::CapabilityDisabled { .. }
+        ));
+    }
 
     fn test_live_identity() -> meerkat_core::SessionLlmIdentity {
         meerkat_core::SessionLlmIdentity {
@@ -868,7 +958,10 @@ mod tests {
         session_id: SessionId,
     ) -> meerkat_live::LiveChannelId {
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let authority = machine
@@ -952,6 +1045,7 @@ mod tests {
         interrupts: StdMutex<Vec<(SessionId, Option<String>)>>,
         completed: StdMutex<Vec<SessionId>>,
         terminals: StdMutex<Vec<(SessionId, LiveAdapterErrorCode)>>,
+        output_audio_degraded: StdMutex<Vec<(SessionId, u64)>>,
     }
 
     #[async_trait]
@@ -1057,6 +1151,18 @@ mod tests {
                 .push((session_id.clone(), response_id.map(|s| s.to_string())));
             Ok(())
         }
+
+        async fn signal_output_audio_degraded(
+            &self,
+            session_id: &SessionId,
+            dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            self.output_audio_degraded
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), dropped));
+            Ok(())
+        }
         async fn signal_turn_completed(
             &self,
             session_id: &SessionId,
@@ -1135,20 +1241,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for RecordingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-        async fn dispatch(
+    impl LiveToolDispatcher for RecordingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            view: ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((view.id.to_string(), view.name.to_string()));
+                .push((call.id.clone(), call.name.clone()));
             Ok(ToolDispatchOutcome::sync_result(ToolResult {
-                tool_use_id: view.id.to_string(),
+                tool_use_id: call.id,
                 is_error: false,
                 content: ContentBlock::text_vec("ok".to_string()),
             }))
@@ -1225,7 +1329,7 @@ mod tests {
         let dispatcher: Arc<RecordingDispatcher> = Arc::new(RecordingDispatcher::default());
         let adapter: Arc<RecordingAdapter> = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as Arc<dyn AgentToolDispatcher>);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as Arc<dyn LiveToolDispatcher>);
         let session_id = test_session_id();
         let channel = open_test_channel(&host, session_id.clone()).await;
         host.attach_adapter(&channel, Arc::clone(&adapter) as Arc<dyn LiveAdapter>)
@@ -1233,8 +1337,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_42".to_string(),
-            tool_name: "echo".to_string(),
+            provider_call_id: ToolCallId::new("call_42"),
+            tool_name: ToolName::new("echo"),
             arguments: serde_json::json!({"value": 1}),
         };
 
@@ -2367,7 +2471,8 @@ mod tests {
             response_id: Some("resp_text"),
             delta_id: Some("delta_text"),
         };
-        let event = build_assistant_text_delta_event("display fragment", identity);
+        let event = build_assistant_text_delta_event("display fragment", identity)
+            .expect("complete identity must build a typed delta event");
         match event {
             RealtimeTranscriptEvent::AssistantTextDelta {
                 response_id,
@@ -2388,6 +2493,51 @@ mod tests {
         }
     }
 
+    /// #199: a delta missing a required identity id fails closed with a typed
+    /// [`LiveTranscriptIdentityError`] rather than emitting a
+    /// `RealtimeTranscriptEvent` carrying empty-string identity.
+    #[test]
+    fn missing_delta_identity_fails_closed_typed() {
+        // Missing response_id.
+        let identity = LiveTranscriptIdentity {
+            provider_item_id: Some("item"),
+            previous_item_id: None,
+            content_index: Some(0),
+            response_id: None,
+            delta_id: Some("delta"),
+        };
+        assert_eq!(
+            build_assistant_text_delta_event("fragment", identity),
+            Err(LiveTranscriptIdentityError::MissingResponseId)
+        );
+
+        // Missing delta_id.
+        let identity = LiveTranscriptIdentity {
+            provider_item_id: Some("item"),
+            previous_item_id: None,
+            content_index: Some(0),
+            response_id: Some("resp"),
+            delta_id: None,
+        };
+        assert_eq!(
+            build_assistant_transcript_delta_event("fragment", identity),
+            Err(LiveTranscriptIdentityError::MissingDeltaId)
+        );
+
+        // Missing item_id.
+        let identity = LiveTranscriptIdentity {
+            provider_item_id: None,
+            previous_item_id: None,
+            content_index: Some(0),
+            response_id: Some("resp"),
+            delta_id: Some("delta"),
+        };
+        assert_eq!(
+            build_assistant_text_delta_event("fragment", identity),
+            Err(LiveTranscriptIdentityError::MissingItemId)
+        );
+    }
+
     #[test]
     fn t10_assistant_transcript_delta_helper_builds_transcript_delta_event() {
         // T10 acceptance: the spoken-transcript path no longer reuses
@@ -2401,7 +2551,8 @@ mod tests {
             response_id: Some("resp_tx"),
             delta_id: Some("delta_tx"),
         };
-        let event = build_assistant_transcript_delta_event("spoken fragment", identity);
+        let event = build_assistant_transcript_delta_event("spoken fragment", identity)
+            .expect("complete identity must build a typed transcript delta event");
         match event {
             RealtimeTranscriptEvent::AssistantTranscriptDelta {
                 response_id,

@@ -492,38 +492,6 @@ impl PeerIngressFact {
         }
     }
 
-    /// Compatibility constructor for tests and legacy non-classified seams.
-    ///
-    /// Prefer constructing a full `peer(...)` fact with canonical peer id,
-    /// signing subject, and route when the ingress came from comms.
-    pub fn legacy_peer_label(
-        interaction_id: InteractionId,
-        label: impl Into<String>,
-        class: PeerInputClass,
-        kind: PeerIngressKind,
-        auth: Option<PeerIngressAuthDecision>,
-        convention: PeerIngressConvention,
-    ) -> Self {
-        let label = label.into();
-        let canonical_peer_id = PeerId::parse(&label).ok();
-        let display_name = PeerName::new(label).ok();
-        let route = canonical_peer_id.map(|peer_id| match &display_name {
-            Some(name) => PeerRoute::with_display_name(peer_id, name.clone()),
-            None => PeerRoute::new(peer_id),
-        });
-        Self {
-            interaction_id,
-            class,
-            kind,
-            canonical_peer_id,
-            display_name,
-            signing_pubkey: None,
-            route,
-            auth,
-            convention,
-        }
-    }
-
     pub fn canonical_peer_id_string(&self) -> Option<String> {
         self.canonical_peer_id.map(|peer_id| peer_id.as_str())
     }
@@ -570,22 +538,6 @@ impl PeerIngressClassification {
             kind,
             auth: PeerIngressAuthDecision::Required,
             lifecycle_kind: None,
-            response_terminality: None,
-        }
-    }
-
-    pub const fn lifecycle(kind: PeerLifecycleKind) -> Self {
-        let class = match kind {
-            PeerLifecycleKind::PeerAdded => PeerInputClass::PeerLifecycleAdded,
-            PeerLifecycleKind::PeerRetired => PeerInputClass::PeerLifecycleRetired,
-            PeerLifecycleKind::PeerUnwired => PeerInputClass::PeerLifecycleUnwired,
-        };
-        Self {
-            class,
-            actionable: peer_input_class_actionable_grouping(class),
-            kind: PeerIngressKind::Request,
-            auth: PeerIngressAuthDecision::Required,
-            lifecycle_kind: Some(kind),
             response_terminality: None,
         }
     }
@@ -730,16 +682,6 @@ pub fn render_peer_ingress_admitted_text(
             format_peer_ack_projection(&facts.from_peer, in_reply_to)
         }
     }
-}
-
-/// Extract the lifecycle subject from typed request/lifecycle parameters.
-pub fn peer_lifecycle_subject(params: &Value, fallback_peer: &str) -> String {
-    params
-        .get("peer")
-        .and_then(Value::as_str)
-        .filter(|peer| !peer.is_empty())
-        .unwrap_or(fallback_peer)
-        .to_string()
 }
 
 /// Canonical peer/event ingress candidate handed to runtime admission.

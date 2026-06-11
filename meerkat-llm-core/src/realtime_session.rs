@@ -223,6 +223,21 @@ pub struct RealtimeSessionOpenConfig {
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
     pub seed_messages: Vec<Message>,
+    /// Authoritative resolved root system prompt for this realtime session.
+    ///
+    /// This is the canonical owner of the live session's system prompt. It is
+    /// populated at projection time by the runtime from the resolved root
+    /// system message (`realtime_projection_root_system_message`) — the same
+    /// content that, when present, is materialized into `seed_messages[0]`.
+    ///
+    /// Provider adapters and snapshot builders MUST consume this typed field
+    /// when they need the prompt as a distinct value (e.g. the OpenAI Refresh
+    /// path rebuilding the realtime `session.update` instructions field). They
+    /// MUST NOT re-derive prompt truth by inspecting `seed_messages[0]`: the
+    /// history-event projector drops `Message::System` / `Message::SystemNotice`
+    /// entries, so inference from seed history silently wipes the prompt on
+    /// refresh. `None` means the session has no resolved root system prompt.
+    pub system_prompt: Option<String>,
     /// Runtime-authored system context carried as typed provenance.
     ///
     /// Provider adapters must treat this as the only authoritative realtime
@@ -251,10 +266,22 @@ impl RealtimeSessionOpenConfig {
             llm_identity,
             visible_tools,
             seed_messages,
+            system_prompt: None,
             runtime_system_context: Vec::new(),
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
         }
+    }
+
+    /// Builder-style typed root system prompt for provider reconstruction.
+    ///
+    /// The runtime populates this from the resolved root system message so the
+    /// provider refresh path consumes the authoritative prompt instead of
+    /// inferring it from `seed_messages[0]`.
+    #[must_use]
+    pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
+        self.system_prompt = system_prompt;
+        self
     }
 
     /// Builder-style typed runtime context for provider reconstruction.
@@ -330,6 +357,19 @@ pub trait RealtimeSessionFactory: Send + Sync {
 mod tests {
     use super::*;
 
+    use meerkat_core::Provider;
+    use meerkat_core::types::{SystemMessage, UserMessage};
+
+    fn sample_identity() -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
     #[test]
     fn external_session_target_rejects_blank_provider_id() {
         let error = match RealtimeExternalSessionTarget::new("   ") {
@@ -337,5 +377,57 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, LlmError::InvalidRequest { .. }));
+    }
+
+    /// Row #209 gate: the realtime open config carries the resolved system
+    /// prompt as a typed field, and the prompt's authority is independent of
+    /// `seed_messages[0]`. A refresh that consumes `config.system_prompt` must
+    /// preserve the prompt even when the seed history has been projected to
+    /// drop its lead `Message::System` (the history-event projector path), so
+    /// no consumer needs to re-infer prompt truth from `seed_messages`.
+    #[test]
+    fn open_config_system_prompt_is_typed_and_independent_of_seed_history() {
+        let resolved_prompt = "You are a careful realtime assistant.".to_string();
+
+        // Seed history WITHOUT a lead `Message::System` — i.e. the
+        // history-event projection already dropped the system message, which
+        // is exactly the case where `seed_messages[0]` inference returns the
+        // wrong answer and silently wipes the prompt on refresh.
+        let config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            sample_identity(),
+            Vec::new(),
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        )
+        .with_system_prompt(Some(resolved_prompt.clone()));
+
+        // The typed field is the authoritative source for the refresh path.
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some(resolved_prompt.as_str())
+        );
+
+        // Authority does NOT come from inspecting the seed history lead: the
+        // first seed message is a user turn, not a system message.
+        assert!(matches!(
+            config.seed_messages.first(),
+            Some(Message::User(_))
+        ));
+    }
+
+    /// Row #209 gate: `new` defaults the typed prompt to `None`, and the
+    /// builder is the single populate-point used by the runtime projection.
+    #[test]
+    fn open_config_system_prompt_defaults_none_and_builder_sets_it() {
+        let config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ExplicitCommit,
+            sample_identity(),
+            Vec::new(),
+            vec![Message::System(SystemMessage::new("seed-lead".to_string()))],
+        );
+        assert_eq!(config.system_prompt, None);
+
+        let config = config.with_system_prompt(Some("authoritative".to_string()));
+        assert_eq!(config.system_prompt.as_deref(), Some("authoritative"));
     }
 }

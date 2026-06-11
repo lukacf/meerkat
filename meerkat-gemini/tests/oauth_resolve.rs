@@ -225,10 +225,10 @@ fn persisted_google_oauth(secret: &str) -> PersistedTokens {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CODE_ASSIST_SCOPES
-            .iter()
-            .map(|scope| (*scope).into())
-            .collect(),
+        // Scopes are sourced from the single auth-core OAuth declaration via
+        // the runtime's endpoint projection (dogma §123: no duplicate scope
+        // constant in the gemini runtime).
+        scopes: oauth::code_assist_endpoints("http://127.0.0.1:0/callback").scopes,
         account_id: None,
         metadata: serde_json::Value::Null,
     }

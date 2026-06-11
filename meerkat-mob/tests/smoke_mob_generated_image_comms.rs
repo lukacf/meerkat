@@ -62,6 +62,11 @@ fn generated_image_comms_profile(
 ) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             builtins: false,
@@ -83,19 +88,19 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("maker"),
-        ProfileBinding::Inline(generated_image_comms_profile(
+        ProfileBinding::Inline(Box::new(generated_image_comms_profile(
             model,
             "maker - generates the initial image and asks reviewer to confirm receipt",
             true,
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("reviewer"),
-        ProfileBinding::Inline(generated_image_comms_profile(
+        ProfileBinding::Inline(Box::new(generated_image_comms_profile(
             model,
             "reviewer - replies to checksum_token image-check requests with a generated image receipt",
             true,
-        )),
+        ))),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("generated-image-comms"));
@@ -113,6 +118,11 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
 fn image_relay_profile(model: &str, peer_description: &str, image_generation: bool) -> Profile {
     Profile {
         model: model.to_string(),
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![],
         tools: ToolConfig {
             builtins: false,
@@ -138,27 +148,27 @@ fn image_relay_definition(
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("maker"),
-        ProfileBinding::Inline(image_relay_profile(
+        ProfileBinding::Inline(Box::new(image_relay_profile(
             maker_model,
             "maker - generates a text-bearing image and sends it to relay",
             true,
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("relay"),
-        ProfileBinding::Inline(image_relay_profile(
+        ProfileBinding::Inline(Box::new(image_relay_profile(
             relay_model,
             "relay - forwards maker images to reader and returns the readout",
             false,
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("reader"),
-        ProfileBinding::Inline(image_relay_profile(
+        ProfileBinding::Inline(Box::new(image_relay_profile(
             reader_model,
             "reader - reads text from relayed images",
             false,
-        )),
+        ))),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("image-relay"));
@@ -486,6 +496,8 @@ async fn member_peer_id(handle: &MobHandle, member: &str) -> Option<String> {
     handle
         .get_member(&AgentIdentity::from(member))
         .await
+        .ok()
+        .flatten()
         .and_then(|entry| entry.peer_id().map(|peer_id| peer_id.to_string()))
 }
 
@@ -512,11 +524,6 @@ fn message_summary(message: &Message) -> String {
                 text.chars().take(160).collect::<String>()
             )
         }
-        Message::Assistant(assistant) => format!(
-            "assistant tools={} text={}",
-            assistant.tool_calls.len(),
-            assistant.content.chars().take(160).collect::<String>()
-        ),
         Message::BlockAssistant(blocks) => {
             let uses = blocks
                 .blocks

@@ -32,3 +32,20 @@ node scripts/machine-posters/generate-machine-posters.mjs
 
 Regenerate after machine/schema/spec changes so the posters stay aligned with
 the canonical formal machine definitions.
+
+## Drift Gate
+
+```bash
+make verify-machine-poster-coverage
+```
+
+Runs two checks against `canonical_machine_schemas()`:
+
+1. **Coverage** — every canonical machine is either postered or listed in the
+   shrink-only `POSTER_COVERAGE_KNOWN_GAPS` allow-list.
+2. **Content** — every poster phase box / group anchor names a canonical state
+   (phase enum variant) and every group trigger names a canonical input or
+   signal variant. The canonical alphabet is emitted at check time by
+   `cargo run -p xtask -- machine-alphabet --emit <path>` from the compiled
+   catalog, so the gate cannot go stale; the script consumes it via
+   `--check --alphabet <path>`.

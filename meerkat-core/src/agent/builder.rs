@@ -1,7 +1,7 @@
 //! Agent builder.
 
 use crate::budget::{Budget, BudgetLimits};
-use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides};
+use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides, ToolsConfig};
 use crate::hooks::HookEngine;
 use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
@@ -22,7 +22,6 @@ use crate::tool_scope::{
     INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
-use serde_json::Value;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::any::Any;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
@@ -37,11 +36,32 @@ use super::{
     select_tool_catalog_mode,
 };
 
+/// Policy governing whether core construction composes the built-in default
+/// system prompt for a new session that carries no explicit prompt.
+///
+/// Default-prompt composition is a facade/runtime-composition concern, not a
+/// core-builder concern: the canonical composition seam owns prompt assembly
+/// and always hands core either an explicit prompt (`system_prompt`) or none.
+/// Standalone core construction therefore suppresses the default unless a
+/// caller explicitly opts in, so core never silently owns prompt policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DefaultSystemPromptPolicy {
+    /// Leave a new session without an explicit prompt unprompted. The caller
+    /// (composition seam) owns supplying any default it wants.
+    #[default]
+    Suppress,
+    /// Compose the built-in default prompt for a new session that has no
+    /// explicit prompt. Reserved for callers that have no upstream composition
+    /// seam (standalone tooling, examples).
+    ComposeDefault,
+}
+
 /// Builder for creating an Agent
 #[derive(Default)]
 pub struct AgentBuilder {
     pub(super) config: AgentConfig,
     pub(super) system_prompt: Option<String>,
+    pub(super) default_system_prompt_policy: DefaultSystemPromptPolicy,
     pub(super) budget_limits: Option<BudgetLimits>,
     pub(super) retry_policy: RetryPolicy,
     pub(super) session: Option<Session>,
@@ -65,6 +85,7 @@ pub struct AgentBuilder {
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
+    pub(super) tools_config: ToolsConfig,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
@@ -111,6 +132,8 @@ pub enum AgentBuildPolicyError {
     ToolVisibilityPersist { message: String },
     #[error("failed to seed agent completion cursor from generated ops authority: {message}")]
     OpsCursorSeed { message: String },
+    #[error("failed to establish session compaction cadence: {message}")]
+    CompactionCadence { message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -194,6 +217,7 @@ impl AgentBuilder {
         Self {
             config: AgentConfig::default(),
             system_prompt: None,
+            default_system_prompt_policy: DefaultSystemPromptPolicy::default(),
             budget_limits: None,
             retry_policy: RetryPolicy::default(),
             session: None,
@@ -216,6 +240,7 @@ impl AgentBuilder {
             default_event_tx: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
+            tools_config: ToolsConfig::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             capability_base_filter_override: None,
@@ -253,6 +278,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the default-system-prompt policy for new sessions that carry no
+    /// explicit prompt. Defaults to [`DefaultSystemPromptPolicy::Suppress`], so
+    /// callers without an upstream composition seam must opt in explicitly.
+    pub fn default_system_prompt_policy(mut self, policy: DefaultSystemPromptPolicy) -> Self {
+        self.default_system_prompt_policy = policy;
+        self
+    }
+
     /// Set max tokens per turn
     pub fn max_tokens_per_turn(mut self, tokens: u32) -> Self {
         self.config.max_tokens_per_turn = tokens;
@@ -271,15 +304,21 @@ impl AgentBuilder {
         self
     }
 
-    /// Set provider-specific parameters
-    pub fn provider_params(mut self, params: Value) -> Self {
-        self.config.provider_params = Some(params);
+    /// Set typed provider-specific parameter overrides.
+    pub fn provider_params(
+        mut self,
+        params: crate::lifecycle::run_primitive::ProviderParamsOverride,
+    ) -> Self {
+        self.config.provider_params.params = params;
         self
     }
 
-    /// Set provider-native tool defaults (resolved at build time, not persisted).
-    pub fn provider_tool_defaults(mut self, defaults: Value) -> Self {
-        self.config.provider_tool_defaults = Some(defaults);
+    /// Set typed provider-native tool defaults (resolved at build time, not persisted).
+    pub fn provider_tool_defaults(
+        mut self,
+        defaults: crate::lifecycle::run_primitive::ProviderTag,
+    ) -> Self {
+        self.config.provider_params.tool_defaults = Some(defaults);
         self
     }
 
@@ -448,7 +487,10 @@ impl AgentBuilder {
                 .unwrap_or_default(),
         ));
 
-        // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
+        // Apply system prompt: use the builder's explicit prompt if set;
+        // otherwise compose the built-in default ONLY when a caller opts in via
+        // `DefaultSystemPromptPolicy::ComposeDefault`. The composition seam owns
+        // default-prompt policy, so standalone core stays unprompted by default.
         let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
         if let Some(prompt) = self.system_prompt {
             session
@@ -459,8 +501,16 @@ impl AgentBuilder {
                 .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
                     message: err.to_string(),
                 })?;
-        } else if !has_system_prompt {
-            // Only set default prompt for new sessions without an existing system prompt
+        } else if !has_system_prompt
+            && matches!(
+                self.default_system_prompt_policy,
+                DefaultSystemPromptPolicy::ComposeDefault
+            )
+        {
+            // Default-prompt composition only runs when a caller explicitly
+            // opts in. The canonical composition seam (facade/runtime) always
+            // hands core an explicit prompt or none, so it never reaches here;
+            // standalone core construction stays unprompted unless asked.
             #[cfg(not(target_arch = "wasm32"))]
             {
                 session
@@ -493,7 +543,7 @@ impl AgentBuilder {
                 let control_names = catalog
                     .iter()
                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                    .map(|entry| entry.tool.name.to_string())
+                    .map(|entry| entry.tool.name.clone())
                     .collect::<std::collections::HashSet<_>>();
                 let deferred_names = if !control_names.is_empty()
                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -507,7 +557,7 @@ impl AgentBuilder {
                                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
                             )
                         })
-                        .map(|entry| entry.tool.name.to_string())
+                        .map(|entry| entry.tool.name.clone())
                         .collect()
                 } else {
                     std::collections::HashSet::new()
@@ -535,7 +585,12 @@ impl AgentBuilder {
                 deferred_tool_names,
             ),
         };
-        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
+        // Cadence metadata is the single typed owner; ingress fails closed on
+        // corrupt metadata and persists the one-time migration immediately.
+        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&mut session)
+            .map_err(|err| AgentBuildPolicyError::CompactionCadence {
+                message: err.to_string(),
+            })?;
 
         // Seed only from generated cursor authority. A completion feed without
         // ops-lifecycle authority is read-only storage, not cursor truth for
@@ -551,8 +606,24 @@ impl AgentBuilder {
             None => 0,
         };
 
+        // Resolve the turn-cap default at the build/composition seam so the run
+        // loop reads an already-resolved value and never privately invents the
+        // default mid-loop. `DEFAULT_MAX_TURNS` (config.rs) remains the single
+        // named owner of the default; `config.max_turns` stays `Option<u32>`
+        // for surfaces, but the agent the loop drives always carries a resolved
+        // `Some(_)`.
+        let mut resolved_config = self.config;
+        if resolved_config.max_turns.is_none() {
+            resolved_config.max_turns = Some(crate::config::DEFAULT_MAX_TURNS);
+        }
+
+        // Typed cancel-after-boundary command channel. The agent retains both
+        // ends: the receiver is drained at turn boundaries, the sender is
+        // cloned for the requesting surface via `cancel_after_boundary_handle`.
+        let (cancel_after_boundary_tx, cancel_after_boundary_rx) = mpsc::unbounded_channel();
+
         let mut agent = Agent {
-            config: self.config,
+            config: resolved_config,
             client,
             tools,
             tool_scope,
@@ -593,7 +664,8 @@ impl AgentBuilder {
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
-            cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_after_boundary_tx,
+            cancel_after_boundary_rx,
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
             extraction_state: super::extraction::ExtractionState::default(),
@@ -601,6 +673,7 @@ impl AgentBuilder {
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),
             turn_tool_dispatch_metadata: Default::default(),
+            tools_config: self.tools_config,
         };
 
         let has_canonical_visibility_state = agent
@@ -942,6 +1015,17 @@ impl AgentBuilder {
         self.call_timeout_override = override_value;
         self
     }
+
+    /// Set the typed tool-execution policy applied to the normal LLM-driven
+    /// tool dispatch loop: per-call timeouts (`tool_timeouts[name]` else
+    /// `default_timeout`) and a concurrency bound (`max_concurrent`).
+    ///
+    /// The composition seam owns this policy; standalone/test construction
+    /// keeps `ToolsConfig::default()`.
+    pub fn with_tools_config(mut self, tools_config: ToolsConfig) -> Self {
+        self.tools_config = tools_config;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -985,8 +1069,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -1126,7 +1210,7 @@ mod tests {
         fn stage_persistent_filter(
             &self,
             filter: ToolFilter,
-            witnesses: BTreeMap<String, crate::ToolVisibilityWitness>,
+            witnesses: BTreeMap<crate::ToolName, crate::ToolVisibilityWitness>,
         ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
             self.fallback_state
                 .stage_persistent_filter(filter, witnesses)
@@ -1134,7 +1218,7 @@ mod tests {
 
         fn stage_requested_deferred_names(
             &self,
-            names: BTreeSet<String>,
+            names: BTreeSet<crate::ToolName>,
         ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
             self.fallback_state.stage_requested_deferred_names(names)
         }
@@ -1148,7 +1232,7 @@ mod tests {
 
         fn replace_deferred_tool_authority_catalog(
             &self,
-            catalog: BTreeMap<String, crate::ToolVisibilityWitness>,
+            catalog: BTreeMap<crate::ToolName, crate::ToolVisibilityWitness>,
         ) -> Result<(), crate::ToolScopeApplyError> {
             self.fallback_state
                 .replace_deferred_tool_authority_catalog(catalog)
@@ -1221,12 +1305,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_a,
                         true,
-                        "callback:restore-fixture".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "restore-fixture".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_b,
                         true,
-                        "callback:restore-fixture".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "restore-fixture".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::control_inline(control, true),
                 ]
@@ -1484,6 +1574,63 @@ mod tests {
         }
     }
 
+    /// Dogma gate (#308): standalone core construction with no explicit prompt
+    /// and the default `Suppress` policy must NOT silently inject a default
+    /// system prompt. Default-prompt policy is owned by the composition seam.
+    #[tokio::test]
+    async fn standalone_builder_suppresses_default_system_prompt_by_default() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            // Note: no .system_prompt(), no .default_system_prompt_policy()
+            .build_standalone(client, tools, store)
+            .await;
+
+        let has_system_prompt = agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::System(_)));
+        assert!(
+            !has_system_prompt,
+            "standalone build without an explicit prompt or opt-in policy must leave the session unprompted"
+        );
+    }
+
+    /// Dogma gate (#308): a caller without an upstream composition seam can opt
+    /// in to default-prompt composition explicitly. On non-wasm the composed
+    /// default is a non-empty prompt; on wasm it is the empty wasm default.
+    #[tokio::test]
+    async fn standalone_builder_composes_default_prompt_when_policy_opts_in() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            .default_system_prompt_policy(DefaultSystemPromptPolicy::ComposeDefault)
+            .build_standalone(client, tools, store)
+            .await;
+
+        let messages = agent.session().messages();
+        match messages.first() {
+            Some(Message::System(sys)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                assert!(
+                    !sys.content.is_empty(),
+                    "ComposeDefault must compose a non-empty default system prompt"
+                );
+                #[cfg(target_arch = "wasm32")]
+                assert!(
+                    sys.content.is_empty(),
+                    "wasm ComposeDefault uses the empty wasm default prompt"
+                );
+            }
+            other => panic!("ComposeDefault should inject a System message, got: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn runtime_backed_builder_requires_explicit_visibility_owner() {
         let client = Arc::new(MockClient);
@@ -1566,7 +1713,6 @@ mod tests {
             serde_json::json!("not-a-visibility-state"),
         );
         let secret_witness = crate::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:secret".to_string()),
             last_seen_provenance: secret_tool.provenance.clone(),
         };
         let original_state = SessionToolVisibilityState {
@@ -1574,7 +1720,7 @@ mod tests {
             staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
             active_revision: 3,
             staged_revision: 3,
-            filter_witnesses: [("secret".to_string(), secret_witness.clone())]
+            filter_witnesses: [(crate::ToolName::from("secret"), secret_witness.clone())]
                 .into_iter()
                 .collect(),
             ..Default::default()
@@ -1582,7 +1728,7 @@ mod tests {
         let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         owner
             .replace_filter_tool_authority_catalog(
-                [("secret".to_string(), secret_witness)]
+                [(crate::ToolName::from("secret"), secret_witness)]
                     .into_iter()
                     .collect(),
             )
@@ -1718,7 +1864,6 @@ mod tests {
         let store = Arc::new(MockStore);
         let inherited_filter = ToolFilter::Deny(["secret".to_string()].into_iter().collect());
         let secret_witness = crate::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:secret".to_string()),
             last_seen_provenance: secret_tool.provenance.clone(),
         };
         let mut session = Session::new();
@@ -1727,7 +1872,7 @@ mod tests {
                 AuthorizedSessionToolVisibilityState::from_generated_authority(
                     SessionToolVisibilityState {
                         inherited_base_filter: inherited_filter.clone(),
-                        filter_witnesses: [("secret".to_string(), secret_witness)]
+                        filter_witnesses: [(crate::ToolName::from("secret"), secret_witness)]
                             .into_iter()
                             .collect(),
                         ..Default::default()

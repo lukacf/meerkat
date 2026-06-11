@@ -1,4 +1,15 @@
+//! Canonical REST surface catalog.
+//!
+//! Single owner of the documented REST path/method surface **and** the typed
+//! request/response contract per operation. The OpenAPI emission
+//! (`emit.rs`) is a pure projection of this catalog plus `schema_for!` of
+//! the referenced wire structs — there is no second hand-maintained
+//! (path, method) → schema map anywhere.
+
 use serde::Serialize;
+
+/// Marker component for declared-untyped JSON pass-through bodies.
+pub const REST_SCHEMA_JSON_VALUE: &str = "JsonValue";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RestOperationDescriptor {
@@ -6,27 +17,103 @@ pub struct RestOperationDescriptor {
     pub summary: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<&'static str>,
+    /// Component schema name of the JSON request body, when one is accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_schema: Option<&'static str>,
+    /// Whether the request body is mandatory.
+    pub request_required: bool,
+    /// Component schema name of the success response body.
+    pub response_schema: &'static str,
+    /// Content type of the success response.
+    pub response_content_type: &'static str,
 }
 
 impl RestOperationDescriptor {
-    const fn new(method: &'static str, summary: &'static str) -> Self {
-        Self {
-            method,
-            summary,
-            description: None,
-        }
-    }
-
-    const fn with_description(
+    const fn json(
         method: &'static str,
         summary: &'static str,
-        description: &'static str,
+        response_schema: &'static str,
     ) -> Self {
         Self {
             method,
             summary,
-            description: Some(description),
+            description: None,
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "application/json",
         }
+    }
+
+    const fn with_json_request(
+        method: &'static str,
+        summary: &'static str,
+        request_schema: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            summary,
+            description: None,
+            request_schema: Some(request_schema),
+            request_required: true,
+            response_schema,
+            response_content_type: "application/json",
+        }
+    }
+
+    const fn with_optional_json_request(
+        method: &'static str,
+        summary: &'static str,
+        request_schema: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            summary,
+            description: None,
+            request_schema: Some(request_schema),
+            request_required: false,
+            response_schema,
+            response_content_type: "application/json",
+        }
+    }
+
+    const fn text(
+        method: &'static str,
+        summary: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            summary,
+            description: None,
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "text/plain",
+        }
+    }
+
+    const fn event_stream(
+        method: &'static str,
+        summary: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            summary,
+            description: None,
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "text/event-stream",
+        }
+    }
+
+    const fn with_description(mut self, description: &'static str) -> Self {
+        self.description = Some(description);
+        self
     }
 }
 
@@ -46,30 +133,42 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
     let mut paths = vec![
         RestPathDescriptor::new(
             "/help",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Ask Meerkat usage help",
+                "HelpRequest",
+                "HelpResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions",
             vec![
-                RestOperationDescriptor::new("get", "List sessions"),
-                RestOperationDescriptor::new("post", "Create and run a new session"),
+                RestOperationDescriptor::json("get", "List sessions", "ListSessionsResult"),
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Create and run a new session",
+                    "RestCreateSessionRequest",
+                    "WireRunResult",
+                ),
             ],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}",
             vec![
-                RestOperationDescriptor::new("get", "Get session details"),
-                RestOperationDescriptor::new("delete", "Archive a session"),
+                RestOperationDescriptor::json(
+                    "get",
+                    "Get session details",
+                    "RestSessionDetailsResponse",
+                ),
+                RestOperationDescriptor::json("delete", "Archive a session", "StatusResponse"),
             ],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/history",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get full session history",
+                "WireSessionHistory",
             )],
         ),
         // NOTE: the transcript-edit family (`transcript-revisions/{revision}`,
@@ -82,311 +181,445 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
         // `router()` arm will fail `verify-rest-surface-alignment`.
         RestPathDescriptor::new(
             "/sessions/{id}/interrupt",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "post",
                 "Interrupt a running session",
+                "StatusResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/system_context",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Append system context to a session",
+                "RestAppendSystemContextRequest",
+                "StatusResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/messages",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Continue session with new message",
+                "RestContinueSessionRequest",
+                "WireRunResult",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/external-events",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Queue a runtime-backed external event",
+                REST_SCHEMA_JSON_VALUE,
+                "StatusResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/peer-response-terminal",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Admit a correlated terminal peer response through the typed runtime ingress",
+                "RestPeerResponseTerminalRequest",
+                "StatusResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/events",
-            vec![RestOperationDescriptor::new("get", "SSE event stream")],
+            vec![RestOperationDescriptor::event_stream(
+                "get",
+                "SSE event stream",
+                "SseEventStream",
+            )],
         ),
         RestPathDescriptor::new(
             "/requests/{request_id}/cancel",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "post",
                 "Cancel an uncommitted in-flight request",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/schedule/tools",
-            vec![RestOperationDescriptor::new("get", "List schedule tools")],
+            vec![RestOperationDescriptor::json(
+                "get",
+                "List schedule tools",
+                "ScheduleToolsResult",
+            )],
         ),
         RestPathDescriptor::new(
             "/schedule/call",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Invoke a schedule tool",
+                "ScheduleToolCallParams",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/schedules",
             vec![
-                RestOperationDescriptor::new("get", "List schedules"),
-                RestOperationDescriptor::new("post", "Create schedule"),
+                RestOperationDescriptor::json("get", "List schedules", "ScheduleListResult"),
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Create schedule",
+                    "CreateScheduleRequest",
+                    "Schedule",
+                ),
             ],
         ),
         RestPathDescriptor::new(
             "/schedules/{id}",
             vec![
-                RestOperationDescriptor::new("get", "Get schedule"),
-                RestOperationDescriptor::new("patch", "Update schedule"),
-                RestOperationDescriptor::new("delete", "Delete schedule"),
+                RestOperationDescriptor::json("get", "Get schedule", "Schedule"),
+                RestOperationDescriptor::with_json_request(
+                    "patch",
+                    "Update schedule",
+                    "UpdateScheduleRequest",
+                    "Schedule",
+                ),
+                RestOperationDescriptor::json("delete", "Delete schedule", "Schedule"),
             ],
         ),
         RestPathDescriptor::new(
             "/schedules/{id}/pause",
-            vec![RestOperationDescriptor::new("post", "Pause schedule")],
+            vec![RestOperationDescriptor::json(
+                "post",
+                "Pause schedule",
+                "Schedule",
+            )],
         ),
         RestPathDescriptor::new(
             "/schedules/{id}/resume",
-            vec![RestOperationDescriptor::new("post", "Resume schedule")],
+            vec![RestOperationDescriptor::json(
+                "post",
+                "Resume schedule",
+                "Schedule",
+            )],
         ),
         RestPathDescriptor::new(
             "/schedules/{id}/occurrences",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "List schedule occurrences",
+                "ScheduleOccurrencesResult",
             )],
         ),
         RestPathDescriptor::new(
             "/comms/send",
-            vec![RestOperationDescriptor::new("post", "Send a comms message")],
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Send a comms message",
+                "CommsSendParams",
+                "CommsSendResult",
+            )],
         ),
         RestPathDescriptor::new(
             "/comms/peers",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "List resolved comms peers",
+                "CommsPeersResult",
             )],
         ),
         RestPathDescriptor::new(
             "/config",
             vec![
-                RestOperationDescriptor::new("get", "Read config"),
-                RestOperationDescriptor::new("put", "Replace config"),
-                RestOperationDescriptor::new("patch", "Merge-patch config"),
+                RestOperationDescriptor::json("get", "Read config", "ConfigEnvelope"),
+                RestOperationDescriptor::with_json_request(
+                    "put",
+                    "Replace config",
+                    "RestSetConfigRequest",
+                    "ConfigEnvelope",
+                ),
+                RestOperationDescriptor::with_json_request(
+                    "patch",
+                    "Merge-patch config",
+                    "RestPatchConfigRequest",
+                    "ConfigEnvelope",
+                ),
             ],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/mcp/add",
-            vec![RestOperationDescriptor::with_description(
-                "post",
-                "Stage live MCP server addition",
-                "Requires mcp_live capability. Check GET /capabilities.",
-            )],
+            vec![
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Stage live MCP server addition",
+                    "McpAddParams",
+                    "McpLiveOpResponse",
+                )
+                .with_description("Requires mcp_live capability. Check GET /capabilities."),
+            ],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/mcp/remove",
-            vec![RestOperationDescriptor::with_description(
-                "post",
-                "Stage live MCP server removal",
-                "Requires mcp_live capability. Check GET /capabilities.",
-            )],
+            vec![
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Stage live MCP server removal",
+                    "McpRemoveParams",
+                    "McpLiveOpResponse",
+                )
+                .with_description("Requires mcp_live capability. Check GET /capabilities."),
+            ],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/mcp/reload",
-            vec![RestOperationDescriptor::with_description(
-                "post",
-                "Stage live MCP server reload",
-                "Requires mcp_live capability. Check GET /capabilities.",
-            )],
+            vec![
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Stage live MCP server reload",
+                    "McpReloadParams",
+                    "McpLiveOpResponse",
+                )
+                .with_description("Requires mcp_live capability. Check GET /capabilities."),
+            ],
         ),
         RestPathDescriptor::new(
             "/skills",
-            vec![RestOperationDescriptor::new("get", "List available skills")],
+            vec![RestOperationDescriptor::json(
+                "get",
+                "List available skills",
+                "SkillListResponse",
+            )],
         ),
         RestPathDescriptor::new(
             "/capabilities",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get runtime capabilities",
+                "CapabilitiesResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/runtime/host_info",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get read-only runtime host information",
+                "RuntimeHostInfo",
             )],
         ),
         RestPathDescriptor::new(
             "/runtime/capabilities",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get runtime host capability flags",
+                "RuntimeHostCapabilities",
             )],
         ),
         RestPathDescriptor::new(
             "/runtime/health",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get runtime host health",
+                "RuntimeHostHealth",
             )],
         ),
         RestPathDescriptor::new(
             "/models/catalog",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get the compiled-in model catalog",
+                "ModelsCatalogResponse",
             )],
         ),
         RestPathDescriptor::new(
             "/sessions/{id}/status",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get a session's current runtime state",
+                "RuntimeStateResult",
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/events",
-            vec![RestOperationDescriptor::new("get", "SSE mob event stream")],
+            vec![RestOperationDescriptor::event_stream(
+                "get",
+                "SSE mob event stream",
+                "SseEventStream",
+            )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/spawn-helper",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Spawn a helper member in a mob",
+                "RestMobHelperRequest",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/fork-helper",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Fork a helper member in a mob",
+                "RestMobForkHelperRequest",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/wait-kickoff",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_optional_json_request(
                 "post",
                 "Wait for autonomous kickoff completion",
+                "RestMobWaitRequest",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/wire-members-batch",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Wire multiple local mob member edges",
+                "RestMobWireMembersBatchRequest",
+                "MobWireMembersBatchResult",
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/status",
-            vec![RestOperationDescriptor::with_description(
-                "get",
-                "Get a mob member execution status snapshot",
-                "Returns the current execution/status snapshot for the named mob member.",
-            )],
+            vec![
+                RestOperationDescriptor::json(
+                    "get",
+                    "Get a mob member execution status snapshot",
+                    REST_SCHEMA_JSON_VALUE,
+                )
+                .with_description(
+                    "Returns the current execution/status snapshot for the named mob member.",
+                ),
+            ],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/cancel",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "post",
                 "Force-cancel a mob member",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/respawn",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "post",
                 "Respawn a mob member with topology restore",
+                REST_SCHEMA_JSON_VALUE,
             )],
         ),
         RestPathDescriptor::new(
             "/health",
-            vec![RestOperationDescriptor::new("get", "Health check")],
+            vec![RestOperationDescriptor::text(
+                "get",
+                "Health check",
+                "PlainTextResponse",
+            )],
         ),
         // Phase 4c — auth + realm endpoints.
         RestPathDescriptor::new(
             "/auth/profiles",
             vec![
-                RestOperationDescriptor::new(
+                RestOperationDescriptor::json(
                     "get",
                     "List realm auth profiles, backend profiles, and bindings",
+                    "WireAuthProfilesList",
                 ),
-                RestOperationDescriptor::new("post", "Store binding-scoped credentials"),
+                RestOperationDescriptor::with_json_request(
+                    "post",
+                    "Store binding-scoped credentials",
+                    "RestAuthProfileCreateRequest",
+                    "WireAuthProfileCreated",
+                ),
             ],
         ),
         RestPathDescriptor::new(
             "/auth/bindings/{binding_id}",
             vec![
-                RestOperationDescriptor::new("get", "Get binding-scoped auth profile"),
-                RestOperationDescriptor::new("delete", "Delete binding-scoped credentials"),
+                RestOperationDescriptor::json(
+                    "get",
+                    "Get binding-scoped auth profile",
+                    "WireAuthProfileDetail",
+                ),
+                RestOperationDescriptor::json(
+                    "delete",
+                    "Delete binding-scoped credentials",
+                    "WireAuthProfileCleared",
+                ),
             ],
         ),
         RestPathDescriptor::new(
             "/auth/bindings/{binding_id}/test",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Test a binding resolve path",
+                "RestAuthBindingTestRequest",
+                "WireAuthStatusDetail",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/login/start",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Begin OAuth login (loopback flow)",
+                "LoginStartParams",
+                "WireLoginStart",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/login/complete",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Finish OAuth login with an authorization code",
+                "LoginCompleteParams",
+                "WireLoginReady",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/login/device/start",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Begin device-code OAuth login",
+                "DeviceStartParams",
+                "WireDeviceStart",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/login/device/complete",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_json_request(
                 "post",
                 "Complete device-code OAuth login",
+                "DeviceCompleteParams",
+                "WireDeviceCompleteResult",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/bindings/{binding_id}/status",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get binding auth status",
+                "WireAuthStatusDetail",
             )],
         ),
         RestPathDescriptor::new(
             "/auth/bindings/{binding_id}/logout",
-            vec![RestOperationDescriptor::new("post", "Log out a binding")],
+            vec![RestOperationDescriptor::json(
+                "post",
+                "Log out a binding",
+                "WireAuthProfileCleared",
+            )],
         ),
         RestPathDescriptor::new(
             "/realms",
-            vec![RestOperationDescriptor::new("get", "List realm summaries")],
+            vec![RestOperationDescriptor::json(
+                "get",
+                "List realm summaries",
+                "WireRealmList",
+            )],
         ),
         RestPathDescriptor::new(
             "/realms/{id}",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::json(
                 "get",
                 "Get a realm's connection set",
+                "WireRealmConnectionSet",
             )],
         ),
     ];
@@ -399,7 +632,31 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
                     .operations
                     .iter()
                     .map(|operation| {
-                        RestOperationDescriptor::new(operation.method, operation.summary)
+                        // WorkGraph owns its REST contract map; the catalog
+                        // projects it rather than re-declaring it.
+                        match meerkat_workgraph::workgraph_rest_request_response_schema(
+                            entry.path,
+                            operation.method,
+                        ) {
+                            Some((Some(request_schema), response_schema)) => {
+                                RestOperationDescriptor::with_json_request(
+                                    operation.method,
+                                    operation.summary,
+                                    request_schema,
+                                    response_schema,
+                                )
+                            }
+                            Some((None, response_schema)) => RestOperationDescriptor::json(
+                                operation.method,
+                                operation.summary,
+                                response_schema,
+                            ),
+                            None => RestOperationDescriptor::json(
+                                operation.method,
+                                operation.summary,
+                                REST_SCHEMA_JSON_VALUE,
+                            ),
+                        }
                     })
                     .collect(),
             )
@@ -519,6 +776,59 @@ mod tests {
                     .description
                     .is_none_or(|description| !description.contains("realtime attachment")),
             "mob member status route must not be labelled as realtime attachment status"
+        );
+    }
+
+    /// Catalog totality: every documented operation carries an explicit
+    /// response contract, and `JsonValue` pass-throughs are the only
+    /// declared-untyped refs (no empty/implicit contracts can exist —
+    /// the descriptor type has no schema-less constructor).
+    #[test]
+    fn every_operation_declares_a_response_contract() {
+        for path in rest_path_catalog() {
+            for operation in &path.operations {
+                assert!(
+                    !operation.response_schema.is_empty(),
+                    "{} {} has no response contract",
+                    operation.method,
+                    path.path
+                );
+            }
+        }
+    }
+
+    /// The create/continue session contracts are the real wire structs —
+    /// the catalog refs must match the types emitted via `schema_for!` so
+    /// drift like the historical missing `enable_web_search` is structural
+    /// rather than editorial.
+    #[test]
+    fn session_bodies_reference_contract_wire_structs() {
+        let catalog = rest_path_catalog();
+        let sessions = catalog
+            .iter()
+            .find(|entry| entry.path == "/sessions")
+            .and_then(|entry| {
+                entry
+                    .operations
+                    .iter()
+                    .find(|operation| operation.method == "post")
+            });
+        assert_eq!(
+            sessions.and_then(|op| op.request_schema),
+            Some("RestCreateSessionRequest")
+        );
+        let messages = catalog
+            .iter()
+            .find(|entry| entry.path == "/sessions/{id}/messages")
+            .and_then(|entry| {
+                entry
+                    .operations
+                    .iter()
+                    .find(|operation| operation.method == "post")
+            });
+        assert_eq!(
+            messages.and_then(|op| op.request_schema),
+            Some("RestContinueSessionRequest")
         );
     }
 }

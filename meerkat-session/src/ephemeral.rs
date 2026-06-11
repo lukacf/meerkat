@@ -13,7 +13,7 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, MobToolAuthorityContext, SessionControlError, SessionError,
@@ -22,31 +22,37 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
     TurnToolOverlay,
 };
+use meerkat_core::session_document::{
+    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
+};
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
-    ConsumedDeferredTurnInputs, DeferredFirstTurnPhase, InputId, PendingSystemContextAppend,
-    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
-    RunId, SessionDeferredTurnState, SessionLlmIdentity, TurnPhase, TurnStateHandle,
-    TurnStateSnapshot,
+    CancelAfterBoundaryCommand, CancelAfterBoundarySender, ConsumedDeferredTurnInputs,
+    DeferredFirstTurnPhase, InputId, PendingSystemContextAppend, RealtimeTranscriptApplyOutcome,
+    RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage, RunId,
+    SessionDeferredTurnState, SessionLlmIdentity, SnapshotProjectionError, SystemContextStateError,
+    TurnPhase, TurnStateHandle, TurnStateSnapshot,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 #[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 
+#[cfg(test)]
+use crate::staged_registry::MaterializationStatus;
+use crate::staged_registry::{PromotionTicket, StagedSessionRegistry};
 pub use crate::turn_admission::ObservedSessionTailKind;
 use crate::turn_admission::{
-    StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
-    TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
+    RuntimeKeepAliveRequest, StartTurnDispatchAuthorization, StartTurnDisposition,
+    StartTurnPublicTerminal, TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
 };
 
 /// Capacity for the internal agent event channel.
@@ -92,7 +98,6 @@ enum SessionCommand {
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         active_admission: Option<RuntimeContextAdmissionGuard>,
-        restore_staged_capacity_on_pre_run_failure: bool,
     },
     ReplaceClient {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
@@ -100,8 +105,10 @@ enum SessionCommand {
     },
     HotSwapLlmIdentity {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
-        identity: SessionLlmIdentity,
-        request_policy: meerkat_core::SessionLlmRequestPolicy,
+        // Boxed: identity + request policy are large inline values (typed
+        // provider-params carrier); keep command variants size-balanced.
+        identity: Box<SessionLlmIdentity>,
+        request_policy: Box<meerkat_core::SessionLlmRequestPolicy>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -115,23 +122,27 @@ enum SessionCommand {
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     SetToolVisibilityState {
-        state: Option<meerkat_core::SessionToolVisibilityState>,
+        // Boxed: the visibility state carries full ToolName-keyed catalogs.
+        state: Option<Box<meerkat_core::SessionToolVisibilityState>>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     SyncSystemContextState {
-        reply_tx: oneshot::Sender<()>,
+        reply_tx: oneshot::Sender<Result<(), SystemContextStateError>>,
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     SyncSessionFromDurableSnapshot {
-        session: meerkat_core::Session,
+        // Boxed: a full Session is by far the largest payload on this channel.
+        session: Box<meerkat_core::Session>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     /// Export the full session (messages + metadata) for persistence.
     ExportSession {
-        reply_tx: oneshot::Sender<meerkat_core::Session>,
+        reply_tx: oneshot::Sender<Result<meerkat_core::Session, SystemContextStateError>>,
     },
     ExecutionSnapshot {
-        reply_tx: oneshot::Sender<Option<meerkat_core::AgentExecutionSnapshot>>,
+        reply_tx: oneshot::Sender<
+            Result<Option<meerkat_core::AgentExecutionSnapshot>, SnapshotProjectionError>,
+        >,
     },
     ToolScopeSnapshot {
         reply_tx: oneshot::Sender<Option<meerkat_core::ToolScopeSnapshot>>,
@@ -152,6 +163,14 @@ enum SessionCommand {
     },
     PublishRuntimeSystemContextEvents {
         appends: Vec<PendingSystemContextAppend>,
+        reply_tx: oneshot::Sender<()>,
+    },
+    RecordLiveTerminalError {
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+        reply_tx: oneshot::Sender<()>,
+    },
+    RecordLiveOutputAudioDegraded {
+        dropped: u64,
         reply_tx: oneshot::Sender<()>,
     },
     AppendExternalUserContent {
@@ -223,94 +242,94 @@ struct SessionHandle {
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
-    /// Capacity reserved for a deferred first turn while the session is staged.
-    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
     /// Capacity currently held by live work for this session. Additional
     /// runtime-routed inputs for the same running session join this lease
     /// instead of consuming another global slot.
     active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
     /// Wakes the running turn loop when an interrupt is requested.
     interrupt_notify: Arc<tokio::sync::Notify>,
-    /// Shared live flag for cancel-after-boundary requests.
-    cancel_after_boundary_handle: Option<Arc<AtomicBool>>,
+    /// Typed command sender for cancel-after-boundary requests; the agent
+    /// task owns the receiver and drains it at the next boundary.
+    cancel_after_boundary_handle: Option<CancelAfterBoundarySender>,
     /// Broadcast channel for session-wide event subscription.
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
 }
 
 pub struct RuntimeContextAdmissionGuard {
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
     active_capacity_lease: Option<Arc<std::sync::Mutex<SessionActiveCapacityLease>>>,
     active_permit: Option<OwnedSemaphorePermit>,
-    restore_staged_capacity_on_drop: bool,
 }
 
 #[derive(Default)]
 struct SessionActiveCapacityLease {
     permit: Option<OwnedSemaphorePermit>,
     leases: usize,
-    restore_staged_capacity_on_final_release: bool,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    /// In-flight staged→active promotion bound to this lease. Settled at
+    /// final release through the registry-owned materialization status: an
+    /// uncommitted promotion restores the staged reservation, a committed one
+    /// lets the permit drop back to the gate. There are no shell-side
+    /// restore flags — the registry status *is* the verdict.
+    promotion: Option<PromotionTicket>,
 }
 
 #[derive(Default)]
 struct ActiveCapacityLeaseRelease {
     permit: Option<OwnedSemaphorePermit>,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    promotion: Option<PromotionTicket>,
+}
+
+impl ActiveCapacityLeaseRelease {
+    /// Settle a final lease release: an in-flight promotion is resolved
+    /// through the registry (restore staged vs release capacity); otherwise
+    /// the permit drops and capacity returns to the gate.
+    fn settle(self) {
+        match self.promotion {
+            Some(ticket) => ticket.settle(self.permit),
+            None => drop(self.permit),
+        }
+    }
 }
 
 impl Drop for RuntimeContextAdmissionGuard {
     fn drop(&mut self) {
         if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
-            if self.restore_staged_capacity_on_drop
-                && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
-            {
-                mark_active_capacity_lease_restore_staged(
-                    &active_capacity_lease,
-                    staged_capacity_permit,
-                );
-            }
-            let released = release_active_capacity_lease(&active_capacity_lease);
-            if let Some(staged_capacity_permit) = released.staged_capacity_permit {
-                restore_staged_capacity_permit(&staged_capacity_permit, released.permit);
-            }
-            return;
+            release_active_capacity_lease(&active_capacity_lease).settle();
         }
-        if self.restore_staged_capacity_on_drop
-            && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
-        {
-            restore_staged_capacity_permit(&staged_capacity_permit, self.active_permit.take());
-        }
+        // A capacity-only admission (`active_permit`) drops with the guard,
+        // returning the permit to the gate.
     }
 }
 
 impl RuntimeContextAdmissionGuard {
-    fn into_start_turn_parts(mut self) -> (Self, bool) {
-        let restore_staged_capacity_on_pre_run_failure = self.restore_staged_capacity_on_drop;
-        self.restore_staged_capacity_on_drop = false;
-        (self, restore_staged_capacity_on_pre_run_failure)
+    /// Commit an in-flight staged→active promotion: the run is genuinely
+    /// beginning, so the registry-owned status flips `Promoting -> Active`
+    /// and the final lease release returns capacity to the gate instead of
+    /// restoring the staged reservation. No-op for admissions that did not
+    /// originate from a staged reservation.
+    fn commit_promotion(&self) {
+        let Some(active_capacity_lease) = self.active_capacity_lease.as_ref() else {
+            return;
+        };
+        let ticket = lock_active_capacity_lease(active_capacity_lease)
+            .promotion
+            .take();
+        if let Some(ticket) = ticket {
+            ticket.commit();
+        }
     }
 
     pub(crate) fn into_create_session_permit(mut self) -> Option<OwnedSemaphorePermit> {
-        self.restore_staged_capacity_on_drop = false;
-        self.staged_capacity_permit.take();
         if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
-            return release_active_capacity_lease(&active_capacity_lease).permit;
+            let released = release_active_capacity_lease(&active_capacity_lease);
+            // The capacity unit is being repurposed for a new session, so an
+            // in-flight promotion can no longer be restored: commit it through
+            // the registry before handing the permit over.
+            if let Some(ticket) = released.promotion {
+                ticket.commit();
+            }
+            return released.permit;
         }
         self.active_permit.take()
-    }
-
-    fn restore_staged_capacity(mut self) {
-        if let Some(active_capacity_lease) = self.active_capacity_lease.as_ref()
-            && let Some(staged_capacity_permit) = self.staged_capacity_permit.as_ref()
-        {
-            mark_active_capacity_lease_restore_staged(
-                active_capacity_lease,
-                Arc::clone(staged_capacity_permit),
-            );
-            self.restore_staged_capacity_on_drop = false;
-            return;
-        }
-        self.restore_staged_capacity_on_drop = true;
     }
 }
 
@@ -320,7 +339,6 @@ struct SessionTaskControl {
     llm_identity_tx: watch::Sender<SessionLlmIdentity>,
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
-    cancel_after_boundary_handle: Option<Arc<AtomicBool>>,
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
     /// Session-context DSL handle (W2-E / issue #264). `None` on standalone
     /// / ephemeral builds that have no runtime-backed DSL authority. The
@@ -551,8 +569,8 @@ pub trait SessionAgent: Send {
     /// Cancel the currently running turn.
     fn cancel(&mut self);
 
-    /// Shared live control flag for cancel-after-boundary requests.
-    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+    /// Typed command sender for cancel-after-boundary requests.
+    fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
         None
     }
 
@@ -586,8 +604,10 @@ pub trait SessionAgent: Send {
     fn snapshot(&self) -> SessionSnapshot;
 
     /// Take a diagnostic snapshot of the live execution state, if supported.
-    fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
-        None
+    fn execution_snapshot(
+        &self,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, SnapshotProjectionError> {
+        Ok(None)
     }
 
     /// Take a diagnostic snapshot of the live tool-scope state, if supported.
@@ -610,7 +630,7 @@ pub trait SessionAgent: Send {
     /// This is more expensive than `snapshot()` because it includes the
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
-    fn session_clone(&self) -> meerkat_core::Session;
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError>;
 
     /// Return the durable LLM identity authored by the concrete agent builder.
     ///
@@ -694,19 +714,23 @@ pub trait SessionAgent: Send {
     fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle;
 
     /// Synchronize the shared system-context control state into the canonical session metadata.
-    fn sync_system_context_state(&mut self) {}
+    fn sync_system_context_state(&mut self) -> Result<(), SystemContextStateError> {
+        Ok(())
+    }
 
     /// Drop active-turn-only context that missed the active turn's model
     /// boundary so it cannot become ordinary context for the next run.
-    fn discard_unapplied_active_turn_system_context(&mut self) -> usize {
+    fn discard_unapplied_active_turn_system_context(
+        &mut self,
+    ) -> Result<usize, SystemContextStateError> {
         let discarded_count = {
             let state = self.system_context_state();
             state.discard_unapplied_active_turn_pending()
         };
         if discarded_count > 0 {
-            self.sync_system_context_state();
+            self.sync_system_context_state()?;
         }
-        discarded_count
+        Ok(discarded_count)
     }
 
     /// Replace live semantic session state from durable authority while preserving live mechanics.
@@ -774,12 +798,6 @@ fn wake_interrupt_notify(notify: &tokio::sync::Notify) {
     notify.notify_one();
 }
 
-fn clear_cancel_after_boundary_request(handle: &Option<Arc<AtomicBool>>) {
-    if let Some(handle) = handle {
-        handle.store(false, Ordering::SeqCst);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // EphemeralSessionService
 // ---------------------------------------------------------------------------
@@ -791,8 +809,20 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
-    max_sessions: Option<usize>,
-    active_session_capacity: Option<Arc<Semaphore>>,
+    /// Single typed owner of session materialization status, staged-capacity
+    /// custody, and the global active-capacity admission seam.
+    ///
+    /// The registry holds the canonical materialization status per session
+    /// (`Staged`/`Promoting`/`Active`), CUSTODY of each staged session's
+    /// reserved capacity permit, and the global concurrency gate behind one
+    /// lock, so staged-ness is never re-derived from permit-existence in a
+    /// handle-side slot. The staged→active promotion verdict
+    /// (`begin_promotion`) is single-winner and owned here. The embedded
+    /// semaphore remains a pure RESOURCE GATE: it bounds how many sessions
+    /// hold live work at once and never decides whether a session is a
+    /// valid/admitted authority — that decision is owned by runtime/machine
+    /// admission.
+    staged_registry: Arc<StagedSessionRegistry>,
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
     session_registered: tokio::sync::Notify,
@@ -804,7 +834,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
         session: &meerkat_core::Session,
-    ) -> Result<RunBoundaryReceipt, SessionError> {
+    ) -> Result<RunBoundaryReceiptDraft, SessionError> {
         let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to serialize session for runtime receipt digest: {err}"
@@ -812,13 +842,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
         let digest = format!("{:x}", Sha256::digest(encoded_messages));
 
-        Ok(RunBoundaryReceipt {
+        // Dogma K10: the boundary sequence is machine-owned; the session
+        // service returns an UNSEQUENCED draft and the runtime driver mints
+        // the final receipt from the generated per-run boundary counter.
+        Ok(RunBoundaryReceiptDraft {
             run_id,
             boundary,
             contributing_input_ids,
             conversation_digest: Some(digest),
             message_count: session.messages().len(),
-            sequence: 0,
         })
     }
 
@@ -975,44 +1007,60 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
             builder,
-            max_sessions: Some(max_sessions),
-            active_session_capacity: Some(Arc::new(Semaphore::new(max_sessions))),
+            staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
         }
     }
 
+    /// Acquire a global active-capacity permit through the single typed
+    /// admission seam.
+    ///
+    /// This is a resource gate (concurrency limit), not lifecycle authority:
+    /// success means there is spare capacity, failure means the global active
+    /// ceiling is reached. It never decides whether a session is a valid
+    /// admitted authority — that decision is owned by runtime/machine
+    /// admission. The permit is reserved inside the
+    /// [`StagedSessionRegistry`] lock so capacity accounting can never
+    /// interleave with a concurrent status transition.
     fn try_acquire_active_permit(&self) -> Result<Option<OwnedSemaphorePermit>, SessionError> {
-        let Some(capacity) = self.active_session_capacity.as_ref() else {
-            return Ok(None);
-        };
-        match capacity.clone().try_acquire_owned() {
-            Ok(permit) => Ok(Some(permit)),
-            Err(_) => {
-                let max_sessions = self.max_sessions.unwrap_or(0);
-                let active = max_sessions.saturating_sub(capacity.available_permits());
-                Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "Max sessions reached ({active}/{max_sessions})"
-                    )),
-                ))
-            }
-        }
+        self.staged_registry.reserve_capacity()
     }
 
     fn acquire_runtime_context_admission_for_handle(
         &self,
+        id: &SessionId,
         handle: &SessionHandle,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
-        if let Some(permit) = take_staged_capacity_permit(&handle.staged_capacity_permit) {
-            let restore_staged_capacity_on_drop = {
+        // The staged branch is gated by the registry-owned single-winner
+        // promotion verdict, never by permit presence: `begin_promotion`
+        // flips `Staged -> Promoting` and hands over custody of the staged
+        // capacity permit. A loser (already promoting/active) falls through
+        // to the non-staged admission paths.
+        if let Some(promotion) = self.staged_registry.begin_promotion(id) {
+            let pending_first_turn = {
                 let state = lock_deferred_turn_state(&handle.deferred_turn_state);
                 matches!(state.first_turn_phase(), DeferredFirstTurnPhase::Pending)
             };
+            let ticket = if pending_first_turn {
+                // The deferred first turn is still pending: keep the
+                // promotion in flight so a pre-run failure settles back to
+                // `Staged` (reservation restored) while a genuine run-begin
+                // commits it to `Active`.
+                Some(PromotionTicket::new(
+                    Arc::clone(&self.staged_registry),
+                    id.clone(),
+                ))
+            } else {
+                // No deferred first turn left to protect: commit immediately
+                // so a pre-run failure releases capacity instead of
+                // re-staging it for a reservation that no longer exists.
+                self.staged_registry.complete_promotion(id);
+                None
+            };
             return Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
-                Some(permit),
-                Some(Arc::clone(&handle.staged_capacity_permit)),
-                restore_staged_capacity_on_drop,
+                promotion.permit,
+                ticket,
             ));
         }
         if let Some(admission) =
@@ -1020,12 +1068,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         {
             return Ok(admission);
         }
-        match self.try_acquire_active_permit() {
-            Ok(permit) => Ok(acquire_active_capacity_lease(
+        match self.staged_registry.reserve(id) {
+            Ok(outcome) => Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
-                permit,
+                outcome.permit,
                 None,
-                false,
             )),
             Err(err) => {
                 if let Some(admission) =
@@ -1040,19 +1087,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     pub fn ensure_active_capacity_available(&self) -> Result<(), SessionError> {
-        let Some(capacity) = self.active_session_capacity.as_ref() else {
-            return Ok(());
-        };
-        if capacity.available_permits() > 0 {
-            return Ok(());
-        }
-        let max_sessions = self.max_sessions.unwrap_or(0);
-        let active = max_sessions.saturating_sub(capacity.available_permits());
-        Err(SessionError::Agent(
-            meerkat_core::error::AgentError::InternalError(format!(
-                "Max sessions reached ({active}/{max_sessions})"
-            )),
-        ))
+        self.staged_registry.ensure_capacity_available()
+    }
+
+    /// Current typed materialization status for a session as owned by the
+    /// admission registry. Exposed for tests that assert the singular status
+    /// fact is recorded/cleared with the session lifecycle.
+    #[cfg(test)]
+    fn materialization_status(&self, id: &SessionId) -> Option<MaterializationStatus> {
+        self.staged_registry.status(id)
     }
 
     fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
@@ -1107,11 +1150,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?;
 
-        let mut session = reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the reply channel".to_string(),
-            ))
-        })?;
+        let mut session = reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(|e: SystemContextStateError| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    e.to_string(),
+                ))
+            })?;
 
         let state = lock_deferred_turn_state(&deferred_turn_state).clone();
         session.set_deferred_turn_state(state).map_err(|err| {
@@ -1145,7 +1195,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::SetToolVisibilityState { state, reply_tx })
+            .send(SessionCommand::SetToolVisibilityState {
+                state: state.map(Box::new),
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -1185,11 +1238,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?;
 
-        reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the reply channel".to_string(),
-            ))
-        })
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(|e: SnapshotProjectionError| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    e.to_string(),
+                ))
+            })
     }
 
     /// Get a diagnostic snapshot of the live tool-scope state for a session.
@@ -1358,7 +1418,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
-        release_staged_capacity_permit(&handle.staged_capacity_permit);
+        // Clear the singular typed materialization record. For a staged
+        // session the registry-held capacity permit drops with it, so the
+        // registry never retains a phantom record (or orphaned reservation)
+        // for a session whose handle no longer exists.
+        self.staged_registry.forget(id);
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.request_shutdown().ok().map(|_| slot.projection())
@@ -1464,7 +1528,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map(|append| {
                 (
                     AppendSystemContextRequest {
-                        text: append.text,
+                        content: append.content,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
@@ -1476,11 +1540,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .collect();
         let (snapshot_state, staged_state) = state
             .stage_active_turn_appends_with_snapshot(staged_appends)
-            .map_err(|err| {
-                SessionError::Agent(AgentError::InternalError(
-                    err.into_control_error(id).to_string(),
-                ))
-            })?;
+            .map_err(|err| crate::control_error_into_session_error(err.into_control_error(id)))?;
         let staged_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
             .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
         if staged_token != initial_token {
@@ -1576,6 +1636,72 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reply_rx.await.map_err(|_| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Record a typed live-adapter terminal error onto the session's owned
+    /// event stream.
+    ///
+    /// Routes the typed [`LiveAdapterErrorCode`] through the session task so it
+    /// is stamped and broadcast as a terminal `RunFailed` event to session
+    /// subscribers, instead of being laundered into a warning log + `Ok(())`.
+    ///
+    /// [`LiveAdapterErrorCode`]: meerkat_core::live_adapter::LiveAdapterErrorCode
+    pub async fn record_live_terminal_error(
+        &self,
+        id: &SessionId,
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::RecordLiveTerminalError { cause, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Record a live transport output-audio delivery degradation (K16).
+    ///
+    /// Routes the dropped-packet count through the session task so it is
+    /// stamped and broadcast as a typed `StreamTruncated` event
+    /// (`OutputAudioDegraded`) to session subscribers, instead of remaining a
+    /// transport-local counter with no live reader.
+    pub async fn record_live_output_audio_degraded(
+        &self,
+        id: &SessionId,
+        dropped: u64,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply".to_string(),
             ))
         })
     }
@@ -1695,11 +1821,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     "Session task has exited".to_string(),
                 ))
             })?;
-        reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped reply channel".to_string(),
-            ))
-        })
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(|e: SystemContextStateError| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    e.to_string(),
+                ))
+            })
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -1723,7 +1856,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx })
+            .send(SessionCommand::SyncSessionFromDurableSnapshot {
+                session: Box::new(session),
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -1925,7 +2061,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        self.acquire_runtime_context_admission_for_handle(handle)
+        self.acquire_runtime_context_admission_for_handle(id, handle)
     }
 
     pub async fn join_active_runtime_context_admission(
@@ -1947,10 +2083,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
         let active_permit = self.try_acquire_active_permit()?;
         Ok(RuntimeContextAdmissionGuard {
-            staged_capacity_permit: None,
             active_capacity_lease: None,
             active_permit,
-            restore_staged_capacity_on_drop: false,
         })
     }
 
@@ -2065,18 +2199,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 })?;
             }
 
-            let (active_admission, restore_staged_capacity_on_pre_run_failure) =
-                if let Some(admission) = reserved_admission.take() {
-                    admission.into_start_turn_parts()
-                } else {
-                    match self.acquire_runtime_context_admission_for_handle(handle) {
-                        Ok(admission) => admission.into_start_turn_parts(),
-                        Err(err) => {
-                            Self::try_abort_admitted_turn(handle);
-                            return Err((err, None));
-                        }
+            let active_admission = if let Some(admission) = reserved_admission.take() {
+                admission
+            } else {
+                match self.acquire_runtime_context_admission_for_handle(id, handle) {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        Self::try_abort_admitted_turn(handle);
+                        return Err((err, None));
                     }
-                };
+                }
+            };
 
             let command = SessionCommand::StartTurn {
                 prompt,
@@ -2084,22 +2217,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 event_tx: req.event_tx,
                 result_tx,
                 active_admission: Some(active_admission),
-                restore_staged_capacity_on_pre_run_failure,
             };
-            if let Err(send_error) = handle.command_tx.send(command).await {
-                let SessionCommand::StartTurn {
-                    active_admission,
-                    restore_staged_capacity_on_pre_run_failure,
-                    ..
-                } = send_error.0
-                else {
-                    unreachable!("only StartTurn command was sent")
-                };
-                if restore_staged_capacity_on_pre_run_failure
-                    && let Some(admission) = active_admission
-                {
-                    admission.restore_staged_capacity();
-                }
+            if handle.command_tx.send(command).await.is_err() {
+                // Dropping the rejected command drops its admission guard; the
+                // final lease release settles staged-restore vs capacity
+                // release through the registry-owned promotion status.
                 Self::try_abort_admitted_turn(handle);
                 return Err((
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -2224,8 +2346,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// Shut down all sessions.
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
-        for (_id, handle) in sessions.drain(..) {
-            release_staged_capacity_permit(&handle.staged_capacity_permit);
+        for (id, handle) in sessions.drain(..) {
+            // Clear the singular typed materialization record with the handle;
+            // a staged session's registry-held permit drops with it.
+            self.staged_registry.forget(&id);
             let projection = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
                 slot.request_shutdown().ok().map(|_| slot.projection())
@@ -2321,7 +2445,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.claim()
                 .map_err(|_| SessionError::Busy { id: id.clone() })?;
-            clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
             slot.projection()
         };
         handle.state_tx.send_replace(projection);
@@ -2332,9 +2455,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             let phase = slot.abort_claim().ok();
-            if phase.is_some() {
-                clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
-            }
             phase.map(|_| slot.projection())
         };
         if let Some(projection) = projection {
@@ -2379,7 +2499,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             hydrate_deferred_turn_state(
                 blob_store.as_ref(),
                 &mut deferred_turn_state,
-                MissingBlobBehavior::HistoricalPlaceholder,
+                // Session creation hydrates blobs that were just externalized;
+                // a missing blob here is a hard fault, not evicted history.
+                MissingBlobBehavior::Error,
             )
             .await
             .map_err(|err| {
@@ -2420,19 +2542,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let turn_admission_slot = TurnAdmissionSlot::new();
         let initial_session_state = turn_admission_slot.projection();
         let turn_admission = Arc::new(std::sync::Mutex::new(turn_admission_slot));
-        let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
         let active_capacity_lease =
             Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
-        let eager_active_admission = if defer_initial_turn {
-            *lock_staged_capacity_permit(&staged_capacity_permit) = create_capacity_permit;
-            None
+        // Deferred sessions hand the reserved capacity permit to the registry
+        // (recorded below, once the handle is stored): the registry owns
+        // staged-permit custody, there is no handle-side permit slot. Eager
+        // sessions thread the permit into the active-capacity lease.
+        let (eager_active_admission, staged_create_permit) = if defer_initial_turn {
+            (None, Some(create_capacity_permit))
         } else {
-            Some(acquire_active_capacity_lease(
-                Arc::clone(&active_capacity_lease),
-                create_capacity_permit,
+            (
+                Some(acquire_active_capacity_lease(
+                    Arc::clone(&active_capacity_lease),
+                    create_capacity_permit,
+                    None,
+                )),
                 None,
-                false,
-            ))
+            )
         };
 
         // Extract the event injector before the agent moves into its task.
@@ -2476,7 +2602,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
-                cancel_after_boundary_handle: cancel_after_boundary_handle.clone(),
                 session_event_tx: session_event_tx.clone(),
                 session_context: session_context.clone(),
             },
@@ -2494,7 +2619,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
-                cancel_after_boundary_handle: cancel_after_boundary_handle.clone(),
                 session_event_tx: session_event_tx.clone(),
                 session_context: session_context.clone(),
             },
@@ -2516,7 +2640,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             system_context_state,
             turn_state_handle,
             deferred_turn_state,
-            staged_capacity_permit,
             active_capacity_lease,
             interrupt_notify,
             cancel_after_boundary_handle,
@@ -2529,6 +2652,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 false
             } else {
                 sessions.insert(session_id.clone(), handle);
+                // Record the singular typed materialization fact keyed by
+                // session id. For a deferred session the registry also takes
+                // CUSTODY of the reserved capacity permit — staged-ness is
+                // never re-derived from permit-presence elsewhere.
+                match staged_create_permit {
+                    Some(permit) => self.staged_registry.record_staged(&session_id, permit),
+                    None => self.staged_registry.record_active(&session_id),
+                }
                 // Notify waiters (e.g., CLI --stdin) that a session is available.
                 self.session_registered.notify_waiters();
                 true
@@ -2577,30 +2708,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             }
         }
 
+        // Dogma K10: `RuntimeTurnMetadata` (via `build.initial_turn_metadata`)
+        // is the ONLY carrier of initial-turn render/skill facts — there is no
+        // request-level duplicate left to merge.
         let initial_turn_metadata = req
             .build
             .as_ref()
             .and_then(|build| build.initial_turn_metadata.as_ref())
             .cloned();
-        let initial_render_metadata = initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.render_metadata.clone())
-            .or(req.render_metadata);
         let initial_handling_mode = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.handling_mode)
             .unwrap_or(meerkat_core::types::HandlingMode::Queue);
-        let initial_skill_references = initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.skill_references.clone())
-            .or(req.skill_references);
         let initial_flow_tool_overlay = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.flow_tool_overlay.clone());
         let initial_runtime = meerkat_core::service::StartTurnRuntimeSemantics::new(
-            initial_render_metadata,
             initial_handling_mode,
-            initial_skill_references,
             initial_flow_tool_overlay,
             Vec::new(),
             initial_turn_metadata,
@@ -2615,7 +2739,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 event_tx: caller_event_tx,
                 result_tx,
                 active_admission: eager_active_admission,
-                restore_staged_capacity_on_pre_run_failure: false,
             })
             .await
             .is_err()
@@ -2627,6 +2750,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             drop(sessions);
             let mut sessions = self.sessions.write().await;
             sessions.swap_remove(&session_id);
+            self.staged_registry.forget(&session_id);
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::InternalError(
                     "Session task exited before first turn".to_string(),
@@ -2639,6 +2763,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Err(_) => {
                 let mut sessions = self.sessions.write().await;
                 sessions.swap_remove(&session_id);
+                self.staged_registry.forget(&session_id);
                 return Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(
                         "Session task dropped the result channel".to_string(),
@@ -2708,8 +2833,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .command_tx
             .send(SessionCommand::HotSwapLlmIdentity {
                 client,
-                identity,
-                request_policy,
+                identity: Box::new(identity),
+                request_policy: Box::new(request_policy),
                 reply_tx,
             })
             .await
@@ -2798,7 +2923,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.authorize_cancel_after_boundary()
                 .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
-            cancel_after_boundary_handle.store(true, Ordering::SeqCst);
+            // The agent task owns the receiver. If the run already ended the
+            // receiver may be dropped; a send failure is a benign no-op (the
+            // staleness reset is core-owned at the next run-start flush).
+            let _ = cancel_after_boundary_handle.send(CancelAfterBoundaryCommand);
         }
         wake_interrupt_notify(&handle.interrupt_notify);
         Ok(())
@@ -2898,7 +3026,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
-        release_staged_capacity_permit(&handle.staged_capacity_permit);
+        // Clear the singular typed materialization record with the handle; a
+        // staged session's registry-held permit drops with it, freeing the
+        // reserved capacity.
+        self.staged_registry.forget(id);
         self.archived_views
             .write()
             .await
@@ -3065,6 +3196,29 @@ fn stamp_event_envelope(
     EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
+/// Render a typed [`LiveAdapterErrorCode`] into the human-readable display
+/// projection carried by the `RunFailed` event's `error`/`message` fields.
+///
+/// The typed cause remains authoritative on the wire (it is the source of this
+/// projection); this is purely the display mirror, never the routing fact.
+fn render_live_terminal_error_message(
+    cause: &meerkat_core::live_adapter::LiveAdapterErrorCode,
+) -> String {
+    use meerkat_core::live_adapter::LiveAdapterErrorCode as Code;
+    match cause {
+        Code::ConnectionFailed => "live channel connection failed".to_string(),
+        Code::ConnectionLost => "live channel connection lost".to_string(),
+        Code::ConfigRejected { reason } => {
+            format!("live channel configuration rejected: {reason}")
+        }
+        Code::ProviderError => "live channel provider error".to_string(),
+        Code::AuthenticationFailed => "live channel authentication failed".to_string(),
+        Code::InternalError => "live channel internal error".to_string(),
+        Code::Other { raw } => format!("live channel error: {raw}"),
+        _ => "live channel terminal error".to_string(),
+    }
+}
+
 fn render_runtime_system_context_event_prompt(
     appends: &[PendingSystemContextAppend],
 ) -> Option<String> {
@@ -3086,7 +3240,7 @@ fn render_runtime_system_context_event_prompt(
                 text.push_str(source);
             }
             text.push_str("\n\n");
-            text.push_str(&append.text);
+            text.push_str(&append.content.render_text());
             text
         })
         .collect::<Vec<_>>()
@@ -3118,7 +3272,9 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
             source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
-                prompt: ContentInput::Text(prompt),
+                input: meerkat_core::types::RunInput::Content {
+                    content: ContentInput::Text(prompt),
+                },
             },
         );
         let _ = control.session_event_tx.send(started);
@@ -3161,7 +3317,9 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
             source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
-                prompt: ContentInput::Text(prompt),
+                input: meerkat_core::types::RunInput::Content {
+                    content: ContentInput::Text(prompt),
+                },
             },
         );
         let _ = control.session_event_tx.send(started);
@@ -3205,14 +3363,6 @@ fn lock_deferred_turn_state(
     }
 }
 
-fn lock_staged_capacity_permit(
-    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
-    permit
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 fn lock_active_capacity_lease(
     lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
 ) -> std::sync::MutexGuard<'_, SessionActiveCapacityLease> {
@@ -3221,50 +3371,30 @@ fn lock_active_capacity_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn take_staged_capacity_permit(
-    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) -> Option<OwnedSemaphorePermit> {
-    lock_staged_capacity_permit(permit).take()
-}
-
-fn restore_staged_capacity_permit(
-    slot: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-    permit: Option<OwnedSemaphorePermit>,
-) {
-    let Some(permit) = permit else {
-        return;
-    };
-    let mut guard = lock_staged_capacity_permit(slot);
-    if guard.is_none() {
-        *guard = Some(permit);
-    }
-}
-
-fn release_staged_capacity_permit(permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>) {
-    let _ = lock_staged_capacity_permit(permit).take();
-}
-
 fn acquire_active_capacity_lease(
     active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
     permit: Option<OwnedSemaphorePermit>,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
-    restore_staged_capacity_on_drop: bool,
+    promotion: Option<PromotionTicket>,
 ) -> RuntimeContextAdmissionGuard {
     let mut lease = lock_active_capacity_lease(&active_capacity_lease);
     if lease.leases == 0 {
         lease.permit = permit;
-        lease.restore_staged_capacity_on_final_release = false;
-        lease.staged_capacity_permit = None;
+        lease.promotion = promotion;
     } else {
+        // An existing lease already holds this session's capacity unit, so
+        // the incoming permit folds back into the gate (capacity tokens are
+        // fungible). An in-flight promotion binds to the shared lease so the
+        // FINAL release settles it through the registry.
         drop(permit);
+        if lease.promotion.is_none() {
+            lease.promotion = promotion;
+        }
     }
     lease.leases = lease.leases.saturating_add(1);
     drop(lease);
     RuntimeContextAdmissionGuard {
-        staged_capacity_permit,
         active_capacity_lease: Some(active_capacity_lease),
         active_permit: None,
-        restore_staged_capacity_on_drop,
     }
 }
 
@@ -3278,22 +3408,9 @@ fn try_join_active_capacity_lease(
     lease.leases = lease.leases.saturating_add(1);
     drop(lease);
     Some(RuntimeContextAdmissionGuard {
-        staged_capacity_permit: None,
         active_capacity_lease: Some(active_capacity_lease),
         active_permit: None,
-        restore_staged_capacity_on_drop: false,
     })
-}
-
-fn mark_active_capacity_lease_restore_staged(
-    active_capacity_lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
-    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) {
-    let mut lease = lock_active_capacity_lease(active_capacity_lease);
-    lease.restore_staged_capacity_on_final_release = true;
-    if lease.staged_capacity_permit.is_none() {
-        lease.staged_capacity_permit = Some(staged_capacity_permit);
-    }
 }
 
 fn release_active_capacity_lease(
@@ -3305,19 +3422,9 @@ fn release_active_capacity_lease(
     }
     lease.leases -= 1;
     if lease.leases == 0 {
-        let permit = lease.permit.take();
-        if lease.restore_staged_capacity_on_final_release {
-            lease.restore_staged_capacity_on_final_release = false;
-            ActiveCapacityLeaseRelease {
-                permit,
-                staged_capacity_permit: lease.staged_capacity_permit.take(),
-            }
-        } else {
-            lease.staged_capacity_permit = None;
-            ActiveCapacityLeaseRelease {
-                permit,
-                staged_capacity_permit: None,
-            }
+        ActiveCapacityLeaseRelease {
+            permit: lease.permit.take(),
+            promotion: lease.promotion.take(),
         }
     } else {
         ActiveCapacityLeaseRelease::default()
@@ -3337,9 +3444,6 @@ fn abort_admitted_turn(control: &SessionTaskControl) {
     let projection = {
         let mut slot = lock_turn_admission(&control.turn_admission);
         let phase = slot.abort_claim().ok();
-        if phase.is_some() {
-            clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
-        }
         phase.map(|_| slot.projection())
     };
     if let Some(projection) = projection {
@@ -3400,9 +3504,10 @@ async fn session_task<A: SessionAgent>(
                 request_policy,
                 reply_tx,
             } => {
-                let result = agent.hot_swap_llm_identity(client, identity.clone(), request_policy);
+                let result =
+                    agent.hot_swap_llm_identity(client, (*identity).clone(), *request_policy);
                 if result.is_ok() {
-                    control.llm_identity_tx.send_replace(identity);
+                    control.llm_identity_tx.send_replace(*identity);
                 }
                 let _ = reply_tx.send(result);
                 continue;
@@ -3422,12 +3527,11 @@ async fn session_task<A: SessionAgent>(
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::SetToolVisibilityState { state, reply_tx } => {
-                let _ = reply_tx.send(agent.set_tool_visibility_state(state));
+                let _ = reply_tx.send(agent.set_tool_visibility_state(state.map(|state| *state)));
                 continue;
             }
             SessionCommand::SyncSystemContextState { reply_tx } => {
-                agent.sync_system_context_state();
-                let _ = reply_tx.send(());
+                let _ = reply_tx.send(agent.sync_system_context_state());
                 continue;
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -3441,7 +3545,7 @@ async fn session_task<A: SessionAgent>(
                     });
                 let result = match durable_deferred_turn_state {
                     Ok(durable_deferred_turn_state) => {
-                        let result = agent.sync_session_from_durable_snapshot(session);
+                        let result = agent.sync_session_from_durable_snapshot(*session);
                         if result.is_ok()
                             && let Some(durable_deferred_turn_state) = durable_deferred_turn_state
                         {
@@ -3471,30 +3575,37 @@ async fn session_task<A: SessionAgent>(
                 event_tx,
                 result_tx,
                 active_admission,
-                restore_staged_capacity_on_pre_run_failure,
             } => {
                 let runtime = *runtime;
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.render_metadata.clone())
-                    .or(runtime.render_metadata);
+                    .and_then(|metadata| metadata.render_metadata.clone());
                 let handling_mode = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.handling_mode)
                     .unwrap_or(runtime.handling_mode);
                 let skill_references = metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.skill_references.clone())
-                    .or(runtime.skill_references);
+                    .and_then(|metadata| metadata.skill_references.clone());
                 let flow_tool_overlay = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
                     .or(runtime.flow_tool_overlay);
-                let keep_alive_policy_present = metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.keep_alive)
-                    .is_some();
+                // #345 / dogma K13: forward the full typed keep-alive
+                // tri-state to the machine. The metadata carrier is
+                // `Option<KeepAliveDirective>`: Enable(policy) -> Enable,
+                // Disable -> Disable, absent -> Preserve. No collapse.
+                let keep_alive_request =
+                    match metadata.as_ref().and_then(|metadata| metadata.keep_alive) {
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(_),
+                        ) => RuntimeKeepAliveRequest::Enable,
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable,
+                        ) => RuntimeKeepAliveRequest::Disable,
+                        None => RuntimeKeepAliveRequest::Preserve,
+                    };
                 let pre_turn_context_appends = runtime.pre_turn_context_appends;
                 let typed_turn_appends = runtime.typed_turn_appends;
                 let prompt = if typed_turn_appends.is_empty() {
@@ -3507,7 +3618,11 @@ async fn session_task<A: SessionAgent>(
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
-                let mut active_admission = active_admission;
+                // `active_admission` is held for the whole turn. On any
+                // pre-run failure path below it simply drops at the end of
+                // this arm: the final lease release settles staged-restore
+                // vs capacity-release through the registry-owned promotion
+                // status, so there is no shell-side restore flag plumbing.
                 let dispatch_authorization = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     slot.authorize_start_turn_dispatch()
@@ -3542,6 +3657,10 @@ async fn session_task<A: SessionAgent>(
                     .iter()
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
+                // Consumed tool-results count; the SAME value feeds the staging
+                // disposition and the apply authorization so the two agree.
+                let pending_tool_results_count =
+                    u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX);
 
                 let resolution = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -3549,7 +3668,7 @@ async fn session_task<A: SessionAgent>(
                         execution_kind,
                         &prompt,
                         agent.observed_session_tail(),
-                        u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX),
+                        pending_tool_results_count,
                     )
                 };
                 let resolution = match resolution {
@@ -3559,11 +3678,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         abort_admitted_turn(&control);
                         let _ =
                             result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
@@ -3576,11 +3690,6 @@ async fn session_task<A: SessionAgent>(
                 if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
                     let terminal = resolution.public_terminal;
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let result = if terminal == Some(StartTurnPublicTerminal::NoPendingBoundary) {
                         Err(meerkat_core::error::AgentError::NoPendingBoundary)
@@ -3595,11 +3704,6 @@ async fn session_task<A: SessionAgent>(
                 }
                 if let Some(terminal) = resolution.public_terminal {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ =
                         result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
@@ -3612,7 +3716,7 @@ async fn session_task<A: SessionAgent>(
 
                 let persist_runtime_keep_alive = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.resolve_runtime_keep_alive(keep_alive_policy_present)
+                    slot.resolve_runtime_keep_alive(keep_alive_request)
                 };
                 let persist_runtime_keep_alive = match persist_runtime_keep_alive {
                     Ok(persist_runtime_keep_alive) => persist_runtime_keep_alive,
@@ -3621,11 +3725,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         abort_admitted_turn(&control);
                         let _ = result_tx.send(Err(
                             meerkat_core::error::AgentError::InternalError(format!(
@@ -3636,41 +3735,103 @@ async fn session_task<A: SessionAgent>(
                     }
                 };
 
-                let discarded_stale_active_context =
-                    agent.discard_unapplied_active_turn_system_context();
-                if discarded_stale_active_context > 0 {
-                    tracing::debug!(
-                        discarded_stale_active_context,
-                        "discarded stale active-turn system context before starting a new run"
-                    );
+                match agent.discard_unapplied_active_turn_system_context() {
+                    Ok(discarded_stale_active_context) => {
+                        if discarded_stale_active_context > 0 {
+                            tracing::debug!(
+                                discarded_stale_active_context,
+                                "discarded stale active-turn system context before starting a new run"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        restore_deferred_turn_inputs(
+                            &deferred_turn_state,
+                            consumed_deferred_inputs,
+                        );
+                        abort_admitted_turn(&control);
+                        let _ = result_tx.send(Err(
+                            meerkat_core::error::AgentError::InternalError(error.to_string()),
+                        ));
+                        continue;
+                    }
                 }
 
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
                     continue;
                 }
-                if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
+                // The canonical SessionDocumentMachine owns the authorized
+                // apply count; the agent's apply becomes the gated effect
+                // handler. Fail closed: a machine drive error, an absent verdict,
+                // or a count that disagrees with the staged disposition takes the
+                // same pre-run failure path as a rejected apply (and never
+                // commits the pending results).
+                let apply_authorization = {
+                    let mut authority = SessionDocumentMachineAuthority::new();
+                    authority
+                        .apply_pending_tool_results(
+                            SessionDocumentKey::new(agent.session_id().to_string()),
+                            pending_tool_results_count,
+                        )
+                        .map_err(|err| {
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "generated session document authority rejected pending \
+                                 tool-results apply: {err}"
+                            ))
+                        })
+                        .and_then(|effects| {
+                            effects
+                                .iter()
+                                .find_map(|effect| match effect {
+                                    SessionDocumentEffect::SessionToolResultsApplied {
+                                        applied_count,
+                                        ..
+                                    } => Some(*applied_count),
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    meerkat_core::error::AgentError::InternalError(
+                                        "generated session document authority returned no \
+                                         pending tool-results apply verdict"
+                                            .to_string(),
+                                    )
+                                })
+                        })
+                        .and_then(|applied_count| {
+                            if applied_count == pending_tool_results_count {
+                                Ok(())
+                            } else {
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "generated session document authority authorized \
+                                     {applied_count} pending tool-results but the staged \
+                                     disposition consumed {pending_tool_results_count}"
+                                )))
+                            }
+                        })
+                };
+                let apply_result = match apply_authorization {
+                    Ok(()) => agent.apply_pending_tool_results(flattened_tool_results),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = apply_result {
                     let _ = agent.set_flow_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
                     continue;
                 }
-                if persist_runtime_keep_alive {
-                    agent.update_keep_alive(true);
+                match persist_runtime_keep_alive {
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PersistEnabled => {
+                        agent.update_keep_alive(true);
+                    }
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PersistDisabled => {
+                        agent.update_keep_alive(false);
+                    }
+                    crate::turn_admission::RuntimeKeepAlivePersistenceDecision::PreserveExisting => {}
                 }
                 let begin_phase = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -3679,6 +3840,14 @@ async fn session_task<A: SessionAgent>(
                 match begin_phase {
                     Ok(projection) => {
                         control.state_tx.send_replace(projection);
+                        // The run is genuinely beginning: commit any in-flight
+                        // staged->active promotion so the registry-owned
+                        // status flips `Promoting -> Active` and the final
+                        // lease release returns capacity to the gate instead
+                        // of restoring the staged reservation.
+                        if let Some(admission) = active_admission.as_ref() {
+                            admission.commit_promotion();
+                        }
                     }
                     Err(error) => {
                         let _ = agent.set_flow_tool_overlay(None);
@@ -3686,11 +3855,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         let _ =
                             result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
                                 format!("illegal begin-run transition: {error}"),
@@ -3814,13 +3978,20 @@ async fn session_task<A: SessionAgent>(
                     (r, resolved_projection)
                 }; // run_fut dropped here
 
-                let discarded_active_context = agent.discard_unapplied_active_turn_system_context();
-                if discarded_active_context > 0 {
-                    tracing::debug!(
-                        discarded_active_context,
-                        "discarded active-turn system context that missed the run boundary"
-                    );
-                }
+                let discard_active_context_error = match agent
+                    .discard_unapplied_active_turn_system_context()
+                {
+                    Ok(discarded_active_context) => {
+                        if discarded_active_context > 0 {
+                            tracing::debug!(
+                                discarded_active_context,
+                                "discarded active-turn system context that missed the run boundary"
+                            );
+                        }
+                        None
+                    }
+                    Err(error) => Some(error),
+                };
 
                 let resolve_projection = resolved_projection.or_else(|| {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -3848,15 +4019,21 @@ async fn session_task<A: SessionAgent>(
                         "failed to clear flow tool overlay; failing turn to avoid stale scope"
                     );
                     Err(error)
+                } else if let Some(error) = discard_active_context_error {
+                    tracing::error!(
+                        error = %error,
+                        "failed to sync system-context state while discarding stale active-turn \
+                         context; failing turn to avoid stale canonical metadata"
+                    );
+                    Err(meerkat_core::error::AgentError::InternalError(
+                        error.to_string(),
+                    ))
                 } else {
                     result
                 };
                 let finalize = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     let finalize = slot.finalize();
-                    if finalize.is_ok() {
-                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
-                    }
                     finalize.map(|outcome| (outcome, slot.projection()))
                 };
                 let shutting_down = match finalize {
@@ -3915,6 +4092,37 @@ async fn session_task<A: SessionAgent>(
                     &mut next_seq,
                     &source,
                 );
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
+                let message = render_live_terminal_error_message(&cause);
+                let failed = stamp_event_envelope(
+                    &mut next_seq,
+                    &source,
+                    AgentEvent::RunFailed {
+                        session_id: agent.session_id(),
+                        terminal_cause_kind: None,
+                        error_report: meerkat_core::event::AgentErrorReport {
+                            class: meerkat_core::event::AgentErrorClass::Terminal,
+                            reason: None,
+                            message,
+                        },
+                    },
+                );
+                let _ = control.session_event_tx.send(failed);
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx } => {
+                let truncated = stamp_event_envelope(
+                    &mut next_seq,
+                    &source,
+                    AgentEvent::StreamTruncated {
+                        reason: meerkat_core::event::StreamTruncationReason::OutputAudioDegraded {
+                            dropped,
+                        },
+                    },
+                );
+                let _ = control.session_event_tx.send(truncated);
                 let _ = reply_tx.send(());
             }
             SessionCommand::AppendExternalUserContent { content, reply_tx } => {
@@ -4062,9 +4270,6 @@ async fn session_task<A: SessionAgent>(
                 let next_projection = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     let next_phase = slot.request_shutdown().ok();
-                    if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
-                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
-                    }
                     next_phase.map(|_| slot.projection())
                 };
                 if let Some(projection) = next_projection {
@@ -4170,6 +4375,15 @@ mod runtime_turn_metadata_tests {
             &self,
             _observer: Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
         ) {
+        }
+
+        fn install_observer_with_baseline(
+            &self,
+            _observer: Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
+        ) -> u64 {
+            // Recording handle never dispatches observer callbacks; the
+            // watermark read is the entire critical section.
+            self.current_watermark_ms()
         }
     }
 
@@ -4282,8 +4496,8 @@ mod runtime_turn_metadata_tests {
             }
         }
 
-        fn session_clone(&self) -> meerkat_core::Session {
-            self.session.clone()
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(self.session.clone())
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -4298,7 +4512,7 @@ mod runtime_turn_metadata_tests {
             self.observed_context_texts
                 .lock()
                 .expect("observed context texts lock poisoned")
-                .extend(appends.iter().map(|append| append.text.clone()));
+                .extend(appends.iter().map(|append| append.content.render_text()));
         }
 
         fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
@@ -4450,12 +4664,12 @@ mod runtime_turn_metadata_tests {
             }
         }
 
-        fn session_clone(&self) -> meerkat_core::Session {
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
             let mut session = meerkat_core::Session::new();
             session
                 .set_system_context_state(self.system_context_state.snapshot())
                 .expect("test system context state should serialize");
-            session
+            Ok(session)
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -4467,7 +4681,9 @@ mod runtime_turn_metadata_tests {
         }
 
         fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
-            let mut session = self.session_clone();
+            let mut session = self
+                .session_clone()
+                .expect("test session clone should succeed");
             session.append_system_context_blocks(appends);
             let state = session.system_context_state().unwrap_or_default();
             self.system_context_state
@@ -4577,8 +4793,8 @@ mod runtime_turn_metadata_tests {
             }
         }
 
-        fn session_clone(&self) -> meerkat_core::Session {
-            meerkat_core::Session::with_id(self.session_id.clone())
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(meerkat_core::Session::with_id(self.session_id.clone()))
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -4599,7 +4815,9 @@ mod runtime_turn_metadata_tests {
                 self.system_context_state
                     .stage_append_with_snapshot(
                         &meerkat_core::service::AppendSystemContextRequest {
-                            text: append.text.clone(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                append.content.render_text(),
+                            ),
                             source: append.source.clone(),
                             idempotency_key: append.idempotency_key.clone(),
                             source_kind: append.source_kind,
@@ -4629,11 +4847,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: None,
@@ -4709,6 +4925,77 @@ mod runtime_turn_metadata_tests {
     }
 
     #[tokio::test]
+    async fn materialization_status_is_owned_by_registry_across_lifecycle() {
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+
+        // A deferred-first-turn session reserves capacity and is recorded as
+        // `Staged` by the single registry owner — not re-derived from
+        // permit-existence plus handle-existence.
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "phase-probe".to_string(),
+                prompt: ContentInput::Text("hello".to_string()),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create deferred session");
+
+        assert_eq!(
+            service.materialization_status(&created.session_id),
+            Some(MaterializationStatus::Staged),
+            "deferred session is recorded Staged by the registry"
+        );
+
+        // The single global permit is held by the staged reservation, so a
+        // second session must fail closed rather than be admitted silently.
+        let second = service
+            .create_session(CreateSessionRequest {
+                model: "phase-probe".to_string(),
+                prompt: ContentInput::Text("again".to_string()),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await;
+        let err = second.expect_err("capacity gate must reject the second session");
+        assert!(
+            format!("{err}").contains("Max sessions reached"),
+            "expected typed capacity-exhaustion error, got: {err}"
+        );
+
+        // Archiving the session clears the typed status through the same owner
+        // and frees the capacity permit.
+        service
+            .archive(&created.session_id)
+            .await
+            .expect("archive deferred session");
+        assert_eq!(
+            service.materialization_status(&created.session_id),
+            None,
+            "archive clears the registry status with the handle"
+        );
+        service
+            .ensure_active_capacity_available()
+            .expect("capacity freed after archive");
+    }
+
+    #[tokio::test]
     async fn eager_initial_turn_forwards_full_runtime_metadata_carrier() {
         let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
         let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
@@ -4729,11 +5016,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -4775,11 +5060,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Stage,
                 build: None,
@@ -4827,11 +5110,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Stage,
                 build: None,
@@ -4866,7 +5147,7 @@ mod runtime_turn_metadata_tests {
     }
 
     #[tokio::test]
-    async fn start_turn_runtime_metadata_prevents_stale_split_skill_replay() {
+    async fn start_turn_runtime_metadata_is_sole_skill_carrier() {
         let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
         let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
         let run_context_counts = Arc::new(Mutex::new(Vec::new()));
@@ -4880,8 +5161,6 @@ mod runtime_turn_metadata_tests {
             },
             1,
         );
-        let stale_split =
-            SkillKey::builtin(SkillName::parse("stale-split-skill").expect("valid skill"));
         let canonical =
             SkillKey::builtin(SkillName::parse("runtime-canonical-skill").expect("valid skill"));
 
@@ -4889,11 +5168,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -4910,9 +5187,7 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        Some(vec![stale_split]),
                         None,
                         Vec::new(),
                         Some(RuntimeTurnMetadata {
@@ -4955,11 +5230,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -4976,12 +5249,12 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
                         None,
-                        None,
                         vec![PendingSystemContextAppend {
-                            text: "terminal peer context".to_string(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                "terminal peer context".to_string(),
+                            ),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5034,11 +5307,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5047,7 +5318,9 @@ mod runtime_turn_metadata_tests {
             .await
             .expect("deferred session should create");
         let appends = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string()
+            ),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5108,11 +5381,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5132,9 +5403,7 @@ mod runtime_turn_metadata_tests {
                         system_prompt: None,
                         event_tx: None,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            None,
                             meerkat_core::types::HandlingMode::Queue,
-                            None,
                             None,
                             Vec::new(),
                             Some(RuntimeTurnMetadata {
@@ -5156,7 +5425,9 @@ mod runtime_turn_metadata_tests {
             .expect("blocking turn should expose active run id");
 
         let appends = vec![PendingSystemContextAppend {
-            text: "active-turn steer context".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "active-turn steer context".to_string(),
+            ),
             source: Some("console:steer:test".to_string()),
             idempotency_key: Some("console:steer:test".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5182,7 +5453,10 @@ mod runtime_turn_metadata_tests {
             .expect("session state should exist");
         let pending = state.snapshot().pending().to_vec();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].text, "active-turn steer context");
+        assert_eq!(
+            pending[0].content.render_text(),
+            "active-turn steer context"
+        );
 
         release.notify_waiters();
         run.await
@@ -5218,11 +5492,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5260,7 +5532,9 @@ mod runtime_turn_metadata_tests {
                 &result.session_id,
                 &run_id,
                 vec![PendingSystemContextAppend {
-                    text: "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
+                    ),
                     source: Some("console:steer:stale".to_string()),
                     idempotency_key: Some("console:steer:stale".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5303,11 +5577,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5334,7 +5606,9 @@ mod runtime_turn_metadata_tests {
                 &result.session_id,
                 &wrong_run_id,
                 vec![PendingSystemContextAppend {
-                    text: "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
+                    ),
                     source: Some("console:steer:wrong-run".to_string()),
                     idempotency_key: Some("console:steer:wrong-run".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5373,11 +5647,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5405,7 +5677,9 @@ mod runtime_turn_metadata_tests {
                 &run_id,
                 vec![
                     PendingSystemContextAppend {
-                        text: "first staged context".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            "first staged context".to_string(),
+                        ),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5413,7 +5687,9 @@ mod runtime_turn_metadata_tests {
                         peer_response_terminal: None,
                     },
                     PendingSystemContextAppend {
-                        text: "conflicting staged context".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            "conflicting staged context".to_string(),
+                        ),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5464,11 +5740,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -5485,16 +5759,16 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        None,
                         Some(TurnToolOverlay {
-                            allowed_tools: Some(vec!["flow_tool".to_string()]),
+                            allowed_tools: Some(vec!["flow_tool".into()]),
                             blocked_tools: None,
                             dispatch_context: Default::default(),
                         }),
                         vec![PendingSystemContextAppend {
-                            text: "must not leak before setup succeeds".to_string(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                "must not leak before setup succeeds".to_string(),
+                            ),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5540,7 +5814,7 @@ mod admission_window_tests {
     use meerkat_core::service::{
         InitialTurnPolicy, SessionBuildOptions, SessionService, StartTurnRequest,
     };
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn test_llm_identity(model: &str) -> SessionLlmIdentity {
@@ -5557,7 +5831,7 @@ mod admission_window_tests {
     struct AdmissionProbeBuilder {
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
-        cancel_after_boundary: Arc<AtomicBool>,
+        cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
     }
@@ -5567,7 +5841,7 @@ mod admission_window_tests {
         identity: SessionLlmIdentity,
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
-        cancel_after_boundary: Arc<AtomicBool>,
+        cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
         system_context_state: meerkat_core::SystemContextStateHandle,
@@ -5588,7 +5862,7 @@ mod admission_window_tests {
                 identity: test_llm_identity(&req.model),
                 run_calls: Arc::clone(&self.run_calls),
                 cancel_calls: Arc::clone(&self.cancel_calls),
-                cancel_after_boundary: Arc::clone(&self.cancel_after_boundary),
+                cancel_after_boundary_tx: self.cancel_after_boundary_tx.clone(),
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
                 system_context_state: meerkat_core::SystemContextStateHandle::new(
@@ -5619,13 +5893,8 @@ mod admission_window_tests {
                     .expect("running turn should accept interrupt probe");
             }
             self.run_calls.fetch_add(1, Ordering::SeqCst);
-            let text = if self.cancel_after_boundary.load(Ordering::SeqCst) {
-                "boundary requested"
-            } else {
-                "ran"
-            };
             Ok(RunResult {
-                text: text.to_string(),
+                text: "ran".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -5660,8 +5929,8 @@ mod admission_window_tests {
             self.cancel_calls.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
-            Some(Arc::clone(&self.cancel_after_boundary))
+        fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
+            Some(self.cancel_after_boundary_tx.clone())
         }
 
         fn session_id(&self) -> SessionId {
@@ -5679,8 +5948,8 @@ mod admission_window_tests {
             }
         }
 
-        fn session_clone(&self) -> meerkat_core::Session {
-            meerkat_core::Session::new()
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(meerkat_core::Session::new())
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -5702,11 +5971,9 @@ mod admission_window_tests {
         CreateSessionRequest {
             model: "admission-window-test".to_string(),
             prompt: ContentInput::Text("defer".to_string()),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),
@@ -5726,12 +5993,12 @@ mod admission_window_tests {
     fn probe_builder(
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
-        cancel_after_boundary: Arc<AtomicBool>,
+        cancel_after_boundary_tx: CancelAfterBoundarySender,
     ) -> AdmissionProbeBuilder {
         AdmissionProbeBuilder {
             run_calls,
             cancel_calls,
-            cancel_after_boundary,
+            cancel_after_boundary_tx,
             turn_admission_for_run: Arc::new(Mutex::new(None)),
             interrupt_before_success: false,
         }
@@ -5769,7 +6036,6 @@ mod admission_window_tests {
                 event_tx: request.event_tx,
                 result_tx,
                 active_admission: None,
-                restore_staged_capacity_on_pre_run_failure: false,
             })
             .await
             .expect("send start turn");
@@ -5780,11 +6046,13 @@ mod admission_window_tests {
     async fn hard_interrupt_during_admission_cancels_before_agent_poll() {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
                 Arc::clone(&cancel_calls),
-                Arc::new(AtomicBool::new(false)),
+                cancel_after_boundary_tx,
             ),
             1,
         );
@@ -5802,14 +6070,15 @@ mod admission_window_tests {
     }
 
     #[tokio::test]
-    async fn boundary_cancel_during_admission_sets_flag_for_delivered_turn() {
+    async fn boundary_cancel_during_admission_delivers_command_to_agent() {
         let run_calls = Arc::new(AtomicUsize::new(0));
-        let cancel_after_boundary = Arc::new(AtomicBool::new(false));
+        let (cancel_after_boundary_tx, mut cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
                 Arc::new(AtomicUsize::new(0)),
-                Arc::clone(&cancel_after_boundary),
+                cancel_after_boundary_tx,
             ),
             1,
         );
@@ -5819,14 +6088,24 @@ mod admission_window_tests {
             .cancel_after_boundary(&session_id)
             .await
             .expect("admitted turn accepts boundary cancel");
-        assert!(cancel_after_boundary.load(Ordering::SeqCst));
+        // The surface delivered exactly one typed command on the agent-owned
+        // carrier; assert delivery on the test-held receiver rather than a
+        // shared bool.
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Ok(CancelAfterBoundaryCommand)
+        ));
 
         let result = deliver_start_turn(command_tx)
             .await
             .expect("start turn should run cooperatively");
-        assert_eq!(result.text, "boundary requested");
+        assert_eq!(result.text, "ran");
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
-        assert!(!cancel_after_boundary.load(Ordering::SeqCst));
+        // No further command is queued after the single delivery.
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -5834,10 +6113,12 @@ mod admission_window_tests {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let cancel_calls = Arc::new(AtomicUsize::new(0));
         let turn_admission_for_run = Arc::new(Mutex::new(None));
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let mut builder = probe_builder(
             Arc::clone(&run_calls),
             Arc::clone(&cancel_calls),
-            Arc::new(AtomicBool::new(false)),
+            cancel_after_boundary_tx,
         );
         builder.turn_admission_for_run = Arc::clone(&turn_admission_for_run);
         builder.interrupt_before_success = true;
@@ -5868,14 +6149,15 @@ mod admission_window_tests {
     }
 
     #[tokio::test]
-    async fn boundary_cancel_on_aborted_admission_does_not_leak_to_next_turn() {
+    async fn boundary_cancel_on_aborted_admission_delivers_command_once() {
         let run_calls = Arc::new(AtomicUsize::new(0));
-        let cancel_after_boundary = Arc::new(AtomicBool::new(false));
+        let (cancel_after_boundary_tx, mut cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
                 Arc::new(AtomicUsize::new(0)),
-                Arc::clone(&cancel_after_boundary),
+                cancel_after_boundary_tx,
             ),
             1,
         );
@@ -5885,13 +6167,23 @@ mod admission_window_tests {
             .cancel_after_boundary(&session_id)
             .await
             .expect("admitted turn accepts boundary cancel");
-        assert!(cancel_after_boundary.load(Ordering::SeqCst));
+        // The boundary-cancel delivered exactly one typed command.
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Ok(CancelAfterBoundaryCommand)
+        ));
         {
             let sessions = service.sessions.read().await;
             let handle = sessions.get(&session_id).expect("session handle");
             EphemeralSessionService::<AdmissionProbeBuilder>::try_abort_admitted_turn(handle);
         }
-        assert!(!cancel_after_boundary.load(Ordering::SeqCst));
+        // Aborting the admission does not synthesize another command; staleness
+        // reset is now core-owned via the run-start flush, so no clear helper
+        // re-touches the carrier here.
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         let result = service
             .start_turn(&session_id, start_turn_request())
@@ -5973,8 +6265,8 @@ mod inline_video_admission_tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "noop"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         fn model(&self) -> &str {
@@ -6073,8 +6365,8 @@ mod inline_video_admission_tests {
             }
         }
 
-        fn session_clone(&self) -> meerkat_core::Session {
-            meerkat_core::Session::new()
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(meerkat_core::Session::new())
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -6099,11 +6391,9 @@ mod inline_video_admission_tests {
         CreateSessionRequest {
             model: "providerless-video-alias".to_string(),
             prompt,
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),

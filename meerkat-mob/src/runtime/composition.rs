@@ -96,31 +96,69 @@ pub fn mob_producer_instance() -> ProducerInstance {
 ///
 /// The variant payload is the canonical DSL effect emitted by
 /// `MobMachine`; do not introduce a second producer-effect mirror here.
+/// The routed [`EffectVariantId`] is computed ONCE at construction (in
+/// [`MobSeamEffect::routed`], the sole real constructor, reached via
+/// [`lift_routed_effect`]) from the generated `meerkat_mob_seam` slug
+/// helpers and cached alongside the canonical body. This makes
+/// [`MobSeamEffect::variant_id`] a TOTAL field read with no panicking
+/// non-routed arm: by construction every `MobSeamEffect` already carries a
+/// generated routed variant id, and a non-routed `MobMachineEffect` cannot
+/// be lifted at all (the constructor fails closed with `None`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MobSeamEffect {
-    /// Producer `mob` emitted an effect body from the canonical machine.
-    Mob(mob_dsl::MobMachineEffect),
+    /// Producer `mob` emitted an effect body from the canonical machine,
+    /// paired with its generated routed effect-variant id.
+    Mob {
+        /// Generated routed effect-variant id (from `seam_facts::effects::mob`).
+        variant: EffectVariantId,
+        /// Canonical DSL effect body emitted by `MobMachine` (no mirror).
+        body: mob_dsl::MobMachineEffect,
+    },
 }
 
 impl MobSeamEffect {
-    /// Typed [`EffectVariantId`] for this producer body. Matches the
-    /// effect-variant slugs declared on `MobMachine`'s schema and the
-    /// `meerkat_mob_seam` route declarations.
-    pub fn variant_id(&self) -> EffectVariantId {
-        match self {
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }) => {
+    /// Construct a seam effect for a routed `MobMachineEffect`, deriving the
+    /// generated [`EffectVariantId`] from the `meerkat_mob_seam` slug
+    /// helpers. Returns `None` (fail closed) for any non-routed variant —
+    /// non-routed effects never cross the composition seam and so can never
+    /// be lifted into a `MobSeamEffect`. This is the single place the
+    /// effect-body → routed-variant mapping is computed.
+    pub fn routed(body: mob_dsl::MobMachineEffect) -> Option<Self> {
+        use mob_dsl::MobMachineEffect as DslEffect;
+        let variant = match &body {
+            DslEffect::RequestRuntimeBinding { .. } => {
                 seam_facts::effects::mob::request_runtime_binding()
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }) => {
+            DslEffect::RequestRuntimeIngress { .. } => {
                 seam_facts::effects::mob::request_runtime_ingress()
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }) => {
+            DslEffect::RequestRuntimeRetire { .. } => {
                 seam_facts::effects::mob::request_runtime_retire()
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { .. }) => {
+            DslEffect::RequestRuntimeDestroy { .. } => {
                 seam_facts::effects::mob::request_runtime_destroy()
             }
-            Self::Mob(other) => unreachable!("non-routed mob effect reached seam: {other:?}"),
+            // Non-routed effects (persist, notice, topology signal, etc.)
+            // stay on the in-process effect-drain path and never cross the
+            // seam — they cannot be lifted.
+            _ => return None,
+        };
+        Some(Self::Mob { variant, body })
+    }
+
+    /// Borrow the canonical DSL effect body.
+    pub fn body(&self) -> &mob_dsl::MobMachineEffect {
+        match self {
+            Self::Mob { body, .. } => body,
+        }
+    }
+
+    /// Generated routed [`EffectVariantId`] for this producer body, computed
+    /// at construction from the generated `meerkat_mob_seam` slug helpers.
+    /// Total field read — no panic, no non-routed arm.
+    pub fn variant_id(&self) -> EffectVariantId {
+        match self {
+            Self::Mob { variant, .. } => variant.clone(),
         }
     }
 
@@ -129,14 +167,14 @@ impl MobSeamEffect {
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
-        match self {
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+        match self.body() {
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding {
                 agent_identity: _,
                 agent_runtime_id,
                 fence_token,
                 generation,
                 session_id,
-            }) => {
+            } => {
                 if id == &seam_facts::fields::agent_runtime_id() {
                     Some(FieldValue::Str(agent_runtime_id.as_str()))
                 } else if id == &seam_facts::fields::fence_token() {
@@ -149,14 +187,14 @@ impl MobSeamEffect {
                     None
                 }
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id,
                 fence_token,
                 generation,
                 session_id,
                 work_id,
                 origin,
-            }) => {
+            } => {
                 if id == &seam_facts::fields::agent_runtime_id() {
                     Some(FieldValue::Str(agent_runtime_id.as_str()))
                 } else if id == &seam_facts::fields::fence_token() {
@@ -173,21 +211,24 @@ impl MobSeamEffect {
                     None
                 }
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }) => {
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id } => {
                 if id == &seam_facts::fields::session_id() {
                     Some(FieldValue::Str(session_id.0.as_str()))
                 } else {
                     None
                 }
             }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }) => {
+            mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id } => {
                 if id == &seam_facts::fields::session_id() {
                     Some(FieldValue::Str(session_id.0.as_str()))
                 } else {
                     None
                 }
             }
-            Self::Mob(_) => None,
+            // Non-routed bodies can never be lifted into a `MobSeamEffect`
+            // (the `routed` constructor fails closed), so this arm is only
+            // reachable if such a body were stored — which the type prevents.
+            _ => None,
         }
     }
 }
@@ -215,14 +256,10 @@ impl ProducerEffect for MobSeamEffect {
 /// notice, topology signal, etc.) — those stay on the in-process
 /// effect-drain path and never cross the composition seam.
 pub fn lift_routed_effect(effect: &mob_dsl::MobMachineEffect) -> Option<MobSeamEffect> {
-    use mob_dsl::MobMachineEffect as DslEffect;
-    match effect {
-        DslEffect::RequestRuntimeBinding { .. }
-        | DslEffect::RequestRuntimeIngress { .. }
-        | DslEffect::RequestRuntimeRetire { .. }
-        | DslEffect::RequestRuntimeDestroy { .. } => Some(MobSeamEffect::Mob(effect.clone())),
-        _ => None,
-    }
+    // `MobSeamEffect::routed` is the sole constructor: it derives the
+    // generated routed variant id and fails closed (`None`) for every
+    // non-routed variant, so non-routed effects can never cross the seam.
+    MobSeamEffect::routed(effect.clone())
 }
 
 /// Wave-c C-6c — build a production [`MobCompositionBinding`] that
@@ -382,7 +419,7 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         &self,
         variant: SignalVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
         let command = super::state::MobCommand::ProjectMachineSignal { signal };
         match self.command_tx.try_send(command) {
@@ -400,7 +437,10 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_command)) => {
-                Err("mob actor signal queue closed".to_string())
+                Err(meerkat_runtime::composition::ConsumerError::new(
+                    "mob_signal_queue_closed",
+                    "mob actor signal queue closed",
+                ))
             }
         }
     }
@@ -477,9 +517,11 @@ fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
         DispatchRefusal::ConsumerRefused {
             instance,
             variant,
-            reason,
+            error,
         } => MobError::Internal(format!(
-            "consumer `{instance}` refused routed input `{variant}`: {reason}"
+            "consumer `{instance}` refused routed input `{variant}`: {} [{}]",
+            error.message(),
+            error.error_code()
         )),
     }
 }
@@ -496,6 +538,13 @@ mod tests {
         FieldId::parse(slug).expect("slug")
     }
 
+    /// Lift a routed effect body into a [`MobSeamEffect`] for assertions.
+    /// Panics in the test if the body is not a routed variant — the
+    /// production constructor fails closed, so tests must use routed bodies.
+    fn seam(body: mob_dsl::MobMachineEffect) -> MobSeamEffect {
+        MobSeamEffect::routed(body).expect("test body must be a routed seam effect")
+    }
+
     #[test]
     fn request_runtime_binding_variant_id_matches_schema_slug() {
         let body = mob_dsl::MobMachineEffect::RequestRuntimeBinding {
@@ -505,10 +554,7 @@ mod tests {
             generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
-        assert_eq!(
-            MobSeamEffect::Mob(body).variant_id(),
-            ev("RequestRuntimeBinding"),
-        );
+        assert_eq!(seam(body).variant_id(), ev("RequestRuntimeBinding"));
     }
 
     #[test]
@@ -520,7 +566,7 @@ mod tests {
             generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
-        let effect = MobSeamEffect::Mob(body);
+        let effect = seam(body);
 
         assert!(matches!(
             effect.field(&fid("agent_runtime_id")).expect("present"),
@@ -543,7 +589,7 @@ mod tests {
 
         let cases = vec![
             (
-                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                seam(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
                     agent_identity: mob_dsl::AgentIdentity::from("agent"),
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                     fence_token: mob_dsl::FenceToken(7),
@@ -553,7 +599,7 @@ mod tests {
                 seam_facts::route_binding_request_reaches_meerkat(),
             ),
             (
-                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                seam(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                     fence_token: mob_dsl::FenceToken(7),
                     generation: Some(mob_dsl::Generation(3)),
@@ -564,13 +610,13 @@ mod tests {
                 seam_facts::route_work_request_reaches_meerkat(),
             ),
             (
-                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
                     session_id: mob_dsl::SessionId::from("session-1"),
                 }),
                 seam_facts::route_retire_request_reaches_meerkat(),
             ),
             (
-                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                seam(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
                     session_id: mob_dsl::SessionId::from("session-1"),
                 }),
                 seam_facts::route_destroy_request_reaches_meerkat(),
@@ -593,10 +639,10 @@ mod tests {
 
     #[test]
     fn retire_and_destroy_have_no_fields() {
-        let retire = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+        let retire = seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
-        let destroy = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+        let destroy = seam(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         assert_eq!(retire.variant_id(), ev("RequestRuntimeRetire"));
@@ -615,7 +661,7 @@ mod tests {
             work_id: mob_dsl::WorkId::from("w-1"),
             origin: mob_dsl::WorkOrigin::External,
         };
-        let effect = MobSeamEffect::Mob(body);
+        let effect = seam(body);
 
         assert!(matches!(
             effect
@@ -658,9 +704,10 @@ mod tests {
         };
         assert!(matches!(
             lift_routed_effect(&binding_in),
-            Some(MobSeamEffect::Mob(
-                mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }
-            )),
+            Some(MobSeamEffect::Mob {
+                body: mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. },
+                ..
+            }),
         ));
 
         let retire_in = DslEffect::RequestRuntimeRetire {
@@ -668,9 +715,10 @@ mod tests {
         };
         assert!(matches!(
             lift_routed_effect(&retire_in),
-            Some(MobSeamEffect::Mob(
-                mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }
-            )),
+            Some(MobSeamEffect::Mob {
+                body: mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. },
+                ..
+            }),
         ));
 
         // Non-routed variant: `PersistKickoffUpdate` stays on the local
@@ -682,10 +730,153 @@ mod tests {
         assert!(lift_routed_effect(&local_only).is_none());
     }
 
+    /// #13 dogma gate: every routed `MobMachineEffect` variant must project
+    /// its seam variant id THROUGH the generated `meerkat_mob_seam` route
+    /// metadata — the cached `variant_id` must resolve to a generated input
+    /// route via `seam_facts::route_to_input`, with no hand-authored mirror
+    /// and no panicking non-routed arm. A non-routed variant must fail closed
+    /// at the `routed` constructor (return `None`) rather than reach a
+    /// `unreachable!`. This fails-old (the prior `variant_id` carried an
+    /// `unreachable!("non-routed mob effect reached seam")` arm and was a
+    /// hand-written match) and passes-new.
+    #[test]
+    fn every_routed_variant_projects_through_generated_route_metadata() {
+        use mob_dsl::MobMachineEffect as DslEffect;
+
+        let routed: Vec<DslEffect> = vec![
+            DslEffect::RequestRuntimeBinding {
+                agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(7),
+                generation: Some(mob_dsl::Generation(3)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            DslEffect::RequestRuntimeIngress {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(7),
+                generation: Some(mob_dsl::Generation(3)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+                work_id: mob_dsl::WorkId::from("work-1"),
+                origin: mob_dsl::WorkOrigin::External,
+            },
+            DslEffect::RequestRuntimeRetire {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            DslEffect::RequestRuntimeDestroy {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+        ];
+
+        for body in routed {
+            let effect = MobSeamEffect::routed(body).expect("routed variant must lift");
+            // The cached variant id must resolve to a generated route — the
+            // single source of truth for the seam. If the cached slug were
+            // hand-authored and drifted from the generated metadata, this
+            // resolution would return `None`.
+            let route = effect
+                .generated_input_route()
+                .expect("cached variant id must resolve to a generated input route");
+            // `TypedRoutedInput.instance_id` is the *input* (consumer) instance
+            // the route delivers into. Every routed `MobMachineEffect` is a
+            // request INTO the `meerkat` runtime machine, so the route resolved
+            // from the cached producer effect-variant id targets the generated
+            // `meerkat` instance — read from generated truth, not a
+            // hand-authored slug.
+            assert_eq!(
+                route.instance_id,
+                meerkat_runtime::generated::meerkat_mob_seam::producers::meerkat_instance_id()
+            );
+            // Every producer field the generated route declares must be
+            // projectable from the effect body through the generated field
+            // helpers (no missing producer field).
+            for (producer_field, _) in &route.bindings {
+                assert!(
+                    effect.field(producer_field).is_some(),
+                    "generated route `{}` requires producer field `{}`",
+                    route.route_id.as_str(),
+                    producer_field.as_str()
+                );
+            }
+        }
+
+        // Non-routed bodies fail closed at construction — they can never be
+        // lifted into a `MobSeamEffect`, so the panicking non-routed arm is
+        // gone and no `unreachable!` is reachable.
+        assert!(
+            MobSeamEffect::routed(DslEffect::PersistKickoffUpdate {
+                member_id: "m".into(),
+                phase: mob_dsl::KickoffPhase::Pending,
+            })
+            .is_none(),
+            "non-routed effect must fail closed at the seam constructor",
+        );
+    }
+
+    /// Schema-enumerated lift-completeness gate: the set of effect variants
+    /// liftable by [`MobSeamEffect::routed`] must EQUAL the set of effect
+    /// routes the `meerkat_mob_seam` composition schema declares from the
+    /// `mob` producer. If the composition gains a new routed effect variant
+    /// without a lift arm, the fail-closed `None` wildcard in `routed` would
+    /// silently drop it on the in-process drain path — this gate turns that
+    /// silent completeness window into a hard test failure.
+    #[test]
+    fn lift_covers_every_schema_declared_mob_effect_route() {
+        use std::collections::BTreeSet;
+
+        let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+        let declared: BTreeSet<String> = schema
+            .routes
+            .iter()
+            .filter(|route| route.from_machine == mob_producer_instance_id())
+            .map(|route| route.effect_variant.as_str().to_string())
+            .collect();
+
+        let liftable_bodies = vec![
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: Some(mob_dsl::Generation(0)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: Some(mob_dsl::Generation(0)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+                work_id: mob_dsl::WorkId::from("work-1"),
+                origin: mob_dsl::WorkOrigin::External,
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+        ];
+        let liftable: BTreeSet<String> = liftable_bodies
+            .into_iter()
+            .map(|body| {
+                MobSeamEffect::routed(body)
+                    .expect("declared routed body must lift")
+                    .variant_id()
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            declared, liftable,
+            "every schema-declared mob effect route must have a lift arm in \
+             MobSeamEffect::routed (and vice versa); update the constructor \
+             AND this gate together when the composition changes"
+        );
+    }
+
     #[tokio::test]
     async fn standalone_binding_skips_dispatch_without_error() {
         let binding: MobCompositionBinding = CompositionBinding::Standalone;
-        let effect = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+        let effect = seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         let outcome = dispatch_routed_effect(&binding, effect)

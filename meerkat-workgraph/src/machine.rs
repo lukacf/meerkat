@@ -53,7 +53,7 @@ impl WorkAttentionMachine {
             expected_revision,
             until_utc_ms: until.map(datetime_to_millis),
         };
-        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        binding.machine_state = apply_attention_dsl(&binding, input, Some(expected_revision))?;
         sync_attention_from_machine_state(&mut binding);
         binding.updated_at = now;
         Ok(binding)
@@ -65,7 +65,7 @@ impl WorkAttentionMachine {
         now: DateTime<Utc>,
     ) -> Result<WorkAttentionBinding, WorkGraphError> {
         let input = attention_dsl::WorkAttentionLifecycleInput::Resume { expected_revision };
-        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        binding.machine_state = apply_attention_dsl(&binding, input, Some(expected_revision))?;
         sync_attention_from_machine_state(&mut binding);
         binding.updated_at = now;
         Ok(binding)
@@ -80,7 +80,7 @@ impl WorkAttentionMachine {
             expected_revision,
             at_utc_ms: datetime_to_millis(now),
         };
-        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        binding.machine_state = apply_attention_dsl(&binding, input, Some(expected_revision))?;
         sync_attention_from_machine_state(&mut binding);
         binding.updated_at = now;
         Ok(binding)
@@ -268,6 +268,15 @@ fn attention_delegated_authority_to_dsl(
 pub struct WorkGraphMachine;
 
 impl WorkGraphMachine {
+    /// Mechanically assert that a `WorkItem`'s projected lifecycle fields agree
+    /// with its machine-owned `machine_state` authority.
+    ///
+    /// This is a *pure structural check*: it borrows `item` immutably and can
+    /// only return `Ok(())` (every projection matches the machine state) or an
+    /// `Err` rejecting the drift. It never synthesizes, repairs, or derives any
+    /// lifecycle/revision field — the canonical truth lives in
+    /// `WorkGraphMachineState`, and this guard merely rejects projections that
+    /// disagree with it.
     pub fn validate_item_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
         validate_item_machine_projection(item)
     }
@@ -1234,6 +1243,7 @@ fn apply_link_validation_dsl(
 fn apply_attention_dsl(
     binding: &WorkAttentionBinding,
     input: attention_dsl::WorkAttentionLifecycleInput,
+    expected_revision: Option<u64>,
 ) -> Result<attention_dsl::WorkAttentionLifecycleMachineState, WorkGraphError> {
     let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
         binding.machine_state.clone(),
@@ -1246,6 +1256,15 @@ fn apply_attention_dsl(
     })?;
     attention_dsl::WorkAttentionLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(
         |error| {
+            if let Some(expected) = expected_revision
+                && binding.machine_state.revision != expected
+            {
+                return WorkGraphError::StaleRevision {
+                    id: binding.work_ref.item_id.clone(),
+                    expected,
+                    actual: binding.machine_state.revision,
+                };
+            }
             WorkGraphError::InvalidTransition(format!(
                 "attention binding {} refused transition: {error:?}",
                 binding.binding_id
@@ -2251,5 +2270,39 @@ mod tests {
         )
         .expect_err("double claim should fail");
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn validate_item_projection_only_rejects_never_derives() {
+        let now = Utc::now();
+
+        // A freshly machine-built item agrees with its machine_state authority.
+        let clean = create("projection-guard", now);
+        WorkGraphMachine::validate_item_projection(&clean)
+            .expect("a machine-built projection must agree with its machine state");
+
+        // Tampering the projected status away from the machine-owned lifecycle
+        // phase is rejected — the guard does not silently re-derive `status`
+        // from the machine state, it fails closed on the drift.
+        let mut status_drift = clean.clone();
+        status_drift.status = WorkStatus::Completed;
+        let err = WorkGraphMachine::validate_item_projection(&status_drift)
+            .expect_err("status projection drift must be rejected, never repaired");
+        assert!(
+            matches!(&err, WorkGraphError::Store(message) if message.contains("status projection")),
+            "rejection must cite the status projection drift, got: {err:?}"
+        );
+
+        // Likewise for the revision projection: the machine_state.revision is
+        // canonical, and a divergent projected revision is rejected rather than
+        // synthesized back into agreement.
+        let mut revision_drift = clean.clone();
+        revision_drift.revision = revision_drift.revision.wrapping_add(1);
+        let err = WorkGraphMachine::validate_item_projection(&revision_drift)
+            .expect_err("revision projection drift must be rejected, never repaired");
+        assert!(
+            matches!(&err, WorkGraphError::Store(message) if message.contains("revision projection")),
+            "rejection must cite the revision projection drift, got: {err:?}"
+        );
     }
 }

@@ -32,6 +32,18 @@ use meerkat_core::{
 use meerkat_llm_core::provider_runtime::binding::ResolvedConnection;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
+fn claude_ai_declaration() -> meerkat_auth_core::oauth_flow::OAuthProviderDeclaration {
+    meerkat_auth_core::oauth_flow::oauth_provider_declaration(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi,
+    )
+}
+
+fn console_declaration() -> meerkat_auth_core::oauth_flow::OAuthProviderDeclaration {
+    meerkat_auth_core::oauth_flow::oauth_provider_declaration(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
+    )
+}
+
 fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
     realm_with_oauth_binding_source(auth_method, CredentialSourceSpec::PlatformDefault)
 }
@@ -307,7 +319,8 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CLAUDE_AI_SCOPES
+        scopes: claude_ai_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -349,7 +362,8 @@ async fn claude_ai_oauth_rejects_token_without_auth_lifecycle() {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CLAUDE_AI_SCOPES
+        scopes: claude_ai_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -395,7 +409,8 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CLAUDE_AI_SCOPES
+        scopes: claude_ai_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -492,7 +507,8 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
                 id_token: None,
                 expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
                 last_refresh: Some(Utc::now()),
-                scopes: oauth::CLAUDE_AI_SCOPES
+                scopes: claude_ai_declaration()
+                    .scopes
                     .iter()
                     .map(|s| (*s).into())
                     .collect(),
@@ -560,7 +576,8 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CLAUDE_AI_SCOPES
+        scopes: claude_ai_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -661,7 +678,8 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: oauth::CLAUDE_AI_SCOPES
+        scopes: claude_ai_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -878,17 +896,18 @@ async fn no_token_store_surface_interactive_login_required() {
 
 #[test]
 fn claude_oauth_constants_match_claude_code_source() {
-    // These must exactly match claude-code/src/constants/oauth.ts.
+    // These must exactly match claude-code/src/constants/oauth.ts. The
+    // client id / endpoints / scopes are owned by the canonical auth-core
+    // declaration; only the Anthropic-only facts still live in this crate.
+    let claude_ai = claude_ai_declaration();
+    let console = console_declaration();
+    assert_eq!(claude_ai.client_id, "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
     assert_eq!(
-        oauth::CLAUDE_CLIENT_ID,
-        "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    );
-    assert_eq!(
-        oauth::CLAUDE_AI_AUTHORIZE_URL,
+        claude_ai.authorize_endpoint,
         "https://claude.com/cai/oauth/authorize"
     );
     assert_eq!(
-        oauth::TOKEN_URL,
+        claude_ai.token_endpoint,
         "https://platform.claude.com/v1/oauth/token"
     );
     assert_eq!(
@@ -898,7 +917,7 @@ fn claude_oauth_constants_match_claude_code_source() {
     assert_eq!(oauth::OAUTH_BETA_HEADER_NAME, "anthropic-beta");
     assert_eq!(oauth::OAUTH_BETA_HEADER_VALUE, "oauth-2025-04-20");
     assert_eq!(
-        oauth::CLAUDE_AI_SCOPES,
+        claude_ai.scopes,
         &[
             "user:profile",
             "user:inference",
@@ -907,8 +926,5 @@ fn claude_oauth_constants_match_claude_code_source() {
             "user:file_upload",
         ]
     );
-    assert_eq!(
-        oauth::CONSOLE_SCOPES,
-        &["org:create_api_key", "user:profile"]
-    );
+    assert_eq!(console.scopes, &["org:create_api_key", "user:profile"]);
 }

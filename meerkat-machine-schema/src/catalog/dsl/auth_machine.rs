@@ -230,9 +230,9 @@ macro_rules! auth_catalog_machine_dsl {
                 CredentialUseAdmissionResolved { disposition: Enum<CredentialUseDisposition> },
             }
 
-            disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication,
-            disposition WakeRefreshLoop => local,
-            disposition CredentialUseAdmissionResolved => local,
+            disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication seam SurfaceResultAlignment,
+            disposition WakeRefreshLoop => local seam NoOwnerRealization,
+            disposition CredentialUseAdmissionResolved => local seam SurfaceResultAlignment,
 
             invariant oauth_flow_membership_consistent {
                 self.oauth_browser_flow_providers.keys() == self.oauth_browser_flow_ids

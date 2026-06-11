@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use meerkat_machine_schema::{
     CompositionSchema, canonical_composition_schemas, canonical_machine_schemas,
-    compat_composition_schemas,
 };
 
 use crate::public_contracts::repo_root;
@@ -197,8 +196,7 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     let mut set = BTreeSet::new();
 
     // Protocol codegen writes one file per declared handoff protocol.
-    let mut compositions: Vec<CompositionSchema> = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions: Vec<CompositionSchema> = canonical_composition_schemas();
     for composition in &compositions {
         for protocol in &composition.handoff_protocols {
             set.insert(PathBuf::from(protocol.rust.module_path.as_str()));
@@ -240,6 +238,8 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/session_document.rs",
     ));
+    // Keystone-A: schema-derived per-machine CatalogInput mirror (protocol-codegen).
+    set.insert(PathBuf::from("meerkat-mob/src/generated/catalog_input.rs"));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

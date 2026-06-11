@@ -34,11 +34,33 @@ pub struct SessionProjector {
     output_dir: PathBuf,
 }
 
+/// Derived-commit cursor persisted in `checkpoint`.
+///
+/// Owns BOTH facts of a committed projection: the last projected event
+/// sequence AND the committed `events.jsonl` byte length. A crash between the
+/// `events.jsonl` append and the checkpoint write leaves a partial tail past
+/// `events_len`; resume truncates back to the committed length before
+/// projecting incrementally, so derived rows can never duplicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ProjectionCheckpoint {
+    last_seq: u64,
+    events_len: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckpointState {
-    Valid(u64),
+    Valid(ProjectionCheckpoint),
     Missing,
     Invalid,
+}
+
+/// Whether the committed `events.jsonl` prefix recorded by the checkpoint is
+/// intact (after healing any partial tail), or the derived output diverged in
+/// a way only a full replay can rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivedTail {
+    Committed,
+    RequiresRebuild,
 }
 
 impl SessionProjector {
@@ -125,6 +147,7 @@ impl SessionProjector {
         // Tokio file writes complete on background blocking tasks; flush before
         // dropping so immediate replay readers observe the finished contents.
         file.flush().await.map_err(ProjectionError::Io)?;
+        let events_len = file.metadata().await.map_err(ProjectionError::Io)?.len();
         drop(file);
 
         // Rewrite commits can replace or remove prior assistant text, so keep
@@ -142,9 +165,17 @@ impl SessionProjector {
             }
         }
 
-        // Write checkpoint
+        // Write the checkpoint cursor: it commits both the last projected
+        // sequence and the events.jsonl byte length so resume can truncate any
+        // partial tail left by a crash before this write.
         let checkpoint_path = dir.join("checkpoint");
-        tokio::fs::write(&checkpoint_path, last_seq.to_string().as_bytes())
+        let checkpoint = ProjectionCheckpoint {
+            last_seq,
+            events_len,
+        };
+        let payload = serde_json::to_string(&checkpoint)
+            .map_err(|e| ProjectionError::Serialization(e.to_string()))?;
+        tokio::fs::write(&checkpoint_path, payload.as_bytes())
             .await
             .map_err(ProjectionError::Io)?;
 
@@ -168,7 +199,7 @@ impl SessionProjector {
     /// Read the last checkpoint seq for a session (0 if no checkpoint).
     pub async fn read_checkpoint(&self, session_id: &SessionId) -> u64 {
         match self.read_checkpoint_state(session_id).await {
-            CheckpointState::Valid(seq) => seq,
+            CheckpointState::Valid(checkpoint) => checkpoint.last_seq,
             CheckpointState::Missing | CheckpointState::Invalid => 0,
         }
     }
@@ -176,8 +207,8 @@ impl SessionProjector {
     async fn read_checkpoint_state(&self, session_id: &SessionId) -> CheckpointState {
         let path = self.session_dir(session_id).join("checkpoint");
         match tokio::fs::read_to_string(&path).await {
-            Ok(s) => match s.trim().parse() {
-                Ok(seq) => CheckpointState::Valid(seq),
+            Ok(s) => match serde_json::from_str::<ProjectionCheckpoint>(s.trim()) {
+                Ok(checkpoint) => CheckpointState::Valid(checkpoint),
                 Err(err) => {
                     tracing::warn!(
                         checkpoint = ?path,
@@ -193,6 +224,52 @@ impl SessionProjector {
                     "failed to read checkpoint: {err}"
                 );
                 CheckpointState::Invalid
+            }
+        }
+    }
+
+    /// Heal the crash window between the `events.jsonl` append and the
+    /// checkpoint write: truncate `events.jsonl` back to the byte length the
+    /// checkpoint committed, dropping any partial tail a crashed projection
+    /// appended. Returns [`DerivedTail::RequiresRebuild`] when the derived file
+    /// is shorter than the committed cursor (only a full replay can rebuild).
+    async fn heal_events_tail(
+        &self,
+        session_id: &SessionId,
+        committed_len: u64,
+    ) -> Result<DerivedTail, ProjectionError> {
+        let events_path = self.session_dir(session_id).join("events.jsonl");
+        let current_len = match tokio::fs::metadata(&events_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(if committed_len == 0 {
+                    DerivedTail::Committed
+                } else {
+                    DerivedTail::RequiresRebuild
+                });
+            }
+            Err(err) => return Err(ProjectionError::Io(err)),
+        };
+        match current_len.cmp(&committed_len) {
+            Ordering::Equal => Ok(DerivedTail::Committed),
+            Ordering::Less => Ok(DerivedTail::RequiresRebuild),
+            Ordering::Greater => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    committed_len,
+                    current_len,
+                    "events.jsonl has a partial tail past the committed checkpoint; truncating"
+                );
+                let file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&events_path)
+                    .await
+                    .map_err(ProjectionError::Io)?;
+                file.set_len(committed_len)
+                    .await
+                    .map_err(ProjectionError::Io)?;
+                file.sync_all().await.map_err(ProjectionError::Io)?;
+                Ok(DerivedTail::Committed)
             }
         }
     }
@@ -231,22 +308,57 @@ impl SessionProjector {
                     .last_seq(session_id)
                     .await
                     .map_err(|e| ProjectionError::EventStore(e.to_string()))?;
-                match checkpoint.cmp(&durable_last_seq) {
+                match checkpoint.last_seq.cmp(&durable_last_seq) {
                     Ordering::Greater => {
                         tracing::warn!(
                             session_id = %session_id,
-                            checkpoint,
+                            checkpoint_last_seq = checkpoint.last_seq,
                             durable_last_seq,
                             "projection checkpoint is ahead of durable event store; replaying derived files"
                         );
                         self.replay(event_store, session_id).await
                     }
-                    Ordering::Equal => Ok(checkpoint),
-                    Ordering::Less => self.project(event_store, session_id, checkpoint + 1).await,
+                    Ordering::Equal => {
+                        match self
+                            .heal_events_tail(session_id, checkpoint.events_len)
+                            .await?
+                        {
+                            DerivedTail::Committed => Ok(checkpoint.last_seq),
+                            DerivedTail::RequiresRebuild => {
+                                self.replay(event_store, session_id).await
+                            }
+                        }
+                    }
+                    Ordering::Less => {
+                        // A crash inside a previous incremental projection can
+                        // leave appended rows past the committed cursor with
+                        // the checkpoint still valid-but-stale. Truncate back
+                        // to the committed byte length before appending, so
+                        // the same derived events are never duplicated.
+                        match self
+                            .heal_events_tail(session_id, checkpoint.events_len)
+                            .await?
+                        {
+                            DerivedTail::Committed => {
+                                self.project(event_store, session_id, checkpoint.last_seq + 1)
+                                    .await
+                            }
+                            DerivedTail::RequiresRebuild => {
+                                self.replay(event_store, session_id).await
+                            }
+                        }
+                    }
                 }
             }
-            CheckpointState::Missing => self.project(event_store, session_id, 1).await,
-            CheckpointState::Invalid => self.replay(event_store, session_id).await,
+            // A missing checkpoint with a possibly-present events.jsonl is the
+            // crash window between the events.jsonl write and the checkpoint
+            // write (project_with_mode writes the checkpoint last). Projecting
+            // from seq 1 here APPENDS to that partial events.jsonl, duplicating
+            // derived rows. Rebuild via replay() (truncate-and-rebuild, removing
+            // derived files first) exactly like the Invalid arm.
+            CheckpointState::Missing | CheckpointState::Invalid => {
+                self.replay(event_store, session_id).await
+            }
         }
     }
 }
@@ -279,9 +391,6 @@ async fn remove_derived_path(path: &Path) -> Result<(), ProjectionError> {
 
 fn last_assistant_text_from_messages(messages: &[meerkat_core::Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| match message {
-        meerkat_core::Message::Assistant(message) if !message.content.is_empty() => {
-            Some(message.content.clone())
-        }
         meerkat_core::Message::BlockAssistant(message) => {
             let text = message.to_string();
             (!text.is_empty()).then_some(text)
@@ -308,11 +417,19 @@ pub enum ProjectionError {
 mod tests {
     use super::*;
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
-    use meerkat_core::types::{AssistantMessage, Message, StopReason, Usage, UserMessage};
+    use meerkat_core::event::EventSourceIdentity;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, Usage, UserMessage,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    fn read_checkpoint_cursor(path: &std::path::Path) -> ProjectionCheckpoint {
+        let content = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(content.trim()).unwrap()
+    }
 
     /// Simple in-memory event store for testing the projector.
     struct MemEventStore {
@@ -335,6 +452,9 @@ mod tests {
                     seq: base_seq + i as u64 + 1,
                     schema_version: EVENT_SCHEMA_VERSION,
                     timestamp: SystemTime::now(),
+                    source: EventSourceIdentity::session(session_id.clone()),
+                    mob_id: None,
+                    stream_seq: 0,
                     event: event.clone(),
                 });
             }
@@ -343,12 +463,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EventStore for MemEventStore {
-        async fn append(
+        async fn append_envelopes(
             &self,
             session_id: &SessionId,
-            events: &[AgentEvent],
+            envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
-            self.add_events(session_id, events);
+            let events: Vec<AgentEvent> = envelopes.iter().map(|env| env.payload.clone()).collect();
+            self.add_events(session_id, &events);
             self.last_seq(session_id).await
         }
 
@@ -393,7 +514,9 @@ mod tests {
             &[
                 AgentEvent::RunStarted {
                     session_id: sid.clone(),
-                    prompt: meerkat_core::ContentInput::Text("Hello".to_string()),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: meerkat_core::ContentInput::Text("Hello".to_string()),
+                    },
                 },
                 AgentEvent::TextComplete {
                     content: "Hi there!".to_string(),
@@ -422,9 +545,16 @@ mod tests {
         let summary = std::fs::read_to_string(session_dir.join("summary.txt")).unwrap();
         assert_eq!(summary, "Hi there!");
 
-        // Check checkpoint
-        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
-        assert_eq!(checkpoint.trim(), "3");
+        // Check checkpoint: the cursor commits both the last sequence and the
+        // committed events.jsonl byte length.
+        let checkpoint = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(checkpoint.last_seq, 3);
+        assert_eq!(
+            checkpoint.events_len,
+            std::fs::metadata(session_dir.join("events.jsonl"))
+                .unwrap()
+                .len()
+        );
     }
 
     #[tokio::test]
@@ -436,11 +566,12 @@ mod tests {
 
         let mut session = meerkat_core::Session::with_id(sid.clone());
         session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "old summary".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "old summary".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().unwrap();
@@ -586,8 +717,8 @@ mod tests {
         let lines: Vec<&str> = events_content.trim().lines().collect();
         assert_eq!(lines.len(), 3);
 
-        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
-        assert_eq!(checkpoint.trim(), "3");
+        let checkpoint = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(checkpoint.last_seq, 3);
     }
 
     #[tokio::test]
@@ -609,9 +740,17 @@ mod tests {
         projector.project(&store, &sid, 1).await.unwrap();
 
         let session_dir = projector.session_dir(&sid);
-        tokio::fs::write(session_dir.join("checkpoint"), b"99")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            session_dir.join("checkpoint"),
+            serde_json::to_string(&ProjectionCheckpoint {
+                last_seq: 99,
+                events_len: 17,
+            })
+            .unwrap()
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
         tokio::fs::write(session_dir.join("events.jsonl"), b"stale projection\n")
             .await
             .unwrap();
@@ -624,8 +763,162 @@ mod tests {
         let lines: Vec<&str> = events_content.trim().lines().collect();
         assert_eq!(lines.len(), 2);
 
-        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
-        assert_eq!(checkpoint.trim(), "2");
+        let checkpoint = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(checkpoint.last_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_missing_checkpoint_rebuilds_without_duplicates() {
+        // Row #144 gate (fails-old / passes-new): a crash after events.jsonl is
+        // written but before the checkpoint write leaves a partial events.jsonl
+        // and NO checkpoint (CheckpointState::Missing). The OLD code called
+        // project(from_seq=1), which APPENDS to that partial file, duplicating
+        // every derived row. The fix rebuilds via replay (truncate-and-rebuild).
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+
+        let session_dir = projector.session_dir(&sid);
+        // Simulate the crash window: events.jsonl exists, checkpoint is gone.
+        tokio::fs::remove_file(session_dir.join("checkpoint"))
+            .await
+            .unwrap();
+        assert!(session_dir.join("events.jsonl").exists());
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 2);
+
+        // events.jsonl must be rebuilt (exactly 2 lines), NOT appended (4 lines).
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "missing-checkpoint resume must rebuild, not append duplicates"
+        );
+
+        let checkpoint = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(checkpoint.last_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_truncates_partial_tail_behind_valid_stale_checkpoint() {
+        // Regression gate (valid-stale-checkpoint crash window): a crash inside
+        // an incremental projection AFTER the events.jsonl append but BEFORE
+        // the checkpoint write leaves a valid-but-stale checkpoint and a
+        // partial tail past its committed byte length. Resume must truncate
+        // back to the committed cursor before projecting, never append the
+        // same derived events twice.
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+        let session_dir = projector.session_dir(&sid);
+        let committed = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(committed.last_seq, 2);
+
+        // Simulate the crashed incremental projection: event 3 lands durably
+        // and its derived row is appended, but the crash happens before the
+        // checkpoint write (checkpoint stays at the committed seq-2 cursor).
+        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+        let partial_row =
+            serde_json::to_string(&store.read_from(&sid, 3).await.unwrap().first().unwrap())
+                .unwrap();
+        use std::io::Write as _;
+        let mut events_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(session_dir.join("events.jsonl"))
+            .unwrap();
+        writeln!(events_file, "{partial_row}").unwrap();
+        drop(events_file);
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 3);
+
+        // Exactly 3 derived rows: the partial tail was truncated, then event 3
+        // was projected once.
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "valid-stale-checkpoint resume must truncate the partial tail, not duplicate rows"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("\"seq\":3"))
+                .count(),
+            1,
+            "the partially appended event must appear exactly once after resume"
+        );
+
+        let checkpoint = read_checkpoint_cursor(&session_dir.join("checkpoint"));
+        assert_eq!(checkpoint.last_seq, 3);
+        assert_eq!(
+            checkpoint.events_len,
+            std::fs::metadata(session_dir.join("events.jsonl"))
+                .unwrap()
+                .len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_rebuilds_when_events_file_shorter_than_committed_cursor() {
+        // If events.jsonl is shorter than the committed cursor (deleted or
+        // tampered derived output), truncation cannot heal it; resume must
+        // rebuild via full replay.
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+        let session_dir = projector.session_dir(&sid);
+        tokio::fs::write(session_dir.join("events.jsonl"), b"x")
+            .await
+            .unwrap();
+        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 3);
+
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(!events_content.starts_with('x'));
     }
 
     #[tokio::test]
@@ -660,7 +953,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
 
         assert!(checkpoint_path.is_file());
-        let checkpoint = std::fs::read_to_string(checkpoint_path).unwrap();
-        assert_eq!(checkpoint.trim(), "3");
+        let checkpoint = read_checkpoint_cursor(&checkpoint_path);
+        assert_eq!(checkpoint.last_seq, 3);
     }
 }

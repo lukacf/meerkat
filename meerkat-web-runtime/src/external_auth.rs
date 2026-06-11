@@ -63,10 +63,6 @@ thread_local! {
 /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`.
 pub const WASM_EXTERNAL_AUTH_RESOLVER_ID: &str = "wasm_host";
 
-/// Back-compat alias for SDKs/examples that still refer to the
-/// credential-source discriminator as a handle.
-pub const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE: &str = WASM_EXTERNAL_AUTH_RESOLVER_ID;
-
 /// Register a JS-side external-auth resolver. The callback receives a
 /// structural auth binding reference argument (`{ realm, binding, profile? }`)
 /// and must return a Promise that resolves to a JSON-serializable
@@ -332,6 +328,9 @@ fn auth_error_from_wire(error: meerkat_contracts::WireAuthError) -> meerkat_core
         }
         meerkat_contracts::WireAuthError::RefreshFailed { detail } => {
             meerkat_core::AuthError::RefreshFailed(detail)
+        }
+        meerkat_contracts::WireAuthError::ResolveRequired { detail } => {
+            meerkat_core::AuthError::ResolveRequired(detail)
         }
         meerkat_contracts::WireAuthError::InteractiveLoginRequired => {
             meerkat_core::AuthError::InteractiveLoginRequired

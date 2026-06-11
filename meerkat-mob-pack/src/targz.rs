@@ -1,5 +1,5 @@
-use crate::exec_bits::normalize_executable_bit;
 use crate::validate::PackValidationError;
+use crate::vocabulary::ExecPolicy;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -19,7 +19,7 @@ pub fn create_targz(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, PackVa
                     path: normalized_path,
                 });
             }
-            let exec = normalize_executable_bit(&normalized_path, bytes);
+            let exec = ExecPolicy::classify(&normalized_path, bytes).is_executable();
             let mut header = Header::new_gnu();
             header.set_size(bytes.len() as u64);
             header.set_entry_type(EntryType::Regular);

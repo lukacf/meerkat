@@ -18,12 +18,8 @@ use meerkat_core::image_generation::{
     SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
 };
 use meerkat_core::lifecycle::WaitRequestId;
-use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
-use meerkat_core::lifecycle::run_primitive::{
-    ModelId, RunPrimitive, TurnMetadataOverride, legacy_override_from_split_fields,
-    take_legacy_clear_bool,
-};
+use meerkat_core::lifecycle::run_primitive::{ModelId, TurnMetadataOverride};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
@@ -53,10 +49,7 @@ use crate::traits::{
 /// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
 /// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
 /// `Some(Set)` overrides it, and `Some(Clear)` removes it. The illegal
-/// "set and clear" fourth state is structurally unrepresentable. The legacy
-/// split wire form (`provider_params` + `clear_provider_params: bool`) is still
-/// accepted at the serde boundary and folded into the tri-state, rejecting a
-/// legacy `set + clear` payload there.
+/// "set and clear" fourth state is structurally unrepresentable.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {
@@ -65,64 +58,14 @@ pub struct SessionLlmReconfigureRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub provider_params: Option<
+        TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
     /// Optional realm-scoped connection override resolved through the tri-state:
     /// `Some(Set)` swaps the binding, `Some(Clear)` removes it, `None` preserves
     /// the session's existing `SessionLlmIdentity.auth_binding`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct SessionLlmReconfigureRequestFields {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
-    #[serde(default)]
-    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-impl<'de> Deserialize<'de> for SessionLlmReconfigureRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: SessionLlmReconfigureRequestFields =
-            serde_json::from_value(raw).map_err(D::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-        Ok(Self {
-            model: fields.model,
-            provider: fields.provider,
-            provider_params,
-            auth_binding,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -201,7 +144,7 @@ pub struct HydratedSessionLlmState {
     pub current_visibility_state: meerkat_core::SessionToolVisibilityState,
     pub current_capability_surface: Option<SessionLlmCapabilitySurface>,
     pub capability_surface_status: SessionLlmCapabilitySurfaceStatus,
-    pub base_tool_names: std::collections::BTreeSet<String>,
+    pub base_tool_names: std::collections::BTreeSet<meerkat_core::ToolName>,
 }
 
 #[derive(Debug, Clone)]
@@ -297,7 +240,7 @@ pub(crate) enum MeerkatMachineCommandError {
 /// Unified internal Meerkat machine command surface.
 ///
 /// This replaces the old per-domain dispatch split (session, drain,
-/// drain-local, control, ingress, legacy-run) while keeping the public helper
+/// drain-local, control, ingress) while keeping the public helper
 /// methods and external runtime/machine surface unchanged.
 #[derive(CommandManifest)]
 #[allow(clippy::large_enum_variant)]
@@ -382,7 +325,8 @@ pub(crate) enum MeerkatMachineCommand {
     StagePersistentFilter {
         session_id: SessionId,
         filter: meerkat_core::ToolFilter,
-        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        witnesses:
+            std::collections::BTreeMap<meerkat_core::ToolName, meerkat_core::ToolVisibilityWitness>,
     },
     RequestDeferredTools {
         session_id: SessionId,
@@ -502,21 +446,6 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input: Input,
     },
-    Prepare {
-        session_id: SessionId,
-        input: Input,
-    },
-    Commit {
-        session_id: SessionId,
-        input_id: InputId,
-        run_id: RunId,
-        output: CoreApplyOutput,
-    },
-    Fail {
-        session_id: SessionId,
-        run_id: RunId,
-        failure: MeerkatMachineRunFailure,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -527,14 +456,6 @@ pub(crate) struct MeerkatMachineRunFailure {
 }
 
 impl MeerkatMachineRunFailure {
-    pub(crate) fn new(error: impl Into<String>) -> Self {
-        Self {
-            source: None,
-            machine_terminal_failure_observed: false,
-            error: error.into(),
-        }
-    }
-
     pub(crate) fn from_machine_terminal_failure(error: impl Into<String>) -> Self {
         Self {
             source: None,
@@ -542,13 +463,6 @@ impl MeerkatMachineRunFailure {
             error: error.into(),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct MeerkatMachineRunPrepared {
-    pub input_id: InputId,
-    pub run_id: RunId,
-    pub primitive: RunPrimitive,
 }
 
 #[derive(Debug)]
@@ -584,7 +498,6 @@ pub(crate) enum MeerkatMachineCommandResult {
     ImageOperationPhase(ImageOperationPhase),
     ImageOperationTerminalClass(ImageOperationTerminalClass),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
-    Prepared(MeerkatMachineRunPrepared),
 }
 
 #[doc(hidden)]
@@ -785,12 +698,17 @@ meerkat_machine_runtime_internal_inputs!(
         AdvanceRuntimeObservedCompletionCursor,
         BoundaryComplete,
         BoundaryContinue,
+        ClassifyAssistantOutput,
+        ClassifyCallTimeout,
         ClassifyTurnTerminalCauseClass,
         ClassifyTurnTerminality,
         ClearSessionLlmState,
+        Commit,
+        Fail,
         HydrateSessionLlmState,
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
+        Prepare,
         PrimitiveApplied,
         RecordBoundarySeq,
         ResolveLiveBoundaryContextReceipt,
@@ -880,6 +798,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     PeerRequestLifecycle => [
         PeerRequestReceived,
+        PeerRequestSendFailed,
         PeerRequestSent,
         PeerRequestTimedOut,
         PeerResponseProgressArrived,
@@ -896,7 +815,7 @@ meerkat_machine_runtime_internal_inputs!(
         StageDeferredNames,
         StageVisibilityFilter,
         SurfaceSetRemovalTimeout,
-        SyncVisibilityRevisions,
+        ReplaceVisibilityState,
     ],
     DeferredSessionLifecycle => [
         AbandonDeferredSessionPromotion,
@@ -1153,9 +1072,6 @@ pub enum MeerkatMachineCatalogInput {
     LoadBoundaryReceipt,
     AcceptWithCompletion,
     AcceptWithoutWake,
-    Prepare,
-    Commit,
-    Fail,
 }
 
 impl MeerkatMachineCatalogInput {
@@ -1205,9 +1121,6 @@ impl MeerkatMachineCatalogInput {
         Self::LoadBoundaryReceipt,
         Self::AcceptWithCompletion,
         Self::AcceptWithoutWake,
-        Self::Prepare,
-        Self::Commit,
-        Self::Fail,
     ];
 
     #[must_use]
@@ -1274,9 +1187,6 @@ impl MeerkatMachineCatalogInput {
             Self::LoadBoundaryReceipt => MeerkatMachineInputVariant::LoadBoundaryReceipt,
             Self::AcceptWithCompletion => MeerkatMachineInputVariant::AcceptWithCompletion,
             Self::AcceptWithoutWake => MeerkatMachineInputVariant::AcceptWithoutWake,
-            Self::Prepare => MeerkatMachineInputVariant::Prepare,
-            Self::Commit => MeerkatMachineInputVariant::Commit,
-            Self::Fail => MeerkatMachineInputVariant::Fail,
         }
     }
 
@@ -1328,9 +1238,6 @@ impl MeerkatMachineCatalogInput {
             Self::LoadBoundaryReceipt => "LoadBoundaryReceipt",
             Self::AcceptWithCompletion => "AcceptWithCompletion",
             Self::AcceptWithoutWake => "AcceptWithoutWake",
-            Self::Prepare => "Prepare",
-            Self::Commit => "Commit",
-            Self::Fail => "Fail",
         }
     }
 }
@@ -1405,9 +1312,6 @@ impl MeerkatMachineCommandVariant {
             Self::LoadBoundaryReceipt => Some(MeerkatMachineCatalogInput::LoadBoundaryReceipt),
             Self::AcceptWithCompletion => Some(MeerkatMachineCatalogInput::AcceptWithCompletion),
             Self::AcceptWithoutWake => Some(MeerkatMachineCatalogInput::AcceptWithoutWake),
-            Self::Prepare => Some(MeerkatMachineCatalogInput::Prepare),
-            Self::Commit => Some(MeerkatMachineCatalogInput::Commit),
-            Self::Fail => Some(MeerkatMachineCatalogInput::Fail),
         }
     }
 }
@@ -1658,15 +1562,6 @@ const fn meerkat_machine_command_classification(
                 MeerkatMachineCatalogInput::AcceptWithoutWake,
             )
         }
-        MeerkatMachineCommandVariant::Prepare => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Prepare)
-        }
-        MeerkatMachineCommandVariant::Commit => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Commit)
-        }
-        MeerkatMachineCommandVariant::Fail => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Fail)
-        }
     }
 }
 
@@ -1714,7 +1609,6 @@ pub struct MeerkatBindingSnapshot {
     pub driver_present: bool,
     pub completions_present: bool,
     pub ops_registry_present: bool,
-    pub attachment_live: bool,
     pub epoch_id: RuntimeEpochId,
     pub cursor_state: MeerkatCursorSnapshot,
 }
@@ -1735,6 +1629,10 @@ pub struct MeerkatAdmittedInputSnapshot {
     pub request_id: Option<RequestId>,
     pub reservation_key: Option<ReservationKey>,
     pub handling_mode: Option<HandlingMode>,
+    /// #338: machine-owned per-input live-interrupt verdict, carried from the
+    /// admission `RuntimeInputSemantics`. The live-projection consumer reads
+    /// this typed fact instead of re-scanning `handling_mode == Steer`.
+    pub live_interrupt_required: bool,
     pub lifecycle: Option<InputLifecycleState>,
     pub terminal_outcome: Option<InputTerminalOutcome>,
     pub last_run_id: Option<RunId>,
@@ -2028,16 +1926,6 @@ impl MeerkatMachineSpineSnapshot {
         }
 
         // --- Drain invariants ---
-
-        // DrainBindingInvariant: drain.phase != Inactive => binding.live
-        if let Some(phase) = self.drain.phase {
-            if phase != CommsDrainPhase::Inactive && !self.binding.attachment_live {
-                // binding.live maps to session being registered (it is, since we have a snapshot)
-                // This invariant is about the binding being live, which is always true if we have
-                // a snapshot. Skip this check since getting a snapshot implies the session exists.
-            }
-            let _ = phase; // suppress unused warning
-        }
 
         // DrainModeInvariant: drain.phase != Inactive => mode is set and not Disabled
         if let Some(phase) = self.drain.phase

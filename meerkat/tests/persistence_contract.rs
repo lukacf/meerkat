@@ -34,11 +34,9 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -144,12 +142,12 @@ mod tests {
                     ToolCatalogEntry::session_deferred(
                         deferred,
                         true,
-                        "callback:deferred-catalog".to_string(),
+                        deferred_catalog_provenance(),
                     ),
                     ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:deferred-catalog".to_string(),
+                        deferred_catalog_provenance(),
                     ),
                 ]
                 .into(),
@@ -217,11 +215,9 @@ mod tests {
         CreateSessionRequest {
             model: "mock-model".to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: None,
@@ -406,10 +402,6 @@ mod tests {
             .requested_witnesses
             .get("deferred_mcp_tool")
             .expect("store projection must persist the catalog-derived witness");
-        assert_eq!(
-            persisted_witness.stable_owner_key.as_deref(),
-            Some("callback:deferred-catalog")
-        );
         assert_eq!(
             persisted_witness.last_seen_provenance.as_ref(),
             Some(&deferred_catalog_provenance()),

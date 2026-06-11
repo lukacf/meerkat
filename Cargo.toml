@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "meerkat-machine-derive",
-    "meerkat-models",
     "meerkat-agent-build-authority",
     "meerkat-core",
     "meerkat-capabilities",
@@ -131,7 +130,6 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-models = { version = "0.7.0-alpha.0", path = "meerkat-models" }
 meerkat-agent-build-authority = { version = "0.7.0-alpha.0", path = "meerkat-agent-build-authority" }
 meerkat-core = { version = "0.7.0-alpha.0", path = "meerkat-core" }
 meerkat-capabilities = { version = "0.7.0-alpha.0", path = "meerkat-capabilities" }

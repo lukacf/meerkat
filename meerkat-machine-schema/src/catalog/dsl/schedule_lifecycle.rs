@@ -10,14 +10,11 @@ machine! {
             schedule_id: ScheduleId,
             lifecycle_phase: ScheduleLifecycleState,
             revision: u64,
-            trigger_key: String,
-            target_binding_key: String,
+            trigger_key: TriggerKey,
+            target_binding_key: TargetBindingId,
             misfire_policy: Enum<MisfirePolicy>,
-            misfire_policy_key: String,
             overlap_policy: Enum<OverlapPolicy>,
-            overlap_policy_key: String,
             missing_target_policy: Enum<MissingTargetPolicy>,
-            missing_target_policy_key: String,
             planning_horizon_days: u64,
             planning_horizon_occurrences: u64,
             planning_cursor_utc_ms: Option<u64>,
@@ -36,11 +33,8 @@ machine! {
             trigger_key = "trigger-0",
             target_binding_key = "target-0",
             misfire_policy = MisfirePolicy::Skip,
-            misfire_policy_key = "misfire:skip",
             overlap_policy = OverlapPolicy::SkipIfRunning,
-            overlap_policy_key = "overlap:skip_if_running",
             missing_target_policy = MissingTargetPolicy::MarkMisfired,
-            missing_target_policy_key = "missing_target:mark_misfired",
             planning_horizon_days = 30,
             planning_horizon_occurrences = 64,
             planning_cursor_utc_ms = None,
@@ -59,26 +53,20 @@ machine! {
         input ScheduleLifecycleInput {
             Create {
                 schedule_id: ScheduleId,
-                trigger_key: String,
-                target_binding_key: String,
+                trigger_key: TriggerKey,
+                target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
-                misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
-                overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
-                missing_target_policy_key: String,
                 planning_horizon_days: Option<u64>,
                 planning_horizon_occurrences: Option<u64>,
             },
             Revise {
-                trigger_key: String,
-                target_binding_key: String,
+                trigger_key: TriggerKey,
+                target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
-                misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
-                overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
-                missing_target_policy_key: String,
                 planning_horizon_days: u64,
                 planning_horizon_occurrences: u64,
                 at_utc_ms: u64,
@@ -88,7 +76,7 @@ machine! {
                 planning_cursor_utc_ms: u64,
                 next_occurrence_ordinal: u64,
             },
-            SyncTargetSnapshot { target_binding_key: String },
+            SyncTargetSnapshot { target_binding_key: TargetBindingId },
             Pause { at_utc_ms: u64 },
             Resume { at_utc_ms: u64 },
             Delete { at_utc_ms: u64 },
@@ -118,9 +106,9 @@ machine! {
             self.planning_cursor_utc_ms == None || self.next_occurrence_ordinal > 0
         }
 
-        disposition EmitScheduleNotice => external,
-        disposition SupersedePendingOccurrences => routed [OccurrenceLifecycleMachine],
-        disposition PlanningWindowRecorded => local,
+        disposition EmitScheduleNotice => external seam SurfaceResultAlignment,
+        disposition SupersedePendingOccurrences => routed [OccurrenceLifecycleMachine] seam NoOwnerRealization,
+        disposition PlanningWindowRecorded => local seam NoOwnerRealization,
 
         // --- Create (only from Active, self-loop) ---
 
@@ -130,11 +118,8 @@ machine! {
                 trigger_key,
                 target_binding_key,
                 misfire_policy,
-                misfire_policy_key,
                 overlap_policy,
-                overlap_policy_key,
                 missing_target_policy,
-                missing_target_policy_key,
                 planning_horizon_days,
                 planning_horizon_occurrences
             }
@@ -144,11 +129,8 @@ machine! {
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
-                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
-                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
-                self.missing_target_policy_key = missing_target_policy_key;
                 if planning_horizon_days != None {
                     self.planning_horizon_days = planning_horizon_days.get("value");
                 }
@@ -167,11 +149,8 @@ machine! {
                 trigger_key,
                 target_binding_key,
                 misfire_policy,
-                misfire_policy_key,
                 overlap_policy,
-                overlap_policy_key,
                 missing_target_policy,
-                missing_target_policy_key,
                 planning_horizon_days,
                 planning_horizon_occurrences,
                 at_utc_ms
@@ -181,11 +160,8 @@ machine! {
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
-                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
-                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
-                self.missing_target_policy_key = missing_target_policy_key;
                 self.planning_horizon_days = planning_horizon_days;
                 self.planning_horizon_occurrences = planning_horizon_occurrences;
                 self.revision += 1;
@@ -201,11 +177,8 @@ machine! {
                 trigger_key,
                 target_binding_key,
                 misfire_policy,
-                misfire_policy_key,
                 overlap_policy,
-                overlap_policy_key,
                 missing_target_policy,
-                missing_target_policy_key,
                 planning_horizon_days,
                 planning_horizon_occurrences,
                 at_utc_ms
@@ -215,11 +188,8 @@ machine! {
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
-                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
-                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
-                self.missing_target_policy_key = missing_target_policy_key;
                 self.planning_horizon_days = planning_horizon_days;
                 self.planning_horizon_occurrences = planning_horizon_occurrences;
                 self.revision += 1;
@@ -412,6 +382,59 @@ pub enum MissingTargetPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleId(pub String);
 impl<T: Into<String>> From<T> for ScheduleId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// Opaque trigger handle. Replaces the prior reuse of `TargetBindingId` for
+// the `trigger_key` field: trigger identity and target-binding identity are
+// DIFFERENT semantic facts, and sharing one newtype across them re-creates
+// the index-confusion the newtypes exist to prevent. The typed atom
+// (`NamedTypeBinding::string("TriggerKey")`) is registered in `dsl/mod.rs`
+// for both the schedule and occurrence machines.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct TriggerKey(pub String);
+impl<T: Into<String>> From<T> for TriggerKey {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// Opaque target-binding handle. Replaces the prior raw `String`
+// `target_binding_key` schedule state field so the schedule authority owns a
+// typed identifier rather than ferrying a bare string. The typed atom
+// (`NamedTypeBinding::string("TargetBindingId")`) registered in `dsl/mod.rs`
+// keeps schema emission consistent across the schedule and occurrence
+// machines that share this binding key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct TargetBindingId(pub String);
+impl<T: Into<String>> From<T> for TargetBindingId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// Opaque claim-owner handle. The occurrence authority's `claimed_by` field is
+// retyped from raw `Option<String>` to `Option<ClaimOwner>`; the newtype is
+// declared here so both the schedule and occurrence DSL modules can reference
+// the shared binding atom (`NamedTypeBinding::string("ClaimOwner")`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct ClaimOwner(pub String);
+impl<T: Into<String>> From<T> for ClaimOwner {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// Opaque delivery/receipt correlation handle. The occurrence authority's
+// `delivery_correlation_id`/`last_receipt_correlation_id`/`runtime_outcome_key`
+// fields are retyped from raw `Option<String>` to `Option<CorrelationId>`; the
+// newtype is declared here so both DSL modules share the binding atom
+// (`NamedTypeBinding::string("CorrelationId")`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CorrelationId(pub String);
+impl<T: Into<String>> From<T> for CorrelationId {
     fn from(s: T) -> Self {
         Self(s.into())
     }

@@ -138,29 +138,6 @@ string_newtype!(
     BranchId
 );
 
-/// Legacy carrier-name alias for [`AgentIdentity`].
-///
-/// DELETE_ME A5 DSL-schema migration: the 0.6 identity-first cascade
-/// unifies the "member identifier string" fact under a single type.
-/// `MeerkatId` was a separate `string_newtype!` wrapper over `String`,
-/// structurally identical to `AgentIdentity` but nominally distinct —
-/// that was parallel truth under dogma principle #1 ("one semantic
-/// fact, one owner").
-///
-/// Collapsing the type (`pub type MeerkatId = AgentIdentity;`) unifies
-/// the ownership without forcing a rename of every generated DSL
-/// command variant field (`Retire { agent_identity }`, `Wire { local }`,
-/// etc.) in a single pass — those field names are now just aliases
-/// that read as `AgentIdentity`. Follow-up passes can rename the
-/// fields to `agent_identity` incrementally without breaking the
-/// type-level invariant.
-///
-/// Existing call sites that used `MeerkatId::from(s)` still work
-/// (forwarded to `AgentIdentity::from(s)`). Existing
-/// `impl From<AgentIdentity> for MeerkatId` / `From<&AgentIdentity>`
-/// impls become reflexive conversions that rustc auto-provides.
-pub type MeerkatId = AgentIdentity;
-
 string_newtype!(
     /// Profile name within a mob definition.
     ProfileName
@@ -206,22 +183,6 @@ string_newtype!(
     /// the display-only peer name.
     RespawnTopologyPeerId
 );
-
-// DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias
-// for `AgentIdentity` (declared above the `AgentIdentity` definition
-// at the top of the "identity-first" section). The previous explicit
-// `From<MeerkatId> for AgentIdentity` / `From<AgentIdentity> for
-// MeerkatId` bridges become reflexive `impl<T> From<T> for T`
-// (auto-provided by core), so they are no longer defined here.
-// Shell-hot-path borrowed conversion `MeerkatId::from(&identity)` is
-// preserved because `AgentIdentity: From<&AgentIdentity>` is an impl
-// we provide below (via the shared string-newtype macro's `From<&str>`
-// plus `AsRef<str>`).
-impl From<&AgentIdentity> for AgentIdentity {
-    fn from(identity: &AgentIdentity) -> Self {
-        Self::from(identity.as_str())
-    }
-}
 
 impl AgentIdentity {
     /// Returns `true` when this identity falls inside the reserved
@@ -518,52 +479,13 @@ mod tests {
         assert_eq!(decoded, id);
     }
 
-    /// DELETE_ME A5 regression: identity-first hot paths and the
-    /// DSL-schema migration unify under a single type.
-    ///
-    /// Originally `MeerkatId` and `AgentIdentity` were two distinct
-    /// `string_newtype!` wrappers, and this test pinned that the
-    /// shell conversion between them preserved the underlying string
-    /// without semantic change. Post-A5-DSL-migration `MeerkatId` is
-    /// a type alias for `AgentIdentity`, so "conversion" is now a
-    /// no-op at the type level — there is only one owner of the
-    /// member-identifier-string fact. The test stays to pin the
-    /// invariant that `MeerkatId::from("…").as_str()` round-trips to
-    /// the expected string on both the owned and borrowed shell-hot
-    /// paths (`MeerkatId::from(&identity)`) and that the two names
-    /// continue to refer to the same value identity.
-    #[test]
-    fn agent_identity_to_meerkat_id_conversion_preserves_identity_string() {
-        let identity = AgentIdentity::from("singer");
-
-        // Owned conversion (now a type-level no-op).
-        let by_owned: MeerkatId = identity.clone();
-        assert_eq!(by_owned.as_str(), "singer");
-
-        // Borrowed conversion — the hot-path shape used by
-        // `MobHandle::wire`, `internal_turn`, `realtime_attach`, etc.
-        let by_borrow: MeerkatId = (&identity).into();
-        assert_eq!(by_borrow.as_str(), "singer");
-
-        // Round trip: MeerkatId and AgentIdentity are the same type
-        // post-A5-DSL-migration, so equality compares the shared
-        // newtype value.
-        let back: AgentIdentity = by_owned;
-        assert_eq!(back, identity);
-    }
-
     #[test]
     fn test_existing_ids_roundtrip() {
         let mob = MobId::from("mob-a");
-        let meerkat = MeerkatId::from("meerkat-a");
         let profile = ProfileName::from("lead");
         assert_eq!(
             serde_json::from_str::<MobId>(&serde_json::to_string(&mob).unwrap()).unwrap(),
             mob
-        );
-        assert_eq!(
-            serde_json::from_str::<MeerkatId>(&serde_json::to_string(&meerkat).unwrap()).unwrap(),
-            meerkat
         );
         assert_eq!(
             serde_json::from_str::<ProfileName>(&serde_json::to_string(&profile).unwrap()).unwrap(),

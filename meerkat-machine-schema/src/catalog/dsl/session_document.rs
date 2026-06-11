@@ -218,7 +218,6 @@ pub enum ObservedSessionTailKind {
     System,
     SystemNotice,
     User,
-    Assistant,
     BlockAssistant,
     ToolResults,
 }
@@ -317,6 +316,74 @@ pub enum LiveSessionAuthorityReason {
     StoredTranscriptRevisionDiverged,
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle-terminal region (LUC-524 R004 fold). Archive lifecycle truth was
+// MODE-SPLIT: runtime-backed archived-ness was owned by MeerkatMachine
+// `Retire` while store-only archived-ness was owned by the session document's
+// `session_lifecycle_terminal` metadata key, with a warn-continue divergence
+// window (machine retired -> projection save failed -> durable doc stayed
+// Active -> standalone reopen resurrected the session). THIS machine now owns
+// the `lifecycle_terminal` fact for ALL profiles: both the runtime-backed and
+// the store-only archive paths drive `ArchiveSessionDocument`, and the shell
+// realizes the machine's action vector fail-closed (durable document commit
+// FIRST, runtime retire SECOND — a failure anywhere fails the archive
+// operation, so `RuntimeState::Retired` implies the durable document is
+// Archived and the divergence window is unrepresentable).
+// ---------------------------------------------------------------------------
+
+/// Canonical lifecycle-terminal class for a session document. `Active` is the
+/// default (and the recovered value for a document with no terminal fact);
+/// `Archived` is the absorbing terminal class. Maps to
+/// `meerkat_core::SessionLifecycleTerminal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionDocumentLifecycle {
+    #[default]
+    Active,
+    Archived,
+}
+
+/// Machine-decided disposition for a session-document archive request.
+///
+/// Idempotence decision (documented contract): archiving an already-Archived
+/// document resolves to the explicit `AlreadyArchived` verdict — a total
+/// verdict, never a guard no-match — with an empty action vector (no document
+/// re-write, no runtime retire). The public surface contract maps
+/// `AlreadyArchived` to its existing `NotFound` error, so re-archive remains
+/// observably idempotent at the API while the machine owns the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionArchiveDisposition {
+    #[default]
+    Archive,
+    AlreadyArchived,
+}
+
+// ---------------------------------------------------------------------------
+// Transcript-edit region (folded from the meerkat-session persistent.rs
+// `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
+// LUC-524). The persist paths commit a fork or rewrite DIRECTLY via
+// `save_normalized_session` / `commit_session_transcript_rewrite_snapshot`
+// with no machine authorization gate. This region authorizes the commit: the
+// shell carries the typed `TranscriptEditKind` directive (fork vs rewrite) and
+// drives the transition BEFORE persisting; `save_normalized_session` /
+// `commit_session_transcript_rewrite_snapshot` become the effect HANDLER, not
+// the decision-maker.
+// ---------------------------------------------------------------------------
+
+/// Typed class of an authorized transcript-edit commit.
+///
+/// `Fork` covers `fork_session` / `fork_session_replace` (the
+/// `persist_transcript_fork` path); `Rewrite` covers
+/// `rewrite_session_transcript` / `restore_session_transcript_revision` (the
+/// `persist_transcript_rewrite` path). The producer constructs the typed
+/// directive at the seam — no shell code reclassifies an edit kind from a
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditKind {
+    #[default]
+    Fork,
+    Rewrite,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -327,12 +394,14 @@ machine! {
             session_first_turn_phase: Map<SessionId, Enum<SessionFirstTurnPhase>>,
             session_pending_initial_prompt_present: Map<SessionId, bool>,
             session_pending_tool_results_count: Map<SessionId, u64>,
+            session_lifecycle_terminal: Map<SessionId, Enum<SessionDocumentLifecycle>>,
         }
 
         init(Ready) {
             session_first_turn_phase = EmptyMap,
             session_pending_initial_prompt_present = EmptyMap,
             session_pending_tool_results_count = EmptyMap,
+            session_lifecycle_terminal = EmptyMap,
         }
 
         terminal []
@@ -573,6 +642,78 @@ machine! {
                 runtime_system_context_diverged: bool,
                 stored_is_archived: bool,
             },
+
+            // -----------------------------------------------------------
+            // Recovery-source-projection region (KEYSTONE, folded from the
+            // meerkat-session persistent.rs shell predicate
+            // `runtime_backed_store_projection_can_recover_authority`). When
+            // the runtime snapshot is absent, the session-store projection may
+            // stand in as the authoritative read source iff it carries
+            // canonical session metadata or build state. The shell extracts the
+            // two typed presence observations and drives this input; THIS
+            // machine — not a handwritten shell `||` reducer — owns the
+            // recoverable verdict. The shell mirrors `recoverable` onto its load
+            // fallback (recoverable -> the projection is authoritative; not
+            // recoverable -> fall through to the quarantine check / `None`).
+            // Fails closed.
+            // -----------------------------------------------------------
+            RecoverSessionFromStore {
+                session_id: SessionId,
+                has_metadata: bool,
+                has_build_state: bool,
+            },
+
+            // -----------------------------------------------------------
+            // Apply-pending-tool-results region (folded from the
+            // meerkat-session ephemeral.rs `agent.apply_pending_tool_results`
+            // call site). Staging already consults generated authority for the
+            // accepted COUNT (StageSessionToolResults); the APPLY of those
+            // staged results into the live transcript was still a direct
+            // mutation outside the turn machine. This input authorizes the
+            // apply: the shell carries the consumed result count and drives the
+            // transition; `agent.apply_pending_tool_results` becomes the effect
+            // HANDLER driven by the emitted `applied_count`, not the decision
+            // point.
+            // -----------------------------------------------------------
+            ApplyPendingToolResults {
+                session_id: SessionId,
+                result_count: u64,
+            },
+
+            // -----------------------------------------------------------
+            // Transcript-edit region. The shell carries the typed
+            // `TranscriptEditKind` directive (fork vs rewrite) and drives this
+            // input BEFORE persisting; THIS machine authorizes the commit and
+            // emits `TranscriptRewriteCommitted`. The persist paths
+            // (`save_normalized_session` for fork,
+            // `commit_session_transcript_rewrite_snapshot` for rewrite) become
+            // the effect HANDLER driven by the verdict, not the decision-maker.
+            // -----------------------------------------------------------
+            TranscriptEdit {
+                session_id: SessionId,
+                fork_or_rewrite_directive: Enum<TranscriptEditKind>,
+            },
+
+            // -----------------------------------------------------------
+            // Lifecycle-terminal region (LUC-524 R004 fold). The recover
+            // input adopts the canonical current archived-ness observation
+            // (runtime mode: the Retire realization; store-only mode: the
+            // durable document's typed lifecycle-terminal fact) into the
+            // machine-owned registry; the archive input then decides the
+            // disposition and the realization action vector from the
+            // machine-owned terminal state plus three pure mode
+            // observations. Neither carries a pre-decided verdict.
+            // -----------------------------------------------------------
+            RecoverSessionLifecycleTerminal {
+                session_id: SessionId,
+                terminal: Enum<SessionDocumentLifecycle>,
+            },
+            ArchiveSessionDocument {
+                session_id: SessionId,
+                runtime_backed: bool,
+                durable_snapshot_present: bool,
+                runtime_session_registered: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -680,6 +821,51 @@ machine! {
             LiveSessionAuthorityClassified {
                 authority: Enum<LiveSessionAuthorityKind>,
                 reason: Enum<LiveSessionAuthorityReason>,
+            },
+
+            // Recovery-source-projection verdict (KEYSTONE). The shell mirrors
+            // `recoverable`: true -> the store projection is an authoritative
+            // read source; false -> it is not (fall through to quarantine /
+            // `None`). This is a total verdict over the two typed presence
+            // observations, so it is emitted on both branches (never a
+            // no-match) — a store-only session that legitimately carries no
+            // metadata or build state resolves to `recoverable: false`
+            // explicitly rather than silently failing to load.
+            SessionStoreRecoverySourceResolved { recoverable: bool },
+
+            // Apply-pending-tool-results verdict. The shell mirrors
+            // `applied_count` onto its `agent.apply_pending_tool_results` call:
+            // it applies exactly the machine-authorized count. The verdict is
+            // vacuous-accept (it mirrors the consumed count), matching the
+            // staging-side `SessionToolResultsStageResolved` shape.
+            SessionToolResultsApplied {
+                session_id: SessionId,
+                applied_count: u64,
+            },
+
+            // Transcript-edit commit verdict. The shell mirrors `success` onto
+            // its persist path: it commits the fork/rewrite only after the
+            // machine authorizes it. The typed `kind` echoes the authorized
+            // directive so the shell routes to the correct persist handler
+            // without re-deriving it.
+            TranscriptRewriteCommitted {
+                kind: Enum<TranscriptEditKind>,
+                success: bool,
+            },
+
+            // Lifecycle-terminal region effects. The recover marker witnesses
+            // the registry adoption; the archive verdict carries the
+            // disposition plus the realization action vector. The shell
+            // realizes the vector fail-closed and IN ORDER — durable document
+            // commit first, runtime retire second — and decides nothing: a
+            // realization failure surfaces as the archive operation's error
+            // with durable truth still convergent (`Retired` implies the
+            // document is Archived; the converse failure window is retryable).
+            SessionLifecycleTerminalRecovered,
+            SessionArchiveResolved {
+                disposition: Enum<SessionArchiveDisposition>,
+                write_document: bool,
+                retire_runtime: bool,
             },
         }
 
@@ -853,29 +1039,58 @@ machine! {
             model_override_present && provider_override_present == false
         }
 
-        disposition SessionFirstTurnPhaseResolved => local,
-        disposition SessionFirstTurnOverridesResolved => local,
-        disposition SessionInitialPromptStageResolved => local,
-        disposition SessionToolResultsStageResolved => local,
-        disposition SessionConsumedInputsRestoreResolved => local,
-        disposition SessionFirstTurnPhaseRecovered => local,
-        disposition SystemContextAppendResolved => local,
-        disposition SystemContextPendingApplyItemResolved => local,
-        disposition SystemContextSteerCleanupItemResolved => local,
-        disposition SystemContextSnapshotRestoreAuthorized => local,
-        disposition SystemContextPersistAppendAdmissionResolved => local,
-        disposition RealtimeTranscriptEventResolved => local,
-        disposition RealtimeMaterializeCandidateResolved => local,
-        disposition RealtimeTranscriptSnapshotRestoreAuthorized => local,
-        disposition SessionMetadataPersistAuthorized => local,
-        disposition SessionBuildStatePersistAuthorized => local,
-        disposition SessionBuildStateRestoreAuthorized => local,
-        disposition SystemPromptMutationAuthorized => local,
-        disposition PendingContinuationResolved => local,
-        disposition PendingContinuationPublicTerminalResolved => local,
-        disposition SessionResumeOverridesAuthorized => local,
-        disposition SessionResumeOverridesRejected => local,
-        disposition LiveSessionAuthorityClassified => local,
+        // Recovery-source-projection predicate (port of the retired shell
+        // `runtime_backed_store_projection_can_recover_authority`): a persisted
+        // store projection is a valid authoritative read source iff it carries
+        // canonical session metadata OR build state.
+        helper store_projection_can_recover_authority(
+            has_metadata: bool,
+            has_build_state: bool
+        ) -> bool {
+            has_metadata || has_build_state
+        }
+
+        // Lifecycle-terminal realization helper: the runtime is retired iff
+        // the archive is runtime-backed AND the session is actually known to
+        // the runtime side (a durable snapshot exists or the runtime has the
+        // session registered). A runtime-backed archive of a session the
+        // runtime has never seen must not spuriously register-then-retire it.
+        helper archive_should_retire_runtime(
+            runtime_backed: bool,
+            durable_snapshot_present: bool,
+            runtime_session_registered: bool
+        ) -> bool {
+            runtime_backed && (durable_snapshot_present || runtime_session_registered)
+        }
+
+        disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
+        disposition SessionFirstTurnOverridesResolved => local seam NoOwnerRealization,
+        disposition SessionInitialPromptStageResolved => local seam NoOwnerRealization,
+        disposition SessionToolResultsStageResolved => local seam NoOwnerRealization,
+        disposition SessionConsumedInputsRestoreResolved => local seam NoOwnerRealization,
+        disposition SessionFirstTurnPhaseRecovered => local seam NoOwnerRealization,
+        disposition SystemContextAppendResolved => local seam NoOwnerRealization,
+        disposition SystemContextPendingApplyItemResolved => local seam NoOwnerRealization,
+        disposition SystemContextSteerCleanupItemResolved => local seam NoOwnerRealization,
+        disposition SystemContextSnapshotRestoreAuthorized => local seam NoOwnerRealization,
+        disposition SystemContextPersistAppendAdmissionResolved => local seam NoOwnerRealization,
+        disposition RealtimeTranscriptEventResolved => local seam NoOwnerRealization,
+        disposition RealtimeMaterializeCandidateResolved => local seam NoOwnerRealization,
+        disposition RealtimeTranscriptSnapshotRestoreAuthorized => local seam NoOwnerRealization,
+        disposition SessionMetadataPersistAuthorized => local seam NoOwnerRealization,
+        disposition SessionBuildStatePersistAuthorized => local seam NoOwnerRealization,
+        disposition SessionBuildStateRestoreAuthorized => local seam NoOwnerRealization,
+        disposition SystemPromptMutationAuthorized => local seam NoOwnerRealization,
+        disposition PendingContinuationResolved => local seam NoOwnerRealization,
+        disposition PendingContinuationPublicTerminalResolved => local seam NoOwnerRealization,
+        disposition SessionResumeOverridesAuthorized => local seam NoOwnerRealization,
+        disposition SessionResumeOverridesRejected => local seam NoOwnerRealization,
+        disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
+        disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
+        disposition SessionToolResultsApplied => local seam NoOwnerRealization,
+        disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
+        disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
+        disposition SessionArchiveResolved => local seam NoOwnerRealization,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2761,5 +2976,189 @@ machine! {
                 reason: LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged
             }
         }
+
+        // ===============================================================
+        // Recovery-source-projection region (KEYSTONE). Both transitions read
+        // the two typed presence observations and resolve the recoverable
+        // verdict via `store_projection_can_recover_authority`. The verdict is
+        // total over the boolean cube, so it is emitted on both branches; the
+        // shell mirrors `recoverable` onto its load fallback and decides
+        // nothing. Fails closed.
+        // ===============================================================
+
+        transition RecoverSessionFromStoreAuthorized {
+            on input RecoverSessionFromStore {
+                session_id,
+                has_metadata,
+                has_build_state
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && store_projection_can_recover_authority(has_metadata, has_build_state)
+            }
+            update {}
+            to Ready
+            emit SessionStoreRecoverySourceResolved { recoverable: true }
+        }
+
+        transition RecoverSessionFromStoreUnrecoverable {
+            on input RecoverSessionFromStore {
+                session_id,
+                has_metadata,
+                has_build_state
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && store_projection_can_recover_authority(has_metadata, has_build_state) == false
+            }
+            update {}
+            to Ready
+            emit SessionStoreRecoverySourceResolved { recoverable: false }
+        }
+
+        // ===============================================================
+        // Apply-pending-tool-results region. The transition reads the consumed
+        // result count and authorizes the apply, emitting `applied_count` equal
+        // to `result_count` (vacuous-accept, mirroring the staging-side
+        // StageSessionToolResults shape). The shell mirrors `applied_count`
+        // onto its `agent.apply_pending_tool_results` call and decides nothing.
+        // ===============================================================
+
+        transition ApplyPendingToolResults {
+            on input ApplyPendingToolResults {
+                session_id,
+                result_count
+            }
+            guard { self.lifecycle_phase == Phase::Ready }
+            update {}
+            to Ready
+            emit SessionToolResultsApplied {
+                session_id: session_id,
+                applied_count: result_count
+            }
+        }
+
+        // ===============================================================
+        // Transcript-edit region. Each transition reads the typed
+        // `TranscriptEditKind` directive and authorizes the commit, echoing the
+        // kind so the shell routes to the correct persist handler. The shell
+        // mirrors `success` onto its persist path and decides nothing.
+        // ===============================================================
+
+        transition TranscriptEditFork {
+            on input TranscriptEdit {
+                session_id,
+                fork_or_rewrite_directive
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && fork_or_rewrite_directive == TranscriptEditKind::Fork
+            }
+            update {}
+            to Ready
+            emit TranscriptRewriteCommitted {
+                kind: TranscriptEditKind::Fork,
+                success: true
+            }
+        }
+
+        transition TranscriptEditRewrite {
+            on input TranscriptEdit {
+                session_id,
+                fork_or_rewrite_directive
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && fork_or_rewrite_directive == TranscriptEditKind::Rewrite
+            }
+            update {}
+            to Ready
+            emit TranscriptRewriteCommitted {
+                kind: TranscriptEditKind::Rewrite,
+                success: true
+            }
+        }
+
+        // ===============================================================
+        // Lifecycle-terminal region (LUC-524 R004 fold). The recover
+        // transition adopts the canonical current archived-ness into the
+        // machine-owned registry; the two archive transitions decide the
+        // disposition and the realization action vector from that
+        // machine-owned terminal state. The Archive guards read the
+        // machine's own map — a drive against an unseeded session id fails
+        // closed at the generated accessor, so the shell MUST recover-seed
+        // before driving the archive input.
+        // ===============================================================
+
+        transition RecoverSessionLifecycleTerminal {
+            on input RecoverSessionLifecycleTerminal { session_id, terminal }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (terminal == SessionDocumentLifecycle::Active
+                    || terminal == SessionDocumentLifecycle::Archived)
+            }
+            update {
+                self.session_lifecycle_terminal.insert(session_id, terminal);
+            }
+            to Ready
+            emit SessionLifecycleTerminalRecovered
+        }
+
+        // Archive from Active: the only transition that moves the document
+        // lifecycle to Archived. The action vector instructs the shell to
+        // commit the durable document iff a durable snapshot exists, and to
+        // retire the runtime iff the archive is runtime-backed and the
+        // runtime actually knows the session.
+        transition ArchiveSessionDocumentActive {
+            on input ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Active
+            }
+            update {
+                self.session_lifecycle_terminal
+                    .insert(session_id, SessionDocumentLifecycle::Archived);
+            }
+            to Ready
+            emit SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::Archive,
+                write_document: durable_snapshot_present,
+                retire_runtime: archive_should_retire_runtime(
+                    runtime_backed,
+                    durable_snapshot_present,
+                    runtime_session_registered)
+            }
+        }
+
+        // Idempotent re-archive: an already-Archived document resolves to an
+        // explicit AlreadyArchived verdict with an empty action vector. The
+        // surface contract maps this verdict to its existing NotFound error.
+        transition ArchiveSessionDocumentAlreadyArchived {
+            on input ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Archived
+            }
+            update {}
+            to Ready
+            emit SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::AlreadyArchived,
+                write_document: false,
+                retire_runtime: false
+            }
+        }
+
     }
 }

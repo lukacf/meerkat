@@ -146,8 +146,12 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
             return Err(ToolError::not_found(call.name));
         }
 
-        let arguments: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let arguments: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("invalid schedule tool-call arguments JSON: {error}"),
+            )
+        })?;
         let result = handle_schedule_tools_call(&self.service, call.name, &arguments)
             .await
             .map_err(|error| map_schedule_tool_dispatch_error(call.name, error))?;
@@ -200,8 +204,12 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
             return self.inner.dispatch(call).await;
         }
 
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("invalid schedule tool-call arguments JSON: {error}"),
+            )
+        })?;
         let rewritten = rewrite_current_session_target(args, &self.current_session_id);
         let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
             .map_err(|error| {

@@ -510,6 +510,16 @@ pub async fn ensure_realm_manifest_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<RealmManifest, StoreError> {
+    // Parse the requested realm identity into the typed `RealmId` atom
+    // BEFORE deriving any filesystem path. The on-disk path is a lossy
+    // sanitization (`.` -> `_`, etc.), so two distinct realm slugs can
+    // alias one manifest directory (e.g. raw `a.b` and `a_b` both
+    // sanitize to `a_b`). Parsing first lets every existing-manifest
+    // branch fail closed on identity inequality instead of silently
+    // handing back another realm's manifest.
+    let requested_realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+
     let paths = realm_paths_in(realms_root, realm_id);
     tokio::fs::create_dir_all(&paths.root)
         .await
@@ -520,13 +530,14 @@ pub async fn ensure_realm_manifest_in(
         .map_err(StoreError::Io)?
     {
         let existing = read_existing_manifest(&paths.manifest_path).await?;
+        validate_realm_identity(&requested_realm, &existing)?;
         validate_backend_hint(&existing, backend_hint)?;
         return Ok(existing);
     }
 
     let lock_path = paths.root.join(".realm_manifest.lock");
     let _lock = ManifestLockGuard::acquire(&lock_path, realm_id).await?;
-    create_or_read_manifest_under_lock(&paths, realm_id, backend_hint, origin_hint).await
+    create_or_read_manifest_under_lock(&paths, &requested_realm, backend_hint, origin_hint).await
 }
 
 fn default_backend() -> Result<RealmBackend, StoreError> {
@@ -544,6 +555,24 @@ fn default_backend() -> Result<RealmBackend, StoreError> {
             "realm support requires at least one persistent backend".to_string(),
         ))
     }
+}
+
+/// Reject a path-aliased open where the requested realm identity differs
+/// from the identity the existing manifest pins. Two raw slugs that
+/// sanitize to the same directory (e.g. `a.b` and `a_b`) must never
+/// silently share one manifest; fail closed on inequality before any
+/// backend-hint validation.
+fn validate_realm_identity(
+    requested: &meerkat_core::RealmId,
+    manifest: &RealmManifest,
+) -> Result<(), StoreError> {
+    if *requested != manifest.realm {
+        return Err(StoreError::RealmIdentityMismatch {
+            requested: requested.as_str().to_string(),
+            existing: manifest.realm.as_str().to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_backend_hint(
@@ -564,7 +593,7 @@ fn validate_backend_hint(
 
 async fn create_or_read_manifest_under_lock(
     paths: &RealmPaths,
-    realm_id: &str,
+    requested_realm: &meerkat_core::RealmId,
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<RealmManifest, StoreError> {
@@ -573,6 +602,7 @@ async fn create_or_read_manifest_under_lock(
         .map_err(StoreError::Io)?
     {
         let existing = read_existing_manifest(&paths.manifest_path).await?;
+        validate_realm_identity(requested_realm, &existing)?;
         validate_backend_hint(&existing, backend_hint)?;
         return Ok(existing);
     }
@@ -582,17 +612,16 @@ async fn create_or_read_manifest_under_lock(
         None => default_backend()?,
     };
     let origin = origin_hint.unwrap_or(RealmOrigin::Explicit);
-    // Wave-c C-12: lift the `&str` realm-id argument into the typed
-    // `RealmId` atom. Upstream callers (surface bootstrap, cli, etc.)
-    // must have already validated the slug via
+    // Wave-c C-12: the realm-id argument is already the typed `RealmId`
+    // atom, parsed at the `ensure_realm_manifest_in` boundary before any
+    // filesystem path was derived. Upstream callers (surface bootstrap,
+    // cli, etc.) must have already validated the slug via
     // `meerkat_core::RealmConfig::selection_from_inputs` /
-    // `validate_explicit_realm_id`, but the store-layer boundary
-    // parses defensively — a failure here means an upstream caller
-    // bypassed its validator.
-    let realm = meerkat_core::RealmId::parse(realm_id)
-        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+    // `validate_explicit_realm_id`; the store-layer boundary parses
+    // defensively — a failure there means an upstream caller bypassed
+    // its validator.
     let manifest = RealmManifest {
-        realm,
+        realm: requested_realm.clone(),
         backend,
         origin,
         created_at: SystemTime::now()
@@ -916,6 +945,52 @@ mod tests {
                 .unwrap();
             assert_eq!(manifest.backend, supported_backend());
         }
+    }
+
+    #[tokio::test]
+    async fn path_aliased_realm_identity_is_rejected() {
+        // `a.b` and `a_b` are two distinct realm identities (both parse as
+        // valid `RealmId` slugs — `.` is allowed by the grammar) but they
+        // sanitize to the same on-disk directory (`a_b`). Opening the
+        // second one must NOT silently hand back the first realm's
+        // manifest; it must fail closed with a typed identity mismatch.
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+
+        let created = ensure_realm_manifest_in(
+            &realms_root,
+            "a.b",
+            Some(supported_backend()),
+            Some(RealmOrigin::Explicit),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.realm.as_str(), "a.b");
+
+        // Sanity: both raw slugs must resolve to the same manifest path,
+        // otherwise the aliasing premise of the test does not hold.
+        assert_eq!(
+            realm_paths_in(&realms_root, "a.b").manifest_path,
+            realm_paths_in(&realms_root, "a_b").manifest_path,
+        );
+
+        let err = ensure_realm_manifest_in(&realms_root, "a_b", Some(supported_backend()), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StoreError::RealmIdentityMismatch { ref requested, ref existing }
+                    if requested == "a_b" && existing == "a.b"
+            ),
+            "expected typed identity mismatch, got: {err:?}"
+        );
+
+        // The original realm's manifest must still be intact and openable.
+        let reopened = ensure_realm_manifest_in(&realms_root, "a.b", None, None)
+            .await
+            .unwrap();
+        assert_eq!(reopened.realm.as_str(), "a.b");
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, Core
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::lifecycle::{InputId, RunId, RuntimeExecutionKind};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::service::TurnToolOverlay;
@@ -36,8 +36,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -68,13 +67,12 @@ impl CoreExecutor for ResultExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         Ok(CoreApplyOutput::with_run_result(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
             make_run_result("runtime ingress ok"),
@@ -107,13 +105,12 @@ impl CoreExecutor for RecordingBatchExecutor {
             .await
             .push(primitive.contributing_input_ids().to_vec());
         Ok(CoreApplyOutput::with_run_result(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
             make_run_result("batched runtime ingress ok"),
@@ -182,7 +179,10 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("queued before reset");
     let input_id = input.id().clone();
@@ -200,7 +200,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "queued ingress should resolve as terminated when control-plane reset wins"
     );
 
@@ -211,7 +211,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .expect("input record");
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })

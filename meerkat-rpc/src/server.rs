@@ -257,6 +257,28 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 msg = self.transport.read_message() => {
                     match msg {
                         Ok(Some(RpcMessage::Request(request))) => {
+                            // Validate the JSON-RPC envelope version at the
+                            // transport boundary before any method-specific
+                            // routing. Frames that do not declare the supported
+                            // "2.0" version are rejected with the standard
+                            // INVALID_REQUEST error (or dropped, if a
+                            // notification) rather than dispatched.
+                            if !request.has_supported_version() {
+                                if !request.is_notification() {
+                                    let response = RpcResponse::error(
+                                        request.id.clone(),
+                                        crate::error::INVALID_REQUEST,
+                                        format!(
+                                            "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                                            crate::protocol::JSONRPC_VERSION,
+                                            request.jsonrpc
+                                        ),
+                                    );
+                                    self.transport.write_response(&response).await?;
+                                }
+                                continue;
+                            }
+
                             // Handle `tools/register` synchronously (needs server state).
                             if request.method == "tools/register" {
                                 let response = self.handle_tools_register(

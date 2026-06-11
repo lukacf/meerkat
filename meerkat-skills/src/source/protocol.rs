@@ -150,11 +150,21 @@ impl<C> ExternalSkillSource<C> {
 
 impl ExternalSkillSource<StdioExternalClient> {
     async fn refresh_if_needed(&self) -> Result<(), SkillError> {
-        if self
-            .cache
-            .read()
-            .map(|cache| cache.is_fresh(self.refresh_interval))
-            .unwrap_or(false)
+        // Authority gate: an Unhealthy source (refresh failing past the
+        // unhealthy threshold) is no longer authoritative. It must NOT serve
+        // interval-fresh-but-stale cache. We still attempt a refresh so the
+        // source can recover, but skip the is_fresh fast-path.
+        let unhealthy = {
+            let streak = self.failure_streak.read().map(|f| *f).unwrap_or_default();
+            streak >= self.thresholds.unhealthy_failure_streak
+        };
+
+        if !unhealthy
+            && self
+                .cache
+                .read()
+                .map(|cache| cache.is_fresh(self.refresh_interval))
+                .unwrap_or(false)
         {
             return Ok(());
         }
@@ -182,8 +192,14 @@ impl ExternalSkillSource<StdioExternalClient> {
                 Ok(())
             }
             Err(err) => {
-                if let Ok(mut failures) = self.failure_streak.write() {
+                let streak = if let Ok(mut failures) = self.failure_streak.write() {
                     *failures = failures.saturating_add(1);
+                    *failures
+                } else {
+                    self.failure_streak.read().map(|f| *f).unwrap_or_default()
+                };
+                if streak >= self.thresholds.unhealthy_failure_streak {
+                    return Err(stale_source_error(&self.client.command, streak, &err));
                 }
                 if self
                     .cache
@@ -263,6 +279,18 @@ impl SkillSource for ExternalSkillSource<StdioExternalClient> {
             failures >= self.thresholds.unhealthy_failure_streak,
         ))
     }
+}
+
+/// Typed refusal for an Unhealthy stdio skill source: refuse to serve stale
+/// (but interval-fresh) cache once refresh has failed past the threshold.
+fn stale_source_error(location: &str, failure_streak: u32, cause: &SkillError) -> SkillError {
+    SkillError::Load(
+        format!(
+            "stale source: stdio skill source {location} is unhealthy \
+             (failure_streak={failure_streak}); refusing to serve stale cache: {cause}"
+        )
+        .into(),
+    )
 }
 
 #[derive(Serialize)]

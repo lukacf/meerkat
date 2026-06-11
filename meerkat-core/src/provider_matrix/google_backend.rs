@@ -1,5 +1,7 @@
 //! Google backend kinds (typed, provider-owned).
 
+use super::google_auth::GoogleAuthMethod;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GoogleBackendKind {
     GoogleGenAi,
@@ -25,6 +27,29 @@ impl GoogleBackendKind {
             Self::GoogleGenAi => "google_genai",
             Self::VertexAi => "vertex_ai",
             Self::GoogleCodeAssist => "google_code_assist",
+        }
+    }
+
+    /// The Google auth methods this backend supports — the provider-owned
+    /// (backend, auth) compatibility policy that the provider-runtime
+    /// `supports()` seam delegates to (dogma rows #122/#178).
+    pub fn supported_auth_methods(self) -> &'static [GoogleAuthMethod] {
+        match self {
+            Self::GoogleGenAi => &[
+                GoogleAuthMethod::ApiKey,
+                GoogleAuthMethod::BearerApiKey,
+                GoogleAuthMethod::ExternalAuthorizer,
+            ],
+            Self::VertexAi => &[
+                GoogleAuthMethod::Adc,
+                GoogleAuthMethod::ApiKeyExpress,
+                GoogleAuthMethod::ExternalAuthorizer,
+            ],
+            Self::GoogleCodeAssist => &[
+                GoogleAuthMethod::GoogleOauth,
+                GoogleAuthMethod::ComputeAdc,
+                GoogleAuthMethod::ExternalAuthorizer,
+            ],
         }
     }
     pub fn default_base_url(self) -> &'static str {

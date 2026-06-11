@@ -14,7 +14,8 @@ use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
-    AssistantImageRef, MediaType, Message, OutputSchema, Provider, StopReason, ToolDef, Usage,
+    AssistantImageRef, MediaType, Message, OutputSchema, Provider, ServerToolKind, StopReason,
+    ToolDef, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -196,11 +197,9 @@ pub struct LlmRequest {
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
     /// Typed provider-specific knobs. `ProviderTag` is a provider-tagged
-    /// enum with typed fields for every known knob; legacy untyped JSON
-    /// is projected through
-    /// [`meerkat_core::lifecycle::run_primitive::AnthropicProviderTag::from_legacy_value`]
-    /// (and the OpenAi/Gemini siblings) at the adapter boundary so the
-    /// request surface never carries `serde_json::Value`.
+    /// enum with typed fields for every known knob; callers construct it
+    /// typed end-to-end (K2 deleted the legacy untyped-JSON projection), so
+    /// the request surface never carries `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<ProviderTag>,
 }
@@ -368,7 +367,8 @@ pub enum LlmEvent {
     /// grounding metadata that are not caller-dispatched tool calls.
     ServerToolContent {
         id: Option<String>,
-        name: String,
+        /// Typed semantic tool kind, parsed once at the provider adapter.
+        kind: ServerToolKind,
         content: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Box<meerkat_core::ProviderMeta>>,

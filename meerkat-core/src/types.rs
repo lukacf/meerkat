@@ -79,7 +79,7 @@ impl From<&str> for VideoData {
 
 #[non_exhaustive]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain text content.
@@ -102,6 +102,56 @@ pub enum ContentBlock {
         #[serde(flatten)]
         data: VideoData,
     },
+    /// Structured JSON content returned by a tool, preserved as JSON rather
+    /// than laundered through a stringified `Text` block.
+    ///
+    /// Tools whose result is structured data (lists, records) emit this so the
+    /// canonical transcript carries the typed JSON shape. The payload is opaque
+    /// pass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared
+    /// with `ToolUse` args): Meerkat does not impose a closed schema on
+    /// arbitrary tool output. The model-facing text projection is *derived*
+    /// from this JSON, never the other way around.
+    Structured {
+        /// Provider-opaque structured JSON, parsed at most once by consumers.
+        #[serde(
+            serialize_with = "serialize_structured_data",
+            deserialize_with = "deserialize_structured_data"
+        )]
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        data: Box<RawValue>,
+    },
+    /// Rendered skill context injected by per-turn skill activation.
+    ///
+    /// The typed `skill_key` preserves the activation provenance in the
+    /// durable transcript — activation is never folded into anonymous
+    /// operator text. `text` is the rendered skill body; the model-facing
+    /// representation is the text projection of this block.
+    SkillContext {
+        /// Canonical identity of the activated skill.
+        skill_key: crate::skills::SkillKey,
+        /// Rendered skill body delivered to the model.
+        text: String,
+    },
+}
+
+/// Serializes a `Box<RawValue>` structured payload as inline JSON (no double
+/// string-encoding).
+fn serialize_structured_data<S>(data: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    data.serialize(serializer)
+}
+
+/// Deserializes a structured payload via `Value` so it survives the
+/// internally-tagged `Message` buffering step, mirroring `deserialize_tool_use_args`.
+fn deserialize_structured_data<'de, D>(deserializer: D) -> Result<Box<RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let raw = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
+    RawValue::from_string(raw).map_err(serde::de::Error::custom)
 }
 
 impl ContentBlock {
@@ -114,12 +164,32 @@ impl ContentBlock {
             ContentBlock::Text { text } => Cow::Borrowed(text),
             ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
             ContentBlock::Video { media_type, .. } => Cow::Owned(format!("[video: {media_type}]")),
+            ContentBlock::Structured { data } => Cow::Owned(data.get().to_string()),
+            ContentBlock::SkillContext { text, .. } => Cow::Borrowed(text),
         }
     }
 
     /// Convenience: wrap a string into a single-element Vec of Text blocks.
     pub fn text_vec(s: String) -> Vec<ContentBlock> {
         vec![ContentBlock::Text { text: s }]
+    }
+
+    /// Construct a structured-JSON content block from any serializable value.
+    ///
+    /// This is the typed path tools use instead of stringifying structured
+    /// output into a `Text` block. Fails closed if the value cannot be
+    /// serialized to JSON.
+    pub fn structured<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+        let raw = serde_json::value::to_raw_value(value)?;
+        Ok(ContentBlock::Structured { data: raw })
+    }
+
+    /// Borrow the raw structured JSON payload, if this is a `Structured` block.
+    pub fn structured_data(&self) -> Option<&RawValue> {
+        match self {
+            ContentBlock::Structured { data } => Some(data),
+            _ => None,
+        }
     }
 
     pub fn image_inline_data(&self) -> Option<(&str, &str)> {
@@ -159,6 +229,54 @@ impl fmt::Display for ContentBlock {
         f.write_str(&self.text_projection())
     }
 }
+
+impl PartialEq for ContentBlock {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ContentBlock::Text { text: t1 }, ContentBlock::Text { text: t2 }) => t1 == t2,
+            (
+                ContentBlock::Image {
+                    media_type: mt1,
+                    data: d1,
+                },
+                ContentBlock::Image {
+                    media_type: mt2,
+                    data: d2,
+                },
+            ) => mt1 == mt2 && d1 == d2,
+            (
+                ContentBlock::Video {
+                    media_type: mt1,
+                    duration_ms: dur1,
+                    data: d1,
+                },
+                ContentBlock::Video {
+                    media_type: mt2,
+                    duration_ms: dur2,
+                    data: d2,
+                },
+            ) => mt1 == mt2 && dur1 == dur2 && d1 == d2,
+            // `RawValue` carries no `PartialEq`; compare the canonical JSON text,
+            // mirroring `AssistantBlock::ToolUse` args equality.
+            (ContentBlock::Structured { data: d1 }, ContentBlock::Structured { data: d2 }) => {
+                d1.get() == d2.get()
+            }
+            (
+                ContentBlock::SkillContext {
+                    skill_key: k1,
+                    text: t1,
+                },
+                ContentBlock::SkillContext {
+                    skill_key: k2,
+                    text: t2,
+                },
+            ) => k1 == k2 && t1 == t2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ContentBlock {}
 
 /// Concatenate text projections from a slice of content blocks.
 pub fn text_content(blocks: &[ContentBlock]) -> String {
@@ -341,6 +459,46 @@ impl From<&str> for ContentInput {
     }
 }
 
+/// Typed input fact for a run boundary.
+///
+/// A run either starts from caller-provided content or resumes from tool
+/// results already staged at the session's pending-continuation boundary.
+/// The pending-tail case is its own typed variant — run-boundary events and
+/// hooks never fabricate an empty-string prompt to stand in for it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunInput {
+    /// The run starts from caller-provided content (text or blocks).
+    Content { content: ContentInput },
+    /// The run resumes a pending continuation whose transcript tail is a
+    /// staged tool-results message; there is no caller prompt.
+    PendingToolResults,
+}
+
+impl RunInput {
+    /// Borrow the caller-provided content, when this run has one.
+    pub fn content(&self) -> Option<&ContentInput> {
+        match self {
+            RunInput::Content { content } => Some(content),
+            RunInput::PendingToolResults => None,
+        }
+    }
+
+    /// Text projection of the caller-provided content, when present.
+    /// `PendingToolResults` has no prompt and projects to `None` — never to
+    /// a fabricated empty string.
+    pub fn prompt_text(&self) -> Option<String> {
+        self.content().map(ContentInput::text_content)
+    }
+}
+
+impl From<ContentInput> for RunInput {
+    fn from(content: ContentInput) -> Self {
+        RunInput::Content { content }
+    }
+}
+
 /// Handling mode for ordinary content-bearing work.
 ///
 /// `Queue` means outer-loop / next-turn handling and leaves the current run
@@ -479,6 +637,55 @@ pub enum TranscriptSource {
     Spoken,
 }
 
+/// Typed semantic kind of a provider-executed (server-side) tool.
+///
+/// This is the single typed owner of the server-tool identity. Each provider
+/// adapter parses its native discriminator into this enum once at the streaming
+/// boundary, so downstream consumers never re-classify by matching a
+/// `name: String`. Provider-native sub-event detail (e.g. OpenAI's
+/// `web_search_call` vs `web_search_result`) is preserved in the accompanying
+/// `content` JSON, not in this kind.
+///
+/// `ProviderNative` is the verbatim escape hatch for dynamic provider tool
+/// names (Anthropic `server_tool_use` carries an arbitrary tool name that must
+/// round-trip exactly on replay). It is the only variant carrying a string,
+/// and that string IS the typed fact — not a re-derivable label.
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerToolKind {
+    /// Provider-hosted web search (Anthropic `web_search*`, OpenAI
+    /// `web_search*`). Sub-event detail lives in the evidence `content`.
+    WebSearch,
+    /// Gemini grounding via Google Search (grounding metadata block).
+    GoogleSearch,
+    /// A provider-native server tool whose exact name must round-trip verbatim
+    /// (Anthropic `server_tool_use` dynamic name and any unrecognized future
+    /// server tool). The `name` is provider-owned and replayed unchanged.
+    ProviderNative { name: String },
+}
+
+impl ServerToolKind {
+    /// The provider-native tool name for this kind.
+    ///
+    /// Replay sites that must reconstruct a provider request item read this
+    /// derived projection instead of carrying a parallel `name: String`.
+    pub fn provider_name(&self) -> &str {
+        match self {
+            ServerToolKind::WebSearch => "web_search",
+            ServerToolKind::GoogleSearch => "google_search",
+            ServerToolKind::ProviderNative { name } => name,
+        }
+    }
+}
+
+impl fmt::Display for ServerToolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.provider_name())
+    }
+}
+
 /// A block of content in an assistant message, preserving order.
 ///
 /// Uses adjacently tagged serde representation to support `Box<RawValue>` in
@@ -539,8 +746,8 @@ pub enum AssistantBlock {
         /// Provider item or tool-use ID when one exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        /// Provider-native tool name, for example `web_search` or `google_search`.
-        name: String,
+        /// Typed semantic tool kind, parsed once at the provider adapter.
+        kind: ServerToolKind,
         /// Provider-native JSON payload, preserved for citations and grounding evidence.
         content: Value,
         /// Provider continuity metadata, if any.
@@ -611,17 +818,17 @@ impl PartialEq for AssistantBlock {
             (
                 AssistantBlock::ServerToolContent {
                     id: i1,
-                    name: n1,
+                    kind: k1,
                     content: c1,
                     meta: m1,
                 },
                 AssistantBlock::ServerToolContent {
                     id: i2,
-                    name: n2,
+                    kind: k2,
                     content: c2,
                     meta: m2,
                 },
-            ) => i1 == i2 && n1 == n2 && c1 == c2 && m1 == m2,
+            ) => i1 == i2 && k1 == k2 && c1 == c2 && m1 == m2,
             (
                 AssistantBlock::Image {
                     image_id: i1,
@@ -669,7 +876,7 @@ impl ToolCallView<'_> {
     }
 }
 
-/// Iterator over tool calls in an AssistantMessage. Zero allocations.
+/// Iterator over tool calls in a [`BlockAssistantMessage`]. Zero allocations.
 pub struct ToolCallIter<'a> {
     inner: std::slice::Iter<'a, AssistantBlock>,
 }
@@ -897,7 +1104,7 @@ impl std::fmt::Display for SessionId {
 }
 
 /// A message in the conversation history
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// System prompt (injected at start)
     System(SystemMessage),
@@ -905,9 +1112,7 @@ pub enum Message {
     SystemNotice(SystemNoticeMessage),
     /// User input
     User(UserMessage),
-    /// Assistant response (may include tool calls) - legacy format
-    Assistant(AssistantMessage),
-    /// Assistant response with ordered blocks - new format (spec v2)
+    /// Assistant response with ordered blocks
     BlockAssistant(BlockAssistantMessage),
     /// Results from tool execution
     ToolResults {
@@ -925,16 +1130,18 @@ impl Message {
         }
     }
 
-    /// Extract text content suitable for semantic indexing.
+    /// Classify this message for semantic indexing as a typed decision.
     ///
-    /// Returns user and assistant text content. System messages and
-    /// tool results are excluded (system prompts are not conversation
-    /// content, tool results are structured data).
-    pub fn as_indexable_text(&self) -> String {
+    /// The include/exclude policy is an explicit typed value, not a hidden
+    /// empty-string convention: conversation turns (user/assistant) project to
+    /// [`MemoryIndexableContent::Indexable`], while system prompts, synthetic
+    /// system notices, and tool results carry a typed
+    /// [`MemoryIndexExclusion`] reason so a consumer (e.g. the memory store)
+    /// can see and own indexability rather than inferring it from an empty
+    /// flattened `String`.
+    pub fn indexable_content(&self) -> MemoryIndexableContent {
         match self {
-            Message::SystemNotice(_) => String::new(),
-            Message::User(u) => u.text_content(),
-            Message::Assistant(a) => a.content.clone(),
+            Message::User(u) => MemoryIndexableContent::Indexable(u.text_content()),
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
                 for text in ba.text_blocks() {
@@ -943,11 +1150,75 @@ impl Message {
                     }
                     result.push_str(text);
                 }
-                result
+                MemoryIndexableContent::Indexable(result)
             }
-            Message::System(_) | Message::ToolResults { .. } => String::new(),
+            Message::System(_) => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt)
+            }
+            Message::SystemNotice(_) => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemNotice)
+            }
+            Message::ToolResults { .. } => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults)
+            }
         }
     }
+
+    /// Extract text content suitable for semantic indexing.
+    ///
+    /// Text projection of [`Message::indexable_content`]: excluded messages
+    /// (system prompts, system notices, tool results) project to an empty
+    /// string. Prefer [`Message::indexable_content`] when the indexability
+    /// decision itself matters.
+    pub fn as_indexable_text(&self) -> String {
+        self.indexable_content().into_indexable_text()
+    }
+}
+
+/// Typed indexability decision for a [`Message`] in semantic-memory indexing.
+///
+/// Replaces the empty-`String` "this message is not indexable" convention with
+/// an explicit, exhaustive decision the consumer can match on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryIndexableContent {
+    /// Conversation content to index, projected to plain text.
+    Indexable(String),
+    /// Message excluded from indexing, with the typed reason.
+    Excluded(MemoryIndexExclusion),
+}
+
+impl MemoryIndexableContent {
+    /// Whether this message contributes content to the index.
+    pub fn is_indexable(&self) -> bool {
+        matches!(self, MemoryIndexableContent::Indexable(_))
+    }
+
+    /// The indexable text, or empty string for excluded messages.
+    pub fn into_indexable_text(self) -> String {
+        match self {
+            MemoryIndexableContent::Indexable(text) => text,
+            MemoryIndexableContent::Excluded(_) => String::new(),
+        }
+    }
+
+    /// Borrow the indexable text, if any.
+    pub fn indexable_text(&self) -> Option<&str> {
+        match self {
+            MemoryIndexableContent::Indexable(text) => Some(text.as_str()),
+            MemoryIndexableContent::Excluded(_) => None,
+        }
+    }
+}
+
+/// Typed reason a [`Message`] is excluded from semantic-memory indexing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryIndexExclusion {
+    /// System prompt — not conversation content.
+    SystemPrompt,
+    /// Synthetic/runtime system notice — not conversation content.
+    SystemNotice,
+    /// Tool results — structured data, not conversation prose.
+    ToolResults,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -956,7 +1227,6 @@ enum MessageWire {
     System(SystemMessage),
     SystemNotice(SystemNoticeMessage),
     User(UserMessage),
-    Assistant(AssistantMessage),
     #[serde(rename = "block_assistant")]
     BlockAssistant(BlockAssistantMessage),
     #[serde(rename = "tool_results")]
@@ -976,7 +1246,6 @@ impl Serialize for Message {
             Self::System(message) => MessageWire::System(message.clone()),
             Self::SystemNotice(message) => MessageWire::SystemNotice(message.clone()),
             Self::User(message) => MessageWire::User(message.clone()),
-            Self::Assistant(message) => MessageWire::Assistant(message.clone()),
             Self::BlockAssistant(message) => MessageWire::BlockAssistant(message.clone()),
             Self::ToolResults {
                 results,
@@ -1000,7 +1269,6 @@ impl<'de> Deserialize<'de> for Message {
             MessageWire::System(message) => Self::System(message),
             MessageWire::SystemNotice(message) => Self::SystemNotice(message),
             MessageWire::User(message) => Self::User(message),
-            MessageWire::Assistant(message) => Self::Assistant(message),
             MessageWire::BlockAssistant(message) => Self::BlockAssistant(message),
             MessageWire::ToolResults {
                 results,
@@ -1014,7 +1282,7 @@ impl<'de> Deserialize<'de> for Message {
 }
 
 /// System message content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemMessage {
     pub content: String,
@@ -1159,24 +1427,20 @@ pub enum SystemNoticeDirection {
 ///
 /// Wire form is a plain string. The canonical tags match the strings the
 /// runtime producer has always emitted (`message`, `request`,
-/// `response_progress`, `response_terminal`); the `peer_`-prefixed forms emitted
-/// by other surfaces (`peer_request`, ...) deserialize into the same variants
-/// for back-read compatibility. Any genuinely-unknown wire value is captured
-/// explicitly as [`CommsNoticeKind::Other`] (NOT a silent fall-through) so the
-/// projection match stays exhaustive while remaining forward-compatible; an
-/// `Other` value round-trips to its original string.
+/// `response_progress`, `response_terminal`). Any unknown wire value is
+/// captured explicitly as [`CommsNoticeKind::Other`] (NOT a silent
+/// fall-through) so the projection match stays exhaustive while remaining
+/// forward-compatible; an `Other` value round-trips to its original string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsNoticeKind {
     /// Simple peer-to-peer message (wire tag `message`).
     Message,
-    /// Correlated request expecting a response (wire tag `request`, alias
-    /// `peer_request`).
+    /// Correlated request expecting a response (wire tag `request`).
     Request,
-    /// Progress update for an in-flight response (wire tag `response_progress`,
-    /// alias `peer_response_progress`).
+    /// Progress update for an in-flight response (wire tag
+    /// `response_progress`).
     ResponseProgress,
-    /// Terminal response, completed or failed (wire tag `response_terminal`,
-    /// alias `peer_response_terminal`).
+    /// Terminal response, completed or failed (wire tag `response_terminal`).
     ResponseTerminal,
     /// Forward-compatible escape hatch for an unrecognized wire kind. Projects
     /// as a plain peer message but is matched explicitly, never silently.
@@ -1196,16 +1460,15 @@ impl CommsNoticeKind {
         }
     }
 
-    /// Classify a wire string into the typed vocabulary, folding in the
-    /// `peer_`-prefixed aliases. Unrecognized values become
-    /// [`CommsNoticeKind::Other`].
+    /// Classify a wire string into the typed vocabulary. Unrecognized values
+    /// become [`CommsNoticeKind::Other`].
     #[must_use]
     pub fn from_wire(raw: &str) -> Self {
         match raw {
             "message" => Self::Message,
-            "request" | "peer_request" => Self::Request,
-            "response_progress" | "peer_response_progress" => Self::ResponseProgress,
-            "response_terminal" | "peer_response_terminal" => Self::ResponseTerminal,
+            "request" => Self::Request,
+            "response_progress" => Self::ResponseProgress,
+            "response_terminal" => Self::ResponseTerminal,
             other => Self::Other(other.to_string()),
         }
     }
@@ -1806,7 +2069,7 @@ impl TranscriptUserRole {
 }
 
 /// User message content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct UserMessage {
     #[serde(with = "content_blocks_serde")]
@@ -1894,11 +2157,10 @@ impl UserMessage {
     }
 }
 
-/// New assistant message with ordered blocks - no billing metadata.
+/// Assistant message with ordered blocks - no billing metadata.
 ///
-/// This is the new format for storing assistant messages with full block ordering.
-/// The existing `AssistantMessage` is preserved for backwards compatibility during
-/// the migration period.
+/// The canonical transcript representation for assistant output: an ordered
+/// sequence of typed [`AssistantBlock`]s plus the stop reason.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockAssistantMessage {
     /// Ordered sequence of content blocks
@@ -1981,24 +2243,6 @@ impl fmt::Display for BlockAssistantMessage {
     }
 }
 
-/// Assistant message with potential tool calls (legacy format)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct AssistantMessage {
-    /// Text content (may be empty if only tool calls)
-    pub content: String,
-    /// Tool calls requested by the model
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
-    /// How the turn ended
-    pub stop_reason: StopReason,
-    /// Token usage for this turn
-    pub usage: Usage,
-    /// When this assistant message was committed to the transcript.
-    #[serde(default = "message_timestamp_now")]
-    pub created_at: MessageTimestamp,
-}
-
 /// A tool call requested by the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2024,7 +2268,7 @@ impl ToolCall {
 }
 
 /// Result of executing a tool
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolResult {
     /// Matches the tool_call.id

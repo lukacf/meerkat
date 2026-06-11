@@ -6,7 +6,7 @@
 
 use super::RunId;
 use super::run_primitive::RunPrimitive;
-use super::run_receipt::RunBoundaryReceipt;
+use super::run_receipt::RunBoundaryReceiptDraft;
 use crate::error::AgentError;
 use crate::service::SessionError;
 use crate::session::PendingSystemContextAppend;
@@ -319,8 +319,11 @@ pub enum CoreApplyTerminal {
 
 #[derive(Debug, Clone)]
 pub struct CoreApplyOutput {
-    /// The authoritative receipt proving boundary application.
-    pub receipt: RunBoundaryReceipt,
+    /// Unsequenced receipt proving boundary application. The runtime driver
+    /// mints the final sequenced [`super::run_receipt::RunBoundaryReceipt`]
+    /// from the generated machine's per-run boundary counter at commit time
+    /// (dogma K10 — executors cannot produce the boundary sequence).
+    pub receipt: RunBoundaryReceiptDraft,
     /// Optional serialized session snapshot to durably commit atomically with
     /// the receipt and input-state updates.
     pub session_snapshot: Option<Vec<u8>>,
@@ -349,7 +352,7 @@ impl CoreBoundaryStageOutput {
 
 impl CoreApplyOutput {
     pub fn with_run_result(
-        receipt: RunBoundaryReceipt,
+        receipt: RunBoundaryReceiptDraft,
         session_snapshot: Option<Vec<u8>>,
         run_result: RunResult,
     ) -> Self {
@@ -361,7 +364,7 @@ impl CoreApplyOutput {
     }
 
     pub fn with_callback_pending(
-        receipt: RunBoundaryReceipt,
+        receipt: RunBoundaryReceiptDraft,
         session_snapshot: Option<Vec<u8>>,
         tool_name: impl Into<String>,
         args: Value,
@@ -377,7 +380,7 @@ impl CoreApplyOutput {
     }
 
     pub fn without_terminal(
-        receipt: RunBoundaryReceipt,
+        receipt: RunBoundaryReceiptDraft,
         session_snapshot: Option<Vec<u8>>,
     ) -> Self {
         Self {

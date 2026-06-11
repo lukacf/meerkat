@@ -5,32 +5,32 @@
 //! feature pages (`effort`, `extended-thinking`, `adaptive-thinking`,
 //! `context-windows`, `compaction`, `structured-outputs`).
 
-use super::{BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport};
+use super::{BetaFeature, BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport};
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 // ── Beta headers ──────────────────────────────────────────────────────────
 
 const BETA_COMPACTION: BetaHeader = BetaHeader {
-    feature: "compaction",
+    feature: BetaFeature::Compaction,
     header_name: "anthropic-beta",
     header_value: "compact-2026-01-12",
 };
 
 const BETA_STRUCTURED_OUTPUT: BetaHeader = BetaHeader {
-    feature: "structured_output",
+    feature: BetaFeature::StructuredOutput,
     header_name: "anthropic-beta",
     header_value: "structured-outputs-2025-11-13",
 };
 
 const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
-    feature: "interleaved_thinking",
+    feature: BetaFeature::InterleavedThinking,
     header_name: "anthropic-beta",
     header_value: "interleaved-thinking-2025-05-14",
 };
 
 /// Headers advertised for models with adaptive thinking + compaction
-/// (Opus 4.8, Opus 4.7, Sonnet 4.6).
+/// (Fable 5, Opus 4.8, Opus 4.7, Sonnet 4.6).
 const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
@@ -50,23 +50,109 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 
 // ── Effort tiers ──────────────────────────────────────────────────────────
 
-/// Effort tiers accepted by Opus 4.8 and Opus 4.7; `xhigh` sits between
-/// `high` and `max`.
-const OPUS_48_47_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// Effort tiers accepted by Fable 5, Opus 4.8, and Opus 4.7; `xhigh` sits
+/// between `high` and `max`.
+const FABLE_5_OPUS_48_47_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
 
 /// Effort tiers accepted by Sonnet 4.6.
-const SONNET_46_EFFORT: &[&str] = &["low", "medium", "high", "max"];
+const SONNET_46_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Max,
+];
 
 /// Effort tiers accepted by Opus 4.5 (verified against the live API:
 /// "This model does not support effort level 'max'. Supported levels: high,
 /// low, medium." — so `max` is rejected on 4.5 despite the docs listing the
 /// model on the effort page.)
-const OPUS_45_EFFORT: &[&str] = &["low", "medium", "high"];
+const OPUS_45_EFFORT: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
 
 // ── Catalog rows ─────────────────────────────────────────────────────────
 
 /// Capability rows for Anthropic catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // Claude Fable 5
+    //
+    // Sources (verified):
+    //   - Models overview:
+    //     https://platform.claude.com/docs/en/about-claude/models/overview
+    //     (API ID claude-fable-5; 1M context; 128k max output; vision/text+image
+    //      input; adaptive thinking only — extended thinking "No"; GA on the
+    //      Claude API beginning June 9, 2026. Fable 5 is NOT listed in the
+    //      output-300k-2026-03-24 batch-beta note, hence no extended-output
+    //      beta on this row.)
+    //   - Introducing Claude Fable 5 and Claude Mythos 5:
+    //     https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5
+    //     (adaptive thinking is the only mode and applies whenever `thinking`
+    //      is unset; an explicit thinking: {"type": "disabled"} is NOT
+    //      supported — unlike Opus 4.8/4.7, which accept it. Meerkat's
+    //      `AnthropicThinkingConfig` has no disabled variant, so
+    //      `AnthropicAdaptiveOnly` is an exact description of the wire shapes
+    //      Meerkat can emit. Supported at launch: effort, compaction, vision,
+    //      memory tool. Refusals surface as stop_reason: "refusal".)
+    //   - Effort:
+    //     https://platform.claude.com/docs/en/build-with-claude/effort
+    //     (supported; low/medium/high/xhigh/max — same ladder as Opus 4.8/4.7)
+    //   - Compaction:
+    //     https://platform.claude.com/docs/en/build-with-claude/compaction
+    //     (supported; compact-2026-01-12 beta header)
+    //   - Structured outputs:
+    //     https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    //     (supported on Claude Fable 5)
+    //   - Web search:
+    //     https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool
+    //     (web_search_20260209 with dynamic filtering lists Fable 5)
+    //   - Sampling: temperature/top_p/top_k removed (400), same request
+    //     surface as Opus 4.8/4.7 per the migration guide; budget_tokens
+    //     fully removed, so no legacy thinking_budget either.
+    //
+    // ASSUMED from the claude-opus-4-8 row (family-conservative defaults; the
+    // launch docs do not state these facts either way):
+    //   - image_tool_results (image blocks inside tool results)
+    //   - supports_inference_geo (data-residency hint)
+    //   - call_timeout_secs (Meerkat-owned operational default, Opus-tier 300s)
+    ModelCapabilities {
+        id: "claude-fable-5",
+        provider: Provider::Anthropic,
+        display_name: "Claude Fable 5",
+        tier: ModelTier::Recommended,
+        model_family: "claude-fable-5",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        supports_reasoning: false,
+        effort_levels: FABLE_5_OPUS_48_47_EFFORT,
+        supports_web_search: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        call_timeout_secs: Some(300),
+    },
     // Claude Opus 4.8
     //
     // Sources:
@@ -100,12 +186,18 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
         thinking: ThinkingSupport::AnthropicAdaptiveOnly,
         supports_reasoning: false,
-        effort_levels: OPUS_48_47_EFFORT,
+        effort_levels: FABLE_5_OPUS_48_47_EFFORT,
         supports_web_search: true,
         supports_inference_geo: true,
         supports_compaction: true,
@@ -147,12 +239,18 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
         thinking: ThinkingSupport::AnthropicAdaptiveOnly,
         supports_reasoning: false,
-        effort_levels: OPUS_48_47_EFFORT,
+        effort_levels: FABLE_5_OPUS_48_47_EFFORT,
         supports_web_search: true,
         supports_inference_geo: true,
         supports_compaction: true,
@@ -191,6 +289,12 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -239,6 +343,12 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -278,6 +388,12 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -311,6 +427,12 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -356,6 +478,12 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,

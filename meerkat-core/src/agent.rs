@@ -54,8 +54,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-pub use builder::{AgentBuildPolicyError, AgentBuilder};
-pub use runner::AgentRunner;
+pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
+pub use runner::{AgentRunner, SnapshotProjectionError, SystemContextStateError};
 
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -71,8 +71,13 @@ pub trait AgentLlmClient: Send + Sync {
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError>;
 
-    /// Get the provider name
-    fn provider(&self) -> &'static str;
+    /// Get the typed catalog provider identity for this client.
+    ///
+    /// Clients return the typed [`crate::provider::Provider`] directly so no
+    /// boundary ever parses a caller-supplied string back into catalog
+    /// identity. String projections are derived via
+    /// [`crate::provider::Provider::as_str`].
+    fn provider(&self) -> crate::provider::Provider;
 
     /// Get the current effective model identifier.
     ///
@@ -183,6 +188,25 @@ pub struct ExternalToolUpdate {
     pub pending: Vec<String>,
 }
 
+/// Typed command requesting cancellation at the next turn boundary.
+///
+/// Carried over the cancel-after-boundary command channel from the surface
+/// that authorized the request (e.g. `SessionService::cancel_after_boundary`)
+/// to the agent loop, which observes it at the next boundary. The agent
+/// resolves the request against its own live active run, so the command
+/// carries no run id; it is a typed edge signal, replacing the previous raw
+/// `AtomicBool` carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelAfterBoundaryCommand;
+
+/// Producer end of the cancel-after-boundary command channel.
+///
+/// Cloned and handed to the requesting surface via
+/// [`Agent::cancel_after_boundary_handle`]; mirrors the cloneable-handle shape
+/// of the session-side `interrupt_notify` so a surface can request boundary
+/// cancellation without holding a reference to the agent.
+pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAfterBoundaryCommand>;
+
 /// Typed context supplied by the agent loop when dispatching a tool call.
 ///
 /// This is a dispatch-time projection of the already-admitted turn input. It
@@ -204,6 +228,16 @@ impl ToolDispatchContext {
         Self {
             current_turn: blocks.map(CurrentTurnContent::new),
             turn_metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Project the typed run input into a dispatch context. The
+    /// pending-tool-results continuation carries no caller content, so it
+    /// projects to an empty context rather than a fabricated empty prompt.
+    pub fn from_run_input(input: &crate::types::RunInput) -> Self {
+        match input {
+            crate::types::RunInput::Content { content } => Self::from_current_turn_input(content),
+            crate::types::RunInput::PendingToolResults => Self::default(),
         }
     }
 
@@ -774,9 +808,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Apply a comms trust projection mutation authorized by generated
     /// machine/composition authority.
     ///
-    /// This is the only mutable trust-store seam. The compatibility
-    /// add/remove helpers below intentionally fail closed when no generated
-    /// handoff is provided.
+    /// This is the only mutable trust-store seam.
     async fn apply_trust_mutation(
         &self,
         _mutation: CommsTrustMutation,
@@ -833,26 +865,6 @@ pub trait CommsRuntime: Send + Sync {
         Err(SendError::Unsupported(
             "recovered generated mob trust owner binding not supported for this CommsRuntime"
                 .to_string(),
-        ))
-    }
-
-    /// Compatibility helper for legacy callers without generated authority.
-    ///
-    /// This fails closed by default so public surfaces cannot mutate trust
-    /// without the generated handoff required by [`Self::apply_trust_mutation`].
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        Err(SendError::Unsupported(
-            "generated comms trust mutation authority required".to_string(),
-        ))
-    }
-
-    /// Compatibility helper for legacy callers without generated authority.
-    ///
-    /// This fails closed by default so public surfaces cannot mutate trust
-    /// without the generated handoff required by [`Self::apply_trust_mutation`].
-    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-        Err(SendError::Unsupported(
-            "generated comms trust mutation authority required".to_string(),
         ))
     }
 
@@ -1211,8 +1223,22 @@ where
     /// to decide whether to emit the `[MCP_PENDING]` system notice.
     pub(crate) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
-    /// Shared live flag for cancellation at the next turn boundary.
-    pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Producer end of the typed cancel-after-boundary command channel.
+    ///
+    /// Retained so [`Agent::cancel_after_boundary_handle`] can hand cloned
+    /// senders to the surface that requests boundary-only cancellation. The
+    /// agent never sends on this end itself; it only drains the matching
+    /// receiver at turn boundaries.
+    pub(crate) cancel_after_boundary_tx: CancelAfterBoundarySender,
+    /// Consumer end of the typed cancel-after-boundary command channel.
+    ///
+    /// Drained (non-blocking) at each turn boundary by
+    /// `observe_cancel_after_boundary_request`, replacing the previous
+    /// `.swap`-polled `AtomicBool`. A delivered [`CancelAfterBoundaryCommand`]
+    /// is observed at most once per boundary, mirroring the prior edge
+    /// semantics.
+    pub(crate) cancel_after_boundary_rx:
+        tokio::sync::mpsc::UnboundedReceiver<CancelAfterBoundaryCommand>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).
     /// Consulted at each LLM call for hot-swap-aware profile default resolution.
     pub(crate) model_defaults_resolver:
@@ -1223,13 +1249,18 @@ where
     /// Structured-output extraction state carried into RunResult.
     pub(crate) extraction_state: extraction::ExtractionState,
     /// Last published hidden deferred-catalog names.
-    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
+    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<crate::types::ToolName>,
     /// Last published pending catalog sources.
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
     /// Dispatch-time projection of the current turn input for contextual tools.
     pub(crate) tool_dispatch_context: ToolDispatchContext,
     /// Runtime-owned dispatch metadata for this turn.
     pub(crate) turn_tool_dispatch_metadata: BTreeMap<String, serde_json::Value>,
+    /// Typed tool-execution policy (per-call timeouts + concurrency bound)
+    /// applied to the normal LLM-driven tool dispatch loop. Populated by the
+    /// composition seam via `AgentBuilder::with_tools_config`; defaults to
+    /// `ToolsConfig::default()` for standalone/test construction.
+    pub(crate) tools_config: crate::config::ToolsConfig,
 }
 
 #[cfg(test)]
@@ -1310,24 +1341,16 @@ mod tests {
             notify: Arc::new(Notify::new()),
         };
         assert!(<NoopCommsRuntime as CommsRuntime>::public_key(&runtime).is_none());
+        // The only mutable trust seam is apply_trust_mutation; without a
+        // generated handoff it fails closed.
         let peer = TrustedPeerDescriptor {
             peer_id: PeerId::new(),
             name: PeerName::new("peer-a").expect("valid peer name"),
             address: PeerAddress::new(PeerTransport::Inproc, "peer-a"),
             pubkey: [0u8; 32],
         };
-        let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
-        assert!(matches!(result, Err(SendError::Unsupported(_))));
-    }
-
-    #[tokio::test]
-    async fn test_remove_trusted_peer_default_unsupported() {
-        let runtime = NoopCommsRuntime {
-            notify: Arc::new(Notify::new()),
-        };
-        let peer_id = PeerId::new().to_string();
         let result =
-            <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, &peer_id).await;
+            <NoopCommsRuntime as CommsRuntime>::add_private_trusted_peer(&runtime, peer).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
     }
 

@@ -44,7 +44,6 @@ import type {
   LiveTruncateParams,
   LiveInputChunkWire,
   RealtimeTurningMode,
-  WireLiveResponseModality,
 } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
@@ -139,14 +138,12 @@ export class LiveChannel {
    *   response. Pass `"text"` to suppress audio output on an audio-first
    *   channel, or `"audio"` explicitly. `undefined` keeps the channel default.
    */
-  async commitInput(responseModality?: string): Promise<void> {
+  async commitInput(responseModality?: "audio" | "text"): Promise<void> {
     const params: LiveCommitInputParams = {
       channel_id: this.requireChannelId(),
     };
     if (responseModality != null) {
-      params.response_modality = {
-        modality: responseModality,
-      } as WireLiveResponseModality;
+      params.response_modality = { modality: responseModality };
     }
     await this.client.liveCommitInput(params);
   }

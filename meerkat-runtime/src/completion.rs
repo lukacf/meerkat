@@ -12,11 +12,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use meerkat_core::TurnErrorMetadata;
 use meerkat_core::lifecycle::InputId;
 #[cfg(test)]
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::{RunResult, SessionId};
+use meerkat_core::{TurnErrorMetadata, TurnTerminalCauseKind, TurnTerminalOutcome};
 use serde_json::Value;
 
 use crate::meerkat_machine::driver::RuntimeCompletionResultAuthority;
@@ -63,21 +63,30 @@ pub enum CompletionOutcome {
     CallbackPending { tool_name: String, args: Value },
     /// The input reached the canonical cancellation terminal.
     Cancelled,
-    /// The input was abandoned before completing.
-    Abandoned(String),
+    /// The input was abandoned before completing, carrying typed failure
+    /// metadata so every surface sees the same structured turn error the
+    /// sibling [`AbandonedWithError`](Self::AbandonedWithError) carries.
+    Abandoned {
+        reason: String,
+        error: TurnErrorMetadata,
+    },
     /// The input was abandoned before completing, with typed failure metadata.
     AbandonedWithError {
         reason: String,
         error: TurnErrorMetadata,
     },
-    /// The turn produced a valid result, but a later runtime finalization step
-    /// failed. Consumers can use the result while handling the mechanics error.
-    CompletedWithFinalizationFailure {
-        result: Box<RunResult>,
+    /// The turn produced output, but a later runtime finalization step (the
+    /// durable commit) failed, so the run is NOT durably terminal. The produced
+    /// result is deliberately NOT carried on this outcome: a finalization
+    /// failure must be treated as failure by every surface, never surfaced as a
+    /// usable success result (that would be a false belief of success).
+    CompletedWithFinalizationFailure { error: TurnErrorMetadata },
+    /// The runtime was stopped or destroyed while the input was pending,
+    /// carrying typed failure metadata describing the termination cause.
+    RuntimeTerminated {
+        reason: String,
         error: TurnErrorMetadata,
     },
-    /// The runtime was stopped or destroyed while the input was pending.
-    RuntimeTerminated(String),
 }
 
 /// Runtime-minted observation for post-completion cleanup.
@@ -341,7 +350,7 @@ impl CompletionHandle {
         reason: String,
     ) -> Result<Self, crate::RuntimeDriverError> {
         Self::already_resolved_with_generated_class(
-            CompletionOutcome::RuntimeTerminated(reason),
+            CompletionOutcome::runtime_terminated(&reason),
             crate::meerkat_machine::dsl::RuntimeCompletionResultClass::RuntimeTerminated,
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RuntimeTerminated,
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
@@ -363,17 +372,35 @@ impl CompletionHandle {
 }
 
 impl CompletionOutcome {
+    /// Mint a [`RuntimeTerminated`](Self::RuntimeTerminated) outcome from a
+    /// termination reason, attaching the typed terminal failure metadata every
+    /// surface keys off (runtime stop/destroy is a fatal terminal boundary).
+    fn runtime_terminated(reason: &str) -> Self {
+        Self::RuntimeTerminated {
+            reason: reason.to_string(),
+            error: TurnErrorMetadata::terminal(
+                TurnTerminalCauseKind::FatalFailure,
+                TurnTerminalOutcome::Failed,
+                reason,
+            ),
+        }
+    }
+
     pub fn abandoned_reason(&self) -> Option<&str> {
         match self {
-            Self::Abandoned(reason) | Self::AbandonedWithError { reason, .. } => Some(reason),
+            Self::Abandoned { reason, .. } | Self::AbandonedWithError { reason, .. } => {
+                Some(reason)
+            }
             _ => None,
         }
     }
 
     pub fn error_metadata(&self) -> Option<&TurnErrorMetadata> {
         match self {
-            Self::AbandonedWithError { error, .. }
-            | Self::CompletedWithFinalizationFailure { error, .. } => Some(error),
+            Self::Abandoned { error, .. }
+            | Self::AbandonedWithError { error, .. }
+            | Self::CompletedWithFinalizationFailure { error, .. }
+            | Self::RuntimeTerminated { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -421,23 +448,26 @@ impl CompletionRegistry {
                     }
                 }
                 CompletionOutcome::Cancelled => CompletionOutcome::Cancelled,
-                CompletionOutcome::Abandoned(reason) => {
-                    CompletionOutcome::Abandoned(reason.clone())
-                }
+                CompletionOutcome::Abandoned { reason, error } => CompletionOutcome::Abandoned {
+                    reason: reason.clone(),
+                    error: error.clone(),
+                },
                 CompletionOutcome::AbandonedWithError { reason, error } => {
                     CompletionOutcome::AbandonedWithError {
                         reason: reason.clone(),
                         error: error.clone(),
                     }
                 }
-                CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+                CompletionOutcome::CompletedWithFinalizationFailure { error } => {
                     CompletionOutcome::CompletedWithFinalizationFailure {
-                        result: Box::new(result.as_ref().clone()),
                         error: error.clone(),
                     }
                 }
-                CompletionOutcome::RuntimeTerminated(reason) => {
-                    CompletionOutcome::RuntimeTerminated(reason.clone())
+                CompletionOutcome::RuntimeTerminated { reason, error } => {
+                    CompletionOutcome::RuntimeTerminated {
+                        reason: reason.clone(),
+                        error: error.clone(),
+                    }
                 }
             };
             let _ = tx.send(Ok(CompletionDelivery {
@@ -658,17 +688,13 @@ impl CompletionRegistry {
     fn resolve_completed_with_finalization_failure(
         &mut self,
         input_id: &InputId,
-        result: RunResult,
         error: TurnErrorMetadata,
         cleanup_observation: CompletionCleanupObservation,
     ) {
         if let Some(senders) = self.take_waiters(input_id) {
             Self::send_outcome(
                 senders,
-                CompletionOutcome::CompletedWithFinalizationFailure {
-                    result: Box::new(result),
-                    error,
-                },
+                CompletionOutcome::CompletedWithFinalizationFailure { error },
                 cleanup_observation,
             );
         }
@@ -677,7 +703,6 @@ impl CompletionRegistry {
     pub(crate) fn resolve_completed_with_finalization_failure_authorized(
         &mut self,
         input_id: &InputId,
-        result: RunResult,
         error: TurnErrorMetadata,
         authority: RuntimeCompletionResultAuthority,
     ) {
@@ -688,7 +713,6 @@ impl CompletionRegistry {
         }
         self.resolve_completed_with_finalization_failure(
             input_id,
-            result,
             error,
             CompletionCleanupObservation::from_authority(authority),
         );
@@ -714,7 +738,7 @@ impl CompletionRegistry {
         for (_, senders) in self.waiters.drain() {
             Self::send_outcome(
                 senders,
-                CompletionOutcome::RuntimeTerminated(reason.into()),
+                CompletionOutcome::runtime_terminated(reason),
                 cleanup_observation.clone(),
             );
         }
@@ -740,7 +764,7 @@ impl CompletionRegistry {
             if let Some(senders) = self.take_waiters(&input_id) {
                 Self::send_outcome(
                     senders,
-                    CompletionOutcome::RuntimeTerminated(reason.into()),
+                    CompletionOutcome::runtime_terminated(reason),
                     cleanup_observation.clone(),
                 );
             }
@@ -795,7 +819,7 @@ impl CompletionRegistry {
 
             Self::send_outcome(
                 std::mem::take(senders),
-                CompletionOutcome::RuntimeTerminated(reason.into()),
+                CompletionOutcome::runtime_terminated(reason),
                 cleanup_observation.clone(),
             );
             false
@@ -959,11 +983,15 @@ mod tests {
         assert!(!registry.debug_has_waiters());
 
         match h1.wait_authorized().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
+            CompletionOutcome::RuntimeTerminated { reason, .. } => {
+                assert_eq!(reason, "runtime stopped");
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
         match h2.wait_authorized().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
+            CompletionOutcome::RuntimeTerminated { reason, .. } => {
+                assert_eq!(reason, "runtime stopped");
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
     }
@@ -1349,7 +1377,9 @@ mod tests {
 
         for handle in [h1, h2] {
             match handle.wait_authorized().await {
-                CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime reset"),
+                CompletionOutcome::RuntimeTerminated { reason, .. } => {
+                    assert_eq!(reason, "runtime reset");
+                }
                 other => panic!("Expected RuntimeTerminated, got {other:?}"),
             }
         }
@@ -1374,7 +1404,9 @@ mod tests {
         assert_eq!(registry.debug_waiter_count(), 1);
 
         match drop_handle.wait_authorized().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime recycled"),
+            CompletionOutcome::RuntimeTerminated { reason, .. } => {
+                assert_eq!(reason, "runtime recycled");
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
 
@@ -1441,5 +1473,34 @@ mod tests {
             ),
         );
         assert!(!registry.debug_has_waiters());
+    }
+
+    #[test]
+    fn abandoned_carries_typed_error_metadata() {
+        let error = TurnErrorMetadata::runtime_apply_failure("apply blew up");
+        let outcome = CompletionOutcome::Abandoned {
+            reason: "abandoned".into(),
+            error: error.clone(),
+        };
+        assert_eq!(outcome.abandoned_reason(), Some("abandoned"));
+        assert_eq!(outcome.error_metadata(), Some(&error));
+    }
+
+    #[test]
+    fn runtime_terminated_carries_typed_error_metadata() {
+        let outcome = CompletionOutcome::runtime_terminated("runtime stopped");
+        match &outcome {
+            CompletionOutcome::RuntimeTerminated { reason, .. } => {
+                assert_eq!(reason, "runtime stopped");
+            }
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
+        }
+        let metadata = outcome
+            .error_metadata()
+            .expect("RuntimeTerminated must carry typed turn error metadata");
+        assert_eq!(metadata.kind, TurnTerminalCauseKind::FatalFailure);
+        assert_eq!(metadata.outcome, Some(TurnTerminalOutcome::Failed));
+        assert!(metadata.terminal);
+        assert_eq!(metadata.detail.as_deref(), Some("runtime stopped"));
     }
 }

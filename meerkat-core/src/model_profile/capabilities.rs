@@ -34,7 +34,13 @@ use crate::model_profile::catalog::ModelTier;
 /// Fields group into:
 /// - identity (`id`, `provider`, `display_name`, `tier`, `model_family`)
 /// - context/output (`context_window`, `max_output_tokens`, plus `_beta` variants)
-/// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`)
+/// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`,
+///   `image_generation`)
+/// - realtime transport capability facts (`realtime_supports_provider_managed_turns`,
+///   `realtime_supports_explicit_commit`, `realtime_interrupt_supported`,
+///   `realtime_transcript_supported`, `transcription_companion_model`) — what
+///   the model's realtime bidirectional transport can actually do; only
+///   meaningful when `realtime` is true
 /// - sampling (`supports_temperature`, `supports_top_p`, `supports_top_k`)
 /// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`)
 /// - features (`supports_web_search`, `supports_inference_geo`,
@@ -75,6 +81,33 @@ pub struct ModelCapabilities {
     /// Whether the model supports a realtime bidirectional streaming transport
     /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints).
     pub realtime: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// provider-managed turn detection (server VAD). Only meaningful when
+    /// `realtime` is true; `false` on non-realtime rows.
+    pub realtime_supports_provider_managed_turns: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// explicit (client-driven) turn commit. Only meaningful when `realtime`
+    /// is true; `false` on non-realtime rows.
+    pub realtime_supports_explicit_commit: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// interrupting (barge-in) the model's in-flight response. Only meaningful
+    /// when `realtime` is true; `false` on non-realtime rows.
+    pub realtime_interrupt_supported: bool,
+    /// Realtime transport: whether the model's realtime session emits spoken
+    /// input/output transcripts. Only meaningful when `realtime` is true;
+    /// `false` on non-realtime rows.
+    pub realtime_transcript_supported: bool,
+    /// Realtime transport: the companion model id used for input audio
+    /// transcription (ASR) on this model's realtime session. `None` on
+    /// non-realtime rows (and on realtime rows with no companion).
+    pub transcription_companion_model: Option<&'static str>,
+    /// Whether this specific model can drive Meerkat image generation.
+    ///
+    /// This is a per-MODEL fact owned by the catalog row, not a per-provider
+    /// derivation: a provider may have an image-generation default model while
+    /// an individual text row on the same provider cannot itself generate
+    /// images (it would require swapping to the provider's native image model).
+    pub image_generation: bool,
 
     // ── Sampling ──────────────────────────────────────────────────────
     /// Whether the API accepts a non-default `temperature` on this model.
@@ -93,8 +126,8 @@ pub struct ModelCapabilities {
     /// Accepted values for effort control. Empty slice = unsupported.
     /// Applies to both Anthropic `output_config.effort` and OpenAI
     /// `reasoning.effort`; the two schemas live in different request shapes but
-    /// share the enum here since the levels are all strings.
-    pub effort_levels: &'static [&'static str],
+    /// share the typed [`EffortLevel`] vocabulary.
+    pub effort_levels: &'static [EffortLevel],
 
     // ── Features ──────────────────────────────────────────────────────
     /// Provider-native web search tool support.
@@ -130,11 +163,39 @@ pub struct BetaValue<T: 'static> {
     pub value: T,
 }
 
+/// Typed semantic feature gated by a beta header.
+///
+/// The single typed owner of the beta-feature value domain: catalog rows
+/// declare which feature each [`BetaHeader`] gates via this enum, and request
+/// shaping selects headers by typed feature — never by matching a raw string
+/// label. The wire/display label is a derived projection
+/// ([`BetaFeature::as_wire_str`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaFeature {
+    /// Anthropic server-side compaction / context management.
+    Compaction,
+    /// Structured output (`output_config.format`).
+    StructuredOutput,
+    /// Interleaved thinking between tool calls.
+    InterleavedThinking,
+}
+
+impl BetaFeature {
+    /// Canonical wire/display label for this feature (derived projection).
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            BetaFeature::Compaction => "compaction",
+            BetaFeature::StructuredOutput => "structured_output",
+            BetaFeature::InterleavedThinking => "interleaved_thinking",
+        }
+    }
+}
+
 /// A beta header that gates a feature on this model.
 #[derive(Debug, Clone, Copy)]
 pub struct BetaHeader {
-    /// Short feature identifier (e.g. `"compaction"`).
-    pub feature: &'static str,
+    /// Typed semantic feature this header gates.
+    pub feature: BetaFeature,
     /// HTTP header name (usually `"anthropic-beta"`).
     pub header_name: &'static str,
     /// HTTP header value (e.g. `"compact-2026-01-12"`).
@@ -156,6 +217,46 @@ pub enum ThinkingSupport {
     /// Legacy `thinking_budget` is also accepted when
     /// `supports_thinking_budget_legacy = true`.
     GeminiThinkingLevel,
+}
+
+/// Reasoning/effort control level, the shared typed vocabulary behind both
+/// Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+///
+/// The two providers expose effort in different request shapes but draw from
+/// the same level vocabulary; modeling it as a typed enum keeps the catalog
+/// value-domain compiler-checked instead of relying on raw string literals.
+/// Each catalog row declares its accepted subset via `effort_levels`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EffortLevel {
+    /// OpenAI `reasoning.effort: "none"` — reasoning disabled.
+    None,
+    /// OpenAI realtime `reasoning.effort: "minimal"`.
+    Minimal,
+    /// Lowest active reasoning effort.
+    Low,
+    /// Medium reasoning effort.
+    Medium,
+    /// High reasoning effort.
+    High,
+    /// Extended-high reasoning effort (e.g. Opus 4.8, GPT-5 recent).
+    Xhigh,
+    /// Maximum reasoning effort (Anthropic-only top tier).
+    Max,
+}
+
+impl EffortLevel {
+    /// The wire string the provider APIs accept for this level.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            EffortLevel::None => "none",
+            EffortLevel::Minimal => "minimal",
+            EffortLevel::Low => "low",
+            EffortLevel::Medium => "medium",
+            EffortLevel::High => "high",
+            EffortLevel::Xhigh => "xhigh",
+            EffortLevel::Max => "max",
+        }
+    }
 }
 
 /// Lookup a model's capabilities by typed provider + id.
@@ -201,7 +302,7 @@ mod tests {
     #[test]
     fn every_capability_matches_a_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id);
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id);
             assert!(
                 entry.is_some(),
                 "capability row '{}' (provider '{}') has no catalog entry",
@@ -245,7 +346,7 @@ mod tests {
     #[test]
     fn tier_matches_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id)
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
                 .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
             assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
         }
@@ -261,6 +362,62 @@ mod tests {
             assert_eq!(caps.max_output_tokens, 64_000);
             assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
             assert!(!caps.supports_compaction);
+        }
+    }
+
+    #[test]
+    fn claude_fable_5_is_cataloged_with_official_limits() {
+        let caps = capabilities_for(Provider::Anthropic, "claude-fable-5")
+            .expect("claude-fable-5 must be in the Anthropic catalog");
+        assert_eq!(caps.provider, Provider::Anthropic);
+        assert_eq!(caps.model_family, "claude-fable-5");
+        assert_eq!(caps.context_window, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+        assert!(
+            caps.max_output_tokens_beta.is_none(),
+            "Fable 5 is not listed for the output-300k batch beta"
+        );
+        assert_eq!(caps.thinking, ThinkingSupport::AnthropicAdaptiveOnly);
+        assert!(
+            !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+            "Fable 5 rejects all sampling parameters"
+        );
+        assert!(
+            !caps.supports_thinking_budget_legacy,
+            "budget_tokens is fully removed on Fable 5"
+        );
+        assert!(caps.vision);
+        assert!(caps.supports_compaction);
+        assert!(caps.supports_structured_output);
+        assert!(caps.supports_web_search);
+        assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
+        assert!(caps.effort_levels.contains(&EffortLevel::Max));
+    }
+
+    #[test]
+    fn beta_feature_is_typed_owner_with_projected_wire_labels() {
+        // The semantic beta-feature domain is the typed enum; the wire label is
+        // a derived projection. Pin the projection so the catalog/wire shape
+        // cannot silently drift.
+        assert_eq!(BetaFeature::Compaction.as_wire_str(), "compaction");
+        assert_eq!(
+            BetaFeature::StructuredOutput.as_wire_str(),
+            "structured_output"
+        );
+        assert_eq!(
+            BetaFeature::InterleavedThinking.as_wire_str(),
+            "interleaved_thinking"
+        );
+        // Every catalog beta header declares a typed feature (exhaustive match
+        // proves the field is enum-typed, not a string label).
+        for caps in all_capabilities() {
+            for header in caps.beta_headers {
+                match header.feature {
+                    BetaFeature::Compaction
+                    | BetaFeature::StructuredOutput
+                    | BetaFeature::InterleavedThinking => {}
+                }
+            }
         }
     }
 

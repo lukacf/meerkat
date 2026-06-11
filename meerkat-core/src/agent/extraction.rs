@@ -90,13 +90,19 @@ pub(super) fn validate_response_text(
     }
     #[cfg(not(feature = "jsonschema"))]
     {
-        let _ = compiled_schema;
-        tracing::warn!(
-            "Structured output schema validation unavailable \
-            (jsonschema feature disabled). Accepting parsed JSON without schema validation."
-        );
+        let _ = (compiled_schema, &normalized);
+        // Fail closed: a declared output schema demands real validation. When
+        // the `jsonschema` validator is compiled out we cannot honor that
+        // contract, so we must NOT launder unvalidated JSON into a `Passed`
+        // verdict. Surface the typed `InvalidOutputSchema` fault instead.
+        return Err(AgentError::InvalidOutputSchema(
+            "structured output schema validation is unavailable (jsonschema feature disabled); \
+             refusing to accept output without validating it against the declared schema"
+                .to_string(),
+        ));
     }
 
+    #[cfg(feature = "jsonschema")]
     Ok(ExtractionValidation::Passed(normalized))
 }
 
@@ -308,6 +314,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "jsonschema")]
     #[test]
     fn test_validate_response_text_rejects_schema_mismatch()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -331,6 +338,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "jsonschema")]
     #[test]
     fn test_validate_response_text_accepts_unwrapped_schema_match()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -352,5 +360,31 @@ mod tests {
             ExtractionValidation::Passed(json!({"response": "hello"}))
         );
         Ok(())
+    }
+
+    /// Row #66: when the `jsonschema` validator is compiled out, a
+    /// schema-configured extraction must fail closed (typed
+    /// `AgentError::InvalidOutputSchema`) instead of laundering unvalidated
+    /// JSON into `ExtractionValidation::Passed`.
+    #[cfg(not(feature = "jsonschema"))]
+    #[test]
+    fn test_validate_response_text_fails_closed_without_validator()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "response": { "type": "string" } },
+            "required": ["response"]
+        }))?;
+
+        // Syntactically valid, schema-conformant JSON. With the validator
+        // compiled in this would be `Passed`; without it, the declared schema
+        // contract cannot be honored, so it must surface a typed fault.
+        let result =
+            validate_response_text(r#"{"response":"hello"}"#, &schema, schema.schema.as_value());
+
+        match result {
+            Err(AgentError::InvalidOutputSchema(_)) => Ok(()),
+            other => panic!("expected fail-closed InvalidOutputSchema, got {other:?}"),
+        }
     }
 }

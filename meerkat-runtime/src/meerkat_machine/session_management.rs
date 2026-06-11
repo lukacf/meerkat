@@ -292,11 +292,13 @@ impl MeerkatMachine {
         let runtime_id = Self::logical_runtime_id(session_id);
         let recovered_authority =
             fresh_registered_runtime_authority(session_id, "fresh storeless session registration")?;
+        let initial_runtime_state =
+            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
         let entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
-            RuntimeState::Idle,
+            initial_runtime_state,
         );
         let control_projection = entry.control_projection_handle();
         let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
@@ -410,11 +412,13 @@ impl MeerkatMachine {
             &session_id,
             "fresh storeless session registration",
         )?;
+        let initial_runtime_state =
+            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
         let mut entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
-            RuntimeState::Idle,
+            initial_runtime_state,
         );
         tracing::debug!(
             %session_id,
@@ -533,12 +537,12 @@ impl MeerkatMachine {
             %runtime_id,
             "MeerkatMachine::register_session_inner loaded durable lifecycle"
         );
-        let initial_runtime_state = recovery_observation.runtime_state;
+        let observed_runtime_state = recovery_observation.runtime_state;
         let requires_observed_recovery = recovery_observation.requires_observed_recovery();
         let recovered_authority = if requires_observed_recovery {
             super::dsl_authority::recover_authority_from_runtime_observation(
                 &session_id,
-                initial_runtime_state,
+                observed_runtime_state,
                 recovery_observation.agent_runtime_id.as_ref(),
                 None,
                 None,
@@ -556,6 +560,11 @@ impl MeerkatMachine {
         } else {
             fresh_registered_runtime_authority(&session_id, "fresh session registration")?
         };
+        // Seed the driver's initial phase from the recovered DSL authority
+        // uniformly (same as the storeless paths): the authority is the owner;
+        // the driver control projection mirrors it, never the raw observation.
+        let initial_runtime_state =
+            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
         tracing::debug!(
             %session_id,
@@ -689,8 +698,12 @@ impl MeerkatMachine {
     ///
     /// Peer requests whose intent matches one of these strings will be accepted
     /// without triggering an LLM turn (ApplyMode::Ignore, WakeMode::None).
-    pub async fn set_session_silent_intents(&self, session_id: &SessionId, intents: Vec<String>) {
-        let _ = self
+    pub async fn set_session_silent_intents(
+        &self,
+        session_id: &SessionId,
+        intents: Vec<String>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::SetSilentIntents {
@@ -698,7 +711,14 @@ impl MeerkatMachine {
                     intents,
                 },
             )
-            .await;
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "set_session_silent_intents: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 
     pub async fn commit_service_turn_terminal_receipt(
@@ -890,12 +910,12 @@ impl MeerkatMachine {
                         return Err(err);
                     }
                 };
-            let initial_runtime_state = recovery_observation.runtime_state;
+            let observed_runtime_state = recovery_observation.runtime_state;
             let requires_observed_recovery = recovery_observation.requires_observed_recovery();
             let recovered_authority = if requires_observed_recovery {
                 match super::dsl_authority::recover_authority_from_runtime_observation(
                     &session_id,
-                    initial_runtime_state,
+                    observed_runtime_state,
                     recovery_observation.agent_runtime_id.as_ref(),
                     None,
                     None,
@@ -919,6 +939,11 @@ impl MeerkatMachine {
             } else {
                 fresh_registered_runtime_authority(&session_id, "fresh executor registration")?
             };
+            // Seed the driver's initial phase from the recovered DSL authority
+            // uniformly: the authority is the owner; the driver control
+            // projection mirrors it, never the raw observation.
+            let initial_runtime_state =
+                super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
             let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
             let mut recovered_entry = self.make_driver(
                 runtime_id.clone(),
@@ -1032,7 +1057,11 @@ impl MeerkatMachine {
                     error = %reason,
                     "generated MeerkatMachine rejected executor registration"
                 );
-                return Err(RuntimeDriverError::ValidationFailed { reason });
+                // Stage-first classification: a claim rejected on a Destroyed
+                // binding surfaces as the terminal `Destroyed` truth.
+                return Err(self
+                    .classify_session_dsl_rejection(&session_id, reason)
+                    .await);
             }
             ExistingExecutorClaim::Claimed {
                 gate,
@@ -1662,7 +1691,10 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         filter: meerkat_core::ToolFilter,
-        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        witnesses: std::collections::BTreeMap<
+            meerkat_core::ToolName,
+            meerkat_core::ToolVisibilityWitness,
+        >,
     ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(

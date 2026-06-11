@@ -38,8 +38,6 @@ use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
 #[cfg(feature = "runtime-adapter")]
-use serde::de::DeserializeOwned;
-#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
@@ -1007,14 +1005,18 @@ impl SessionBackend {
     }
 
     fn runtime_input_from_turn_request(req: &StartTurnRequest) -> Input {
-        let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: Some(req.runtime.handling_mode),
-            keep_alive: None,
-            skill_references: req.runtime.skill_references.clone(),
-            flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
-            render_metadata: req.runtime.render_metadata.clone(),
-            ..Default::default()
-        };
+        // The canonical `RuntimeTurnMetadata` carrier owns render metadata and
+        // skill references; only handling/overlay retain a flat fallback on
+        // `StartTurnRuntimeSemantics`.
+        let mut turn_metadata = req.runtime.turn_metadata.clone().unwrap_or_default();
+        turn_metadata.handling_mode = Some(
+            turn_metadata
+                .handling_mode
+                .unwrap_or(req.runtime.handling_mode),
+        );
+        if turn_metadata.flow_tool_overlay.is_none() {
+            turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+        }
         let prompt = req.prompt.clone();
         Input::Prompt(PromptInput {
             header: InputHeader {
@@ -1027,12 +1029,7 @@ impl SessionBackend {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: prompt.text_content(),
-            blocks: if prompt.has_images() {
-                Some(prompt.into_blocks())
-            } else {
-                None
-            },
+            content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
             turn_metadata: Some(turn_metadata),
         })
@@ -1206,7 +1203,7 @@ fn runtime_completion_to_mob_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(MobError::Internal("turn cancelled".to_string()))
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(MobError::Internal(format!("turn abandoned: {reason}")))
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
@@ -1216,21 +1213,15 @@ fn runtime_completion_to_mob_result(
             )))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
             error,
         } => Err(MobError::Internal(format!(
-            "turn finalization failed after output: {}; structured_output={}",
+            "turn finalization failed after output: {}",
             error
                 .detail
                 .as_deref()
                 .unwrap_or("turn finalization failed"),
-            result
-                .structured_output
-                .as_ref()
-                .map(serde_json::Value::to_string)
-                .unwrap_or_else(|| "null".to_string())
         ))),
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(MobError::Internal(format!("runtime terminated: {reason}")))
         }
     }
@@ -1452,7 +1443,7 @@ mod tests {
             "mob/worker/member-1",
             &peer_id_str,
             "tcp://example.invalid/member-1",
-            Some(pubkey),
+            pubkey,
         )
         .expect("external peer spec should validate");
 
@@ -1463,52 +1454,13 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[test]
-    fn validated_external_peer_spec_rejects_missing_pubkey() {
-        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]).to_string();
-
-        let err = MultiBackendProvisioner::validated_external_peer_spec(
-            "mob/worker/member-1",
-            &peer_id,
-            "tcp://example.invalid/member-1",
-            None,
-        )
-        .expect_err("external peer specs must carry non-zero signing pubkeys");
-
-        assert!(
-            err.to_string().contains("pubkey") && err.to_string().contains("required"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    #[test]
-    fn peer_only_spec_from_parts_rejects_unregistered_peer_without_pubkey() {
-        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[8u8; 32]).to_string();
-
-        let err = MultiBackendProvisioner::peer_only_spec_from_parts(
-            &peer_id,
-            "tcp://example.invalid/member-1",
-            None,
-        )
-        .expect_err("peer-only trust must not fall back to a zero-pubkey descriptor");
-
-        assert!(
-            err.to_string().contains("pubkey") && err.to_string().contains("required"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    #[test]
     fn session_owned_eager_member_create_gets_runtime_execution_kind_stamp() {
         let mut req = meerkat_core::service::CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(meerkat_core::service::SessionBuildOptions {
@@ -1665,26 +1617,6 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            meerkat_core::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
-                .model_projection_text()
-        }
-        _ => String::new(),
-    }
-}
-
-#[cfg(feature = "runtime-adapter")]
 fn pending_system_context_appends_for_runtime_executor(
     appends: &[meerkat_core::lifecycle::run_primitive::ConversationContextAppend],
 ) -> Vec<PendingSystemContextAppend> {
@@ -1695,7 +1627,7 @@ fn pending_system_context_appends_for_runtime_executor(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_runtime_context_append_text(&append.content),
+            content: append.content.clone(),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             // Durable keyed conversation context append — not a transient steer.
@@ -1787,11 +1719,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                primitive
-                    .turn_metadata()
-                    .and_then(|meta| meta.skill_references.clone()),
                 primitive
                     .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -2402,16 +2330,20 @@ impl MobProvisioner for SessionBackend {
                 req.prompt.clone(),
                 &run_id.to_string(),
                 0,
-                Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        handling_mode: Some(req.runtime.handling_mode),
-                        keep_alive: None,
-                        skill_references: req.runtime.skill_references.clone(),
-                        flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
-                        render_metadata: req.runtime.render_metadata.clone(),
-                        ..Default::default()
-                    },
-                ),
+                Some({
+                    // Consume the canonical carrier; flats only backfill
+                    // handling/overlay.
+                    let mut turn_metadata = req.runtime.turn_metadata.clone().unwrap_or_default();
+                    turn_metadata.handling_mode = Some(
+                        turn_metadata
+                            .handling_mode
+                            .unwrap_or(req.runtime.handling_mode),
+                    );
+                    if turn_metadata.flow_tool_overlay.is_none() {
+                        turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+                    }
+                    turn_metadata
+                }),
             );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx)
@@ -2601,10 +2533,10 @@ struct ExternalBindingTarget {
     peer_id: String,
     address: String,
     bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
-    /// Ed25519 signing pubkey of the external process. When present,
-    /// propagated into the supervisor's trust store so inbound
-    /// signed-envelope replies admit past ingress `is_trusted` gating.
-    pubkey: Option<[u8; 32]>,
+    /// Ed25519 signing pubkey of the external process. Propagated into the
+    /// supervisor's trust store so inbound signed-envelope replies admit past
+    /// ingress `is_trusted` gating.
+    pubkey: [u8; 32],
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -2615,7 +2547,7 @@ struct ProvisionerBindingPersistence {
 }
 
 #[cfg(feature = "runtime-adapter")]
-type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, Option<[u8; 32]>);
+type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, [u8; 32]);
 
 #[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
@@ -2668,17 +2600,12 @@ impl MultiBackendProvisioner {
     fn peer_only_spec_from_parts(
         peer_id: &str,
         address: &str,
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let peer_name = address
             .strip_prefix("inproc://")
             .map(|value| value.split('?').next().unwrap_or(value).to_string())
             .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
-        let pubkey = pubkey.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "invalid peer-only spec for '{peer_name}': pubkey is required"
-            ))
-        })?;
         let result = TrustedPeerDescriptor::unsigned_with_pubkey(
             peer_name,
             peer_id.to_string(),
@@ -2692,13 +2619,8 @@ impl MultiBackendProvisioner {
         peer_name: &str,
         peer_id: &str,
         address: &str,
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        let pubkey = pubkey.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "invalid external peer spec for '{peer_name}': pubkey is required"
-            ))
-        })?;
         let result = TrustedPeerDescriptor::unsigned_with_pubkey(
             peer_name.to_string(),
             peer_id.to_string(),
@@ -2774,11 +2696,31 @@ impl MultiBackendProvisioner {
         let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
+        // Transport requires the recipient be trusted before the request can be
+        // routed (see comms admission), so trust is installed before the send.
+        // The invariant is enforced by rolling the trust back on every path
+        // where this `peer` is not a CONFIRMED, ACCEPTED supervisor: an
+        // `AuthorizeSupervisor` rejection or send failure must leave NO
+        // installed recipient trust (fail closed).
         self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        // 60s (not 30s): the requester must tolerate the same async
+        // trust/peer-registration propagation lag the live peer waits out
+        // before replying (see `spawn_live_external_peer`, 60s). It bounds only
+        // genuine failure-lag — the happy path returns as soon as the reply
+        // lands. Under high-parallelism RBE, loopback registration can lag tens
+        // of seconds; in real deployments it propagates in milliseconds.
+        let value = match self
             .supervisor_bridge
-            .send_bridge_command(peer, &command, Duration::from_secs(30))
-            .await?;
+            .send_bridge_command(peer, &command, Duration::from_secs(60))
+            .await
+        {
+            Ok(value) => value,
+            Err(send_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, send_error)
+                    .await);
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             // The provisioner does NOT own the recoverable-vs-fatal verdict for
             // a rejection cause — that is a MobMachine-owned fact. When a
@@ -2796,6 +2738,15 @@ impl MultiBackendProvisioner {
                 let expected_peer =
                     Self::peer_only_spec_from_parts(peer_id, &expected_address, pubkey)?;
                 let Some(rebind_authority) = rebind_authority else {
+                    // No rebind authority yet: hoist the observation so the
+                    // machine-owning caller can classify and re-attempt. The
+                    // rejected recipient must not retain trust between attempts.
+                    if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await
+                    {
+                        return Err(MobError::WiringError(format!(
+                            "AuthorizeSupervisor rejection for '{peer_id}' could not roll back rejected recipient trust: {untrust_error}"
+                        )));
+                    }
                     return Ok(PeerOnlySupervisorAuthorization {
                         peer: expected_peer.clone(),
                         rebind_required: Some(PeerOnlyRebindObservation {
@@ -2810,13 +2761,30 @@ impl MultiBackendProvisioner {
                     || rebind_authority.peer.address != expected_peer.address
                     || rebind_authority.peer.pubkey != expected_peer.pubkey
                 {
-                    return Err(MobError::WiringError(format!(
+                    // The rejected recipient cannot be rebound to a matching
+                    // authority, so it is not a confirmed supervisor and its
+                    // trust must not survive.
+                    let mismatch = MobError::WiringError(format!(
                         "peer-only rebind authority for '{peer_id}' does not match MobMachine member peer endpoint"
-                    )));
+                    ));
+                    return Err(self
+                        .rollback_supervisor_recipient_trust(peer, mismatch)
+                        .await);
                 }
-                let bind: super::bridge_protocol::BridgeBindResponse = self
+                // Re-bind the same peer (the bind re-establishes its own
+                // recipient trust). If the bind fails, the recipient was never
+                // confirmed and its trust must not survive — roll it back.
+                let bind: super::bridge_protocol::BridgeBindResponse = match self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
-                    .await?;
+                    .await
+                {
+                    Ok(bind) => bind,
+                    Err(bind_error) => {
+                        return Err(self
+                            .rollback_supervisor_recipient_trust(peer, bind_error)
+                            .await);
+                    }
+                };
                 let returned_address =
                     super::bridge_protocol::canonicalize_bridge_address(&bind.address);
                 if bind.peer_id != peer_id || returned_address != expected_address {
@@ -2834,17 +2802,45 @@ impl MultiBackendProvisioner {
                     rebind_required: None,
                 });
             }
-            return Err(Self::bridge_rejection_error(rejection));
+            return Err(self
+                .rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))
+                .await);
         }
-        let _ack = super::bridge_protocol::decode_bridge_ack(
+        let _ack = match super::bridge_protocol::decode_bridge_ack(
             &command,
             value,
             "authorize supervisor response",
-        )?;
+        ) {
+            Ok(ack) => ack,
+            Err(decode_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, decode_error)
+                    .await);
+            }
+        };
         Ok(PeerOnlySupervisorAuthorization {
             peer: peer.clone(),
             rebind_required: None,
         })
+    }
+
+    /// Fail-closed rollback for supervisor recipient trust installed ahead of an
+    /// `AuthorizeSupervisor` send. The recipient was trusted only so the bridge
+    /// request could be routed; if authorization did not terminate in a
+    /// confirmed accept, the trust must not survive. The authorization
+    /// `original_error` is preserved; an untrust failure is folded into a typed
+    /// `MobError` rather than silently dropped.
+    async fn rollback_supervisor_recipient_trust(
+        &self,
+        peer: &TrustedPeerDescriptor,
+        original_error: MobError,
+    ) -> MobError {
+        if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await {
+            return MobError::WiringError(format!(
+                "supervisor authorization failed ({original_error}); additionally failed to roll back installed recipient trust: {untrust_error}"
+            ));
+        }
+        original_error
     }
 
     async fn clear_pending_supervisor_acceptance_for_peer_ids(
@@ -2858,7 +2854,7 @@ impl MultiBackendProvisioner {
         Ok(())
     }
 
-    async fn send_bridge_command_typed<R: DeserializeOwned>(
+    async fn send_bridge_command_typed<R: super::bridge_protocol::FromBridgeReply>(
         &self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
@@ -2872,11 +2868,7 @@ impl MultiBackendProvisioner {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        let payload =
-            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
-        serde_json::from_value(payload).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
+        super::bridge_protocol::decode_bridge_payload(command, value, "command")
     }
 
     async fn bind_peer_only_member(
@@ -2902,7 +2894,11 @@ impl MultiBackendProvisioner {
                 bootstrap_token,
             },
         );
-        self.send_bridge_command_typed(peer, &command, Duration::from_secs(30))
+        // 60s (not 30s): tolerate async trust/peer-registration propagation lag
+        // before the bind reply lands (matches the responder's 60s wait). Bounds
+        // failure-lag only; under high-parallelism RBE loopback registration can
+        // lag tens of seconds, in real deployments it propagates in ms.
+        self.send_bridge_command_typed(peer, &command, Duration::from_secs(60))
             .await
     }
 

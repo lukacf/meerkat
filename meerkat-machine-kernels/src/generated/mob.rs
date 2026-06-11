@@ -337,6 +337,58 @@ impl std::fmt::Display for EventSubscriptionRejectReasonKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ExternalMemberRebindCapability {
+    #[default]
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Available")]
+    Available,
+}
+impl ExternalMemberRebindCapability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Available => "Available",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ExternalMemberRebindCapability {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unavailable" => Ok(Self::Unavailable),
+            "Available" => Ok(Self::Available),
+            other => Err(format!(
+                "invalid ExternalMemberRebindCapability value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ExternalMemberRebindCapability {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ExternalMemberRebindCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type ExternalPeerEdge = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerEdge;
 pub type ExternalPeerKey = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerKey;
 #[derive(
@@ -1335,6 +1387,58 @@ impl std::fmt::Display for LoopStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberAdmissionVerdictKind {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "DuplicateRejected")]
+    DuplicateRejected,
+}
+impl MemberAdmissionVerdictKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::DuplicateRejected => "DuplicateRejected",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberAdmissionVerdictKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "DuplicateRejected" => Ok(Self::DuplicateRejected),
+            other => Err(format!(
+                "invalid MemberAdmissionVerdictKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberAdmissionVerdictKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberAdmissionVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberLifecycleKind {
     #[default]
     #[serde(rename = "Spawned")]
@@ -1391,7 +1495,109 @@ impl std::fmt::Display for MemberLifecycleKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    #[serde(rename = "DurableSnapshotPresent")]
+    DurableSnapshotPresent,
+    #[serde(rename = "DurableSnapshotMissing")]
+    DurableSnapshotMissing,
+}
+impl MemberLiveMaterializationObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DurableSnapshotPresent => "DurableSnapshotPresent",
+            Self::DurableSnapshotMissing => "DurableSnapshotMissing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberLiveMaterializationObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DurableSnapshotPresent" => Ok(Self::DurableSnapshotPresent),
+            "DurableSnapshotMissing" => Ok(Self::DurableSnapshotMissing),
+            other => Err(format!(
+                "invalid MemberLiveMaterializationObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberLiveMaterializationObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberLiveMaterializationObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    #[serde(rename = "ReviveAuthorized")]
+    ReviveAuthorized,
+    #[serde(rename = "BrokenRecorded")]
+    BrokenRecorded,
+}
+impl MemberRevivalVerdictKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReviveAuthorized => "ReviveAuthorized",
+            Self::BrokenRecorded => "BrokenRecorded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberRevivalVerdictKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ReviveAuthorized" => Ok(Self::ReviveAuthorized),
+            "BrokenRecorded" => Ok(Self::BrokenRecorded),
+            other => Err(format!("invalid MemberRevivalVerdictKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberRevivalVerdictKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberRevivalVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -3112,6 +3318,56 @@ impl std::fmt::Display for NodeRunStatus {
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 pub type PeerSigningKey = meerkat_machine_schema::catalog::dsl::mob_machine::PeerSigningKey;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PolicyDecision {
+    #[default]
+    #[serde(rename = "Allow")]
+    Allow,
+    #[serde(rename = "Deny")]
+    Deny,
+}
+impl PolicyDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "Allow",
+            Self::Deny => "Deny",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PolicyDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Allow" => Ok(Self::Allow),
+            "Deny" => Ok(Self::Deny),
+            other => Err(format!("invalid PolicyDecision value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PolicyDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PolicyDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -3326,6 +3582,56 @@ impl std::fmt::Display for SpawnPolicyRuntimeMode {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum StepFaultDispositionKind {
+    #[default]
+    #[serde(rename = "Retry")]
+    Retry,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl StepFaultDispositionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retry => "Retry",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for StepFaultDispositionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retry" => Ok(Self::Retry),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!("invalid StepFaultDispositionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for StepFaultDispositionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for StepFaultDispositionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -3352,6 +3658,52 @@ impl From<&str> for StepId {
 impl std::fmt::Display for StepId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum StepOutputFaultKind {
+    #[default]
+    #[serde(rename = "MalformedJson")]
+    MalformedJson,
+}
+impl StepOutputFaultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MalformedJson => "MalformedJson",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for StepOutputFaultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MalformedJson" => Ok(Self::MalformedJson),
+            other => Err(format!("invalid StepOutputFaultKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for StepOutputFaultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for StepOutputFaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -3476,8 +3828,114 @@ impl std::fmt::Display for SubmitWorkRejectReasonKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorEscalationFailureCause {
+    #[default]
+    #[serde(rename = "NoEligibleSupervisor")]
+    NoEligibleSupervisor,
+    #[serde(rename = "TimeoutExceeded")]
+    TimeoutExceeded,
+}
+impl SupervisorEscalationFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoEligibleSupervisor => "NoEligibleSupervisor",
+            Self::TimeoutExceeded => "TimeoutExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorEscalationFailureCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoEligibleSupervisor" => Ok(Self::NoEligibleSupervisor),
+            "TimeoutExceeded" => Ok(Self::TimeoutExceeded),
+            other => Err(format!(
+                "invalid SupervisorEscalationFailureCause value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorEscalationFailureCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorEscalationFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type SupervisorProtocolVersion =
     meerkat_machine_schema::catalog::dsl::mob_machine::SupervisorProtocolVersion;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnTimeoutDisposition {
+    #[default]
+    #[serde(rename = "Detached")]
+    Detached,
+    #[serde(rename = "Canceled")]
+    Canceled,
+    #[serde(rename = "Retryable")]
+    Retryable,
+}
+impl TurnTimeoutDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Detached => "Detached",
+            Self::Canceled => "Canceled",
+            Self::Retryable => "Retryable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnTimeoutDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Detached" => Ok(Self::Detached),
+            "Canceled" => Ok(Self::Canceled),
+            "Retryable" => Ok(Self::Retryable),
+            other => Err(format!("invalid TurnTimeoutDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnTimeoutDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnTimeoutDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -3789,14 +4247,15 @@ pub struct State {
     pub member_startup_binding_requested: std::collections::BTreeSet<AgentRuntimeId>,
     pub member_startup_runtime_ready: std::collections::BTreeSet<AgentRuntimeId>,
     pub member_startup_ready: std::collections::BTreeSet<AgentRuntimeId>,
-    pub member_kickoff_pending: std::collections::BTreeSet<String>,
-    pub member_kickoff_starting: std::collections::BTreeSet<String>,
-    pub member_kickoff_callback_pending: std::collections::BTreeSet<String>,
-    pub member_kickoff_started: std::collections::BTreeSet<String>,
-    pub member_kickoff_failed: std::collections::BTreeSet<String>,
-    pub member_kickoff_cancelled: std::collections::BTreeSet<String>,
-    pub member_kickoff_error: std::collections::BTreeMap<String, String>,
+    pub member_kickoff_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_starting: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_callback_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_started: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_failed: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_cancelled: std::collections::BTreeSet<AgentIdentity>,
+    pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
@@ -3861,6 +4320,13 @@ pub struct State {
     pub resource_claim_owner_present: std::collections::BTreeMap<ResourceClaimId, bool>,
     pub resource_claim_expires_at_ms: std::collections::BTreeMap<ResourceClaimId, Option<u64>>,
     pub coordination_event_next_sequence: u64,
+    pub topology_default_policy: PolicyDecision,
+    pub external_member_rebind_capability:
+        std::collections::BTreeMap<AgentIdentity, ExternalMemberRebindCapability>,
+    pub orphan_budget: u64,
+    pub desired_members: std::collections::BTreeSet<AgentIdentity>,
+    pub members_to_spawn: std::collections::BTreeSet<AgentIdentity>,
+    pub members_to_retire: std::collections::BTreeSet<AgentIdentity>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -4392,11 +4858,11 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkPending {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkStarting {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartupMarkReady {
@@ -4405,24 +4871,73 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffResolveStarted {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffResolveCallbackPending {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffResolveFailed {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffCancelRequested {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffClear {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ProbeMemberAdmission {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ComputeRespawnGeneration {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyStepOutputFault {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub target_retry_key: String,
+        pub fault: StepOutputFaultKind,
+        pub attempt: u32,
+        pub max_retries: u32,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EscalateToSupervisor {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub supervisor_identity: AgentIdentity,
+        pub turn_timeout_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EscalateToSupervisorNoEligibleTarget {
+        pub run_id: RunId,
+        pub step_id: StepId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EvaluateTopologyEdge {
+        pub from_role: String,
+        pub to_role: String,
+        pub rule_match: Option<PolicyDecision>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetExternalMemberRebindCapability {
+        pub agent_identity: AgentIdentity,
+        pub capability: ExternalMemberRebindCapability,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTurnTimeoutDisposition {
+        pub timed_out_run_id: RunId,
+        pub retryable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SeedOrphanBudget {
+        pub budget: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordCoordinationWorkIntent {
@@ -4573,6 +5088,15 @@ pub enum Input {
     KickoffResolveFailed(inputs::KickoffResolveFailed),
     KickoffCancelRequested(inputs::KickoffCancelRequested),
     KickoffClear(inputs::KickoffClear),
+    ProbeMemberAdmission(inputs::ProbeMemberAdmission),
+    ComputeRespawnGeneration(inputs::ComputeRespawnGeneration),
+    ClassifyStepOutputFault(inputs::ClassifyStepOutputFault),
+    EscalateToSupervisor(inputs::EscalateToSupervisor),
+    EscalateToSupervisorNoEligibleTarget(inputs::EscalateToSupervisorNoEligibleTarget),
+    EvaluateTopologyEdge(inputs::EvaluateTopologyEdge),
+    SetExternalMemberRebindCapability(inputs::SetExternalMemberRebindCapability),
+    ClassifyTurnTimeoutDisposition(inputs::ClassifyTurnTimeoutDisposition),
+    SeedOrphanBudget(inputs::SeedOrphanBudget),
     RecordCoordinationWorkIntent(inputs::RecordCoordinationWorkIntent),
     RecordCoordinationResourceClaim(inputs::RecordCoordinationResourceClaim),
     UpdateCoordinationWorkIntentStatus(inputs::UpdateCoordinationWorkIntentStatus),
@@ -4709,6 +5233,19 @@ impl Input {
             Self::KickoffResolveFailed(_) => InputKind::KickoffResolveFailed,
             Self::KickoffCancelRequested(_) => InputKind::KickoffCancelRequested,
             Self::KickoffClear(_) => InputKind::KickoffClear,
+            Self::ProbeMemberAdmission(_) => InputKind::ProbeMemberAdmission,
+            Self::ComputeRespawnGeneration(_) => InputKind::ComputeRespawnGeneration,
+            Self::ClassifyStepOutputFault(_) => InputKind::ClassifyStepOutputFault,
+            Self::EscalateToSupervisor(_) => InputKind::EscalateToSupervisor,
+            Self::EscalateToSupervisorNoEligibleTarget(_) => {
+                InputKind::EscalateToSupervisorNoEligibleTarget
+            }
+            Self::EvaluateTopologyEdge(_) => InputKind::EvaluateTopologyEdge,
+            Self::SetExternalMemberRebindCapability(_) => {
+                InputKind::SetExternalMemberRebindCapability
+            }
+            Self::ClassifyTurnTimeoutDisposition(_) => InputKind::ClassifyTurnTimeoutDisposition,
+            Self::SeedOrphanBudget(_) => InputKind::SeedOrphanBudget,
             Self::RecordCoordinationWorkIntent(_) => InputKind::RecordCoordinationWorkIntent,
             Self::RecordCoordinationResourceClaim(_) => InputKind::RecordCoordinationResourceClaim,
             Self::UpdateCoordinationWorkIntentStatus(_) => {
@@ -4822,6 +5359,15 @@ pub enum InputKind {
     KickoffResolveFailed,
     KickoffCancelRequested,
     KickoffClear,
+    ProbeMemberAdmission,
+    ComputeRespawnGeneration,
+    ClassifyStepOutputFault,
+    EscalateToSupervisor,
+    EscalateToSupervisorNoEligibleTarget,
+    EvaluateTopologyEdge,
+    SetExternalMemberRebindCapability,
+    ClassifyTurnTimeoutDisposition,
+    SeedOrphanBudget,
     RecordCoordinationWorkIntent,
     RecordCoordinationResourceClaim,
     UpdateCoordinationWorkIntentStatus,
@@ -4938,7 +5484,7 @@ pub mod signals {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverMemberKickoff {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
         pub phase: KickoffPhase,
         pub error: Option<String>,
     }
@@ -4979,6 +5525,21 @@ pub mod signals {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverMemberRestoreFailure {
+        pub agent_identity: AgentIdentity,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberLiveMaterialization {
+        pub agent_identity: AgentIdentity,
+        pub observation: MemberLiveMaterializationObservationKind,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalSucceeded {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalFailed {
         pub agent_identity: AgentIdentity,
         pub reason: String,
     }
@@ -5060,6 +5621,9 @@ pub enum Signal {
     RecoverSupervisorAuthority(signals::RecoverSupervisorAuthority),
     RecoverOwnerBridgeSession(signals::RecoverOwnerBridgeSession),
     RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
+    ClassifyMemberLiveMaterialization(signals::ClassifyMemberLiveMaterialization),
+    ResolveMemberRevivalSucceeded(signals::ResolveMemberRevivalSucceeded),
+    ResolveMemberRevivalFailed(signals::ResolveMemberRevivalFailed),
     AdmitDestroyCleanup(signals::AdmitDestroyCleanup),
     AdmitDestroyStorageFinalizing(signals::AdmitDestroyStorageFinalizing),
     MarkCompleted(signals::MarkCompleted),
@@ -5112,6 +5676,11 @@ impl Signal {
             Self::RecoverSupervisorAuthority(_) => SignalKind::RecoverSupervisorAuthority,
             Self::RecoverOwnerBridgeSession(_) => SignalKind::RecoverOwnerBridgeSession,
             Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
+            Self::ClassifyMemberLiveMaterialization(_) => {
+                SignalKind::ClassifyMemberLiveMaterialization
+            }
+            Self::ResolveMemberRevivalSucceeded(_) => SignalKind::ResolveMemberRevivalSucceeded,
+            Self::ResolveMemberRevivalFailed(_) => SignalKind::ResolveMemberRevivalFailed,
             Self::AdmitDestroyCleanup(_) => SignalKind::AdmitDestroyCleanup,
             Self::AdmitDestroyStorageFinalizing(_) => SignalKind::AdmitDestroyStorageFinalizing,
             Self::MarkCompleted(_) => SignalKind::MarkCompleted,
@@ -5163,6 +5732,9 @@ pub enum SignalKind {
     RecoverSupervisorAuthority,
     RecoverOwnerBridgeSession,
     RecoverMemberRestoreFailure,
+    ClassifyMemberLiveMaterialization,
+    ResolveMemberRevivalSucceeded,
+    ResolveMemberRevivalFailed,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
     MarkCompleted,
@@ -5335,19 +5907,73 @@ pub mod effects {
     pub struct EmitProgressNote {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PersistKickoffUpdate {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
         pub phase: KickoffPhase,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PersistKickoffFailureUpdate {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
         pub phase: KickoffPhase,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitKickoffLifecycleNotice {
-        pub member_id: String,
+        pub member_id: AgentIdentity,
         pub intent: KickoffIntent,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberAdmissionProbed {
+        pub agent_identity: AgentIdentity,
+        pub verdict: MemberAdmissionVerdictKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RespawnGenerationComputed {
+        pub agent_identity: AgentIdentity,
+        pub next_generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StepOutputFaultClassified {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub target_retry_key: String,
+        pub disposition: StepFaultDispositionKind,
+        pub terminal_cause: StepOutputFaultKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorEscalationRequested {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub supervisor_identity: AgentIdentity,
+        pub turn_timeout_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorEscalationFailed {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub cause: SupervisorEscalationFailureCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TopologyEdgeVerdictResolved {
+        pub from_role: String,
+        pub to_role: String,
+        pub verdict: PolicyDecision,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TurnTimeoutDispositionClassified {
+        pub timed_out_run_id: RunId,
+        pub disposition: TurnTimeoutDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberSpawnRequired {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberRetainRequired {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberRetireRequired {
+        pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnPolicyResolutionRecorded {
@@ -5367,6 +5993,13 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub result: RespawnTopologyRestoreResultKind,
         pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberLiveMaterializationClassified {
+        pub agent_identity: AgentIdentity,
+        pub observation: MemberLiveMaterializationObservationKind,
+        pub verdict: MemberRevivalVerdictKind,
+        pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnManyFailureClassified {
@@ -5679,9 +6312,20 @@ pub enum Effect {
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
+    MemberAdmissionProbed(effects::MemberAdmissionProbed),
+    RespawnGenerationComputed(effects::RespawnGenerationComputed),
+    StepOutputFaultClassified(effects::StepOutputFaultClassified),
+    SupervisorEscalationRequested(effects::SupervisorEscalationRequested),
+    SupervisorEscalationFailed(effects::SupervisorEscalationFailed),
+    TopologyEdgeVerdictResolved(effects::TopologyEdgeVerdictResolved),
+    TurnTimeoutDispositionClassified(effects::TurnTimeoutDispositionClassified),
+    MemberSpawnRequired(effects::MemberSpawnRequired),
+    MemberRetainRequired(effects::MemberRetainRequired),
+    MemberRetireRequired(effects::MemberRetireRequired),
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     OwnerBridgeSessionBound(effects::OwnerBridgeSessionBound),
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
+    MemberLiveMaterializationClassified(effects::MemberLiveMaterializationClassified),
     SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
     MemberWaitClassified(effects::MemberWaitClassified),
     FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
@@ -5764,9 +6408,20 @@ pub enum EffectKind {
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
+    MemberAdmissionProbed,
+    RespawnGenerationComputed,
+    StepOutputFaultClassified,
+    SupervisorEscalationRequested,
+    SupervisorEscalationFailed,
+    TopologyEdgeVerdictResolved,
+    TurnTimeoutDispositionClassified,
+    MemberSpawnRequired,
+    MemberRetainRequired,
+    MemberRetireRequired,
     SpawnPolicyResolutionRecorded,
     OwnerBridgeSessionBound,
     RespawnTopologyRestoreResolved,
+    MemberLiveMaterializationClassified,
     SpawnManyFailureClassified,
     MemberWaitClassified,
     FlowDelegationEdgeAdmissionResolved,
@@ -6100,6 +6755,7 @@ pub enum TransitionId {
     ReconcileRunning,
     ReconcileStopped,
     ReconcileCompleted,
+    ReconcileDestroyed,
     ObserveRuntimeReady,
     StartupMarkReadyRunning,
     StartupMarkReadyStopped,
@@ -6125,6 +6781,70 @@ pub enum TransitionId {
     KickoffClearRunning,
     KickoffClearStopped,
     KickoffClearCompleted,
+    ProbeMemberAdmissionDuplicateRunning,
+    ProbeMemberAdmissionDuplicateStopped,
+    ProbeMemberAdmissionDuplicateCompleted,
+    ProbeMemberAdmissionDuplicateDestroyed,
+    ProbeMemberAdmissionAdmittedRunning,
+    ProbeMemberAdmissionAdmittedStopped,
+    ProbeMemberAdmissionAdmittedCompleted,
+    ProbeMemberAdmissionAdmittedDestroyed,
+    ComputeRespawnGenerationRunning,
+    ComputeRespawnGenerationStopped,
+    ComputeRespawnGenerationCompleted,
+    ComputeRespawnGenerationDestroyed,
+    ClassifyStepOutputFaultRetryRunning,
+    ClassifyStepOutputFaultRetryStopped,
+    ClassifyStepOutputFaultRetryCompleted,
+    ClassifyStepOutputFaultRetryDestroyed,
+    ClassifyStepOutputFaultTerminalRunning,
+    ClassifyStepOutputFaultTerminalStopped,
+    ClassifyStepOutputFaultTerminalCompleted,
+    ClassifyStepOutputFaultTerminalDestroyed,
+    EscalateToSupervisorTargetFoundRunning,
+    EscalateToSupervisorTargetFoundStopped,
+    EscalateToSupervisorTargetFoundCompleted,
+    EscalateToSupervisorTargetFoundDestroyed,
+    EscalateToSupervisorTargetMissingRunning,
+    EscalateToSupervisorTargetMissingStopped,
+    EscalateToSupervisorTargetMissingCompleted,
+    EscalateToSupervisorTargetMissingDestroyed,
+    EvaluateTopologyEdgeRuleAllowRunning,
+    EvaluateTopologyEdgeRuleAllowStopped,
+    EvaluateTopologyEdgeRuleAllowCompleted,
+    EvaluateTopologyEdgeRuleAllowDestroyed,
+    EvaluateTopologyEdgeRuleDenyRunning,
+    EvaluateTopologyEdgeRuleDenyStopped,
+    EvaluateTopologyEdgeRuleDenyCompleted,
+    EvaluateTopologyEdgeRuleDenyDestroyed,
+    EvaluateTopologyEdgeDefaultAllowRunning,
+    EvaluateTopologyEdgeDefaultAllowStopped,
+    EvaluateTopologyEdgeDefaultAllowCompleted,
+    EvaluateTopologyEdgeDefaultAllowDestroyed,
+    EvaluateTopologyEdgeDefaultDenyRunning,
+    EvaluateTopologyEdgeDefaultDenyStopped,
+    EvaluateTopologyEdgeDefaultDenyCompleted,
+    EvaluateTopologyEdgeDefaultDenyDestroyed,
+    SetExternalMemberRebindCapabilityRunning,
+    SetExternalMemberRebindCapabilityStopped,
+    SetExternalMemberRebindCapabilityCompleted,
+    SetExternalMemberRebindCapabilityDestroyed,
+    SeedOrphanBudgetRunning,
+    SeedOrphanBudgetStopped,
+    SeedOrphanBudgetCompleted,
+    SeedOrphanBudgetDestroyed,
+    ClassifyTurnTimeoutDispositionRetryableRunning,
+    ClassifyTurnTimeoutDispositionRetryableStopped,
+    ClassifyTurnTimeoutDispositionRetryableCompleted,
+    ClassifyTurnTimeoutDispositionRetryableDestroyed,
+    ClassifyTurnTimeoutDispositionDetachedRunning,
+    ClassifyTurnTimeoutDispositionDetachedStopped,
+    ClassifyTurnTimeoutDispositionDetachedCompleted,
+    ClassifyTurnTimeoutDispositionDetachedDestroyed,
+    ClassifyTurnTimeoutDispositionCanceledRunning,
+    ClassifyTurnTimeoutDispositionCanceledStopped,
+    ClassifyTurnTimeoutDispositionCanceledCompleted,
+    ClassifyTurnTimeoutDispositionCanceledDestroyed,
     SubmitWorkRunningExternal,
     SubmitWorkRunningExternalPeerOnly,
     SubmitWorkRunningInternal,
@@ -6164,6 +6884,10 @@ pub enum TransitionId {
     ResolveRespawnTopologyRestoreCompleted,
     ResolveRespawnTopologyRestoreFailed,
     RecoverMemberRestoreFailureRunning,
+    ClassifyMemberLiveMaterializationRevivable,
+    ClassifyMemberLiveMaterializationTerminal,
+    ResolveMemberRevivalSucceededRunning,
+    ResolveMemberRevivalFailedRunning,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
     MarkCompleted,
@@ -6576,6 +7300,7 @@ pub fn initial_state() -> State {
         member_kickoff_cancelled: Default::default(),
         member_kickoff_error: Default::default(),
         member_restore_failures: Default::default(),
+        member_revival_pending: Default::default(),
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),
         external_peer_edges: Default::default(),
@@ -6626,5 +7351,11 @@ pub fn initial_state() -> State {
         resource_claim_owner_present: Default::default(),
         resource_claim_expires_at_ms: Default::default(),
         coordination_event_next_sequence: 1,
+        topology_default_policy: PolicyDecision::Allow,
+        external_member_rebind_capability: Default::default(),
+        orphan_budget: 0,
+        desired_members: Default::default(),
+        members_to_spawn: Default::default(),
+        members_to_retire: Default::default(),
     }
 }

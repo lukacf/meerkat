@@ -20,6 +20,15 @@ pub enum RuntimeDriverError {
     #[error("Runtime not ready: {state}")]
     NotReady { state: RuntimeState },
 
+    /// The runtime was never registered / does not exist.
+    ///
+    /// Distinct from [`RuntimeDriverError::Destroyed`] and
+    /// [`RuntimeDriverError::NotReady`] with a `Destroyed` state: absence means
+    /// the runtime id was never admitted, not that it once existed and was torn
+    /// down.
+    #[error("Runtime not found: {runtime_id}")]
+    NotFound { runtime_id: LogicalRuntimeId },
+
     /// Input validation failed.
     #[error("Input validation failed: {reason}")]
     ValidationFailed { reason: String },

@@ -3,17 +3,20 @@
 //! Gated behind the `session-store` feature.
 //!
 //! File-backed sequence contract:
-//! - Owner: `FileEventStore` allocates event order from a durable per-session
-//!   sequence owner under the event-store root.
+//! - Owner: `FileEventStore` allocates event order from the canonical event log
+//!   tail, reconciled against a durable per-session sequence owner hint.
 //! - Bootstrap: when the owner is absent, the canonical event log tail seeds it;
 //!   projected `.rkat/sessions/...` files are never consulted.
-//! - Staleness: an existing owner behind the event log tail is corruption and
-//!   append fails closed.
+//! - Durable ordering: the sequence owner is advanced only AFTER the log bytes
+//!   are flushed and `fsync`ed (see [`FileEventStore::append`]). A crash between
+//!   allocation and the owner write therefore leaves the owner trailing the log
+//!   tail — a benign stale hint that the tail authoritatively overrides — never a
+//!   forward gap or a reused/overwritten sequence.
 //! - Failure: allocation errors abort append; the store never falls back to a
 //!   process-local counter or projection checkpoint.
 
 use async_trait::async_trait;
-use meerkat_core::event::AgentEvent;
+use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -26,7 +29,13 @@ use tokio::io::AsyncWriteExt;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
 
-/// A stored event with sequence metadata.
+/// A stored event with sequence metadata and canonical stream-envelope identity.
+///
+/// The durable log preserves the originating [`EventEnvelope`] identity (typed
+/// `source`, `mob_id`, and the original stream `stream_seq`) so replay can
+/// rehydrate the real envelope instead of fabricating a session-scoped one. Only
+/// `seq` is store-assigned; the remaining identity is carried verbatim from the
+/// envelope that produced the event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredEvent {
     /// Monotonically increasing sequence number within a session.
@@ -35,25 +44,105 @@ pub struct StoredEvent {
     pub schema_version: u32,
     /// When the event was stored.
     pub timestamp: SystemTime,
+    /// Canonical typed source identity of the originating stream envelope.
+    ///
+    /// `serde(default)` exists ONLY so a pre-bump (v1) row — which lacked this
+    /// field — still parses far enough to be rejected by the typed
+    /// [`EventStoreError::SchemaVersionMismatch`] gate in
+    /// [`FileEventStore::read_from`], rather than surfacing an opaque
+    /// deserialization error. It is never a substantive fallback: any row
+    /// carrying it is fail-closed on the schema-version check before use.
+    #[serde(default = "stored_event_legacy_source")]
+    pub source: EventSourceIdentity,
+    /// Mob the originating envelope belonged to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<String>,
+    /// Original stream sequence carried by the originating envelope.
+    #[serde(default)]
+    pub stream_seq: u64,
     /// The event payload.
     pub event: AgentEvent,
 }
 
+/// Placeholder source used only to let a pre-bump row deserialize so the typed
+/// schema-version gate can reject it (see [`StoredEvent::source`]).
+fn stored_event_legacy_source() -> EventSourceIdentity {
+    EventSourceIdentity::external("legacy-pre-schema-v2")
+}
+
+impl StoredEvent {
+    /// Rehydrate the canonical [`EventEnvelope`] this row was persisted from.
+    ///
+    /// This is the inverse of the persist path: it returns the original typed
+    /// source/mob_id/stream sequence rather than a fabricated session-scoped
+    /// envelope. The envelope `seq` is the original stream sequence; the durable
+    /// store sequence is [`StoredEvent::seq`].
+    #[must_use]
+    pub fn to_envelope(&self) -> EventEnvelope<AgentEvent> {
+        EventEnvelope::new_with_source(
+            self.source.clone(),
+            self.stream_seq,
+            self.mob_id.clone(),
+            self.event.clone(),
+        )
+    }
+}
+
 /// Current schema version for stored events.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped to `2` when [`StoredEvent`] gained canonical envelope identity
+/// (`source`/`mob_id`/`stream_seq`). [`FileEventStore::read_from`] fails closed on
+/// any row whose `schema_version` does not match this constant.
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// Append-only event log.
+///
+/// The canonical append surface is [`EventStore::append_envelopes`], which
+/// preserves the originating [`EventEnvelope`] identity (typed source, `mob_id`,
+/// and the original stream sequence). [`EventStore::append`] is a thin reduction
+/// for callers that genuinely produce session-scoped events (a session event IS a
+/// session-sourced envelope); it is not a lossy fallback.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait EventStore: Send + Sync {
-    /// Append events to the log for a session.
+    /// Append canonical stream envelopes to the durable log for a session.
     ///
-    /// Returns the sequence number of the last appended event.
+    /// The store assigns durable [`StoredEvent::seq`] values but preserves each
+    /// envelope's typed `source`, `mob_id`, and original `seq` (persisted as
+    /// [`StoredEvent::stream_seq`]). Returns the durable sequence number of the
+    /// last appended event.
+    async fn append_envelopes(
+        &self,
+        session_id: &SessionId,
+        envelopes: &[EventEnvelope<AgentEvent>],
+    ) -> Result<u64, EventStoreError>;
+
+    /// Append bare session-scoped events to the log for a session.
+    ///
+    /// Each event is reduced to a session-sourced envelope before being handed to
+    /// [`EventStore::append_envelopes`]. Returns the sequence number of the last
+    /// appended event.
     async fn append(
         &self,
         session_id: &SessionId,
         events: &[AgentEvent],
-    ) -> Result<u64, EventStoreError>;
+    ) -> Result<u64, EventStoreError> {
+        if events.is_empty() {
+            return self.last_seq(session_id).await;
+        }
+        let envelopes: Vec<EventEnvelope<AgentEvent>> = events
+            .iter()
+            .map(|event| {
+                EventEnvelope::new_with_source(
+                    EventSourceIdentity::session(session_id.clone()),
+                    0,
+                    None,
+                    event.clone(),
+                )
+            })
+            .collect();
+        self.append_envelopes(session_id, &envelopes).await
+    }
 
     /// Read events from a given sequence number onward.
     async fn read_from(
@@ -77,6 +166,12 @@ pub enum EventStoreError {
 
     #[error("Store error: {0}")]
     Store(String),
+
+    #[error(
+        "event log schema version mismatch: stored row has schema_version {found}, \
+         runtime expects {expected}; refusing to project an unknown schema"
+    )]
+    SchemaVersionMismatch { expected: u32, found: u32 },
 }
 
 /// Filesystem-backed [`EventStore`] with one JSONL log per session.
@@ -207,6 +302,15 @@ impl FileEventStore {
         Ok(())
     }
 
+    /// Allocate a contiguous sequence range WITHOUT advancing the durable owner.
+    ///
+    /// The owner is advanced only after the log bytes are flushed and `fsync`ed
+    /// (see [`FileEventStore::append`]). A durable owner that trails the canonical
+    /// event log tail is therefore the expected post-crash state — a benign stale
+    /// hint — so the tail authoritatively reconciles it (`base = max(owner, tail)`)
+    /// rather than being treated as corruption. A durable owner AHEAD of the tail
+    /// is an intentional reservation and remains authoritative; the projection
+    /// checkpoint is never consulted.
     async fn allocate_sequence_range(
         &self,
         session_id: &SessionId,
@@ -223,15 +327,7 @@ impl FileEventStore {
 
         let event_log_tail = self.last_seq(session_id).await?;
         let sequence_owner = self.read_sequence_owner(session_id).await?;
-        let base_seq = match sequence_owner {
-            Some(owner_seq) if owner_seq < event_log_tail => {
-                return Err(EventStoreError::Store(format!(
-                    "durable sequence owner for session {session_id} is stale ({owner_seq}) behind event log tail ({event_log_tail}); refusing to allocate"
-                )));
-            }
-            Some(owner_seq) => owner_seq,
-            None => event_log_tail,
-        };
+        let base_seq = sequence_owner.unwrap_or(event_log_tail).max(event_log_tail);
         let first_seq = base_seq.checked_add(1).ok_or_else(|| {
             EventStoreError::Store("event sequence overflow while allocating first sequence".into())
         })?;
@@ -239,7 +335,6 @@ impl FileEventStore {
             EventStoreError::Store("event sequence overflow while allocating range".into())
         })?;
 
-        self.write_sequence_owner(session_id, last_seq).await?;
         Ok((first_seq, last_seq))
     }
 }
@@ -248,12 +343,12 @@ impl FileEventStore {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg(not(target_arch = "wasm32"))]
 impl EventStore for FileEventStore {
-    async fn append(
+    async fn append_envelopes(
         &self,
         session_id: &SessionId,
-        events: &[AgentEvent],
+        envelopes: &[EventEnvelope<AgentEvent>],
     ) -> Result<u64, EventStoreError> {
-        if events.is_empty() {
+        if envelopes.is_empty() {
             return self.last_seq(session_id).await;
         }
 
@@ -262,15 +357,18 @@ impl EventStore for FileEventStore {
         let _sequence_lock = self.acquire_sequence_lock(session_id).await?;
         let path = self.log_path(session_id);
         let (mut next_seq, last_allocated_seq) = self
-            .allocate_sequence_range(session_id, events.len())
+            .allocate_sequence_range(session_id, envelopes.len())
             .await?;
         let mut lines = String::new();
-        for event in events {
+        for envelope in envelopes {
             let stored = StoredEvent {
                 seq: next_seq,
                 schema_version: EVENT_SCHEMA_VERSION,
                 timestamp: SystemTime::now(),
-                event: event.clone(),
+                source: envelope.source.clone(),
+                mob_id: envelope.mob_id.clone(),
+                stream_seq: envelope.seq,
+                event: envelope.payload.clone(),
             };
             lines.push_str(
                 &serde_json::to_string(&stored)
@@ -287,6 +385,13 @@ impl EventStore for FileEventStore {
         file.write_all(lines.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
+        // Advance the durable sequence owner only AFTER the log bytes are
+        // durably persisted (flushed + fsynced). A crash before this point
+        // leaves the owner trailing the log tail (a benign stale hint that the
+        // tail reconciles on the next allocation), never a forward gap or a
+        // reused sequence.
+        self.write_sequence_owner(session_id, last_allocated_seq)
+            .await?;
         Ok(last_allocated_seq)
     }
 
@@ -310,6 +415,16 @@ impl EventStore for FileEventStore {
                     .map_err(|err| EventStoreError::Serialization(err.to_string()))
             })
             .filter_map(|event| match event {
+                // Fail closed on schema drift: an unknown (future or pre-bump)
+                // schema version must not be silently projected as the current
+                // shape. The version constant gates a real runtime decision
+                // rather than being an inert written field.
+                Ok(event) if event.schema_version != EVENT_SCHEMA_VERSION => {
+                    Some(Err(EventStoreError::SchemaVersionMismatch {
+                        expected: EVENT_SCHEMA_VERSION,
+                        found: event.schema_version,
+                    }))
+                }
                 Ok(event) if event.seq >= from_seq => Some(Ok(event)),
                 Ok(_) => None,
                 Err(err) => Some(Err(err)),
@@ -491,10 +606,7 @@ mod tests {
 
         let projected_seq = projector.resume(&store, &session_id).await?;
         assert_eq!(projected_seq, 2);
-        let checkpoint = tokio::fs::read_to_string(session_projection_dir.join("checkpoint"))
-            .await
-            .unwrap();
-        assert_eq!(checkpoint.trim(), "2");
+        assert_eq!(projector.read_checkpoint(&session_id).await, 2);
         Ok(())
     }
 
@@ -561,8 +673,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_stale_sequence_owner_fails_closed()
+    async fn file_event_store_owner_trailing_log_tail_reconciles_to_tail()
     -> Result<(), Box<dyn std::error::Error>> {
+        // Row #71: with the durable sequence owner advanced only AFTER the log
+        // bytes are fsynced, an owner that trails the log tail is the normal
+        // post-crash state (bytes synced, owner write lost) — NOT corruption.
+        // The canonical event log tail authoritatively reconciles it, so the
+        // next append continues contiguously from the tail (no reuse, no gap).
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
@@ -578,22 +695,222 @@ mod tests {
                 ],
             )
             .await?;
+        // Simulate a crash that lost the owner write after the log fsync: the
+        // owner trails the durable tail of 2.
         store.write_sequence_owner(&session_id, 1).await?;
 
-        let err = store
+        let seq = store
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
-                    content: "must not reuse sequence".to_string(),
+                    content: "continues from tail, no reuse".to_string(),
                 }],
             )
-            .await
-            .expect_err("stale durable sequence owner must fail closed");
+            .await?;
 
-        assert!(err.to_string().contains("stale"));
-        assert_eq!(store.last_seq(&session_id).await?, 2);
-        let events = store.read_from(&session_id, 1).await?;
-        assert_eq!(events.len(), 2);
+        assert_eq!(seq, 3, "tail (2) reconciles the trailing owner; no reuse");
+        let sequences: Vec<u64> = store
+            .read_from(&session_id, 1)
+            .await?
+            .into_iter()
+            .map(|event| event.seq)
+            .collect();
+        assert_eq!(sequences, vec![1, 2, 3]);
+        // The owner is re-advanced past the tail after the successful fsync.
+        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(3));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_event_store_owner_advances_only_after_fsync_no_forward_gap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Row #71 hardening: the OLD code advanced the durable owner BEFORE
+        // writing the log bytes, so a write/flush failure after sequence
+        // allocation left the owner ahead of the tail, minting a forward gap on
+        // the next append. The fix advances the owner only after
+        // `file.sync_all()`. This pins the post-commit invariant — owner equals
+        // the durable tail (never ahead) — so an interrupted append can only
+        // ever leave the owner trailing (reconciled by the tail), never ahead.
+        // (The fails-old/passes-new behavioral gate is the trailing-owner
+        // reconcile test above.)
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+
+        let seq = store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await?;
+        assert_eq!(seq, 1);
+        // Post-commit invariant: owner == durable tail (NOT ahead). Under the
+        // old "advance-before-write" ordering an interrupted append would leave
+        // the owner ahead of the tail here.
+        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(1));
+        assert_eq!(store.last_seq(&session_id).await?, 1);
+
+        // The next append therefore reuses first_seq == tail + 1 with no gap.
+        let seq = store
+            .append(
+                &session_id,
+                &[AgentEvent::TextComplete {
+                    content: "no forward gap".to_string(),
+                }],
+            )
+            .await?;
+        assert_eq!(seq, 2);
+        let sequences: Vec<u64> = store
+            .read_from(&session_id, 1)
+            .await?
+            .into_iter()
+            .map(|event| event.seq)
+            .collect();
+        assert_eq!(sequences, vec![1, 2], "contiguous sequence, no forward gap");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_event_store_preserves_envelope_identity_round_trip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Rows #164/#265: appending a canonical envelope with a non-session
+        // source + mob_id must persist that identity and rehydrate the original
+        // envelope on replay (not a fabricated session-scoped one).
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+
+        let envelope = EventEnvelope::new_with_source(
+            EventSourceIdentity::runtime("rt-7"),
+            42,
+            Some("mob-abc".to_string()),
+            AgentEvent::TextComplete {
+                content: "from a mob runtime".to_string(),
+            },
+        );
+        let last_seq = store
+            .append_envelopes(&session_id, std::slice::from_ref(&envelope))
+            .await?;
+        assert_eq!(last_seq, 1);
+
+        let stored = store.read_from(&session_id, 1).await?;
+        assert_eq!(stored.len(), 1);
+        let row = &stored[0];
+        assert_eq!(row.seq, 1, "store-assigned durable sequence");
+        assert_eq!(row.stream_seq, 42, "original stream seq preserved");
+        assert_eq!(row.mob_id.as_deref(), Some("mob-abc"));
+        assert_eq!(row.source, EventSourceIdentity::runtime("rt-7"));
+        assert_eq!(row.schema_version, EVENT_SCHEMA_VERSION);
+
+        // Rehydrate the canonical envelope; it must equal the original identity,
+        // not a session-scoped fabrication.
+        let rebuilt = row.to_envelope();
+        assert_eq!(rebuilt.source, EventSourceIdentity::runtime("rt-7"));
+        assert_eq!(rebuilt.mob_id.as_deref(), Some("mob-abc"));
+        assert_eq!(rebuilt.seq, 42);
+        assert_ne!(
+            rebuilt.source,
+            EventSourceIdentity::session(session_id.clone()),
+            "must not fabricate a session-scoped source"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_event_store_read_from_fails_closed_on_schema_version_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Row #265 gate (fails-old / passes-new): the OLD code wrote
+        // `schema_version` but never read it, silently projecting any shape.
+        // The fix makes `read_from` fail closed with a typed
+        // `SchemaVersionMismatch` when a row's version differs from the runtime
+        // constant.
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+
+        store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await?;
+
+        // Hand-write a row carrying a future/unknown schema version.
+        let future = StoredEvent {
+            seq: 2,
+            schema_version: EVENT_SCHEMA_VERSION + 1,
+            timestamp: SystemTime::now(),
+            source: EventSourceIdentity::session(session_id.clone()),
+            mob_id: None,
+            stream_seq: 0,
+            event: AgentEvent::TextComplete {
+                content: "future schema".to_string(),
+            },
+        };
+        let mut line = serde_json::to_string(&future)?;
+        line.push('\n');
+        let log_path = store.root().join(format!("{session_id}.jsonl"));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+
+        let err = store
+            .read_from(&session_id, 1)
+            .await
+            .expect_err("schema-version drift must fail closed");
+        assert!(
+            matches!(
+                err,
+                EventStoreError::SchemaVersionMismatch {
+                    expected,
+                    found,
+                } if expected == EVENT_SCHEMA_VERSION && found == EVENT_SCHEMA_VERSION + 1
+            ),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_event_store_rejects_pre_bump_v1_row_with_typed_schema_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Rows #164/#265: a pre-bump (v1) row lacks `source`/`stream_seq`. It
+        // must still parse (via the documented parse-bridge defaults) so the
+        // typed SchemaVersionMismatch gate rejects it — NOT surface an opaque
+        // serialization error, and never be silently projected as the v2 shape.
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+
+        // Exact pre-bump v1 on-disk shape: seq/schema_version/timestamp/event,
+        // with NO source/mob_id/stream_seq fields. The event payload is encoded
+        // from a real AgentEvent so the shape can't silently drift.
+        let timestamp = serde_json::to_value(SystemTime::now())?;
+        let event = serde_json::to_value(AgentEvent::TurnStarted { turn_number: 1 })?;
+        let v1_line = serde_json::to_string(&serde_json::json!({
+            "seq": 1,
+            "schema_version": 1,
+            "timestamp": timestamp,
+            "event": event,
+        }))?;
+        let log_path = store.root().join(format!("{session_id}.jsonl"));
+        if let Some(parent) = log_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&log_path, format!("{v1_line}\n")).await?;
+
+        let err = store
+            .read_from(&session_id, 1)
+            .await
+            .expect_err("pre-bump v1 row must fail closed");
+        assert!(
+            matches!(
+                err,
+                EventStoreError::SchemaVersionMismatch {
+                    expected,
+                    found,
+                } if expected == EVENT_SCHEMA_VERSION && found == 1
+            ),
+            "pre-bump row must surface the typed schema mismatch, got: {err}"
+        );
         Ok(())
     }
 }

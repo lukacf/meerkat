@@ -69,6 +69,49 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         &runtime_id.0
     }
 
+    /// Deserialize a persisted session-snapshot row through typed serde.
+    /// `Session::deserialize` validates the mandatory envelope version against
+    /// the generated persistence version authority, so a missing or
+    /// non-current (v0/v1) row fails closed here instead of silently
+    /// defaulting or upgrading on read.
+    fn deserialize_persisted_session(
+        bytes: &[u8],
+    ) -> Result<meerkat_core::Session, RuntimeStoreError> {
+        serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+    }
+
+    /// Deserialize a persisted `StoredInputState` row through typed serde.
+    /// `StoredInputState::deserialize` validates the mandatory
+    /// `stored_input_state_version` byte against the generated persistence
+    /// version authority, so a missing or non-current row fails closed.
+    fn deserialize_persisted_input_state(
+        bytes: &[u8],
+    ) -> Result<StoredInputState, RuntimeStoreError> {
+        serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+    }
+
+    /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
+    /// column as the reinterpreted two's-complement `i64` bit pattern.
+    ///
+    /// This is a total, injective bijection over the full `u64` domain: every
+    /// distinct sequence maps to a distinct stored key (values above
+    /// `i64::MAX` wrap into the negative `i64` range rather than saturating to
+    /// a single alias). The `sequence` column participates only in exact-match
+    /// equality lookups against a composite primary key — never in ordered
+    /// range scans — so the lack of monotonic ORDER BY ordering for the
+    /// wrapped high half is irrelevant to identity. Decode symmetrically with
+    /// [`decode_receipt_sequence`].
+    fn encode_receipt_sequence(sequence: u64) -> i64 {
+        i64::from_ne_bytes(sequence.to_ne_bytes())
+    }
+
+    /// Inverse of [`encode_receipt_sequence`]: reinterpret the stored `i64`
+    /// bit pattern back into the original `u64` sequence.
+    #[cfg(test)]
+    fn decode_receipt_sequence(stored: i64) -> u64 {
+        u64::from_ne_bytes(stored.to_ne_bytes())
+    }
+
     fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
         session.transcript_history_state().ok().flatten().is_none()
             && matches!(
@@ -111,7 +154,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             params![
                 runtime_id_text(runtime_id),
                 receipt.run_id.0.to_string(),
-                i64::try_from(receipt.sequence).unwrap_or(i64::MAX),
+                encode_receipt_sequence(receipt.sequence),
                 receipt_json,
             ],
         )
@@ -276,10 +319,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .map(|bytes| {
-                        serde_json::from_slice::<meerkat_core::Session>(&bytes)
-                            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-                    })
+                    .map(|bytes| deserialize_persisted_session(&bytes))
                     .transpose()?;
                 meerkat_core::session_store::run_boundary_snapshot_save_guard(
                     &incoming,
@@ -319,10 +359,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .map(|bytes| {
-                        serde_json::from_slice::<meerkat_core::Session>(&bytes)
-                            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-                    })
+                    .map(|bytes| deserialize_persisted_session(&bytes))
                     .transpose()?;
                 meerkat_core::session_store::transcript_rewrite_save_guard(
                     &incoming,
@@ -379,6 +416,13 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
 
+                // The supersession verdict keys the entire commit: if the
+                // incoming session snapshot is classified as superseded (the
+                // persisted head is already a valid append-extension of it),
+                // the snapshot write is skipped AND so are the receipt + input
+                // writes, so receipt/input ordering identity never advances
+                // past the retained session truth.
+                let mut session_snapshot_superseded = false;
                 if let Some(session) = session_snapshot.as_ref() {
                     let mut persist_session_snapshot = true;
                     let previous = tx
@@ -389,9 +433,8 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                         )
                         .optional()
                         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                        .map(|bytes| serde_json::from_slice::<meerkat_core::Session>(&bytes))
-                        .transpose()
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                        .map(|bytes| deserialize_persisted_session(&bytes))
+                        .transpose()?;
                     if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         session,
                         previous.as_ref(),
@@ -406,6 +449,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                             .is_ok()
                         }) {
                             persist_session_snapshot = false;
+                            session_snapshot_superseded = true;
                         } else {
                             return Err(RuntimeStoreError::WriteFailed(err.to_string()));
                         }
@@ -415,6 +459,18 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     {
                         upsert_runtime_snapshot(&tx, &runtime_id, &delta.session_snapshot)?;
                     }
+                }
+
+                // When the session snapshot was superseded and skipped, the
+                // boundary receipt and input-state updates must also be skipped:
+                // advancing them against a retained (older) session snapshot
+                // would split receipt/input ordering identity from session
+                // truth. Commit the (no-op) transaction so the read lock is
+                // released cleanly.
+                if session_snapshot_superseded {
+                    tx.commit()
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    return Ok(());
                 }
 
                 insert_receipt(&tx, &runtime_id, &receipt)?;
@@ -453,8 +509,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 rows.map(|row| {
                     let bytes =
                         row.map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                    serde_json::from_slice(&bytes)
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+                    deserialize_persisted_input_state(&bytes)
                 })
                 .collect()
             })
@@ -482,7 +537,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     params![
                         runtime_id_text(&runtime_id),
                         run_id.0.to_string(),
-                        i64::try_from(sequence).unwrap_or(i64::MAX)
+                        encode_receipt_sequence(sequence)
                     ],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
@@ -650,10 +705,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                .map(|bytes| {
-                    serde_json::from_slice(&bytes)
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-                })
+                .map(|bytes| deserialize_persisted_input_state(&bytes))
                 .transpose()
             })
             .await
@@ -795,7 +847,9 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
         use meerkat_core::session_store::SessionStore as _;
-        use meerkat_core::types::{AssistantMessage, Message, StopReason, UserMessage};
+        use meerkat_core::types::{
+            AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+        };
         use meerkat_core::{Session, TranscriptRewriteReason, TranscriptRewriteSelection};
         use meerkat_store::SqliteSessionStore;
 
@@ -820,11 +874,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         fn session_with_one_turn() -> Session {
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text("hello".to_string())));
-            session.push(Message::Assistant(AssistantMessage {
-                content: "verbose answer".to_string(),
-                tool_calls: Vec::new(),
+            session.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "verbose answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             session
@@ -994,11 +1049,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let runtime_id = runtime_id();
             let incoming = session_with_user("turn input");
             let mut current = incoming.clone();
-            current.push(Message::Assistant(AssistantMessage {
-                content: "peer response already applied".to_string(),
-                tool_calls: Vec::new(),
+            current.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let current_snapshot = serde_json::to_vec(&current).unwrap();
@@ -1028,7 +1084,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                         session_snapshot: serde_json::to_vec(&incoming).unwrap(),
                     }),
                     receipt.clone(),
-                    vec![],
+                    vec![input_state()],
                     Some(incoming.id().clone()),
                 )
                 .await
@@ -1038,12 +1094,22 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
                 Some(current_snapshot)
             );
+            // The session snapshot was classified superseded and skipped, so the
+            // boundary receipt + input-state writes must NOT advance against the
+            // retained (more-advanced) session snapshot.
             assert_eq!(
                 store
                     .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
                     .await
                     .unwrap(),
-                Some(receipt)
+                None
+            );
+            assert!(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
             );
         }
 
@@ -1125,11 +1191,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             previous.push(Message::User(UserMessage::text(
                 "Turn 1 request".to_string(),
             )));
-            previous.push(Message::Assistant(AssistantMessage {
-                content: "Turn 1 answer".to_string(),
-                tool_calls: Vec::new(),
+            previous.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "Turn 1 answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
 
@@ -1141,11 +1208,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             for message in previous.messages()[1..].iter().cloned() {
                 incoming.push(message);
             }
-            incoming.push(Message::Assistant(AssistantMessage {
-                content: "Turn 2 generated answer".to_string(),
-                tool_calls: Vec::new(),
+            incoming.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "Turn 2 generated answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let parent_revision = incoming.transcript_revision().unwrap();
@@ -1226,11 +1294,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let first_commit = first_rewrite
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::Assistant(AssistantMessage {
-                        content: "first compact answer".to_string(),
-                        tool_calls: Vec::new(),
+                    vec![Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "first compact answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::types::Usage::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),
@@ -1253,11 +1322,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let stale_commit = stale_rewrite
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::Assistant(AssistantMessage {
-                        content: "stale compact answer".to_string(),
-                        tool_calls: Vec::new(),
+                    vec![Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "stale compact answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::types::Usage::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),
@@ -1470,6 +1540,225 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 crate::store::load_machine_lifecycle(&store, &runtime_id).await,
                 Err(RuntimeStoreError::ReadFailed(_))
             ));
+        }
+
+        #[test]
+        fn receipt_sequence_encoding_is_injective_across_i64_boundary() {
+            // Distinct u64 sequences straddling the i64::MAX boundary must map
+            // to distinct durable keys (no saturation aliasing) and decode
+            // symmetrically.
+            let probes: [u64; 6] = [
+                0,
+                1,
+                i64::MAX as u64 - 1,
+                i64::MAX as u64,
+                i64::MAX as u64 + 1,
+                u64::MAX,
+            ];
+            let mut seen = std::collections::HashSet::new();
+            for sequence in probes {
+                let encoded = encode_receipt_sequence(sequence);
+                assert!(
+                    seen.insert(encoded),
+                    "sequence {sequence} aliased an already-stored key {encoded}"
+                );
+                assert_eq!(
+                    decode_receipt_sequence(encoded),
+                    sequence,
+                    "round-trip failed for sequence {sequence}"
+                );
+            }
+        }
+
+        fn receipt_with_sequence(run_id: RunId, sequence: u64) -> RunBoundaryReceipt {
+            RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: Some("machine-owned-digest".to_string()),
+                message_count: 1,
+                sequence,
+            }
+        }
+
+        #[tokio::test]
+        async fn boundary_receipts_straddling_i64_max_persist_and_read_distinctly() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let run_id = RunId(uuid::Uuid::new_v4());
+            let low = receipt_with_sequence(run_id.clone(), i64::MAX as u64);
+            let high = receipt_with_sequence(run_id.clone(), i64::MAX as u64 + 1);
+
+            store
+                .atomic_apply(&runtime_id, None, low.clone(), vec![], None)
+                .await
+                .unwrap();
+            store
+                .atomic_apply(&runtime_id, None, high.clone(), vec![], None)
+                .await
+                .unwrap();
+
+            // Two distinct sequences must produce two distinct durable rows,
+            // not collapse onto one i64::MAX key.
+            assert_eq!(receipt_row_count(&store), 2);
+            assert_eq!(
+                store
+                    .load_boundary_receipt(&runtime_id, &run_id, low.sequence)
+                    .await
+                    .unwrap(),
+                Some(low)
+            );
+            assert_eq!(
+                store
+                    .load_boundary_receipt(&runtime_id, &run_id, high.sequence)
+                    .await
+                    .unwrap(),
+                Some(high)
+            );
+        }
+
+        /// A session blob without the mandatory envelope `version` byte (the
+        /// pre-typed-owner v0 shape) must FAIL CLOSED through the runtime-store
+        /// read helper — it never silently defaults or upgrades on read.
+        #[test]
+        fn deserialize_persisted_session_rejects_missing_version_row() {
+            let v0_blob = serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000012",
+                "messages": [],
+                "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "metadata": {}
+            });
+            let bytes = serde_json::to_vec(&v0_blob).unwrap();
+
+            let err = deserialize_persisted_session(&bytes)
+                .expect_err("missing-version session row must fail closed");
+            assert!(
+                err.to_string().contains("version"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A session blob carrying the retired legacy envelope version (v1)
+        /// must FAIL CLOSED with the typed generated-authority rejection.
+        #[test]
+        fn deserialize_persisted_session_rejects_legacy_v1_version_row() {
+            let v1_blob = serde_json::json!({
+                "version": 1,
+                "id": "00000000-0000-0000-0000-000000000012",
+                "messages": [],
+                "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "metadata": {}
+            });
+            let bytes = serde_json::to_vec(&v1_blob).unwrap();
+
+            let err = deserialize_persisted_session(&bytes)
+                .expect_err("legacy v1 session row must fail closed");
+            assert!(
+                err.to_string()
+                    .contains("generated session persistence version authority rejected"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// End-to-end: a raw v0 session row written directly into the
+        /// `runtime_session_snapshots` table must FAIL the runtime-store
+        /// `previous`-snapshot read path (here exercised by
+        /// `commit_session_snapshot`) — the read path never silently accepts a
+        /// pre-version row.
+        #[tokio::test]
+        async fn runtime_store_read_path_rejects_v0_session_row() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+
+            // Write a v0-shaped row (no envelope `version`) directly into the
+            // durable table.
+            let v0_blob = serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000012",
+                "messages": [],
+                "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "metadata": {}
+            });
+            let v0_bytes = serde_json::to_vec(&v0_blob).unwrap();
+            {
+                let mut conn = open_runtime_connection(store.path()).unwrap();
+                let tx = begin_runtime_transaction(&mut conn).unwrap();
+                upsert_runtime_snapshot(&tx, &runtime_id, &v0_bytes).unwrap();
+                tx.commit().unwrap();
+            }
+
+            // A subsequent boundary commit reads the persisted previous row;
+            // the v0 row must surface a read failure, not a silent default.
+            let mut incoming = Session::new();
+            incoming.push(Message::User(UserMessage::text("hello".to_string())));
+            let err = store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    },
+                )
+                .await
+                .expect_err("v0 previous row must fail the read path closed");
+            assert!(
+                err.to_string().contains("version"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A `StoredInputState` row without the mandatory
+        /// `stored_input_state_version` byte (the pre-version v0 shape) written
+        /// directly into `runtime_input_states` must FAIL CLOSED on read.
+        #[tokio::test]
+        async fn runtime_store_read_path_rejects_v0_input_state_row() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+
+            let input_id = InputId::new();
+            let bundle = StoredInputState::new_accepted(input_id.clone());
+            let mut row = serde_json::to_value(&bundle).unwrap();
+            // Drop the version byte to simulate a pre-version (v0) row.
+            row.as_object_mut()
+                .unwrap()
+                .remove("stored_input_state_version");
+            let row_bytes = serde_json::to_vec(&row).unwrap();
+            {
+                let mut conn = open_runtime_connection(store.path()).unwrap();
+                let tx = begin_runtime_transaction(&mut conn).unwrap();
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                    VALUES (?1, ?2, ?3)
+                    ",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        input_id.0.to_string(),
+                        row_bytes
+                    ],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+
+            let err = store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .expect_err("v0 input-state row must fail the read path closed");
+            assert!(
+                err.to_string().contains("stored_input_state_version"),
+                "unexpected error: {err}"
+            );
+
+            let err = store
+                .load_input_states(&runtime_id)
+                .await
+                .expect_err("v0 input-state row must fail the bulk read path closed");
+            assert!(
+                err.to_string().contains("stored_input_state_version"),
+                "unexpected error: {err}"
+            );
         }
     }
 }

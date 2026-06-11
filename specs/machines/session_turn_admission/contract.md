@@ -23,7 +23,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeStartTurnDispatch`
 - `AuthorizeCancelAfterBoundary`
 - `ResolveLastStartTurnPublicTerminal`
-- `ResolveRuntimeKeepAlive`(keep_alive_policy_present: Bool)
+- `ResolveRuntimeKeepAlive`(keep_alive_request: RuntimeKeepAliveRequest)
 - `ResolveStartTurnDisposition`(execution_kind_present: Bool, execution_kind: StartTurnExecutionKind, prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64, pending_continuation: PendingContinuationDisposition)
 
 ## Signals
@@ -35,7 +35,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelAfterBoundaryAuthorized`
 - `StartTurnDispositionResolved`(disposition: StartTurnDisposition)
 - `StartTurnPublicTerminalResolved`(terminal: StartTurnPublicTerminal)
-- `RuntimeKeepAliveResolved`(persist_keep_alive: Bool)
+- `RuntimeKeepAliveResolved`(decision: RuntimeKeepAlivePersistenceDecision)
 
 ## Helpers
 - `is_active_phase`(phase: TurnAdmissionPhase) -> `Bool`
@@ -251,7 +251,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeKeepAliveEnable`
 - From: `Admitted`
-- On: `ResolveRuntimeKeepAlive`(keep_alive_policy_present)
+- On: `ResolveRuntimeKeepAlive`(keep_alive_request)
+- Guards:
+  - ``
+- Emits: `RuntimeKeepAliveResolved`
+- To: `Admitted`
+
+### `ResolveRuntimeKeepAliveDisable`
+- From: `Admitted`
+- On: `ResolveRuntimeKeepAlive`(keep_alive_request)
 - Guards:
   - ``
 - Emits: `RuntimeKeepAliveResolved`
@@ -259,7 +267,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeKeepAlivePreserve`
 - From: `Admitted`
-- On: `ResolveRuntimeKeepAlive`(keep_alive_policy_present)
+- On: `ResolveRuntimeKeepAlive`(keep_alive_request)
 - Guards:
   - ``
 - Emits: `RuntimeKeepAliveResolved`
@@ -307,7 +315,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-session/src/generated/session_turn_admission.rs` — generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariant shutdown_phase_is_not_active
+- `session_turn_admission_authority` (machine `SessionTurnAdmissionMachine`): `meerkat-session/src/generated/session_turn_admission.rs` — generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariant shutdown_phase_is_not_active
 
 ### Scenarios
 - `turn_admission_claim_run_finalize` — ClaimTurn, BeginTurn, ResolveTurn, FinalizeTurnToIdle, FinalizeTurnToShutdown, AbortClaim, and ProjectTurnAdmission own the Idle/Admitted/Running/Completing/ShuttingDown turn-admission phase and emit TurnAdmissionProjected without handwritten phase mutation

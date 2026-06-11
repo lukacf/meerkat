@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WorkGraphLifecycleMachine`
 
 ### Code Anchors
-- `workgraph_lifecycle`: `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality
+- `workgraph_lifecycle` (machine `WorkGraphLifecycleMachine`): `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality
 
 ### Scenarios
 - `workgraph_create_update_ready_claim` — CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision
@@ -108,131 +108,131 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
 - `ClassifyPublicErrorNotFoundAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorNotFoundFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorConflictFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidTransitionFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorInvalidArgumentsFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorCapabilityUnavailableFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPublicErrorStoreErrorFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTerminalityTerminalCompleted`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
@@ -244,730 +244,730 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `workgraph_topology_legality`
 - `ClassifyTerminalityLiveAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyTerminalityLiveOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyTerminalityLiveInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyTerminalityLiveBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyReadinessOpenOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessInProgressInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessNotClaimableAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessNotClaimableBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessNotClaimableCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessNotClaimableCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyReadinessNotClaimableFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyBlockerSatisfactionFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionOpenFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionBlockedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedAbsentFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedInProgressFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCompletedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedCancelledFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateStatusAdmissionDeniedFailedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSelfAttestFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionHostConfirmedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionSupervisorFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCompletedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionCancelledFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionFailedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedAbsentFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedOpenFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedInProgressFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCloseStatusAdmissionDeniedBlockedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSelfAttestFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionHostConfirmedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionSupervisorFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyPublicConfirmationAdmissionReviewerQuorumFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionUnchangedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedAbsent`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedInProgress`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedCompleted`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedCancelled`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyCompletionPolicyMutationAdmissionChangedFailed`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalRequiredFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionPrincipalKindMismatchFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSupervisorMismatchFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionSelfAttestEmptyFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionEvidenceKindFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedAbsent`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedInProgress`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedBlocked`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedCompleted`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedCancelled`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyConfirmationAdmissionAdmittedFailed`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `Created`
@@ -995,35 +995,35 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
 - `WorkGraphPublicErrorClassified`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WorkItemTerminalityClassified`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BlockerSatisfactionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `CreateStatusAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: (unclaimed)
 - `CreateCompletionPolicyAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `CloseStatusAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `PublicConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `CompletionPolicyMutationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `ConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - scenarios: (unclaimed)
 - `WorkItemReadinessClassified`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_claim_release_recovery`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `absent_has_zero_revision`
@@ -1033,8 +1033,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
 - `topology_snapshot_is_stateless`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `terminal_has_terminal_time`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
@@ -1048,17 +1048,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_claim_release_recovery`
 - `supervisor_policy_has_owner`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `non_supervisor_policy_has_no_owner`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `reviewer_quorum_policy_has_positive_threshold`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `non_reviewer_quorum_policy_has_no_threshold`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_block_close_evidence`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

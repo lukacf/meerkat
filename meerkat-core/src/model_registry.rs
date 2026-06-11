@@ -2,7 +2,8 @@
 
 use crate::Provider;
 use crate::config::{
-    Config, ConfigError, SelfHostedApiStyle, SelfHostedConfig, SelfHostedTransport,
+    Config, ConfigError, CustomModelConfig, SelfHostedApiStyle, SelfHostedConfig,
+    SelfHostedTransport,
 };
 use crate::model_profile::{ModelProfile, catalog::ModelTier};
 use serde::{Deserialize, Serialize};
@@ -124,25 +125,36 @@ impl fmt::Display for UnsupportedModelCapabilityEvidence {
 
 impl ModelRegistry {
     pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
+        Self::from_config_with_models(config, &BTreeMap::new())
+    }
+
+    /// Build the effective registry from a config snapshot plus caller-scoped
+    /// custom model definitions (e.g. mob-definition `[models.<id>]` entries).
+    ///
+    /// Config-owned `[models.<id>]` entries merge first, then `extra_models`.
+    /// Model ids must stay unique across catalog, config, self-hosted, and
+    /// caller-scoped entries (fail closed on conflict).
+    pub fn from_config_with_models(
+        config: &Config,
+        extra_models: &BTreeMap<String, CustomModelConfig>,
+    ) -> Result<Self, ConfigError> {
         let mut entries = BTreeMap::new();
         let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
-        for provider_name in crate::model_profile::catalog::provider_names() {
-            let provider = Provider::parse_strict(provider_name).ok_or_else(|| {
-                ConfigError::InternalError(format!("unknown built-in provider '{provider_name}'"))
-            })?;
-            let default_model = crate::model_profile::catalog::default_model(provider_name)
-                .ok_or_else(|| {
+        for &provider in crate::model_profile::catalog::catalog_providers() {
+            let default_model =
+                crate::model_profile::catalog::default_model(provider).ok_or_else(|| {
                     ConfigError::InternalError(format!(
-                        "missing built-in default for '{provider_name}'"
+                        "missing built-in default for '{}'",
+                        provider.as_str()
                     ))
                 })?;
             defaults.insert(provider, default_model.to_string());
 
             for entry in crate::model_profile::catalog::catalog()
                 .iter()
-                .filter(|entry| entry.provider == *provider_name)
+                .filter(|entry| entry.provider == provider.as_str())
             {
                 let profile =
                     crate::model_profile::profile_for(provider, entry.id).ok_or_else(|| {
@@ -167,6 +179,9 @@ impl ModelRegistry {
                 )?;
             }
         }
+
+        append_custom_models(&mut entries, &mut profiles, &config.models.custom)?;
+        append_custom_models(&mut entries, &mut profiles, extra_models)?;
 
         append_self_hosted(
             &mut entries,
@@ -282,6 +297,73 @@ impl ModelRegistry {
     }
 }
 
+/// Merge user-defined `[models.<id>]` entries into the registry.
+///
+/// One definition is the single owner for provider inference, compaction
+/// scaling (via `context_window`), capability gates, and call timeouts.
+/// Capability flags default conservatively (absent unless declared).
+fn append_custom_models(
+    entries: &mut BTreeMap<String, ModelRegistryEntry>,
+    profiles: &mut BTreeMap<(Provider, String), ModelProfile>,
+    models: &BTreeMap<String, CustomModelConfig>,
+) -> Result<(), ConfigError> {
+    for (model_id, model) in models {
+        match model.provider {
+            Provider::Anthropic | Provider::OpenAI | Provider::Gemini => {}
+            Provider::SelfHosted => {
+                return Err(ConfigError::Validation(format!(
+                    "models.{model_id}: self-hosted models must be declared under \
+                     [self_hosted.models], not [models]"
+                )));
+            }
+            Provider::Other => {
+                return Err(ConfigError::Validation(format!(
+                    "models.{model_id}: provider must be a concrete API provider \
+                     (anthropic, openai, gemini)"
+                )));
+            }
+        }
+
+        let vision = model.vision.unwrap_or(false);
+        let profile = ModelProfile {
+            provider: model.provider,
+            model_family: model_id.clone(),
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            supports_web_search: model.web_search.unwrap_or(false),
+            inline_video: false,
+            vision,
+            image_input: vision,
+            image_tool_results: vision,
+            realtime: false,
+            image_generation: false,
+            params_schema: serde_json::json!({}),
+            beta_headers: Vec::new(),
+            call_timeout_secs: model.call_timeout_secs,
+        };
+
+        insert_unique(
+            entries,
+            profiles,
+            ModelRegistryEntry {
+                id: model_id.clone(),
+                display_name: model
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| model_id.clone()),
+                provider: model.provider,
+                tier: ModelTier::Supported,
+                context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens,
+                self_hosted: None,
+            },
+            profile,
+        )?;
+    }
+    Ok(())
+}
+
 fn append_self_hosted(
     entries: &mut BTreeMap<String, ModelRegistryEntry>,
     profiles: &mut BTreeMap<(Provider, String), ModelProfile>,
@@ -292,9 +374,40 @@ fn append_self_hosted(
         return Ok(());
     }
 
-    let default_model = config.models.keys().min().cloned().ok_or_else(|| {
-        ConfigError::InternalError("self-hosted models unexpectedly empty".to_string())
-    })?;
+    // The self-hosted default is a declared choice owned by the config, never a
+    // `BTreeMap` key-order artifact. An explicit `default_model` must reference
+    // a configured model; absent that, a single configured model is the
+    // unambiguous default, while multiple models require an explicit
+    // declaration (fail closed).
+    let default_model = match &config.default_model {
+        Some(declared) => {
+            if !config.models.contains_key(declared) {
+                return Err(ConfigError::Validation(format!(
+                    "self_hosted.default_model '{declared}' does not reference a configured \
+                     self_hosted.models entry"
+                )));
+            }
+            declared.clone()
+        }
+        None => {
+            let mut model_ids = config.models.keys();
+            match (model_ids.next(), model_ids.next()) {
+                (Some(only), None) => only.clone(),
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::MissingField(
+                        "self_hosted.default_model (required when more than one self_hosted.models \
+                         entry is configured)"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(ConfigError::InternalError(
+                        "self-hosted models unexpectedly empty".to_string(),
+                    ));
+                }
+            }
+        }
+    };
     defaults.insert(Provider::SelfHosted, default_model);
 
     for (model_id, model) in &config.models {
@@ -304,13 +417,6 @@ fn append_self_hosted(
                 model.server
             ))
         })?;
-        if server.bearer_token.is_some() {
-            tracing::warn!(
-                server_id = %model.server,
-                "self-hosted server uses a literal bearer_token; bearer_token_env is recommended to avoid storing secrets in config files"
-            );
-        }
-
         let self_hosted = SelfHostedServerRef {
             server_id: model.server.clone(),
             remote_model: model.remote_model.clone(),
@@ -319,7 +425,7 @@ fn append_self_hosted(
             base_url: normalize_base_url(&server.base_url),
         };
         let profile = ModelProfile {
-            provider: Provider::SelfHosted.as_str().to_string(),
+            provider: Provider::SelfHosted,
             model_family: model.family.clone(),
             supports_temperature: model.supports_temperature,
             supports_thinking: model.supports_thinking,
@@ -364,9 +470,9 @@ fn insert_unique(
     let model_id = entry.id.clone();
     let provider = entry.provider;
     if entries.insert(model_id.clone(), entry).is_some() {
-        return Err(ConfigError::Validation(
-            "model id must be unique across built-in and self-hosted entries".to_string(),
-        ));
+        return Err(ConfigError::Validation(format!(
+            "model id '{model_id}' must be unique across built-in, custom, and self-hosted entries"
+        )));
     }
     profiles.insert((provider, model_id), profile);
     Ok(())
@@ -398,8 +504,6 @@ mod tests {
                 transport: SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: SelfHostedApiStyle::Responses,
-                bearer_token: None,
-                bearer_token_env: Some("LOCAL_TOKEN".to_string()),
             },
         );
         config.self_hosted.models.insert(
@@ -465,6 +569,78 @@ mod tests {
         );
     }
 
+    fn insert_second_self_hosted_model(config: &mut Config) {
+        config.self_hosted.models.insert(
+            "gemma-4-9b".to_string(),
+            SelfHostedModelConfig {
+                server: "local".to_string(),
+                remote_model: "gemma4:9b".to_string(),
+                display_name: "Gemma 4 9B".to_string(),
+                family: "gemma-4".to_string(),
+                tier: ModelTier::Supported,
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                vision: false,
+                image_tool_results: false,
+                inline_video: false,
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                supports_web_search: false,
+                call_timeout_secs: Some(600),
+            },
+        );
+    }
+
+    #[test]
+    fn multiple_self_hosted_models_require_explicit_default() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        // No `default_model` declared: the default must not be silently chosen
+        // by `BTreeMap` key order. Fail closed.
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("multi-model self-hosted config without explicit default should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("self_hosted.default_model"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn explicit_self_hosted_default_is_honored_not_lexicographic() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        // Declare the lexicographically-larger id as the default to prove the
+        // choice is declared, not a `.min()` key-order artifact.
+        config.self_hosted.default_model = Some("gemma-4-9b".to_string());
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        assert_eq!(
+            registry.default_model(Provider::SelfHosted),
+            Some("gemma-4-9b")
+        );
+    }
+
+    #[test]
+    fn explicit_self_hosted_default_must_reference_configured_model() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        config.self_hosted.default_model = Some("does-not-exist".to_string());
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("default_model referencing an absent model should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("does not reference a configured self_hosted.models entry"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn rejects_unknown_server_reference() {
         let mut config = Config::default();
@@ -504,8 +680,6 @@ mod tests {
                 transport: SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: SelfHostedApiStyle::Responses,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -532,7 +706,147 @@ mod tests {
             Ok(_) => panic!("duplicate model id should fail"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("model id must be unique"));
+        assert!(err.to_string().contains("must be unique"));
+    }
+
+    fn custom_model(provider: Provider) -> CustomModelConfig {
+        CustomModelConfig {
+            provider,
+            display_name: Some("Claude Custom".to_string()),
+            context_window: Some(500_000),
+            max_output_tokens: Some(16_384),
+            vision: Some(true),
+            web_search: None,
+            call_timeout_secs: Some(900),
+        }
+    }
+
+    #[test]
+    fn custom_models_merge_into_registry_with_provider_inference() {
+        let mut config = Config::default();
+        config.models.custom.insert(
+            "claude-internal-preview".to_string(),
+            custom_model(Provider::Anthropic),
+        );
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        // One definition feeds provider inference...
+        let entry = registry
+            .entry("claude-internal-preview")
+            .unwrap_or_else(|| panic!("custom entry must be registered"));
+        assert_eq!(entry.provider, Provider::Anthropic);
+        assert_eq!(entry.display_name, "Claude Custom");
+        // ...compaction scaling inputs...
+        assert_eq!(entry.context_window, Some(500_000));
+        assert_eq!(entry.max_output_tokens, Some(16_384));
+        // ...capability gates and call timeouts via the typed profile owner.
+        let profile = registry
+            .profile_for_provider(Provider::Anthropic, "claude-internal-preview")
+            .unwrap_or_else(|| panic!("custom profile must resolve for declared provider"));
+        assert!(profile.vision);
+        assert!(profile.image_input);
+        assert!(
+            !profile.supports_web_search,
+            "undeclared capability flags must default conservatively"
+        );
+        assert_eq!(profile.call_timeout_secs, Some(900));
+        assert!(
+            registry
+                .profile_for_provider(Provider::OpenAI, "claude-internal-preview")
+                .is_none(),
+            "custom capability truth must stay scoped to the declared provider"
+        );
+    }
+
+    #[test]
+    fn extra_custom_models_merge_via_from_config_with_models() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "mob-defined-model".to_string(),
+            custom_model(Provider::Gemini),
+        );
+        let registry = match ModelRegistry::from_config_with_models(&Config::default(), &extra) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        assert_eq!(
+            registry
+                .entry("mob-defined-model")
+                .map(|entry| entry.provider),
+            Some(Provider::Gemini)
+        );
+    }
+
+    #[test]
+    fn custom_models_reject_catalog_id_conflicts() {
+        let mut config = Config::default();
+        config
+            .models
+            .custom
+            .insert("gpt-5.4".to_string(), custom_model(Provider::OpenAI));
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("custom entry shadowing a catalog id must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("must be unique"));
+    }
+
+    #[test]
+    fn custom_models_reject_self_hosted_and_other_providers() {
+        for provider in [Provider::SelfHosted, Provider::Other] {
+            let mut config = Config::default();
+            config
+                .models
+                .custom
+                .insert("custom-x".to_string(), custom_model(provider));
+            let err = match ModelRegistry::from_config(&config) {
+                Ok(_) => panic!("non-concrete custom model provider must fail closed"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string().contains("models.custom-x"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_model_toml_ingress_is_fail_closed_on_provider() {
+        // `[models.<id>]` parses the provider into the typed closed vocabulary.
+        let parsed: Result<crate::config::ModelDefaults, _> = toml::from_str(
+            r#"
+anthropic = "claude-opus-4-8"
+
+[claude-internal-preview]
+provider = "anthropic"
+context_window = 500000
+"#,
+        );
+        let defaults = match parsed {
+            Ok(defaults) => defaults,
+            Err(err) => panic!("custom model table must parse: {err}"),
+        };
+        assert_eq!(
+            defaults
+                .custom
+                .get("claude-internal-preview")
+                .map(|model| model.provider),
+            Some(Provider::Anthropic)
+        );
+
+        let rejected: Result<crate::config::ModelDefaults, _> = toml::from_str(
+            r#"
+[claude-internal-preview]
+provider = "not-a-provider"
+"#,
+        );
+        assert!(
+            rejected.is_err(),
+            "unknown provider names must fail closed at config ingress"
+        );
     }
 
     #[test]

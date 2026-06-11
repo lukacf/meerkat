@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(
             err,
             ToolScopeStageError::MissingFilterWitnesses {
-                names: vec!["external_tool".to_string()]
+                names: vec!["external_tool".into()]
             }
         );
     }
@@ -241,7 +241,7 @@ mod tests {
             .expect("external tool should have provenance witness");
 
         assert!(
-            witness.has_provenance_identity_witness(),
+            witness.has_identity_witness(),
             "inherited filters need provenance-backed witnesses"
         );
         assert_eq!(

@@ -5,7 +5,7 @@
 //! `MobActor::dispose_member`.
 
 use crate::error::MobError;
-use crate::ids::MeerkatId;
+use crate::ids::AgentIdentity;
 use crate::roster::RosterEntry;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{CommsTrustMutationAuthority, TrustedPeerDescriptor};
@@ -56,7 +56,7 @@ impl std::fmt::Display for DisposalStep {
 ///
 /// Steps never re-read the roster — prevents TOCTOU races.
 pub(super) struct DisposalContext {
-    pub(crate) agent_identity: MeerkatId,
+    pub(crate) agent_identity: AgentIdentity,
     pub entry: RosterEntry,
     pub retiring_key: Option<String>,
     pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
@@ -130,7 +130,7 @@ impl ErrorPolicy for WarnAndContinue {
         ctx: &DisposalContext,
     ) -> bool {
         tracing::warn!(
-            meerkat_id = %ctx.agent_identity,
+            agent_identity = %ctx.agent_identity,
             step = %step,
             error = %error,
             "retire: step failed (continuing)"
@@ -152,14 +152,14 @@ impl ErrorPolicy for BulkBestEffort {
     ) -> bool {
         if step.is_peer_step() {
             tracing::debug!(
-                meerkat_id = %ctx.agent_identity,
+                agent_identity = %ctx.agent_identity,
                 step = %step,
                 error = %error,
                 "retire(bulk): step failed (expected during concurrent teardown)"
             );
         } else {
             tracing::warn!(
-                meerkat_id = %ctx.agent_identity,
+                agent_identity = %ctx.agent_identity,
                 step = %step,
                 error = %error,
                 "retire(bulk): step failed (continuing)"
@@ -194,13 +194,12 @@ mod tests {
     use super::*;
     use crate::event::MemberRef;
     use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
-    use crate::roster::MemberState;
     use meerkat_core::types::SessionId;
     use std::collections::BTreeSet;
 
     fn test_ctx() -> DisposalContext {
         DisposalContext {
-            agent_identity: MeerkatId::from("test-member"),
+            agent_identity: AgentIdentity::from("test-member"),
             entry: RosterEntry {
                 agent_identity: AgentIdentity::from("test-member"),
                 generation: Generation::INITIAL,
@@ -211,7 +210,6 @@ mod tests {
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,
                 transport_public_key: None,
-                state: MemberState::Retiring,
                 wired_to: BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),

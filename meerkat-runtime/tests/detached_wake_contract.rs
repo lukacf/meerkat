@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use meerkat_core::RunBoundaryReceipt;
+use meerkat_core::RunBoundaryReceiptDraft;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
@@ -90,13 +90,12 @@ impl CoreExecutor for ResultExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         Ok(CoreApplyOutput::with_run_result(
-            RunBoundaryReceipt {
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
-                sequence: 0,
             },
             None,
             RunResult {
@@ -139,13 +138,12 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
             Ok(CoreApplyOutput::with_run_result(
-                RunBoundaryReceipt {
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 RunResult {
@@ -299,8 +297,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "trigger wake".into(),
-        blocks: None,
+        content: "trigger wake".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -408,8 +405,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "trigger".into(),
-        blocks: None,
+        content: "trigger".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -465,13 +461,12 @@ async fn choke_004_completion_during_running_defers_wake() {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             Ok(CoreApplyOutput::with_run_result(
-                RunBoundaryReceipt {
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 RunResult {
@@ -544,8 +539,7 @@ async fn choke_004_completion_during_running_defers_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "start turn".into(),
-        blocks: None,
+        content: "start turn".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -625,13 +619,12 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 skill_diagnostics: None,
             };
             Ok(CoreApplyOutput::with_run_result(
-                RunBoundaryReceipt {
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
-                    sequence: 0,
                 },
                 None,
                 run_result,
@@ -693,8 +686,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "flush".into(),
-        blocks: None,
+        content: "flush".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });

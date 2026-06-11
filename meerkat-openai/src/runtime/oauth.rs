@@ -18,34 +18,30 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
-    exchange_authorization_code, exchange_refresh_token, oauth_refresh_error,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
+    exchange_refresh_token, oauth_refresh_error,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
+use meerkat_auth_core::oauth_flow::{
+    OAuthProviderDeclaration, OAuthProviderIdentity, oauth_provider_declaration,
+    oauth_provider_endpoints,
+};
 
-// ---------------------------------------------------------------------
-// Constants (verified against codex-rs/login/src/{auth/manager,server}.rs)
-// ---------------------------------------------------------------------
-
-pub const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const CHATGPT_ISSUER: &str = "https://auth.openai.com";
-pub const CHATGPT_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-pub const CHATGPT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub const CHATGPT_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
-pub const CHATGPT_ORIGINATOR: &str = "codex_cli_rs";
-
-/// The scope Codex requests for a ChatGPT OAuth login.
-pub const CHATGPT_SCOPES: &[&str] = &[
-    "openid",
-    "profile",
-    "email",
-    "offline_access",
-    "api.connectors.read",
-    "api.connectors.invoke",
-];
+/// The canonical ChatGPT OAuth provider declaration, owned by auth-core.
+///
+/// The single owner of the ChatGPT OAuth `client_id`, authorize/token
+/// endpoints, scopes, and typed backend kind is the auth-core declaration for
+/// [`OAuthProviderIdentity::OpenAiChatGpt`] (verified against
+/// codex-rs/login/src/{auth/manager,server}.rs). This runtime reads those
+/// facts from here instead of redeclaring the literals (dogma row #123). If a
+/// revoke/logout flow ever lands, its endpoint belongs on the auth-core
+/// declaration like its siblings, not as a runtime-local constant.
+pub fn chatgpt_declaration() -> OAuthProviderDeclaration {
+    oauth_provider_declaration(OAuthProviderIdentity::OpenAiChatGpt)
+}
 
 // Wire header constants are defined in `auth.rs` (unconditional module) so
 // they remain available when the interactive OAuth flow is feature-gated off.
@@ -62,28 +58,9 @@ pub type TokenCommitFn = Box<
 // ---------------------------------------------------------------------
 
 pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    let endpoints = OAuthEndpoints {
-        client_id: CHATGPT_CLIENT_ID.into(),
-        authorize_url: CHATGPT_AUTHORIZE_URL.into(),
-        token_url: CHATGPT_TOKEN_URL.into(),
-        device_code_url: None,
-        redirect_uri: redirect_uri.into(),
-        scopes: CHATGPT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_authorize_params: vec![
-            ("id_token_add_organizations".into(), "true".into()),
-            ("codex_cli_simplified_flow".into(), "true".into()),
-            ("originator".into(), CHATGPT_ORIGINATOR.into()),
-        ],
-        token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-        include_state_in_token_exchange: false,
-        extra_token_params: Vec::new(),
-        refresh_scopes: Vec::new(),
-        extra_headers: Vec::new(),
-    };
-    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
-        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-        endpoints,
-    )
+    // Built from the single auth-core declaration for the ChatGPT provider;
+    // the test-fixture endpoint override is applied inside `endpoints()`.
+    oauth_provider_endpoints(OAuthProviderIdentity::OpenAiChatGpt, redirect_uri)
 }
 
 // ---------------------------------------------------------------------
@@ -374,17 +351,24 @@ mod tests {
 
     #[test]
     fn chatgpt_constants_match_codex_source() {
-        assert_eq!(CHATGPT_CLIENT_ID, "app_EMoamEEZ73f0CkXaXp7hrann");
-        assert_eq!(CHATGPT_ISSUER, "https://auth.openai.com");
+        // The provider facts are sourced from the single auth-core declaration.
+        let declaration = chatgpt_declaration();
+        assert_eq!(declaration.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
         assert_eq!(
-            CHATGPT_AUTHORIZE_URL,
+            declaration.authorize_endpoint,
             "https://auth.openai.com/oauth/authorize"
         );
-        assert_eq!(CHATGPT_TOKEN_URL, "https://auth.openai.com/oauth/token");
-        assert_eq!(CHATGPT_REVOKE_URL, "https://auth.openai.com/oauth/revoke");
-        assert_eq!(CHATGPT_ORIGINATOR, "codex_cli_rs");
         assert_eq!(
-            CHATGPT_SCOPES,
+            declaration.token_endpoint,
+            "https://auth.openai.com/oauth/token"
+        );
+        assert!(
+            declaration
+                .extra_authorize_params
+                .contains(&("originator", "codex_cli_rs"))
+        );
+        assert_eq!(
+            declaration.scopes,
             &[
                 "openid",
                 "profile",

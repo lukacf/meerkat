@@ -42,10 +42,11 @@ pub enum CapabilityId {
     McpLive,
 }
 
-/// Capability tokens that appear in mobpack manifests.
+/// A mobpack manifest capability token paired with its typed classification.
 ///
-/// Manifests remain string-based for compatibility, but policy checks should
-/// classify those strings before making allow/forbid decisions.
+/// This is the parse-once classifier used at the manifest boundary: a raw
+/// token is classified into a [`MobpackCapabilityId`] exactly once, and policy
+/// decisions take the typed id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MobpackCapabilityRequirement<'a> {
     raw: &'a str,
@@ -56,10 +57,13 @@ impl<'a> MobpackCapabilityRequirement<'a> {
     pub fn parse(raw: &'a str) -> Self {
         let id = CapabilityId::from_str(raw).map_or_else(
             |_| {
-                HostProcessCapabilityId::parse(raw).map_or(
-                    MobpackCapabilityId::Unknown,
-                    MobpackCapabilityId::HostProcess,
-                )
+                HostProcessCapabilityId::parse(raw)
+                    .map(MobpackCapabilityId::HostProcess)
+                    .or_else(|| {
+                        DeploySurfaceCapabilityId::parse(raw)
+                            .map(MobpackCapabilityId::DeploySurface)
+                    })
+                    .unwrap_or(MobpackCapabilityId::Unknown)
             },
             MobpackCapabilityId::Known,
         );
@@ -80,7 +84,39 @@ impl<'a> MobpackCapabilityRequirement<'a> {
 pub enum MobpackCapabilityId {
     Known(CapabilityId),
     HostProcess(HostProcessCapabilityId),
+    DeploySurface(DeploySurfaceCapabilityId),
     Unknown,
+}
+
+/// Deploy-surface capabilities named by mobpack manifests.
+///
+/// These name the runtime surface a deployed mob is hosted on (`core`,
+/// `mcp`, `rpc`), distinct from the feature-capability vocabulary in
+/// [`CapabilityId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploySurfaceCapabilityId {
+    Core,
+    Mcp,
+    Rpc,
+}
+
+impl DeploySurfaceCapabilityId {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "core" => Some(Self::Core),
+            "mcp" => Some(Self::Mcp),
+            "rpc" => Some(Self::Rpc),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Mcp => "mcp",
+            Self::Rpc => "rpc",
+        }
+    }
 }
 
 /// Host process capabilities named by existing mobpack manifests.
@@ -121,17 +157,15 @@ impl BrowserMobpackCapabilityDecision {
 }
 
 pub fn browser_mobpack_capability_decision(
-    requirement: MobpackCapabilityRequirement<'_>,
+    capability: MobpackCapabilityId,
 ) -> BrowserMobpackCapabilityDecision {
-    match requirement.id() {
+    match capability {
         MobpackCapabilityId::Known(CapabilityId::Shell) | MobpackCapabilityId::HostProcess(_) => {
-            BrowserMobpackCapabilityDecision::Forbidden {
-                capability: requirement.id(),
-            }
+            BrowserMobpackCapabilityDecision::Forbidden { capability }
         }
-        MobpackCapabilityId::Known(_) | MobpackCapabilityId::Unknown => {
-            BrowserMobpackCapabilityDecision::Allowed
-        }
+        MobpackCapabilityId::Known(_)
+        | MobpackCapabilityId::DeploySurface(_)
+        | MobpackCapabilityId::Unknown => BrowserMobpackCapabilityDecision::Allowed,
     }
 }
 
@@ -355,7 +389,7 @@ mod tests {
     fn browser_mobpack_policy_forbids_shell_and_host_process_capabilities() {
         for raw in ["shell", "mcp_stdio", "process_spawn"] {
             assert!(
-                browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw))
+                browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw).id())
                     .is_forbidden(),
                 "{raw} should be forbidden in browser mobpacks"
             );
@@ -365,13 +399,13 @@ mod tests {
     #[test]
     fn browser_mobpack_policy_allows_safe_known_and_unknown_capabilities() {
         assert_eq!(
-            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse("comms")),
+            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse("comms").id()),
             BrowserMobpackCapabilityDecision::Allowed
         );
         assert_eq!(
-            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(
-                "vendor.custom"
-            )),
+            browser_mobpack_capability_decision(
+                MobpackCapabilityRequirement::parse("vendor.custom").id()
+            ),
             BrowserMobpackCapabilityDecision::Allowed
         );
     }

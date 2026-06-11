@@ -28,14 +28,14 @@ use crate::wire::session::WireStopReason;
 
 /// Wire-safe projection of [`meerkat_core::Provider`].
 ///
-/// The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
-/// transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
-/// `"openai"`. `WireProvider` pins the correct wire names with explicit
-/// `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
-/// `"anthropic"`, `"gemini"`, etc.
-///
-/// Includes an `Unknown { debug: String }` variant for future-proofing per
-/// the wire-mirror dogma used throughout this module.
+/// `WireProvider` pins each provider's canonical wire name with an explicit
+/// `#[serde(rename)]` (`"openai"`, `"anthropic"`, `"gemini"`, …). The core
+/// `Provider` enum now agrees (its `OpenAI` variant carries an explicit
+/// `#[serde(rename = "openai")]` so `rename_all = "snake_case"` can no longer
+/// mangle it into `"open_a_i"`); `WireProvider` exists as the dedicated wire
+/// mirror so SDK consumers get a stable, explicitly-named contract plus the
+/// fail-loud `Unknown` sentinel below, per the wire-mirror dogma used
+/// throughout this module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -629,10 +629,8 @@ pub struct LiveStatusResult {
 /// value and fail closed for values outside the generated contract they were
 /// built with.
 ///
-/// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
-/// place this typed status alongside the back-compat `refresh_enqueued`
-/// boolean as ordinary sibling fields, which keeps SDK codegen on the
-/// simple-struct path.
+/// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps
+/// SDK codegen on the simple-struct path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -647,9 +645,7 @@ pub enum LiveRefreshStatus {
 /// Response payload for `live/refresh`.
 ///
 /// R4-5 (P3): replaces the previous untyped `{"refresh_enqueued": true}`
-/// JSON blob. The boolean `refresh_enqueued` field is preserved for back-
-/// compat (legacy clients that pattern-match on it stay on the green path)
-/// alongside the typed `status` discriminator. New code should route on
+/// JSON blob with the typed `status` discriminator. Clients route on
 /// `status`.
 ///
 /// See [`LiveRefreshStatus`] for the variant set and the contract on
@@ -660,10 +656,6 @@ pub struct LiveRefreshResult {
     /// Typed refresh status emitted by generated runtime authority.
     /// Today: always [`LiveRefreshStatus::Queued`].
     pub status: LiveRefreshStatus,
-    /// Back-compat mirror of the generated queued-authority result. Always
-    /// `true` when paired with `status: queued`. New code should route on
-    /// `status`.
-    pub refresh_enqueued: bool,
 }
 
 impl LiveRefreshResult {
@@ -671,7 +663,6 @@ impl LiveRefreshResult {
     pub fn queued() -> Self {
         Self {
             status: LiveRefreshStatus::Queued,
-            refresh_enqueued: true,
         }
     }
 }
@@ -693,17 +684,13 @@ pub enum LiveCloseStatus {
 
 /// Response payload for `live/close`.
 ///
-/// The boolean `closed` field is preserved for back-compat alongside the typed
-/// `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveCloseResult {
     /// Typed close status emitted by generated runtime authority.
     /// Today: always [`LiveCloseStatus::Closed`].
     pub status: LiveCloseStatus,
-    /// Back-compat mirror of the generated close-authority result. Always
-    /// `true` when paired with `status: closed`.
-    pub closed: bool,
 }
 
 impl LiveCloseResult {
@@ -711,7 +698,155 @@ impl LiveCloseResult {
     pub fn closed() -> Self {
         Self {
             status: LiveCloseStatus::Closed,
-            closed: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #234 — typed live-command results
+//
+// `live/send_input`, `live/commit_input`, `live/interrupt`, and
+// `live/truncate` previously returned ad-hoc `serde_json::json!({"sent":
+// true})` blobs from the RPC handler — untyped at the SDK boundary and
+// invisible to schema codegen. These typed result shapes mirror the
+// `LiveCloseResult` / `LiveCloseStatus` precedent above: a typed `status`
+// discriminator emitted by generated runtime authority. Each `status` enum is
+// `#[non_exhaustive]` so future generated contracts can add explicit result
+// classes without reshaping the object.
+// ---------------------------------------------------------------------------
+
+/// Typed public result class for `live/send_input`.
+///
+/// Today generated runtime authority emits only `Sent`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveSendInputStatus {
+    /// The host accepted the input chunk onto the adapter queue.
+    Sent,
+}
+
+/// Response payload for `live/send_input`.
+///
+/// Clients route on the typed `status` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveSendInputResult {
+    /// Typed send-input status emitted by generated runtime authority.
+    /// Today: always [`LiveSendInputStatus::Sent`].
+    pub status: LiveSendInputStatus,
+}
+
+impl LiveSendInputResult {
+    /// Project the generated `Sent` authority result to the wire shape.
+    pub fn sent() -> Self {
+        Self {
+            status: LiveSendInputStatus::Sent,
+        }
+    }
+}
+
+/// Typed public result class for `live/commit_input`.
+///
+/// Today generated runtime authority emits only `Committed`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveCommitInputStatus {
+    /// The host accepted the commit-input command onto the adapter queue.
+    Committed,
+}
+
+/// Response payload for `live/commit_input`.
+///
+/// Clients route on the typed `status` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveCommitInputResult {
+    /// Typed commit-input status emitted by generated runtime authority.
+    /// Today: always [`LiveCommitInputStatus::Committed`].
+    pub status: LiveCommitInputStatus,
+}
+
+impl LiveCommitInputResult {
+    /// Project the generated `Committed` authority result to the wire shape.
+    pub fn committed() -> Self {
+        Self {
+            status: LiveCommitInputStatus::Committed,
+        }
+    }
+}
+
+/// Typed public result class for `live/interrupt`.
+///
+/// Today generated runtime authority emits only `Interrupted`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveInterruptStatus {
+    /// The host accepted the interrupt command onto the adapter queue.
+    Interrupted,
+}
+
+/// Response payload for `live/interrupt`.
+///
+/// Clients route on the typed `status` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveInterruptResult {
+    /// Typed interrupt status emitted by generated runtime authority.
+    /// Today: always [`LiveInterruptStatus::Interrupted`].
+    pub status: LiveInterruptStatus,
+}
+
+impl LiveInterruptResult {
+    /// Project the generated `Interrupted` authority result to the wire shape.
+    pub fn interrupted() -> Self {
+        Self {
+            status: LiveInterruptStatus::Interrupted,
+        }
+    }
+}
+
+/// Typed public result class for `live/truncate`.
+///
+/// Today generated runtime authority emits only `Truncated`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveTruncateStatus {
+    /// The host accepted the truncate command onto the adapter queue.
+    Truncated,
+}
+
+/// Response payload for `live/truncate`.
+///
+/// Clients route on the typed `status` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveTruncateResult {
+    /// Typed truncate status emitted by generated runtime authority.
+    /// Today: always [`LiveTruncateStatus::Truncated`].
+    pub status: LiveTruncateStatus,
+}
+
+impl LiveTruncateResult {
+    /// Project the generated `Truncated` authority result to the wire shape.
+    pub fn truncated() -> Self {
+        Self {
+            status: LiveTruncateStatus::Truncated,
         }
     }
 }
@@ -1525,8 +1660,11 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 tool_name,
                 arguments,
             } => Self::ToolCallRequested {
-                provider_call_id,
-                tool_name,
+                // #270: the wire mirror carries the provider-native string on
+                // the wire (this IS the string seam); project the typed core
+                // newtypes to their `String` payloads at the boundary.
+                provider_call_id: provider_call_id.0,
+                tool_name: tool_name.into_string(),
                 arguments,
             },
             LiveAdapterObservation::TurnInterrupted { response_id } => {
@@ -2390,41 +2528,21 @@ mod tests {
         assert_eq!(v, back);
     }
 
-    /// R4-5 (P3): the typed `LiveRefreshResult` round-trips through JSON
-    /// preserving both the new typed `status` discriminator and the legacy
-    /// `refresh_enqueued: true` back-compat field. The `status: queued`
-    /// shape mirrors the generated authority result after host queue
-    /// acceptance.
+    /// R4-5 (P3): the typed `LiveRefreshResult` round-trips through JSON on
+    /// the typed `status` discriminator alone. The `status: queued` shape
+    /// mirrors the generated authority result after host queue acceptance;
+    /// the deleted legacy `refresh_enqueued` boolean must not reappear.
     #[test]
     fn live_refresh_result_queued_round_trip() {
         let v = LiveRefreshResult::queued();
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["status"], "queued");
-        assert_eq!(j["refresh_enqueued"], serde_json::Value::Bool(true));
+        assert!(
+            j.get("refresh_enqueued").is_none(),
+            "deleted legacy `refresh_enqueued` boolean must not be on the wire"
+        );
         let back: LiveRefreshResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
-    }
-
-    /// R4-5 (P3): legacy clients that pattern-match on the old untyped
-    /// `{"refresh_enqueued": true}` shape continue to see the field, and
-    /// new clients that route on `status` see the typed variant. Both
-    /// surfaces are byte-coexistent on the same payload.
-    #[test]
-    fn live_refresh_result_back_compat_field_present() {
-        let v = LiveRefreshResult::queued();
-        let j = serde_json::to_value(&v).expect("round-trip should succeed");
-        // Legacy: callers checking the boolean directly still pass.
-        assert_eq!(
-            j.get("refresh_enqueued"),
-            Some(&serde_json::Value::Bool(true)),
-            "back-compat `refresh_enqueued: true` must remain on the wire"
-        );
-        // New: typed status discriminator is also present.
-        assert_eq!(
-            j.get("status"),
-            Some(&serde_json::Value::String("queued".into())),
-            "typed `status: queued` must be present alongside the legacy field"
-        );
     }
 
     #[test]
@@ -2432,7 +2550,10 @@ mod tests {
         let v = LiveCloseResult::closed();
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["status"], "closed");
-        assert_eq!(j["closed"], serde_json::Value::Bool(true));
+        assert!(
+            j.get("closed").is_none(),
+            "deleted legacy `closed` boolean must not be on the wire"
+        );
         let back: LiveCloseResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }

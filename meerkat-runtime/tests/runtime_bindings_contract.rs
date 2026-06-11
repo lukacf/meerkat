@@ -122,7 +122,10 @@ async fn prepare_bindings_idempotent_with_prior_registration() {
     let session_id = SessionId::new();
 
     // Pre-register (as some surfaces do)
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // prepare_bindings should reuse the existing entry
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();

@@ -240,8 +240,8 @@ Direct `rkat mob` is helper/artifact oriented. Lifecycle creation, wiring, and
 member management are done with agent `mob_*` tools or RPC `mob/*`.
 
 ```bash
-rkat mob spawn-helper <mob_id> <prompt> [--profile <profile>] [--agent-identity <id>] [--json]
-rkat mob fork-helper <mob_id> <source_member> <prompt> [--profile <profile>] [--agent-identity <id>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
+rkat mob spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]
+rkat mob fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
 rkat mob member-status <mob_id> <agent_identity> [--json]
 rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--initial-message <MSG>]

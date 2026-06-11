@@ -10,9 +10,10 @@
 //! and recovered keep/drop behavior are emitted by generated MeerkatMachine
 //! inputs/effects.
 //!
-//! `InputState` still caches terminal outcome and attempt count for persistence,
-//! recovery normalization, and compatibility reads, but the authoritative live
-//! copies now live in the DSL's typed terminal/attempt maps.
+//! Terminal outcome and attempt count are DSL-owned facts. Live reads go
+//! through `EphemeralRuntimeDriver::input_terminal_outcome` /
+//! `input_attempt_count`; persistence carries them on [`InputStateSeed`].
+//! `InputState` holds no copy of either.
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -53,10 +54,10 @@ pub enum InputAbandonReason {
     MaxAttemptsExhausted { attempts: u32 },
 }
 
-/// Terminal outcome cache for an input.
+/// Terminal outcome for an input.
 ///
-/// The authoritative live copy is split across the DSL's typed terminal maps.
-/// The shell keeps this typed cache for persistence and compatibility reads.
+/// The authoritative live copy is split across the DSL's typed terminal maps;
+/// persistence carries it on [`InputStateSeed`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome_type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -214,10 +215,6 @@ impl InputStatePersistenceRecord {
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
-    /// Compatibility cache of the DSL-owned terminal outcome metadata.
-    pub terminal_outcome: Option<InputTerminalOutcome>,
-    /// Compatibility cache of the DSL-owned attempt count.
-    pub attempt_count: u32,
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
     pub policy: Option<PolicySnapshot>,
@@ -240,8 +237,6 @@ impl InputState {
         let now = Utc::now();
         Self {
             input_id,
-            terminal_outcome: None,
-            attempt_count: 0,
             history: Vec::new(),
             updated_at: now,
             policy: None,
@@ -255,24 +250,12 @@ impl InputState {
         }
     }
 
-    pub fn is_terminal(&self) -> bool {
-        self.terminal_outcome.is_some()
-    }
-
-    pub fn terminal_outcome(&self) -> Option<&InputTerminalOutcome> {
-        self.terminal_outcome.as_ref()
-    }
-
     pub fn history(&self) -> &[InputStateHistoryEntry] {
         &self.history
     }
 
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
-    }
-
-    pub fn attempt_count(&self) -> u32 {
-        self.attempt_count
     }
 }
 
@@ -290,7 +273,6 @@ impl InputState {
 
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
-    #[serde(default = "default_stored_input_state_version")]
     stored_input_state_version: u32,
     input_id: InputId,
     current_state: InputLifecycleState,
@@ -324,11 +306,6 @@ struct InputStateSerde {
     recovery_lane: Option<HandlingMode>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-}
-
-fn default_stored_input_state_version() -> u32 {
-    meerkat_core::generated::session_persistence_version_authority::legacy_stored_input_state_version(
-    )
 }
 
 impl Serialize for StoredInputState {
@@ -370,8 +347,6 @@ impl<'de> Deserialize<'de> for StoredInputState {
             .map_err(<D::Error as serde::de::Error>::custom)?;
         let state = InputState {
             input_id: helper.input_id,
-            terminal_outcome: helper.terminal_outcome.clone(),
-            attempt_count: helper.attempt_count,
             history: helper.history,
             updated_at: helper.updated_at,
             policy: helper.policy,
@@ -505,7 +480,10 @@ mod tests {
     }
 
     #[test]
-    fn stored_input_state_deserializes_legacy_persisted_input_tags() {
+    fn stored_input_state_rejects_legacy_persisted_input_tags() {
+        // Pre-rename `system_generated` / `projected` persisted input tags are
+        // retired shapes: a stored row carrying them must fail closed instead
+        // of being folded into the canonical `continuation` / `operation` tags.
         let continuation_bundle = StoredInputState {
             state: InputState {
                 persisted_input: Some(Input::Continuation(
@@ -518,11 +496,8 @@ mod tests {
         let mut continuation_json = serde_json::to_value(&continuation_bundle).unwrap();
         continuation_json["persisted_input"]["input_type"] =
             serde_json::Value::String("system_generated".into());
-        let parsed: StoredInputState = serde_json::from_value(continuation_json).unwrap();
-        assert!(matches!(
-            parsed.state.persisted_input,
-            Some(Input::Continuation(_))
-        ));
+        serde_json::from_value::<StoredInputState>(continuation_json)
+            .expect_err("legacy system_generated persisted input tag must be rejected");
 
         let operation_bundle = StoredInputState {
             state: InputState {
@@ -549,11 +524,31 @@ mod tests {
         let mut operation_json = serde_json::to_value(&operation_bundle).unwrap();
         operation_json["persisted_input"]["input_type"] =
             serde_json::Value::String("projected".into());
-        let parsed: StoredInputState = serde_json::from_value(operation_json).unwrap();
-        assert!(matches!(
-            parsed.state.persisted_input,
-            Some(Input::Operation(_))
-        ));
+        serde_json::from_value::<StoredInputState>(operation_json)
+            .expect_err("legacy projected persisted input tag must be rejected");
+    }
+
+    #[test]
+    fn stored_input_state_rejects_legacy_dual_carrier_persisted_input_shape() {
+        // The retired persisted prompt shape carried `text` + optional
+        // `blocks`; the single typed `content` owner replaced both. A stored
+        // row holding the old shape must fail closed.
+        let bundle = StoredInputState {
+            state: InputState {
+                persisted_input: Some(Input::Prompt(crate::input::PromptInput::new("hello", None))),
+                ..InputState::new_accepted(InputId::new())
+            },
+            seed: InputStateSeed::new_accepted(),
+        };
+        let mut json = serde_json::to_value(&bundle).unwrap();
+        let persisted = json["persisted_input"]
+            .as_object_mut()
+            .expect("persisted_input object");
+        persisted.remove("content");
+        persisted.insert("text".into(), serde_json::Value::String("hello".into()));
+        persisted.insert("blocks".into(), serde_json::Value::Null);
+        serde_json::from_value::<StoredInputState>(json)
+            .expect_err("legacy text+blocks persisted prompt shape must be rejected");
     }
 
     #[test]

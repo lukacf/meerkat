@@ -25,7 +25,7 @@
 
 use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine;
 use meerkat_machine_schema::identity::NamedTypeId;
-use meerkat_machine_schema::{FieldSchema, MachineSchemaError, TypeRef};
+use meerkat_machine_schema::{Expr, FieldInit, FieldSchema, MachineSchemaError, TypeRef};
 
 #[test]
 fn validate_rejects_schema_with_unbound_named_type() {
@@ -47,8 +47,16 @@ fn validate_rejects_schema_with_unbound_named_type() {
             .expect("slug is a valid FieldId");
 
     schema.state.fields.push(FieldSchema {
-        name: renamed,
+        name: renamed.clone(),
         ty: TypeRef::Named(unbound.clone()),
+    });
+    // #174: every declared `state.fields` entry must carry a `state.init.fields`
+    // initializer, else `MissingInitializer` fires before the named-type check.
+    // Give the tripwire field an initializer so this test still probes the
+    // named-type validator (its actual target), not the initializer rule.
+    schema.state.init.fields.push(FieldInit {
+        field: renamed,
+        expr: Expr::Bool(false),
     });
 
     // The validator may surface *any* unbound binding it finds first

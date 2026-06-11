@@ -163,7 +163,10 @@ fn restore_credential_lifecycle_snapshot_input(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn append_restore_oauth_inputs_from_state(
     inputs: &mut Vec<auth_dsl::AuthMachineInput>,
     poll_inputs: &mut Vec<auth_dsl::AuthMachineInput>,
@@ -197,7 +200,10 @@ fn append_restore_oauth_inputs_from_state(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn restore_oauth_inputs_from_states(
     states: &[&auth_dsl::AuthMachineState],
 ) -> Vec<auth_dsl::AuthMachineInput> {
@@ -210,7 +216,10 @@ fn restore_oauth_inputs_from_states(
     inputs
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn restore_oauth_membership_observed(states: &[&auth_dsl::AuthMachineState]) -> bool {
     states
         .iter()
@@ -268,7 +277,10 @@ fn apply_restore_input_to_registry(
     apply_restore_input(authority, lease_key, input, context)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn restore_authority_from_registry(
     registry: &AuthLeaseRegistry,
     lease_key: &LeaseKey,
@@ -283,7 +295,10 @@ fn restore_authority_from_registry(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn apply_restore_inputs_to_registry(
     registry: &mut AuthLeaseRegistry,
     lease_key: &LeaseKey,
@@ -300,7 +315,10 @@ fn apply_restore_inputs_to_registry(
     Ok(restored)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn restore_state_to_registry(
     registry: &mut AuthLeaseRegistry,
     lease_key: &LeaseKey,
@@ -310,7 +328,10 @@ fn restore_state_to_registry(
     restore_state_with_oauth_sources_to_registry(registry, lease_key, state, &[state], context)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Test-only restore-path fixture plumbing: the production restore arm was
+// deleted by K7 (clear+release is one AuthMachine-authorized transition);
+// these helpers remain solely to drive the generated restore guards in tests.
+#[cfg(test)]
 fn restore_state_with_oauth_sources_to_registry(
     registry: &mut AuthLeaseRegistry,
     lease_key: &LeaseKey,
@@ -337,41 +358,6 @@ fn restore_state_with_oauth_sources_to_registry(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(not(target_arch = "wasm32"))]
-fn restore_lifecycle_with_oauth_to_registry(
-    registry: &mut AuthLeaseRegistry,
-    lease_key: &LeaseKey,
-    oauth: &auth_dsl::AuthMachineState,
-    lifecycle_phase: auth_dsl::AuthLifecyclePhase,
-    expires_at: Option<u64>,
-    last_refresh: Option<u64>,
-    refresh_attempt: u64,
-    credential_present: bool,
-    credential_generation: u64,
-    credential_published_at_millis: Option<u64>,
-    context: &'static str,
-) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
-    let oauth_sources = [oauth];
-    let oauth_inputs = restore_oauth_inputs_from_states(&oauth_sources);
-    apply_restore_inputs_to_registry(
-        registry,
-        lease_key,
-        restore_credential_lifecycle_snapshot_input(
-            Some(lifecycle_phase),
-            expires_at,
-            last_refresh,
-            refresh_attempt,
-            credential_present,
-            credential_generation,
-            credential_published_at_millis,
-            restore_oauth_membership_observed(&oauth_sources),
-        ),
-        oauth_inputs,
-        context,
-    )
-}
-
 fn auth_lease_transition_from_generated_publication(
     lease_key: &LeaseKey,
     authority: &auth_dsl::AuthMachineAuthority,
@@ -382,7 +368,7 @@ fn auth_lease_transition_from_generated_publication(
         lease_key, authority, transition, context,
     )? {
         Some(transition) => Ok(transition),
-        None => Err(DslTransitionError::new(
+        None => Err(DslTransitionError::no_matching(
             context,
             "AuthMachine transition emitted no lifecycle publication obligation",
         )),
@@ -401,7 +387,7 @@ fn maybe_auth_lease_transition_from_generated_publication(
         return Ok(None);
     }
     if obligations.len() != 1 {
-        return Err(DslTransitionError::new(
+        return Err(DslTransitionError::no_matching(
             context,
             format!(
                 "AuthMachine transition emitted {} lifecycle publication obligations",
@@ -419,7 +405,7 @@ fn maybe_auth_lease_transition_from_generated_publication(
         .into_auth_lease_transition(scope)
         .map(Some)
         .map_err(|err| {
-            DslTransitionError::new(
+            DslTransitionError::no_matching(
                 context,
                 format!("AuthMachine lifecycle publication handoff failed: {err}"),
             )
@@ -496,18 +482,6 @@ fn run_release_after_accept_hook(lease_key: &LeaseKey) {
 #[derive(Default)]
 struct AuthLeaseRegistry {
     authorities: HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn registry_phase_or_released(
-    registry: &AuthLeaseRegistry,
-    lease_key: &LeaseKey,
-) -> AuthLeasePhase {
-    registry
-        .authorities
-        .get(lease_key)
-        .map(|current| map_phase(current.state().lifecycle_phase))
-        .unwrap_or(AuthLeasePhase::Released)
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
@@ -612,7 +586,7 @@ impl RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !create_if_missing && !guard.authorities.contains_key(lease_key) {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 context,
                 format!("no auth lease registered for lease_key `{lease_key}`"),
             ));
@@ -627,7 +601,7 @@ impl RuntimeAuthLeaseHandle {
                 match guard.authorities.get_mut(lease_key) {
                     Some(m) => m,
                     None => {
-                        return Err(DslTransitionError::new(
+                        return Err(DslTransitionError::no_matching(
                             context,
                             format!("no auth lease registered for lease_key `{lease_key}`"),
                         ));
@@ -734,7 +708,7 @@ impl RuntimeAuthLeaseHandle {
             let entry = match guard.authorities.get_mut(&lease_key) {
                 Some(m) => m,
                 None => {
-                    return Err(DslTransitionError::new(
+                    return Err(DslTransitionError::no_matching(
                         context,
                         format!("no auth machine registered for lease_key `{lease_key}`"),
                     ));
@@ -777,7 +751,7 @@ impl RuntimeAuthLeaseHandle {
             let entry = match guard.authorities.get_mut(&lease_key) {
                 Some(m) => m,
                 None => {
-                    return Err(DslTransitionError::new(
+                    return Err(DslTransitionError::no_matching(
                         context,
                         format!("no auth machine registered for lease_key `{lease_key}`"),
                     ));
@@ -842,108 +816,6 @@ impl RuntimeAuthLeaseHandle {
         flow_id: &str,
     ) -> bool {
         self.has_oauth_device_flow(target, flow_id)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn restore_released_lease_after_observer_failure(
-        &self,
-        lease_key: &LeaseKey,
-        previous_state: Option<auth_dsl::AuthMachineState>,
-    ) {
-        const CONTEXT: &str = "AuthLeaseHandle::rollback_release_lease";
-        let mut guard = self
-            .machines
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let current_generation = guard
-            .authorities
-            .get(lease_key)
-            .map(|authority| authority.state().credential_generation)
-            .unwrap_or(0);
-        let previous_generation_value = previous_state
-            .as_ref()
-            .map(|state| state.credential_generation)
-            .unwrap_or(0);
-        let restore_result = if current_generation > previous_generation_value {
-            match previous_state {
-                Some(previous_state) => {
-                    if let Some(current_state) = guard
-                        .authorities
-                        .get(lease_key)
-                        .map(|current| current.state().clone())
-                    {
-                        restore_state_with_oauth_sources_to_registry(
-                            &mut guard,
-                            lease_key,
-                            &current_state,
-                            &[&current_state, &previous_state],
-                            CONTEXT,
-                        )
-                        .map(|(phase, _)| phase)
-                    } else {
-                        restore_lifecycle_with_oauth_to_registry(
-                            &mut guard,
-                            lease_key,
-                            &previous_state,
-                            auth_dsl::AuthLifecyclePhase::ReauthRequired,
-                            None,
-                            None,
-                            0,
-                            false,
-                            previous_state.credential_generation,
-                            None,
-                            CONTEXT,
-                        )
-                        .map(|(phase, _)| phase)
-                    }
-                }
-                None => Ok(registry_phase_or_released(&guard, lease_key)),
-            }
-        } else if let Some(restored_state) = previous_state {
-            match guard
-                .authorities
-                .get(lease_key)
-                .map(|current| current.state().clone())
-            {
-                Some(current_state) if current_state.credential_present => {
-                    restore_state_with_oauth_sources_to_registry(
-                        &mut guard,
-                        lease_key,
-                        &current_state,
-                        &[&current_state, &restored_state],
-                        CONTEXT,
-                    )
-                    .map(|(phase, _)| phase)
-                }
-                Some(current_state) => restore_state_with_oauth_sources_to_registry(
-                    &mut guard,
-                    lease_key,
-                    &restored_state,
-                    &[&restored_state, &current_state],
-                    CONTEXT,
-                )
-                .map(|(phase, _)| phase),
-                None => restore_state_to_registry(&mut guard, lease_key, &restored_state, CONTEXT)
-                    .map(|(phase, _)| phase),
-            }
-        } else {
-            Ok(registry_phase_or_released(&guard, lease_key))
-        };
-        let to_phase = restore_result.unwrap_or_else(|err| {
-            tracing::error!(
-                %lease_key,
-                error = %err,
-                "generated AuthMachine rollback after release observer failure was rejected"
-            );
-            registry_phase_or_released(&guard, lease_key)
-        });
-        drop(guard);
-        emit_audit(
-            lease_key,
-            "rollback_release_lease",
-            AuthLeasePhase::Released,
-            to_phase,
-        );
     }
 
     fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
@@ -1199,42 +1071,51 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         let context = "AuthLeaseHandle::release_lease";
-        // Capture OAuth membership while the released machine is still the
-        // canonical AuthMachine state. Observers later prune only those exact
-        // payloads, so a same-target flow admitted after this transition is
+        // Stage-then-commit ordering: every fallible side effect (observer
+        // collection + durable release cleanup) runs BEFORE the authoritative
+        // Release transition. An observer fault aborts the release fail-closed
+        // — the lease and its OAuth flow membership are untouched and the
+        // caller retries — so no post-transition compensation (the deleted
+        // restore arm, which could resurrect a live lease over a credential
+        // the token-clear flow was destroying) is ever needed.
+        //
+        // Capture OAuth membership while the live machine is still the
+        // canonical AuthMachine state. Observers prune only those exact
+        // payloads, so a same-target flow admitted after this capture is
         // not removed by stale target-wide cleanup.
         #[cfg(not(target_arch = "wasm32"))]
-        let release_observers = self.live_release_observers();
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut released = self.collect_release_observer_flows(&release_observers, lease_key)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let previous_state;
+        {
+            let release_observers = self.live_release_observers();
+            let mut released =
+                self.collect_release_observer_flows(&release_observers, lease_key)?;
+            {
+                let guard = self
+                    .machines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = guard.authorities.get(lease_key) {
+                    released
+                        .browser_flow_ids
+                        .extend(entry.state().oauth_browser_flow_ids.iter().cloned());
+                    released
+                        .device_flow_ids
+                        .extend(entry.state().oauth_device_flow_ids.iter().cloned());
+                }
+                released.dedup();
+            }
+            self.notify_release_observers(&release_observers, &released)?;
+        }
+        // Commit: the Release transition through generated machine authority.
+        // Nothing fallible follows it.
         let (from_phase, to_phase) = {
             let mut guard = self
                 .machines
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                previous_state = guard
-                    .authorities
-                    .get(lease_key)
-                    .map(|authority| authority.state().clone());
-            }
             let entry = guard
                 .authorities
                 .entry(lease_key.clone())
                 .or_insert_with(auth_dsl::AuthMachineAuthority::new);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                released
-                    .browser_flow_ids
-                    .extend(entry.state().oauth_browser_flow_ids.iter().cloned());
-                released
-                    .device_flow_ids
-                    .extend(entry.state().oauth_device_flow_ids.iter().cloned());
-                released.dedup();
-            }
             let from_phase = map_phase(entry.state().lifecycle_phase);
             let transition =
                 auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
@@ -1251,11 +1132,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         emit_audit(lease_key, "release_lease", from_phase, to_phase);
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Err(err) = self.notify_release_observers(&release_observers, &released) {
-            self.restore_released_lease_after_observer_failure(lease_key, previous_state);
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -1299,7 +1175,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         if captured.captured_by_type_id() != std::any::TypeId::of::<RuntimeAuthLeaseHandle>()
             || captured.captured_by_instance_id() != self.auth_lifecycle_restore_instance_id()
         {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
                 "auth lifecycle restore snapshot was not captured from this RuntimeAuthLeaseHandle",
             ));
@@ -1362,7 +1238,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             lease_key.profile.clone(),
         );
         if publication.token_key() != &lease_token_key {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 context,
                 "durable auth lifecycle marker identity does not match restore lease key",
             ));
@@ -1433,7 +1309,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 effect
                 && resolved.replace(*disposition).is_some()
             {
-                return Err(DslTransitionError::new(
+                return Err(DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted multiple credential-use dispositions for `{lease_key}`"
@@ -1445,7 +1321,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         resolved
             .map(credential_use_disposition_from_dsl)
             .ok_or_else(|| {
-                DslTransitionError::new(
+                DslTransitionError::no_matching(
                     CONTEXT,
                     format!("AuthMachine emitted no credential-use disposition for `{lease_key}`"),
                 )
@@ -1488,7 +1364,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 effect
                 && resolved.replace(*disposition).is_some()
             {
-                return Err(DslTransitionError::new(
+                return Err(DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted multiple OAuth-login credential dispositions for `{lease_key}`"
@@ -1500,7 +1376,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         resolved
             .map(credential_use_disposition_from_dsl)
             .ok_or_else(|| {
-                DslTransitionError::new(
+                DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted no OAuth-login credential disposition for `{lease_key}`"
@@ -1978,104 +1854,60 @@ mod tests {
             &self,
             _released: &ReleasedOAuthFlows,
         ) -> Result<(), DslTransitionError> {
-            Err(DslTransitionError::new(
+            Err(DslTransitionError::no_matching(
                 "test_release_observer",
                 "injected release observer failure",
             ))
         }
     }
 
+    /// An observer fault aborts the release BEFORE the authoritative Release
+    /// transition: the typed fault propagates and the original live lease is
+    /// untouched — no transition happened, so there is nothing to restore.
+    /// (Regression pin for the deleted post-transition restore arm, which
+    /// could resurrect a live lease over a credential the token-clear flow
+    /// was destroying.)
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn release_observer_failure_does_not_overwrite_concurrent_reacquire() {
+    fn release_observer_failure_aborts_release_fail_closed() {
         let h = RuntimeAuthLeaseHandle::new();
-        let key = lease("dev", "shared_failure");
-        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let key = lease("dev", "staged_failure");
+        let acquired = h.acquire_lease(&key, 1_800_000_000).unwrap();
 
         let observer: Arc<dyn AuthLeaseReleaseObserver> = Arc::new(FailingReleaseObserver);
         h.add_release_observer(Arc::downgrade(&observer));
 
-        let acquire_handle = h.clone();
-        let acquire_key = key.clone();
+        // The after-accept hook must NOT fire: the release aborts before the
+        // Release transition is ever applied.
         let hook_key = key.clone();
-        let acquired_transition = Arc::new(Mutex::new(None));
-        let hook_transition = Arc::clone(&acquired_transition);
+        let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_fired_flag = Arc::clone(&hook_fired);
         let _hook_guard =
             install_release_after_accept_hook_for_test(Arc::new(move |released_key| {
-                if released_key != &hook_key {
-                    return;
+                if released_key == &hook_key {
+                    hook_fired_flag.store(true, std::sync::atomic::Ordering::Release);
                 }
-                let transition = acquire_handle
-                    .acquire_lease(&acquire_key, 1_900_000_000)
-                    .unwrap();
-                *hook_transition.lock().unwrap() = Some(transition);
             }));
 
-        assert!(h.release_lease(&key).is_err());
+        let err = h
+            .release_lease(&key)
+            .expect_err("observer fault must surface typed");
+        assert!(
+            err.to_string()
+                .contains("injected release observer failure"),
+            "typed fault must carry the observer failure, got: {err}"
+        );
+        assert!(
+            !hook_fired.load(std::sync::atomic::Ordering::Acquire),
+            "Release transition must not be applied when an observer faulted"
+        );
 
-        let acquired_transition = acquired_transition
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("release hook should reacquire the lease");
+        // Fail-closed: the original lease is fully intact and retryable.
         let snap = h.snapshot(&key);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
-        assert_eq!(
-            snap.expires_at,
-            Some(1_900_000_000),
-            "observer-failure rollback must not restore the stale released credential snapshot"
-        );
-        assert_eq!(snap.generation, acquired_transition.generation());
-        assert_eq!(
-            snap.credential_published_at_millis,
-            acquired_transition.credential_published_at_millis()
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn release_observer_failure_does_not_resurrect_after_newer_release() {
-        let h = RuntimeAuthLeaseHandle::new();
-        let key = lease("dev", "shared_newer_release");
-        h.acquire_lease(&key, 1_800_000_000).unwrap();
-
-        let observer: Arc<dyn AuthLeaseReleaseObserver> = Arc::new(FailingReleaseObserver);
-        h.add_release_observer(Arc::downgrade(&observer));
-
-        let lifecycle_handle = h.clone();
-        let lifecycle_key = key.clone();
-        let hook_key = key.clone();
-        let acquired_transition = Arc::new(Mutex::new(None));
-        let hook_transition = Arc::clone(&acquired_transition);
-        let _hook_guard =
-            install_release_after_accept_hook_for_test(Arc::new(move |released_key| {
-                if released_key != &hook_key {
-                    return;
-                }
-                let transition = lifecycle_handle
-                    .acquire_lease(&lifecycle_key, 1_900_000_000)
-                    .unwrap();
-                lifecycle_handle
-                    .release_credential_lifecycle(&lifecycle_key)
-                    .unwrap();
-                *hook_transition.lock().unwrap() = Some(transition);
-            }));
-
-        assert!(h.release_lease(&key).is_err());
-
-        let acquired_transition = acquired_transition
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("release hook should reacquire before newer release");
-        let snap = h.snapshot(&key);
-        assert_eq!(
-            snap.phase, None,
-            "older observer-failure rollback must not resurrect stale credential state after a newer release"
-        );
-        assert_eq!(snap.expires_at, None);
-        assert_eq!(snap.generation, acquired_transition.generation());
-        assert_eq!(snap.credential_published_at_millis, None);
+        assert_eq!(snap.expires_at, Some(1_800_000_000));
+        assert!(snap.credential_present);
+        assert_eq!(snap.generation, acquired.generation());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2444,5 +2276,135 @@ mod tests {
         assert_eq!(h.snapshot(&openai).phase, Some(AuthLeasePhase::Expiring));
         assert_eq!(h.snapshot(&anthropic).phase, Some(AuthLeasePhase::Valid));
         assert_eq!(h.snapshot(&anthropic).expires_at, Some(1_900_000_000));
+    }
+    /// K7 interleaving pin: the token-clear flow stages the lease release
+    /// BEFORE the durable clear commits, and the release itself notifies
+    /// observers before its authoritative transition. A release-observer
+    /// fault therefore aborts the whole clear fail-closed: the typed fault
+    /// surfaces, the durable clear never ran, and the lease is untouched —
+    /// no interleaving can produce a live lease over a cleared credential,
+    /// and no post-clear lease operation (the old restore arm) exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn clear_flow_observer_failure_fails_closed_and_never_clears_durable() {
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingStore {
+            tokens: StdMutex<Option<meerkat_core::auth::PersistedTokens>>,
+            key: meerkat_core::auth::TokenKey,
+            clear_called: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::auth::TokenStore for RecordingStore {
+            async fn load(
+                &self,
+                key: &meerkat_core::auth::TokenKey,
+            ) -> Result<
+                Option<meerkat_core::auth::PersistedTokens>,
+                meerkat_core::auth::TokenStoreError,
+            > {
+                if key == &self.key {
+                    Ok(self.tokens.lock().unwrap().clone())
+                } else {
+                    Ok(None)
+                }
+            }
+
+            async fn save(
+                &self,
+                _key: &meerkat_core::auth::TokenKey,
+                tokens: &meerkat_core::auth::PersistedTokens,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                *self.tokens.lock().unwrap() = Some(tokens.clone());
+                Ok(())
+            }
+
+            async fn clear(
+                &self,
+                _key: &meerkat_core::auth::TokenKey,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                self.clear_called
+                    .store(true, std::sync::atomic::Ordering::Release);
+                *self.tokens.lock().unwrap() = None;
+                Ok(())
+            }
+
+            async fn list(
+                &self,
+            ) -> Result<Vec<meerkat_core::auth::TokenKey>, meerkat_core::auth::TokenStoreError>
+            {
+                Ok(vec![self.key.clone()])
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "recording-clear-test"
+            }
+        }
+
+        let handle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let generated =
+            crate::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::clone(&handle),
+            )
+            .expect("test AuthLeaseHandle must be generated-authority certified");
+        let binding = auth_binding("dev", "clear_stage");
+        let key = meerkat_core::auth::TokenKey::from_auth_binding(&binding);
+
+        let tokens = meerkat_core::auth::PersistedTokens {
+            auth_mode: meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access-token".into()),
+            refresh_token: Some("refresh-token".into()),
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        meerkat_core::publish_token_lifecycle_acquired(&generated, &binding, &tokens)
+            .expect("acquire lease");
+        let store = RecordingStore {
+            tokens: StdMutex::new(Some(tokens)),
+            key: key.clone(),
+            clear_called: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let observer: Arc<dyn AuthLeaseReleaseObserver> = Arc::new(FailingReleaseObserver);
+        handle.add_release_observer(Arc::downgrade(&observer));
+
+        let err =
+            meerkat_core::clear_tokens_and_publish_lifecycle_released(&store, &generated, &binding)
+                .await
+                .expect_err("staged release observer fault must fail the clear typed");
+        assert!(
+            matches!(
+                err,
+                meerkat_core::TokenLifecycleClearError::AuthMachineRelease(_)
+            ),
+            "expected typed AuthMachineRelease fault, got: {err:?}"
+        );
+
+        // The durable clear must never run after a staging fault: fail closed.
+        assert!(
+            !store
+                .clear_called
+                .load(std::sync::atomic::Ordering::Acquire),
+            "durable clear must not run when release staging faulted"
+        );
+        assert!(store.tokens.lock().unwrap().is_some());
+
+        // Fail-closed consistency: durable truth still holds the credential
+        // and the lease projection still matches it (live) — the clear is
+        // retryable; nothing diverged. In particular no interleaving exists
+        // where a live lease outlives a CLEARED credential: the durable clear
+        // only commits after the release fully succeeded.
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&binding);
+        let snap = handle.snapshot(&lease_key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
+        assert!(
+            snap.credential_present,
+            "aborted clear must leave the live lease aligned with the retained durable record, got {snap:?}"
+        );
     }
 }

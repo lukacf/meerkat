@@ -11,7 +11,7 @@
 use super::provisioner::MobProvisioner;
 use crate::error::MobError;
 use crate::event::MemberRef;
-use crate::ids::MeerkatId;
+use crate::ids::AgentIdentity;
 use std::sync::Arc;
 
 /// A provisioned member that must be explicitly committed or rolled back.
@@ -22,7 +22,7 @@ use std::sync::Arc;
 #[must_use = "provisioned member must be committed or rolled back"]
 pub(super) struct PendingProvision {
     member_ref: Option<MemberRef>,
-    agent_identity: MeerkatId,
+    agent_identity: AgentIdentity,
     provisioner: Arc<dyn MobProvisioner>,
     committed: bool,
     rollback_attempted: bool,
@@ -31,7 +31,7 @@ pub(super) struct PendingProvision {
 impl PendingProvision {
     pub(super) fn new(
         member_ref: MemberRef,
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         provisioner: Arc<dyn MobProvisioner>,
     ) -> Self {
         Self {
@@ -80,7 +80,7 @@ impl PendingProvision {
 
     /// The meerkat ID associated with this provision.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn meerkat_id(&self) -> &MeerkatId {
+    pub(super) fn member_identity(&self) -> &AgentIdentity {
         &self.agent_identity
     }
 
@@ -100,14 +100,14 @@ impl Drop for PendingProvision {
         if !self.committed && !self.rollback_attempted {
             let member_ref = self.member_ref.take();
             tracing::error!(
-                meerkat_id = %self.agent_identity,
+                agent_identity = %self.agent_identity,
                 member_ref = ?member_ref,
                 "PendingProvision dropped without commit or rollback — resource leak"
             );
             debug_assert!(false, "PendingProvision dropped without commit or rollback");
         } else if self.rollback_attempted {
             tracing::error!(
-                meerkat_id = %self.agent_identity,
+                agent_identity = %self.agent_identity,
                 member_ref = ?self.member_ref,
                 "PendingProvision rollback was attempted but failed"
             );
@@ -119,7 +119,7 @@ impl Drop for PendingProvision {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::ids::MeerkatId;
+    use crate::ids::AgentIdentity;
     use crate::runtime::handle::MemberSpawnReceipt;
     use crate::runtime::provisioner::ProvisionMemberRequest;
     use async_trait::async_trait;
@@ -262,9 +262,9 @@ mod tests {
         let provisioner = Arc::new(MockProvisioner::new());
         let session_id = SessionId::new();
         let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref.clone(), meerkat_id, provisioner.clone());
+        let guard = PendingProvision::new(member_ref.clone(), member_identity, provisioner.clone());
         let committed_ref = guard.commit().unwrap();
         assert_eq!(committed_ref, member_ref);
         assert!(!provisioner.retired.load(Ordering::Acquire));
@@ -274,9 +274,9 @@ mod tests {
     async fn rollback_retires_member() {
         let provisioner = Arc::new(MockProvisioner::new());
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, meerkat_id, provisioner.clone());
+        let guard = PendingProvision::new(member_ref, member_identity, provisioner.clone());
         guard.rollback().await.unwrap();
         assert!(provisioner.retired.load(Ordering::Acquire));
     }
@@ -285,9 +285,9 @@ mod tests {
     async fn rollback_failure_returns_error_without_drop_panic() {
         let provisioner = Arc::new(MockProvisioner::failing_retire());
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, meerkat_id, provisioner.clone());
+        let guard = PendingProvision::new(member_ref, member_identity, provisioner.clone());
         let error = guard
             .rollback()
             .await
@@ -301,21 +301,21 @@ mod tests {
     async fn member_ref_accessor_returns_ref() {
         let provisioner = Arc::new(MockProvisioner::new());
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref.clone(), meerkat_id, provisioner);
+        let guard = PendingProvision::new(member_ref.clone(), member_identity, provisioner);
         assert_eq!(guard.member_ref(), &member_ref);
         let _ = guard.commit(); // consume to avoid Drop panic
     }
 
     #[tokio::test]
-    async fn meerkat_id_accessor() {
+    async fn agent_identity_accessor() {
         let provisioner = Arc::new(MockProvisioner::new());
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, meerkat_id.clone(), provisioner);
-        assert_eq!(guard.meerkat_id(), &meerkat_id);
+        let guard = PendingProvision::new(member_ref, member_identity.clone(), provisioner);
+        assert_eq!(guard.member_identity(), &member_identity);
         let _ = guard.commit(); // consume
     }
 
@@ -325,9 +325,9 @@ mod tests {
     async fn drop_without_consume_panics_in_debug() {
         let provisioner = Arc::new(MockProvisioner::new());
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
-        let meerkat_id = MeerkatId::from("test-member");
+        let member_identity = AgentIdentity::from("test-member");
 
-        let _guard = PendingProvision::new(member_ref, meerkat_id, provisioner);
+        let _guard = PendingProvision::new(member_ref, member_identity, provisioner);
         // dropped without commit or rollback
     }
 }

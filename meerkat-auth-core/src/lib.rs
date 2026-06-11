@@ -49,8 +49,8 @@ pub use auth_store::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use mcp_oauth::{
-    BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpAuthTarget, McpOAuthAuthority,
-    McpOAuthError,
+    BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpOAuthAuthority, McpOAuthError,
+    McpServerIdentity,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{

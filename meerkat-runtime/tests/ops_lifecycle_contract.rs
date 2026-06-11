@@ -334,8 +334,14 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
     let session_a = SessionId::new();
     let session_b = SessionId::new();
 
-    adapter.register_session(session_a.clone()).await;
-    adapter.register_session(session_b.clone()).await;
+    adapter
+        .register_session(session_a.clone())
+        .await
+        .expect("register session");
+    adapter
+        .register_session(session_b.clone())
+        .await
+        .expect("register session");
 
     let registry_a = adapter
         .ops_lifecycle_registry(&session_a)
@@ -373,7 +379,10 @@ async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_ba
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let child_operation_id = OperationId::new();
     let (child_outcome, child_handle) = runtime

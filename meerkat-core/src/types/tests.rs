@@ -70,17 +70,28 @@ fn test_message_json_schema() {
     assert_eq!(json["body"], "Background job still running.");
 
     // Assistant message
-    let assistant = Message::Assistant(AssistantMessage {
-        content: "Hi there!".to_string(),
-        tool_calls: vec![],
+    let assistant = Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::Text {
+            text: "Hi there!".to_string(),
+            meta: None,
+        }],
         stop_reason: StopReason::EndTurn,
-        usage: Usage::default(),
         created_at: message_timestamp_now(),
     });
     let json = serde_json::to_value(&assistant).unwrap();
-    assert_eq!(json["role"], "assistant");
-    assert_eq!(json["content"], "Hi there!");
+    assert_eq!(json["role"], "block_assistant");
+    assert_eq!(json["blocks"][0]["block_type"], "text");
+    assert_eq!(json["blocks"][0]["data"]["text"], "Hi there!");
     assert_eq!(json["stop_reason"], "end_turn");
+
+    // Legacy text-shaped assistant role fails closed at deserialization.
+    let legacy = json!({
+        "role": "assistant",
+        "content": "Hi there!",
+        "stop_reason": "end_turn"
+    });
+    serde_json::from_value::<Message>(legacy)
+        .expect_err("legacy role=assistant persisted form must be rejected");
 
     // Tool results
     let tool_results = Message::tool_results(vec![ToolResult::new(
@@ -258,17 +269,17 @@ fn comms_notice_kind_wire_tags_match_legacy_strings() {
 }
 
 #[test]
-fn comms_notice_kind_accepts_legacy_peer_prefixed_aliases() {
-    // Other surfaces historically emitted `peer_`-prefixed kinds; they must
-    // still deserialize into the canonical typed vocabulary (back-read).
-    let aliases = [
-        ("peer_request", CommsNoticeKind::Request),
-        ("peer_response_progress", CommsNoticeKind::ResponseProgress),
-        ("peer_response_terminal", CommsNoticeKind::ResponseTerminal),
-    ];
-    for (alias, expected) in aliases {
-        let parsed: CommsNoticeKind = serde_json::from_value(json!(alias)).unwrap();
-        assert_eq!(parsed, expected);
+fn comms_notice_kind_peer_prefixed_tags_are_not_canonical_variants() {
+    // The retired `peer_`-prefixed wire tags are no longer folded into the
+    // canonical typed vocabulary; they degrade to the explicit `Other`
+    // capture like any other unrecognized tag.
+    for tag in [
+        "peer_request",
+        "peer_response_progress",
+        "peer_response_terminal",
+    ] {
+        let parsed: CommsNoticeKind = serde_json::from_value(json!(tag)).unwrap();
+        assert_eq!(parsed, CommsNoticeKind::Other(tag.to_string()));
     }
 }
 
@@ -311,25 +322,6 @@ fn comms_block_round_trips_through_wire_with_typed_peer_id() {
 
     let parsed: SystemNoticeBlock = serde_json::from_value(value).unwrap();
     assert_eq!(parsed, block);
-
-    // A legacy transcript carrying `peer_request` deserializes into the same
-    // typed Request variant.
-    let legacy: SystemNoticeBlock = serde_json::from_value(json!({
-        "type": "comms",
-        "kind": "peer_request",
-        "direction": "incoming",
-        "peer": { "id": peer_id.as_str(), "display_name": "Analyst" },
-        "request_id": "request-9",
-        "intent": "checksum"
-    }))
-    .unwrap();
-    assert!(matches!(
-        legacy,
-        SystemNoticeBlock::Comms {
-            kind: CommsNoticeKind::Request,
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -373,6 +365,33 @@ fn test_tool_result_serialization() {
     let json = serde_json::to_string(&error_result).unwrap();
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
     assert!(parsed.is_error);
+}
+
+#[test]
+fn content_blocks_text_only_serializes_as_plain_string() {
+    // TRIPWIRE (KEEP_FUNCTIONAL): `content_blocks_serde` keeps its
+    // string-accepting deserialize arm ONLY because the serializer still emits
+    // text-only content as a plain JSON string (round-trip symmetry). If this
+    // test trips because serialization moved to always-array, the
+    // string-accepting deserialize arm has become a legacy fold and must be
+    // deleted along with this test.
+    let tool_result = ToolResult::new("tc_1".to_string(), "just text".to_string(), false);
+    let value = serde_json::to_value(&tool_result).unwrap();
+    assert!(
+        value["content"].is_string(),
+        "text-only ToolResult content must serialize as a plain JSON string, got: {}",
+        value["content"]
+    );
+    assert_eq!(value["content"], json!("just text"));
+
+    let user = UserMessage::text("hello");
+    let value = serde_json::to_value(&user).unwrap();
+    assert!(
+        value["content"].is_string(),
+        "text-only UserMessage content must serialize as a plain JSON string, got: {}",
+        value["content"]
+    );
+    assert_eq!(value["content"], json!("hello"));
 }
 
 #[test]
@@ -577,20 +596,23 @@ fn test_session_checkpoint_complex() {
 
         if i % 3 == 0 {
             // With tool calls
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Let me help with request {i}"),
-                tool_calls: vec![ToolCall::new(
-                    format!("tc_{i}"),
-                    "test_tool".to_string(),
-                    json!({"index": i}),
-                )],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![
+                    AssistantBlock::Text {
+                        text: format!("Let me help with request {i}"),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: format!("tc_{i}"),
+                        name: "test_tool".to_string(),
+                        args: serde_json::value::RawValue::from_string(format!(
+                            "{{\"index\":{i}}}"
+                        ))
+                        .expect("valid args"),
+                        meta: None,
+                    },
+                ],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 100 + i as u64,
-                    output_tokens: 50 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
 
@@ -600,30 +622,22 @@ fn test_session_checkpoint_complex() {
                 false,
             )]));
 
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Completed request {i} with tool result"),
-                tool_calls: vec![],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: format!("Completed request {i} with tool result"),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 150 + i as u64,
-                    output_tokens: 75 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
         } else {
             // Without tool calls
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Response to request {i}"),
-                tool_calls: vec![],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: format!("Response to request {i}"),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 100 + i as u64,
-                    output_tokens: 50 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
         }
@@ -1314,7 +1328,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage::tool_calls() iterator tests
+    // BlockAssistantMessage::tool_calls() iterator tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1433,7 +1447,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage Display impl tests
+    // BlockAssistantMessage Display impl tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1482,7 +1496,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage text_blocks iterator tests
+    // BlockAssistantMessage text_blocks iterator tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1785,6 +1799,53 @@ mod content_block_tests {
         let text = msg.as_indexable_text();
         assert!(text.contains("describe this"));
         assert!(text.contains("[image: image/png]"));
+    }
+
+    /// Dogma gate (#319): the indexability decision is an explicit typed value,
+    /// not a silent empty-`String` convention. Conversation turns are
+    /// `Indexable`; system prompts, system notices, and tool results carry a
+    /// typed `MemoryIndexExclusion` reason a consumer can see and own.
+    #[test]
+    fn indexable_content_carries_typed_inclusion_policy() {
+        let user = Message::User(UserMessage::text("hello".to_string()));
+        match user.indexable_content() {
+            MemoryIndexableContent::Indexable(text) => assert_eq!(text, "hello"),
+            other => panic!("user content should be indexable, got: {other:?}"),
+        }
+
+        let system = Message::System(SystemMessage::new("You are a helpful assistant."));
+        assert_eq!(
+            system.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt),
+        );
+
+        let notice = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::BackgroundJob,
+            "Background job still running.",
+        ));
+        assert_eq!(
+            notice.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemNotice),
+        );
+
+        let tool_results = Message::tool_results(vec![ToolResult::new(
+            "call-1".to_string(),
+            "structured output".to_string(),
+            false,
+        )]);
+        assert_eq!(
+            tool_results.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults),
+        );
+
+        // The text projection stays consistent with the typed decision: only
+        // indexable messages produce text, excluded ones project to empty.
+        assert_eq!(user.as_indexable_text(), "hello");
+        assert!(system.as_indexable_text().is_empty());
+        assert!(notice.as_indexable_text().is_empty());
+        assert!(tool_results.as_indexable_text().is_empty());
+        assert!(!system.indexable_content().is_indexable());
+        assert_eq!(user.indexable_content().indexable_text(), Some("hello"));
     }
 
     // ContentInput tests

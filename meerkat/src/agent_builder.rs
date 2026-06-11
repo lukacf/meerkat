@@ -90,9 +90,21 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the system prompt.
+    /// Set an explicit per-request system prompt.
+    ///
+    /// This wins outright over config and AGENTS.md
+    /// ([`SystemPromptOverride::Set`](crate::SystemPromptOverride::Set)).
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.build_config.system_prompt = Some(prompt.into());
+        self.build_config.system_prompt = crate::SystemPromptOverride::Set(prompt.into());
+        self
+    }
+
+    /// Suppress every system-prompt source for this build.
+    ///
+    /// No config override, no AGENTS.md, and no default prompt are applied
+    /// ([`SystemPromptOverride::Disable`](crate::SystemPromptOverride::Disable)).
+    pub fn disable_system_prompt(mut self) -> Self {
+        self.build_config.system_prompt = crate::SystemPromptOverride::Disable;
         self
     }
 
@@ -108,8 +120,11 @@ impl AgentBuilder {
         self
     }
 
-    /// Set provider-specific parameters.
-    pub fn provider_params(mut self, params: serde_json::Value) -> Self {
+    /// Set typed provider-specific parameter overrides.
+    pub fn provider_params(
+        mut self,
+        params: meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+    ) -> Self {
         self.build_config.provider_params = Some(params);
         self
     }
@@ -133,6 +148,13 @@ impl AgentBuilder {
         self.config.retry.initial_delay = policy.initial_delay;
         self.config.retry.max_delay = policy.max_delay;
         self.config.retry.multiplier = policy.multiplier;
+        // Carry the hard call-timeout policy through to the config snapshot so
+        // an explicit timeout survives to the factory/build seam and runtime
+        // retry accounting. A `None` policy means inherit (profile-derived).
+        self.config.retry.call_timeout_override = match policy.call_timeout {
+            Some(d) => meerkat_core::CallTimeoutOverride::Value(d),
+            None => meerkat_core::CallTimeoutOverride::Inherit,
+        };
         self
     }
 

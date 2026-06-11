@@ -377,6 +377,14 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "StoredTranscriptRevisionDiverged",
                 ],
             ),
+            // Lifecycle-terminal region typed vocabulary (LUC-524 R004 fold:
+            // SessionDocumentMachine owns archive lifecycle truth for all
+            // profiles).
+            NamedTypeBinding::string_enum("SessionDocumentLifecycle", &["Active", "Archived"]),
+            NamedTypeBinding::string_enum(
+                "SessionArchiveDisposition",
+                &["Archive", "AlreadyArchived"],
+            ),
         ],
         Vec::new(),
     )

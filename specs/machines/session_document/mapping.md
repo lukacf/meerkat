@@ -253,6 +253,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TranscriptEditRewrite`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverSessionLifecycleTerminal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveSessionDocumentActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveSessionDocumentAlreadyArchived`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -331,6 +340,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `TranscriptRewriteCommitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SessionLifecycleTerminalRecovered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SessionArchiveResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

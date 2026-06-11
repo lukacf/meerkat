@@ -53,8 +53,8 @@ use meerkat_core::service::{
     StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
-    LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionDocumentEffect,
-    SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
+    LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
+    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState, SessionLifecycleTerminal};
@@ -1328,10 +1328,13 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
-/// Whether the session's typed lifecycle-terminal owner marks it archived.
+/// Whether the session document's typed lifecycle-terminal projection marks it
+/// archived.
 ///
-/// Reads the typed [`Session::lifecycle_terminal`] fact. This is the
-/// standalone-path terminality authority.
+/// Reads the typed [`Session::lifecycle_terminal`] fact — the durable,
+/// machine-realized projection of the canonical SessionDocumentMachine
+/// `session_lifecycle_terminal` fact. This is a projection read, not an
+/// authority decision.
 fn session_marks_archived(session: &Session) -> bool {
     session
         .lifecycle_terminal()
@@ -1421,9 +1424,13 @@ impl<'a> MachineServiceTurnCommitProtocol<'a> {
 
 /// Runtime/session composition protocol for archiving a session.
 ///
-/// Archive is a user-facing session lifecycle transition. Runtime-backed
-/// callers must first land the machine-owned `Retire` transition durably, then
-/// may update the session-store projection used for history reads.
+/// Archive is a user-facing session lifecycle transition decided by the
+/// canonical SessionDocumentMachine (`ArchiveSessionDocument`). For
+/// runtime-backed callers this protocol supplies the runtime half of the
+/// machine's realization action vector: after the durable session-document
+/// lifecycle commit lands, the runtime is retired through the machine-owned
+/// `Retire` transition. Both realizations are fail-closed — a failure in
+/// either fails the archive operation.
 #[derive(Clone, Copy)]
 pub struct MachineSessionArchiveProtocol<'a> {
     runtime_adapter: &'a MeerkatMachine,
@@ -1517,6 +1524,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Whether the session is archived, read as a projection of the canonical
+    /// SessionDocumentMachine `session_lifecycle_terminal` fact.
+    ///
+    /// Both branches read machine-realized projections of the same archive
+    /// verdict: store-only mode reads the durable document's typed
+    /// lifecycle-terminal fact; runtime-backed mode reads the runtime
+    /// `Retired` realization. The fail-closed archive realization order
+    /// (durable document commit first, runtime retire second) guarantees
+    /// `Retired` implies the document is Archived, so the two projections are
+    /// convergent; the only reachable partial state (document Archived,
+    /// runtime live) reads as not-archived here and converges on a retried
+    /// archive.
     pub async fn session_archived_by_authority(
         &self,
         id: &SessionId,
@@ -5254,12 +5273,70 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             },
             Err(err) => return Err(err),
         };
-        let already_retired_by_machine = if let Some(ref session) = archived_snapshot {
+        // Drive the canonical SessionDocumentMachine archive decision. The
+        // machine owns the session-document lifecycle-terminal fact for ALL
+        // profiles (LUC-524 R004 fold): this shell extracts only pure
+        // observations — the canonical current archived-ness (runtime mode:
+        // the Retire realization; store-only mode: the durable document's
+        // typed fact), the mode, the durable-snapshot presence, and the
+        // runtime registration — seeds the machine registry, and mirrors the
+        // emitted disposition + realization action vector. It decides nothing.
+        let currently_archived = if let Some(ref session) = archived_snapshot {
             self.session_archived_by_authority(id, session).await?
         } else {
             false
         };
-        if already_retired_by_machine {
+        let runtime_session_registered = if let Some(ref protocol) = machine_archive {
+            protocol.session_registered(id).await
+        } else {
+            false
+        };
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let document_key = SessionDocumentKey::new(id.to_string());
+        let seed = if currently_archived {
+            SessionLifecycleTerminal::Archived
+        } else {
+            SessionLifecycleTerminal::Active
+        };
+        authority
+            .recover_session_lifecycle_terminal(document_key.clone(), seed.into())
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected lifecycle-terminal recovery \
+                     for session {id}: {err}"
+                )))
+            })?;
+        let effects = authority
+            .archive_session_document(
+                document_key,
+                machine_archive.is_some(),
+                archived_snapshot.is_some(),
+                runtime_session_registered,
+            )
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected archive for session {id}: {err}"
+                )))
+            })?;
+        let (disposition, write_document, retire_runtime) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::SessionArchiveResolved {
+                    disposition,
+                    write_document,
+                    retire_runtime,
+                } => Some((*disposition, *write_document, *retire_runtime)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no archive verdict for \
+                     session {id}"
+                )))
+            })?;
+        if disposition == SessionArchiveDisposition::AlreadyArchived {
+            // Machine-decided idempotent re-archive verdict; the public
+            // surface contract for an archived session is NotFound.
             return Err(SessionError::NotFound { id: id.clone() });
         }
 
@@ -5276,22 +5353,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             None
         };
 
-        let had_durable_snapshot = archived_snapshot.is_some();
-        let mut machine_retired = already_retired_by_machine;
-        if let Some(protocol) = machine_archive {
-            let should_retire = !already_retired_by_machine
-                && (archived_snapshot.is_some() || protocol.session_registered(id).await);
-            if should_retire && let Err(err) = protocol.retire_session(id).await {
+        // Realize the machine's action vector fail-closed and IN ORDER:
+        // durable document commit first, runtime retire second. The ordering
+        // invariant is load-bearing: `RuntimeState::Retired` implies the
+        // durable document is Archived, so the former warn-continue divergence
+        // window (machine retired, projection save failed, durable document
+        // stayed Active, standalone reopen resurrected the session) is
+        // unrepresentable. The converse partial state (document Archived,
+        // runtime still live after a retire failure) reads as not-archived
+        // through the runtime authority and converges on retry.
+        if write_document {
+            let Some(session) = archived_snapshot.clone() else {
                 if let Some(ref mut guard) = gate_guard {
                     **guard = false;
                 }
-                return Err(err);
-            }
-            machine_retired = should_retire;
-        }
-
-        let mut saved_archived_snapshot = false;
-        if let Some(session) = archived_snapshot.clone() {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "machine archive verdict for session {id} requested a document commit \
+                     without a durable snapshot"
+                ))));
+            };
             let mut session = session;
             if let Err(err) = session.set_lifecycle_terminal(SessionLifecycleTerminal::Archived) {
                 if let Some(ref mut guard) = gate_guard {
@@ -5301,25 +5381,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to mark session {id} archived: {err}"
                 ))));
             }
-            match self.save_compatibility_projection_only(session).await {
-                Ok(_) => {
-                    saved_archived_snapshot = true;
+            if let Err(err) = self.save_compatibility_projection_only(session).await {
+                // Fail closed: a failed durable lifecycle commit fails the
+                // archive operation. The runtime has not been retired yet, so
+                // durable truth stays consistent and the archive is retryable.
+                if let Some(ref mut guard) = gate_guard {
+                    **guard = false;
                 }
-                Err(err) => {
-                    if self.runtime_store.is_some() && machine_retired {
-                        tracing::warn!(
-                            session_id = %id,
-                            error = %err,
-                            "machine archive retired session but compatibility projection save failed"
-                        );
-                        saved_archived_snapshot = false;
-                    } else {
-                        if let Some(ref mut guard) = gate_guard {
-                            **guard = false;
-                        }
-                        return Err(err);
-                    }
+                return Err(err);
+            }
+        }
+        if retire_runtime {
+            let Some(protocol) = machine_archive else {
+                if let Some(ref mut guard) = gate_guard {
+                    **guard = false;
                 }
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "machine archive verdict for session {id} requested a runtime retire \
+                     without a machine archive protocol"
+                ))));
+            };
+            if let Err(err) = protocol.retire_session(id).await {
+                // Fail closed: the archive operation fails. The committed
+                // document write (if any) is convergent-by-retry — the runtime
+                // authority still reads the session as live, and a retried
+                // archive re-drives the machine, re-commits the idempotent
+                // document write, and retires the runtime.
+                if let Some(ref mut guard) = gate_guard {
+                    **guard = false;
+                }
+                return Err(err);
             }
         }
 
@@ -5330,20 +5421,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         drop(gate_guard.take());
         self.checkpointer_gates.lock().await.remove(id);
 
-        match (&live_result, saved_archived_snapshot) {
-            // At least one side had the session - success.
+        match (&live_result, write_document || retire_runtime) {
+            // At least one side had the session - success. A realized machine
+            // action vector implies both realizations landed (failures above
+            // returned early).
             (Ok(()), _) | (_, true) => Ok(()),
-            (_, false) if machine_retired => Ok(()),
-            (_, false) if had_durable_snapshot => Ok(()),
             // Neither side had it - propagate NotFound from the live service.
             _ => live_result,
         }
     }
 
     /// Archive with a concrete machine protocol. Runtime-backed surfaces must
-    /// use this path so archive behavior is backed by a durable
-    /// `MeerkatMachine::Retire` transition. Compatibility projection writes
-    /// happen only after that canonical lifecycle transition has landed.
+    /// use this path so the canonical SessionDocumentMachine archive verdict
+    /// is realized on BOTH sides: the durable session-document lifecycle
+    /// commit lands first, then the runtime `MeerkatMachine::Retire`
+    /// transition. A failure anywhere fails the archive operation
+    /// (fail-closed) — there is no warn-continue split-truth window.
     pub async fn archive_with_machine_protocol(
         &self,
         id: &SessionId,
@@ -11842,6 +11935,396 @@ mod tests {
                 .await
                 .expect("live-session status should succeed"),
             "archive() should discard the stale live session"
+        );
+    }
+
+    /// Session store that fails saves of archived-marked snapshots on demand.
+    /// Used to reproduce the former warn-continue divergence window.
+    struct FailingArchivedSaveStore {
+        inner: MemoryStore,
+        fail_archived_saves: AtomicBool,
+    }
+
+    impl FailingArchivedSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                fail_archived_saves: AtomicBool::new(false),
+            }
+        }
+
+        fn reject_archived_save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            if self.fail_archived_saves.load(Ordering::Acquire) && session_marks_archived(session) {
+                return Err(SessionStoreError::Io(std::io::Error::other(
+                    "injected archived-save failure",
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailingArchivedSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            self.reject_archived_save(session)?;
+            self.inner.save(session).await
+        }
+
+        async fn save_transcript_rewrite(
+            &self,
+            session: &Session,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), SessionStoreError> {
+            self.reject_archived_save(session)?;
+            self.inner.save_transcript_rewrite(session, commit).await
+        }
+
+        async fn save_authoritative_projection(
+            &self,
+            session: &Session,
+        ) -> Result<(), SessionStoreError> {
+            self.reject_archived_save(session)?;
+            self.inner.save_authoritative_projection(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), SessionStoreError> {
+            self.reject_archived_save(session)?;
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
+    }
+
+    /// Divergence-window regression (LUC-524 R004): a failed durable
+    /// lifecycle commit must FAIL the archive operation fail-closed. The
+    /// runtime must NOT be retired (the document commit realizes first), the
+    /// durable document must stay Active, the session must remain readable
+    /// (no resurrection-prone split truth), and a retried archive after the
+    /// store heals must converge to fully archived.
+    #[tokio::test]
+    async fn test_runtime_backed_archive_fails_closed_when_lifecycle_projection_save_fails() {
+        let failing_store = Arc::new(FailingArchivedSaveStore::new());
+        let store: Arc<dyn SessionStore> = Arc::clone(&failing_store) as Arc<dyn SessionStore>;
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(Arc::clone(&runtime_store)),
+            memory_blob_store(),
+        );
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+
+        // Commit the durable row as the runtime session snapshot so the
+        // session is a fully runtime-backed document (matching the production
+        // shape where runtime authority owns the snapshot).
+        let seeded = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("created session should have a durable row");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&seeded)
+                        .expect("session snapshot should serialize"),
+                },
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        failing_store
+            .fail_archived_saves
+            .store(true, Ordering::Release);
+        let err = service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect_err("archive must fail closed when the durable lifecycle commit fails");
+        assert!(
+            matches!(err, SessionError::Store(_)),
+            "archive failure must surface the durable lifecycle commit error, got: {err:?}"
+        );
+
+        // No split truth: the runtime was NOT retired (document commit
+        // realizes first), the durable document stays Active, and the
+        // session is still a readable, resumable session — not a half
+        // archived one.
+        assert_ne!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime state load should succeed"),
+            Some(RuntimeState::Retired),
+            "failed archive must not leave the runtime retired"
+        );
+        let durable = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("durable projection should remain present");
+        assert!(
+            !session_marks_archived(&durable),
+            "failed archive must not leave the durable document archived"
+        );
+        assert!(
+            !service
+                .session_archived_by_authority(&id, &durable)
+                .await
+                .expect("archived-by-authority read should succeed"),
+            "failed archive must leave the session not-archived through the authority read"
+        );
+        service
+            .read(&id)
+            .await
+            .expect("session must remain readable after a failed archive");
+
+        // Retry after the store heals: the archive converges fully.
+        failing_store
+            .fail_archived_saves
+            .store(false, Ordering::Release);
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("retried archive should converge after the store heals");
+        let archived = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("archived projection should be present");
+        assert!(
+            session_marks_archived(&archived),
+            "retried archive must realize the durable lifecycle commit"
+        );
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime state load should succeed"),
+            Some(RuntimeState::Retired),
+            "retried archive must retire the runtime after the document commit"
+        );
+        assert!(
+            !service
+                .has_live_session(&id)
+                .await
+                .expect("live-session status should succeed"),
+            "archived session must not report a live session"
+        );
+
+        // Resurrection regression: a standalone (store-only) reopen over the
+        // same durable store must see the machine-realized archived document
+        // and reject the session — the pre-fold warn-continue window let this
+        // reopen resurrect a machine-retired session.
+        let standalone = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+        let reopened = standalone.read(&id).await;
+        assert!(
+            matches!(reopened, Err(SessionError::NotFound { .. })),
+            "standalone reopen must not resurrect the archived session, got: {reopened:?}"
+        );
+    }
+
+    /// Store-only archive drives the same canonical SessionDocumentMachine
+    /// input as the runtime-backed path: the durable document lifecycle
+    /// commit is the machine-realized projection, and re-archive resolves
+    /// the machine's explicit AlreadyArchived verdict (surfaced as the
+    /// existing NotFound public contract).
+    #[tokio::test]
+    async fn test_store_only_archive_routes_through_session_document_machine() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+
+        service
+            .archive(&id)
+            .await
+            .expect("store-only archive should succeed");
+        let archived = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("archived projection should be present");
+        assert!(
+            session_marks_archived(&archived),
+            "store-only archive must realize the machine-owned lifecycle terminal"
+        );
+
+        let err = service
+            .archive(&id)
+            .await
+            .expect_err("re-archive must resolve the machine AlreadyArchived verdict");
+        assert!(
+            matches!(err, SessionError::NotFound { .. }),
+            "AlreadyArchived verdict must surface as NotFound, got: {err:?}"
+        );
+    }
+
+    /// Direct generated-authority coverage for the lifecycle-terminal region:
+    /// unseeded drives fail closed, Active archives with the realization
+    /// action vector, re-archive is the explicit AlreadyArchived verdict with
+    /// an empty vector, and the retire flag never fires for sessions the
+    /// runtime has never seen or for store-only archives.
+    #[test]
+    fn test_session_document_archive_verdicts() {
+        use meerkat_core::session_document::SessionDocumentLifecycle;
+
+        fn verdict(
+            authority: &mut SessionDocumentMachineAuthority,
+            key: &SessionDocumentKey,
+            runtime_backed: bool,
+            durable_snapshot_present: bool,
+            runtime_session_registered: bool,
+        ) -> (SessionArchiveDisposition, bool, bool) {
+            let effects = authority
+                .archive_session_document(
+                    key.clone(),
+                    runtime_backed,
+                    durable_snapshot_present,
+                    runtime_session_registered,
+                )
+                .expect("seeded archive drive should resolve");
+            effects
+                .iter()
+                .find_map(|effect| match effect {
+                    SessionDocumentEffect::SessionArchiveResolved {
+                        disposition,
+                        write_document,
+                        retire_runtime,
+                    } => Some((*disposition, *write_document, *retire_runtime)),
+                    _ => None,
+                })
+                .expect("archive drive should emit a verdict")
+        }
+
+        fn seeded(
+            terminal: SessionDocumentLifecycle,
+        ) -> (SessionDocumentMachineAuthority, SessionDocumentKey) {
+            let mut authority = SessionDocumentMachineAuthority::new();
+            let key = SessionDocumentKey::new("session-archive-verdicts");
+            authority
+                .recover_session_lifecycle_terminal(key.clone(), terminal)
+                .expect("lifecycle-terminal recovery should be authorized");
+            (authority, key)
+        }
+
+        // Unseeded drive fails closed at the generated accessor.
+        let mut unseeded = SessionDocumentMachineAuthority::new();
+        assert!(
+            unseeded
+                .archive_session_document(
+                    SessionDocumentKey::new("session-archive-verdicts"),
+                    true,
+                    true,
+                    false,
+                )
+                .is_err(),
+            "archive drive against an unseeded session id must fail closed"
+        );
+
+        // Active -> Archive with the full action vector; re-archive on the
+        // same registry is the explicit AlreadyArchived verdict.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
+        assert_eq!(
+            verdict(&mut authority, &key, true, true, false),
+            (SessionArchiveDisposition::Archive, true, true)
+        );
+        assert_eq!(
+            verdict(&mut authority, &key, true, true, false),
+            (SessionArchiveDisposition::AlreadyArchived, false, false)
+        );
+
+        // A recovered-Archived document resolves AlreadyArchived.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Archived);
+        assert_eq!(
+            verdict(&mut authority, &key, true, true, false),
+            (SessionArchiveDisposition::AlreadyArchived, false, false)
+        );
+
+        // Runtime-backed archive of a session the runtime never saw must not
+        // spuriously register-then-retire it.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
+        assert_eq!(
+            verdict(&mut authority, &key, true, false, false),
+            (SessionArchiveDisposition::Archive, false, false)
+        );
+
+        // Registered-without-snapshot retires.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
+        assert_eq!(
+            verdict(&mut authority, &key, true, false, true),
+            (SessionArchiveDisposition::Archive, false, true)
+        );
+
+        // Store-only archives never retire a runtime.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
+        assert_eq!(
+            verdict(&mut authority, &key, false, true, false),
+            (SessionArchiveDisposition::Archive, true, false)
         );
     }
 

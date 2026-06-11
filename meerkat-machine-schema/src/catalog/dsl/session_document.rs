@@ -317,6 +317,47 @@ pub enum LiveSessionAuthorityReason {
 }
 
 // ---------------------------------------------------------------------------
+// Lifecycle-terminal region (LUC-524 R004 fold). Archive lifecycle truth was
+// MODE-SPLIT: runtime-backed archived-ness was owned by MeerkatMachine
+// `Retire` while store-only archived-ness was owned by the session document's
+// `session_lifecycle_terminal` metadata key, with a warn-continue divergence
+// window (machine retired -> projection save failed -> durable doc stayed
+// Active -> standalone reopen resurrected the session). THIS machine now owns
+// the `lifecycle_terminal` fact for ALL profiles: both the runtime-backed and
+// the store-only archive paths drive `ArchiveSessionDocument`, and the shell
+// realizes the machine's action vector fail-closed (durable document commit
+// FIRST, runtime retire SECOND — a failure anywhere fails the archive
+// operation, so `RuntimeState::Retired` implies the durable document is
+// Archived and the divergence window is unrepresentable).
+// ---------------------------------------------------------------------------
+
+/// Canonical lifecycle-terminal class for a session document. `Active` is the
+/// default (and the recovered value for a document with no terminal fact);
+/// `Archived` is the absorbing terminal class. Maps to
+/// `meerkat_core::SessionLifecycleTerminal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionDocumentLifecycle {
+    #[default]
+    Active,
+    Archived,
+}
+
+/// Machine-decided disposition for a session-document archive request.
+///
+/// Idempotence decision (documented contract): archiving an already-Archived
+/// document resolves to the explicit `AlreadyArchived` verdict — a total
+/// verdict, never a guard no-match — with an empty action vector (no document
+/// re-write, no runtime retire). The public surface contract maps
+/// `AlreadyArchived` to its existing `NotFound` error, so re-archive remains
+/// observably idempotent at the API while the machine owns the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionArchiveDisposition {
+    #[default]
+    Archive,
+    AlreadyArchived,
+}
+
+// ---------------------------------------------------------------------------
 // Transcript-edit region (folded from the meerkat-session persistent.rs
 // `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
 // LUC-524). The persist paths commit a fork or rewrite DIRECTLY via
@@ -353,12 +394,14 @@ machine! {
             session_first_turn_phase: Map<SessionId, Enum<SessionFirstTurnPhase>>,
             session_pending_initial_prompt_present: Map<SessionId, bool>,
             session_pending_tool_results_count: Map<SessionId, u64>,
+            session_lifecycle_terminal: Map<SessionId, Enum<SessionDocumentLifecycle>>,
         }
 
         init(Ready) {
             session_first_turn_phase = EmptyMap,
             session_pending_initial_prompt_present = EmptyMap,
             session_pending_tool_results_count = EmptyMap,
+            session_lifecycle_terminal = EmptyMap,
         }
 
         terminal []
@@ -650,6 +693,27 @@ machine! {
                 session_id: SessionId,
                 fork_or_rewrite_directive: Enum<TranscriptEditKind>,
             },
+
+            // -----------------------------------------------------------
+            // Lifecycle-terminal region (LUC-524 R004 fold). The recover
+            // input adopts the canonical current archived-ness observation
+            // (runtime mode: the Retire realization; store-only mode: the
+            // durable document's typed lifecycle-terminal fact) into the
+            // machine-owned registry; the archive input then decides the
+            // disposition and the realization action vector from the
+            // machine-owned terminal state plus three pure mode
+            // observations. Neither carries a pre-decided verdict.
+            // -----------------------------------------------------------
+            RecoverSessionLifecycleTerminal {
+                session_id: SessionId,
+                terminal: Enum<SessionDocumentLifecycle>,
+            },
+            ArchiveSessionDocument {
+                session_id: SessionId,
+                runtime_backed: bool,
+                durable_snapshot_present: bool,
+                runtime_session_registered: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -787,6 +851,21 @@ machine! {
             TranscriptRewriteCommitted {
                 kind: Enum<TranscriptEditKind>,
                 success: bool,
+            },
+
+            // Lifecycle-terminal region effects. The recover marker witnesses
+            // the registry adoption; the archive verdict carries the
+            // disposition plus the realization action vector. The shell
+            // realizes the vector fail-closed and IN ORDER — durable document
+            // commit first, runtime retire second — and decides nothing: a
+            // realization failure surfaces as the archive operation's error
+            // with durable truth still convergent (`Retired` implies the
+            // document is Archived; the converse failure window is retryable).
+            SessionLifecycleTerminalRecovered,
+            SessionArchiveResolved {
+                disposition: Enum<SessionArchiveDisposition>,
+                write_document: bool,
+                retire_runtime: bool,
             },
         }
 
@@ -971,6 +1050,19 @@ machine! {
             has_metadata || has_build_state
         }
 
+        // Lifecycle-terminal realization helper: the runtime is retired iff
+        // the archive is runtime-backed AND the session is actually known to
+        // the runtime side (a durable snapshot exists or the runtime has the
+        // session registered). A runtime-backed archive of a session the
+        // runtime has never seen must not spuriously register-then-retire it.
+        helper archive_should_retire_runtime(
+            runtime_backed: bool,
+            durable_snapshot_present: bool,
+            runtime_session_registered: bool
+        ) -> bool {
+            runtime_backed && (durable_snapshot_present || runtime_session_registered)
+        }
+
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnOverridesResolved => local seam NoOwnerRealization,
         disposition SessionInitialPromptStageResolved => local seam NoOwnerRealization,
@@ -997,6 +1089,8 @@ machine! {
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
+        disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
+        disposition SessionArchiveResolved => local seam NoOwnerRealization,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2982,6 +3076,87 @@ machine! {
             emit TranscriptRewriteCommitted {
                 kind: TranscriptEditKind::Rewrite,
                 success: true
+            }
+        }
+
+        // ===============================================================
+        // Lifecycle-terminal region (LUC-524 R004 fold). The recover
+        // transition adopts the canonical current archived-ness into the
+        // machine-owned registry; the two archive transitions decide the
+        // disposition and the realization action vector from that
+        // machine-owned terminal state. The Archive guards read the
+        // machine's own map — a drive against an unseeded session id fails
+        // closed at the generated accessor, so the shell MUST recover-seed
+        // before driving the archive input.
+        // ===============================================================
+
+        transition RecoverSessionLifecycleTerminal {
+            on input RecoverSessionLifecycleTerminal { session_id, terminal }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (terminal == SessionDocumentLifecycle::Active
+                    || terminal == SessionDocumentLifecycle::Archived)
+            }
+            update {
+                self.session_lifecycle_terminal.insert(session_id, terminal);
+            }
+            to Ready
+            emit SessionLifecycleTerminalRecovered
+        }
+
+        // Archive from Active: the only transition that moves the document
+        // lifecycle to Archived. The action vector instructs the shell to
+        // commit the durable document iff a durable snapshot exists, and to
+        // retire the runtime iff the archive is runtime-backed and the
+        // runtime actually knows the session.
+        transition ArchiveSessionDocumentActive {
+            on input ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Active
+            }
+            update {
+                self.session_lifecycle_terminal
+                    .insert(session_id, SessionDocumentLifecycle::Archived);
+            }
+            to Ready
+            emit SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::Archive,
+                write_document: durable_snapshot_present,
+                retire_runtime: archive_should_retire_runtime(
+                    runtime_backed,
+                    durable_snapshot_present,
+                    runtime_session_registered)
+            }
+        }
+
+        // Idempotent re-archive: an already-Archived document resolves to an
+        // explicit AlreadyArchived verdict with an empty action vector. The
+        // surface contract maps this verdict to its existing NotFound error.
+        transition ArchiveSessionDocumentAlreadyArchived {
+            on input ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Archived
+            }
+            update {}
+            to Ready
+            emit SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::AlreadyArchived,
+                write_document: false,
+                retire_runtime: false
             }
         }
 

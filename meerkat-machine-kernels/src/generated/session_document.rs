@@ -677,6 +677,106 @@ impl std::fmt::Display for ResumeSelfHostedSelection {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SessionArchiveDisposition {
+    #[default]
+    #[serde(rename = "Archive")]
+    Archive,
+    #[serde(rename = "AlreadyArchived")]
+    AlreadyArchived,
+}
+impl SessionArchiveDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::AlreadyArchived => "AlreadyArchived",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionArchiveDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Archive" => Ok(Self::Archive),
+            "AlreadyArchived" => Ok(Self::AlreadyArchived),
+            other => Err(format!("invalid SessionArchiveDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionArchiveDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionArchiveDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionDocumentLifecycle {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Archived")]
+    Archived,
+}
+impl SessionDocumentLifecycle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Archived => "Archived",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionDocumentLifecycle {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Archived" => Ok(Self::Archived),
+            other => Err(format!("invalid SessionDocumentLifecycle value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionDocumentLifecycle {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionDocumentLifecycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionFirstTurnPhase {
     #[default]
     #[serde(rename = "Inactive")]
@@ -1092,6 +1192,7 @@ pub struct State {
     pub session_first_turn_phase: std::collections::BTreeMap<SessionId, SessionFirstTurnPhase>,
     pub session_pending_initial_prompt_present: std::collections::BTreeMap<SessionId, bool>,
     pub session_pending_tool_results_count: std::collections::BTreeMap<SessionId, u64>,
+    pub session_lifecycle_terminal: std::collections::BTreeMap<SessionId, SessionDocumentLifecycle>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -1301,6 +1402,18 @@ pub mod inputs {
         pub session_id: SessionId,
         pub fork_or_rewrite_directive: TranscriptEditKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionLifecycleTerminal {
+        pub session_id: SessionId,
+        pub terminal: SessionDocumentLifecycle,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ArchiveSessionDocument {
+        pub session_id: SessionId,
+        pub runtime_backed: bool,
+        pub durable_snapshot_present: bool,
+        pub runtime_session_registered: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1337,6 +1450,8 @@ pub enum Input {
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
+    RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
+    ArchiveSessionDocument(inputs::ArchiveSessionDocument),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1393,6 +1508,8 @@ impl Input {
             Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
+            Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
+            Self::ArchiveSessionDocument(_) => InputKind::ArchiveSessionDocument,
         }
     }
 }
@@ -1430,6 +1547,8 @@ pub enum InputKind {
     RecoverSessionFromStore,
     ApplyPendingToolResults,
     TranscriptEdit,
+    RecoverSessionLifecycleTerminal,
+    ArchiveSessionDocument,
 }
 
 pub mod effects {
@@ -1550,6 +1669,14 @@ pub mod effects {
         pub kind: TranscriptEditKind,
         pub success: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionLifecycleTerminalRecovered {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionArchiveResolved {
+        pub disposition: SessionArchiveDisposition,
+        pub write_document: bool,
+        pub retire_runtime: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1584,6 +1711,8 @@ pub enum Effect {
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
+    SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
+    SessionArchiveResolved(effects::SessionArchiveResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1613,6 +1742,8 @@ pub enum EffectKind {
     SessionStoreRecoverySourceResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
+    SessionLifecycleTerminalRecovered,
+    SessionArchiveResolved,
 }
 
 #[allow(non_camel_case_types)]
@@ -1695,6 +1826,9 @@ pub enum TransitionId {
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
+    RecoverSessionLifecycleTerminal,
+    ArchiveSessionDocumentActive,
+    ArchiveSessionDocumentAlreadyArchived,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1770,5 +1904,6 @@ pub fn initial_state() -> State {
         session_first_turn_phase: Default::default(),
         session_pending_initial_prompt_present: Default::default(),
         session_pending_tool_results_count: Default::default(),
+        session_lifecycle_terminal: Default::default(),
     }
 }

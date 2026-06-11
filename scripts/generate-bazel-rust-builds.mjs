@@ -1238,6 +1238,11 @@ for (const pkg of localPackages.values()) {
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);
+      } else if (key === "xtask" && (target.name === "rmat_strict" || target.name === "rmat_audit")) {
+        // Strict RMAT walks every workspace source through syn (and now
+        // resolves ownership anchors against a full workspace type index);
+        // the 60s "small" budget times out on remote executors.
+        attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       } else if (tags.includes("fast")) {
         attrs.splice(attrs.length - 1, 0, `    size = "small",`);
       }

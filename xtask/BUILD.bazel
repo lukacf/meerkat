@@ -597,7 +597,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:repo_governance_files",
@@ -670,7 +670,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:workspace_runfiles",
         "tests/rustfmt_host.sh",

@@ -2675,8 +2675,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
             // `live/refresh` observes adapter command-queue acceptance in the
             // shell, then submits that observation here. The generated effect
-            // below owns the public `Queued` result class and the compatibility
-            // `refresh_enqueued` mirror.
+            // below owns the public `Queued` result class.
             live_refresh_result_sequence: u64,
             live_refresh_queue_acceptance_sequence_by_channel: Map<String, u64>,
             live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
@@ -3906,12 +3905,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 deny_names: Set<ToolName>,
             },
             ClearTurnToolOverlay,
-            // Generated authority for full visibility-state replacement. The
-            // name is retained for compatibility with older schema artifacts;
-            // the transition now admits filters, witnesses, deferred authority
-            // maps, and revision high-water marks before any shell projection
-            // may be overwritten.
-            SyncVisibilityRevisions {
+            // Generated authority for full visibility-state replacement:
+            // admits filters, witnesses, deferred authority maps, and
+            // revision high-water marks before any shell projection may be
+            // overwritten.
+            ReplaceVisibilityState {
                 capability_base_filter: ToolFilter,
                 inherited_base_filter: ToolFilter,
                 active_filter: ToolFilter,
@@ -4502,21 +4500,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             LiveRefreshResultResolved {
                 channel_id: String,
                 status: Enum<LiveRefreshPublicStatus>,
-                refresh_enqueued: bool,
                 sequence: u64,
                 queue_acceptance_sequence: u64,
             },
             LiveCloseResultResolved {
                 channel_id: String,
                 status: Enum<LiveClosePublicStatus>,
-                closed: bool,
                 sequence: u64,
                 close_observation_sequence: u64,
             },
             LiveCommandResultResolved {
                 channel_id: String,
                 command: Enum<LiveCommandPublicKind>,
-                accepted: bool,
                 sequence: u64,
                 command_acceptance_sequence: u64,
             },
@@ -4657,7 +4652,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 lane: Enum<RealtimeTranscriptLaneKind>,
                 sequence: u64,
             },
-            EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
                 // Machine-owned actionable grouping verdict: encodes which
@@ -4908,7 +4902,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition MobEventStreamCloseResolved => local seam SurfaceResultAlignment,
         disposition LiveChannelStatusResolved => local seam SurfaceResultAlignment,
         disposition RealtimeTranscriptAppended => local seam SurfaceResultAlignment,
-        disposition EnqueueClassifiedEntry => local seam NoOwnerRealization,
         disposition PeerIngressClassified => local seam NoOwnerRealization,
         disposition PeerResponseReplyClassified => local seam NoOwnerRealization,
         disposition PeerIngressReceiveResolved => local seam NoOwnerRealization,
@@ -11072,8 +11065,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Comms supplies only parsed transport facts. The DSL owns the
         // semantic classification result emitted on `PeerIngressClassified`:
         // peer input class, auth exemption, lifecycle subject, silent routing,
-        // and response terminality. The legacy `EnqueueClassifiedEntry` effect
-        // remains as the coarse queue signal for existing machine audits.
+        // and response terminality.
         //
         // Peer lifecycle notices are mob topology control-plane mechanics, so
         // live idle members may still classify them without admitting normal
@@ -11089,7 +11081,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "peer_ingress_message" { envelope_kind == PeerIngressEnvelopeClass::Message }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
                 actionable: true,
@@ -11111,7 +11102,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "peer_ingress_message" { envelope_kind == PeerIngressEnvelopeClass::Message }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
                 actionable: true,
@@ -11139,7 +11129,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11167,7 +11156,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11195,7 +11183,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11223,7 +11210,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11251,7 +11237,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11279,7 +11264,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Retired
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11307,7 +11291,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Stopped
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11335,7 +11318,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11363,7 +11345,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -11391,7 +11372,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -11419,7 +11399,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Retired
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -11447,7 +11426,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Stopped
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -11475,7 +11453,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -11501,7 +11478,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
                 actionable: false,
@@ -11527,7 +11503,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
                 actionable: false,
@@ -11553,7 +11528,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
                 actionable: false,
@@ -11579,7 +11553,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
                 actionable: false,
@@ -11605,7 +11578,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
                 actionable: false,
@@ -11631,7 +11603,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -11657,7 +11628,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -11683,7 +11653,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -11709,7 +11678,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -11735,7 +11703,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -11763,7 +11730,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11791,7 +11757,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11819,7 +11784,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
                 actionable: false,
@@ -11847,7 +11811,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11875,7 +11838,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Retired
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11903,7 +11865,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Stopped
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11931,7 +11892,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11959,7 +11919,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
                 actionable: false,
@@ -11987,7 +11946,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Idle
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -12015,7 +11973,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Retired
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -12043,7 +12000,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Stopped
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -12071,7 +12027,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -12099,7 +12054,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
                 actionable: false,
@@ -12124,7 +12078,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
                 actionable: true,
@@ -12149,7 +12102,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
                 actionable: true,
@@ -12174,7 +12126,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
                 actionable: true,
@@ -12199,7 +12150,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
                 actionable: true,
@@ -12224,7 +12174,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
                 actionable: true,
@@ -12249,7 +12198,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
                 actionable: true,
@@ -12271,7 +12219,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "peer_ingress_ack" { envelope_kind == PeerIngressEnvelopeClass::Ack }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
                 actionable: false,
@@ -12293,7 +12240,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "peer_ingress_ack" { envelope_kind == PeerIngressEnvelopeClass::Ack }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
                 actionable: false,
@@ -12311,7 +12257,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "session_registered" { self.session_id != None }
             update {}
             to Attached
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
                 actionable: true,
@@ -12329,7 +12274,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "session_registered" { self.session_id != None }
             update {}
             to Running
-            emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
                 actionable: true,
@@ -16983,8 +16927,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // RecordLiveRefreshQueued: generated public-result authority for
         // `live/refresh` once the adapter command queue has accepted the
         // refresh handoff. The shell observes queue acceptance but cannot
-        // construct `status: queued` or the compatibility
-        // `refresh_enqueued` fact without this generated effect.
+        // construct `status: queued` without this generated effect.
         transition RecordLiveRefreshQueued {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecordLiveRefreshQueued { channel_id, queue_acceptance_sequence }
@@ -17009,7 +16952,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit LiveRefreshResultResolved {
                 channel_id: channel_id,
                 status: LiveRefreshPublicStatus::Queued,
-                refresh_enqueued: true,
                 sequence: self.live_refresh_result_sequence,
                 queue_acceptance_sequence: queue_acceptance_sequence
             }
@@ -17056,7 +16998,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit LiveCloseResultResolved {
                 channel_id: channel_id,
                 status: LiveClosePublicStatus::Closed,
-                closed: true,
                 sequence: self.live_close_result_sequence,
                 close_observation_sequence: close_observation_sequence
             }
@@ -17093,7 +17034,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit LiveCommandResultResolved {
                 channel_id: channel_id,
                 command: command,
-                accepted: true,
                 sequence: self.live_command_result_sequence,
                 command_acceptance_sequence: command_acceptance_sequence
             }
@@ -18416,14 +18356,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // SyncVisibilityRevisions: generated authority for full visibility
-        // replacement. The transition name is retained for compatibility, but
-        // it now admits filters, witnesses, deferred authority maps, and
-        // revision high-water marks before shell visibility projections are
-        // overwritten.
-        transition SyncVisibilityRevisions {
+        // ReplaceVisibilityState: generated authority for full visibility
+        // replacement. Admits filters, witnesses, deferred authority maps,
+        // and revision high-water marks before shell visibility projections
+        // are overwritten.
+        transition ReplaceVisibilityState {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input SyncVisibilityRevisions {
+            on input ReplaceVisibilityState {
                 capability_base_filter, inherited_base_filter,
                 active_filter, staged_filter,
                 active_revision, staged_revision,

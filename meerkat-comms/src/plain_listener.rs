@@ -149,19 +149,19 @@ mod tests {
     use super::*;
     use crate::classify::test_support;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeers;
+    use crate::trust::TrustStore;
     use tokio::io::AsyncWriteExt;
 
     fn classified_inbox() -> (Inbox, crate::InboxSender) {
         Inbox::new_classified(test_support::classification_context(
-            TrustedPeers::new(),
+            TrustStore::new(),
             false,
         ))
     }
 
     fn classified_inbox_with_capacity(capacity: usize) -> (Inbox, crate::InboxSender) {
         Inbox::new_classified_with_capacity_for_test(
-            test_support::classification_context(TrustedPeers::new(), false),
+            test_support::classification_context(TrustStore::new(), false),
             capacity,
         )
     }

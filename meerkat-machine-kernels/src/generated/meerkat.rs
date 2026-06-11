@@ -11650,7 +11650,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearTurnToolOverlay {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SyncVisibilityRevisions {
+    pub struct ReplaceVisibilityState {
         pub capability_base_filter: ToolFilter,
         pub inherited_base_filter: ToolFilter,
         pub active_filter: ToolFilter,
@@ -12159,7 +12159,7 @@ pub enum Input {
     CommitDeferredNames(inputs::CommitDeferredNames),
     SetTurnToolOverlay(inputs::SetTurnToolOverlay),
     ClearTurnToolOverlay(inputs::ClearTurnToolOverlay),
-    SyncVisibilityRevisions(inputs::SyncVisibilityRevisions),
+    ReplaceVisibilityState(inputs::ReplaceVisibilityState),
     SurfaceRegister(inputs::SurfaceRegister),
     SurfaceSetRemovalTimeout(inputs::SurfaceSetRemovalTimeout),
     SurfaceStageAdd(inputs::SurfaceStageAdd),
@@ -12491,7 +12491,7 @@ impl Input {
             Self::CommitDeferredNames(_) => InputKind::CommitDeferredNames,
             Self::SetTurnToolOverlay(_) => InputKind::SetTurnToolOverlay,
             Self::ClearTurnToolOverlay(_) => InputKind::ClearTurnToolOverlay,
-            Self::SyncVisibilityRevisions(_) => InputKind::SyncVisibilityRevisions,
+            Self::ReplaceVisibilityState(_) => InputKind::ReplaceVisibilityState,
             Self::SurfaceRegister(_) => InputKind::SurfaceRegister,
             Self::SurfaceSetRemovalTimeout(_) => InputKind::SurfaceSetRemovalTimeout,
             Self::SurfaceStageAdd(_) => InputKind::SurfaceStageAdd,
@@ -12780,7 +12780,7 @@ pub enum InputKind {
     CommitDeferredNames,
     SetTurnToolOverlay,
     ClearTurnToolOverlay,
-    SyncVisibilityRevisions,
+    ReplaceVisibilityState,
     SurfaceRegister,
     SurfaceSetRemovalTimeout,
     SurfaceStageAdd,
@@ -13408,7 +13408,6 @@ pub mod effects {
     pub struct LiveRefreshResultResolved {
         pub channel_id: String,
         pub status: LiveRefreshPublicStatus,
-        pub refresh_enqueued: bool,
         pub sequence: u64,
         pub queue_acceptance_sequence: u64,
     }
@@ -13416,7 +13415,6 @@ pub mod effects {
     pub struct LiveCloseResultResolved {
         pub channel_id: String,
         pub status: LiveClosePublicStatus,
-        pub closed: bool,
         pub sequence: u64,
         pub close_observation_sequence: u64,
     }
@@ -13424,7 +13422,6 @@ pub mod effects {
     pub struct LiveCommandResultResolved {
         pub channel_id: String,
         pub command: LiveCommandPublicKind,
-        pub accepted: bool,
         pub sequence: u64,
         pub command_acceptance_sequence: u64,
     }
@@ -13565,8 +13562,6 @@ pub mod effects {
         pub lane: RealtimeTranscriptLaneKind,
         pub sequence: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
         pub class: PeerIngressInputClass,
@@ -13856,7 +13851,6 @@ pub enum Effect {
     MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
     RealtimeTranscriptAppended(effects::RealtimeTranscriptAppended),
-    EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
     PeerIngressReceiveResolved(effects::PeerIngressReceiveResolved),
@@ -14012,7 +14006,6 @@ pub enum EffectKind {
     MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
     RealtimeTranscriptAppended,
-    EnqueueClassifiedEntry,
     PeerIngressClassified,
     PeerResponseReplyClassified,
     PeerIngressReceiveResolved,
@@ -15383,11 +15376,11 @@ pub enum TransitionId {
     ClearTurnToolOverlayRunning,
     ClearTurnToolOverlayRetired,
     ClearTurnToolOverlayStopped,
-    SyncVisibilityRevisionsIdle,
-    SyncVisibilityRevisionsAttached,
-    SyncVisibilityRevisionsRunning,
-    SyncVisibilityRevisionsRetired,
-    SyncVisibilityRevisionsStopped,
+    ReplaceVisibilityStateIdle,
+    ReplaceVisibilityStateAttached,
+    ReplaceVisibilityStateRunning,
+    ReplaceVisibilityStateRetired,
+    ReplaceVisibilityStateStopped,
     McpServerConnectPendingIdle,
     McpServerConnectPendingAttached,
     McpServerConnectPendingRunning,

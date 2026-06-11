@@ -1707,7 +1707,7 @@ fn apply_recovered_flow_signal(
 
 fn seed_mob_authority_restore_failures(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
-    restore_diagnostics: &HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>,
+    restore_diagnostics: &HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>,
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
     for (identity, diagnostic) in restore_diagnostics {
@@ -1735,7 +1735,8 @@ struct RuntimeWiring {
     dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
     machine_state_watch_tx:
         tokio::sync::watch::Sender<crate::machines::mob_machine::MobMachineState>,
-    restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
+    restore_diagnostics:
+        Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
     command_tx: mpsc::Sender<MobCommand>,
@@ -3164,8 +3165,8 @@ impl MobBuilder {
                     continue;
                 };
                 let peer_identity = AgentIdentity::from(peer_dsl_identity.0.as_str());
-                let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
-                let peer_entry = roster.get(&peer_meerkat_id).cloned().ok_or_else(|| {
+                let peer_member_identity = AgentIdentity::from(peer_identity.as_str());
+                let peer_entry = roster.get(&peer_member_identity).cloned().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume machine wiring target '{}' missing for '{}'",
                         peer_identity, entry.agent_identity
@@ -3176,7 +3177,7 @@ impl MobBuilder {
                     peer_entry.role.as_str(),
                     peer_entry.agent_identity.as_str(),
                 )?;
-                if broken_members.contains(&peer_meerkat_id) {
+                if broken_members.contains(&peer_member_identity) {
                     if let (Some(comms_a), Some(local_peer_id)) =
                         (local_comms.as_ref(), local_peer_id.as_ref())
                         && let Some(stale_peer) = current_peers

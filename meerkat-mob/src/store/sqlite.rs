@@ -2331,11 +2331,7 @@ mod tests {
             let mut flows = std::collections::BTreeMap::new();
             flows.insert(
                 FlowId::from("flow-a"),
-                FlowSpec {
-                    description: None,
-                    steps: IndexMap::new(),
-                    root: None,
-                },
+                FlowSpec::new(None, IndexMap::new(), None),
             );
             flows
         };
@@ -2877,7 +2873,7 @@ mod tests {
                 address: "tcp://worker-1".to_string(),
                 bootstrap_token: None,
                 session_id: None,
-                pubkey: None,
+                pubkey: [7u8; 32],
             }),
             bootstrap_token: None,
             status: ExternalBindingOverlayStatus::Normalized,

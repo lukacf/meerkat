@@ -6,7 +6,7 @@ use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
 use async_trait::async_trait;
-use meerkat_auth_core::{McpAuthMode, McpAuthTarget, McpOAuthError};
+use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
@@ -33,12 +33,12 @@ pub struct McpConnection {
 pub trait McpAuthResolver: Send + Sync {
     async fn stored_bearer_token(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError>;
 
     async fn interactive_login(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError>;
 }
@@ -47,14 +47,14 @@ pub trait McpAuthResolver: Send + Sync {
 impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
     async fn stored_bearer_token(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
         self.stored_bearer_token(target).await
     }
 
     async fn interactive_login(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
         self.interactive_login(target, www_authenticate).await
@@ -149,7 +149,7 @@ impl McpConnection {
                 .await
                 .map_err(StreamableConnectError::into_mcp_error);
         }
-        let target = McpAuthTarget::new(config.name.clone(), url.to_string());
+        let target = McpServerIdentity::from_server_config(config.name.clone(), url.to_string());
         let mut stored_token = None;
         let mut force_interactive_reauth = false;
         if let Some(resolver) = auth_resolver.as_deref() {
@@ -943,11 +943,11 @@ pub mod tests {
     impl McpAuthResolver for FakeMcpAuthResolver {
         async fn stored_bearer_token(
             &self,
-            target: &McpAuthTarget,
+            target: &McpServerIdentity,
         ) -> Result<Option<String>, McpOAuthError> {
             if self.stored_reauth_required {
                 return Err(McpOAuthError::ReauthRequired {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                 });
             }
             Ok(self.stored_token.clone())
@@ -955,7 +955,7 @@ pub mod tests {
 
         async fn interactive_login(
             &self,
-            _target: &McpAuthTarget,
+            _target: &McpServerIdentity,
             www_authenticate: Option<&str>,
         ) -> Result<String, McpOAuthError> {
             if let Some(delay) = self.interactive_delay {

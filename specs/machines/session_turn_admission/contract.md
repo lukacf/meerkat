@@ -24,7 +24,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeCancelAfterBoundary`
 - `ResolveLastStartTurnPublicTerminal`
 - `ResolveRuntimeKeepAlive`(keep_alive_request: RuntimeKeepAliveRequest)
-- `ResolveLiveInterruptRequired`(handling_mode: TurnHandlingMode)
 - `ResolveStartTurnDisposition`(execution_kind_present: Bool, execution_kind: StartTurnExecutionKind, prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64, pending_continuation: PendingContinuationDisposition)
 
 ## Signals
@@ -37,7 +36,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StartTurnDispositionResolved`(disposition: StartTurnDisposition)
 - `StartTurnPublicTerminalResolved`(terminal: StartTurnPublicTerminal)
 - `RuntimeKeepAliveResolved`(decision: RuntimeKeepAlivePersistenceDecision)
-- `LiveInterruptRequired`(required: Bool)
 
 ## Helpers
 - `is_active_phase`(phase: TurnAdmissionPhase) -> `Bool`
@@ -273,22 +271,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `RuntimeKeepAliveResolved`
-- To: `Admitted`
-
-### `ResolveLiveInterruptRequiredSteer`
-- From: `Admitted`
-- On: `ResolveLiveInterruptRequired`(handling_mode)
-- Guards:
-  - ``
-- Emits: `LiveInterruptRequired`
-- To: `Admitted`
-
-### `ResolveLiveInterruptRequiredQueue`
-- From: `Admitted`
-- On: `ResolveLiveInterruptRequired`(handling_mode)
-- Guards:
-  - ``
-- Emits: `LiveInterruptRequired`
 - To: `Admitted`
 
 ### `ResolveLastStartTurnPublicTerminalNoPendingIdle`

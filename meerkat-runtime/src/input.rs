@@ -13,7 +13,8 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{
-    HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticePeer,
+    ContentInput, HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
+    SystemNoticePeer,
 };
 use meerkat_core::{
     BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
@@ -127,10 +128,8 @@ pub enum Input {
     /// External event input.
     ExternalEvent(ExternalEventInput),
     /// Explicit runtime continuation work.
-    #[serde(alias = "system_generated")]
     Continuation(ContinuationInput),
     /// Explicit non-content operation/lifecycle input.
-    #[serde(alias = "projected")]
     Operation(OperationInput),
 }
 
@@ -199,21 +198,22 @@ impl Input {
     }
 }
 
-fn migrate_legacy_payload_blocks(event: &mut ExternalEventInput) -> Result<(), BlobStoreError> {
-    let Some(obj) = event.payload.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(blocks_value) = obj.remove("blocks") else {
-        return Ok(());
-    };
-    if event.blocks.is_some() {
-        return Ok(());
+/// Fail closed on the retired external-event shape that smuggled multimodal
+/// blocks inside the payload JSON object. The typed [`ExternalEventInput::blocks`]
+/// field is the only content owner; a payload-level `blocks` key is rejected
+/// with a typed error instead of being migrated or silently passed through.
+fn reject_legacy_payload_blocks(event: &ExternalEventInput) -> Result<(), BlobStoreError> {
+    if event
+        .payload
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("blocks"))
+    {
+        return Err(BlobStoreError::Internal(format!(
+            "external-event payload for event_type `{}` carries the retired payload-level \
+             `blocks` key; multimodal content must use the typed `ExternalEventInput.blocks` owner",
+            event.event_type
+        )));
     }
-    let blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value)
-        .map_err(|err| {
-            BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
-        })?;
-    event.blocks = Some(blocks);
     Ok(())
 }
 
@@ -223,22 +223,22 @@ pub async fn externalize_input_images(
 ) -> Result<(), BlobStoreError> {
     match input {
         Input::Prompt(prompt) => {
-            if let Some(blocks) = prompt.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut prompt.content {
                 externalize_content_blocks(blob_store, blocks).await?;
             }
         }
         Input::Peer(peer) => {
-            if let Some(blocks) = peer.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut peer.content {
                 externalize_content_blocks(blob_store, blocks).await?;
             }
         }
         Input::FlowStep(flow_step) => {
-            if let Some(blocks) = flow_step.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut flow_step.content {
                 externalize_content_blocks(blob_store, blocks).await?;
             }
         }
         Input::ExternalEvent(event) => {
-            migrate_legacy_payload_blocks(event)?;
+            reject_legacy_payload_blocks(event)?;
             if let Some(blocks) = event.blocks.as_mut() {
                 externalize_content_blocks(blob_store, blocks).await?;
             }
@@ -255,22 +255,22 @@ pub async fn hydrate_input_images(
 ) -> Result<(), BlobStoreError> {
     match input {
         Input::Prompt(prompt) => {
-            if let Some(blocks) = prompt.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut prompt.content {
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
         }
         Input::Peer(peer) => {
-            if let Some(blocks) = peer.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut peer.content {
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
         }
         Input::FlowStep(flow_step) => {
-            if let Some(blocks) = flow_step.blocks.as_mut() {
+            if let ContentInput::Blocks(blocks) = &mut flow_step.content {
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
         }
         Input::ExternalEvent(event) => {
-            migrate_legacy_payload_blocks(event)?;
+            reject_legacy_payload_blocks(event)?;
             if let Some(blocks) = event.blocks.as_mut() {
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
@@ -284,12 +284,11 @@ pub async fn hydrate_input_images(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptInput {
     pub header: InputHeader,
-    /// The prompt text.
-    pub text: String,
-    /// Optional multimodal content blocks. When present, `text` serves as the
-    /// text projection (backwards compat), and `blocks` carries the full content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// The prompt content — the single typed owner of this input's content
+    /// fact (plain text or multimodal blocks). The text projection is derived
+    /// at read time via [`ContentInput::text_content`]; it is never stored
+    /// separately.
+    pub content: ContentInput,
     /// Runtime-authored typed transcript appends that travel with this turn.
     ///
     /// These are not operator-authored prompt content. The runtime projects
@@ -314,24 +313,17 @@ impl PromptInput {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: text.into(),
-            blocks: None,
+            content: ContentInput::Text(text.into()),
             typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
 
-    /// Create a multimodal prompt from `ContentInput`.
+    /// Create a prompt from `ContentInput` (text or multimodal blocks).
     pub fn from_content_input(
-        input: meerkat_core::types::ContentInput,
+        input: ContentInput,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
-        let text = input.text_content();
-        let blocks = if input.has_images() {
-            Some(input.into_blocks())
-        } else {
-            None
-        };
         Self {
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -343,8 +335,7 @@ impl PromptInput {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text,
-            blocks,
+            content: input,
             typed_turn_appends: Vec::new(),
             turn_metadata,
         }
@@ -358,22 +349,19 @@ pub struct PeerInput {
     /// The peer convention (message, request, response).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub convention: Option<PeerConvention>,
-    /// Legacy textual body for this peer input.
-    ///
-    /// Message-style peer traffic uses this directly. Request/response prompt
-    /// projection is runtime-owned and must be reconstructed from
-    /// `convention + payload + source` rather than helper-rendered prose.
-    pub body: String,
+    /// The peer content — the single typed owner of this input's content fact
+    /// (plain text or multimodal blocks). Message-style peer traffic uses this
+    /// directly. Request/response prompt projection is runtime-owned and must
+    /// be reconstructed from `convention + payload + source` rather than
+    /// helper-rendered prose. The text projection is derived at read time via
+    /// [`ContentInput::text_content`]; it is never stored separately.
+    pub content: ContentInput,
     /// Structured peer payload, when one exists.
     ///
     /// For `Request`, this is the request params. For `Response*`, this is the
     /// response result payload. Message traffic leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
-    /// Optional multimodal content blocks. When present, `body` serves as the
-    /// text projection (backwards compat), and `blocks` carries the full content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
     /// Optional handling-mode override for actionable peer inputs.
     /// When present on Message/Request/no-convention, overrides kind-based
     /// policy defaults. Forbidden on ResponseProgress; ResponseTerminal may
@@ -459,9 +447,8 @@ pub fn peer_response_terminal_input(
             request_id,
             status: response_terminal_status_from_wire(status),
         }),
-        body: String::new(),
+        content: ContentInput::Text(String::new()),
         payload: Some(result),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -472,13 +459,11 @@ pub struct FlowStepInput {
     pub header: InputHeader,
     /// Flow step identifier.
     pub step_id: String,
-    /// Step instructions/prompt.
-    pub instructions: String,
-    /// Optional multimodal content blocks. When present, `instructions` serves
-    /// as the text projection (backwards compat), and `blocks` carries the
-    /// full content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// Step instructions — the single typed owner of this input's content
+    /// fact (plain text or multimodal blocks). The text projection is derived
+    /// at read time via [`ContentInput::text_content`]; it is never stored
+    /// separately.
+    pub content: ContentInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
@@ -735,19 +720,19 @@ pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
         .map(|projection| {
             let prompt = projection.prompt_text();
             if prompt.is_empty() {
-                peer.body.clone()
+                peer.content.text_content()
             } else {
                 prompt
             }
         })
-        .unwrap_or_else(|| peer.body.clone())
+        .unwrap_or_else(|| peer.content.text_content())
 }
 
 pub(crate) fn input_prompt_text(input: &Input) -> String {
     match input {
-        Input::Prompt(p) => p.text.clone(),
+        Input::Prompt(p) => p.content.text_content(),
         Input::Peer(p) => peer_prompt_text(p),
-        Input::FlowStep(f) => f.instructions.clone(),
+        Input::FlowStep(f) => f.content.text_content(),
         Input::ExternalEvent(e) => external_event_projection_text(e),
         Input::Continuation(continuation) => format!("[Continuation] {}", continuation.reason),
         Input::Operation(operation) => {
@@ -815,25 +800,12 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
         CommsNoticeKind::ResponseTerminal => "Peer response terminal".to_string(),
         CommsNoticeKind::Message | CommsNoticeKind::Other(_) => "Peer message".to_string(),
     };
-    let content = if let Some(blocks) = peer.blocks.clone() {
-        let body_already_in_blocks = blocks.iter().any(|block| {
-            matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == peer.body.trim())
-        });
-        if peer.body.trim().is_empty() || body_already_in_blocks {
-            blocks
-        } else {
-            let mut content = vec![meerkat_core::types::ContentBlock::Text {
-                text: peer.body.clone(),
-            }];
-            content.extend(blocks);
-            content
+    let content = match &peer.content {
+        ContentInput::Text(body) if body.is_empty() => Vec::new(),
+        ContentInput::Text(body) => {
+            vec![meerkat_core::types::ContentBlock::Text { text: body.clone() }]
         }
-    } else if peer.body.is_empty() {
-        Vec::new()
-    } else {
-        vec![meerkat_core::types::ContentBlock::Text {
-            text: peer.body.clone(),
-        }]
+        ContentInput::Blocks(blocks) => blocks.clone(),
     };
     // The peer routing identity is the canonical typed `PeerId`. Production
     // peer inputs always carry a hyphenated UUID here (the comms bridge stamps
@@ -904,23 +876,27 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     let (role, content) = match input {
         Input::Prompt(p)
             if !p.typed_turn_appends.is_empty()
-                && p.text.trim().is_empty()
-                && p.blocks.as_ref().is_none_or(Vec::is_empty) =>
+                && match &p.content {
+                    ContentInput::Text(text) => text.trim().is_empty(),
+                    ContentInput::Blocks(blocks) => blocks.is_empty(),
+                } =>
         {
             return None;
         }
-        Input::Prompt(p) if p.blocks.is_some() => (
-            ConversationAppendRole::User,
-            CoreRenderable::Blocks {
-                blocks: p.blocks.clone().unwrap_or_default(),
-            },
-        ),
-        Input::Prompt(_) => (
-            ConversationAppendRole::User,
-            CoreRenderable::Text {
-                text: input_prompt_text(input),
-            },
-        ),
+        Input::Prompt(p) => match &p.content {
+            ContentInput::Blocks(blocks) => (
+                ConversationAppendRole::User,
+                CoreRenderable::Blocks {
+                    blocks: blocks.clone(),
+                },
+            ),
+            ContentInput::Text(_) => (
+                ConversationAppendRole::User,
+                CoreRenderable::Text {
+                    text: input_prompt_text(input),
+                },
+            ),
+        },
         Input::Peer(p) => peer_notice_renderable(p)
             .map(|content| (ConversationAppendRole::SystemNotice, content))?,
         Input::FlowStep(f) => (
@@ -930,7 +906,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
                 body: Some(format!("Flow step {}", f.step_id)),
                 blocks: vec![SystemNoticeBlock::RuntimeNotice {
                     category: "flow_step".to_string(),
-                    detail: Some(f.instructions.clone()),
+                    detail: Some(f.content.text_content()),
                     payload: None,
                 }],
             },
@@ -1122,8 +1098,7 @@ mod tests {
     fn prompt_input_serde() {
         let input = Input::Prompt(PromptInput {
             header: make_header(),
-            text: "hello".into(),
-            blocks: None,
+            content: "hello".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
@@ -1138,8 +1113,7 @@ mod tests {
         let append = typed_runtime_notice_append("peer delivery");
         let input = Input::Prompt(PromptInput {
             header: make_header(),
-            text: String::new(),
-            blocks: None,
+            content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![append.clone()],
             turn_metadata: None,
         });
@@ -1157,8 +1131,7 @@ mod tests {
         let append = typed_runtime_notice_append("typed appends persist");
         let input = Input::Prompt(PromptInput {
             header: make_header(),
-            text: String::new(),
-            blocks: None,
+            content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![append.clone()],
             turn_metadata: None,
         });
@@ -1168,7 +1141,7 @@ mod tests {
         let Input::Prompt(prompt) = parsed else {
             panic!("expected prompt input");
         };
-        assert_eq!(prompt.text, "");
+        assert_eq!(prompt.content.text_content(), "");
         assert_eq!(prompt.typed_turn_appends, vec![append]);
     }
 
@@ -1177,9 +1150,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi there".into(),
+            content: "hi there".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1200,9 +1172,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header,
             convention: Some(PeerConvention::Message),
-            body: "caption".into(),
-            payload: None,
-            blocks: Some(vec![
+            content: ContentInput::Blocks(vec![
                 meerkat_core::types::ContentBlock::Text {
                     text: "caption".into(),
                 },
@@ -1211,6 +1181,7 @@ mod tests {
                     data: "abc".into(),
                 },
             ]),
+            payload: None,
             handling_mode: None,
         });
 
@@ -1262,9 +1233,8 @@ mod tests {
                 request_id: request_id.into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "legacy response body".into(),
+            content: "response body".into(),
             payload: Some(serde_json::json!({"answer":"ok"})),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -1401,9 +1371,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header,
             convention: Some(PeerConvention::Message),
-            body: "please look at this while you work".into(),
+            content: "please look at this while you work".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         let input_id = input.id().clone();
@@ -1473,12 +1442,11 @@ mod tests {
                 request_id: request_id.into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
-            payload: Some(serde_json::json!({"answer":"ok"})),
-            blocks: Some(vec![meerkat_core::types::ContentBlock::Image {
+            content: ContentInput::Blocks(vec![meerkat_core::types::ContentBlock::Image {
                 media_type: "image/jpeg".into(),
                 data: "abc".into(),
             }]),
+            payload: Some(serde_json::json!({"answer":"ok"})),
             handling_mode: None,
         });
 
@@ -1515,9 +1483,8 @@ mod tests {
                 request_id: "req-1".into(),
                 intent: "mob.peer_added".into(),
             }),
-            body: "Agent joined".into(),
+            content: "Agent joined".into(),
             payload: Some(serde_json::json!({"name": "agent-1"})),
-            blocks: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1537,9 +1504,8 @@ mod tests {
                 request_id: "req-1".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "Done".into(),
+            content: "Done".into(),
             payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1555,9 +1521,8 @@ mod tests {
                 request_id: "req-1".into(),
                 phase: ResponseProgressPhase::InProgress,
             }),
-            body: "Working...".into(),
+            content: "Working...".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
-            blocks: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1570,8 +1535,7 @@ mod tests {
         let input = Input::FlowStep(FlowStepInput {
             header: make_header(),
             step_id: "step-1".into(),
-            instructions: "analyze the data".into(),
-            blocks: Some(vec![
+            content: ContentInput::Blocks(vec![
                 meerkat_core::types::ContentBlock::Text {
                     text: "analyze the data".into(),
                 },
@@ -1617,8 +1581,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_external_event_payload_blocks_migrate_to_canonical_blocks_owner() {
-        let mut input = Input::ExternalEvent(ExternalEventInput {
+    fn legacy_external_event_payload_blocks_are_rejected() {
+        // The retired shape smuggled multimodal blocks inside the payload
+        // JSON. It must fail closed with a typed error — never migrate.
+        let event = ExternalEventInput {
             header: make_header(),
             event_type: "webhook.received".into(),
             payload: serde_json::json!({
@@ -1631,17 +1597,31 @@ mod tests {
             blocks: None,
             handling_mode: HandlingMode::Queue,
             render_metadata: None,
-        });
+        };
 
-        match &mut input {
-            Input::ExternalEvent(event) => {
-                migrate_legacy_payload_blocks(event).unwrap();
-                assert!(event.payload.get("blocks").is_none());
-                assert_eq!(event.payload["body"], "see image");
-                assert_eq!(event.blocks.as_ref().map(Vec::len), Some(2));
-            }
-            other => panic!("Expected ExternalEvent, got {other:?}"),
-        }
+        let err = reject_legacy_payload_blocks(&event)
+            .expect_err("payload-level blocks must fail closed");
+        assert!(matches!(err, BlobStoreError::Internal(_)));
+        // Payload is untouched: rejection never strips or rewrites it.
+        assert!(event.payload.get("blocks").is_some());
+        assert!(event.blocks.is_none());
+    }
+
+    #[test]
+    fn external_event_payload_without_blocks_key_passes_rejection_gate() {
+        let event = ExternalEventInput {
+            header: make_header(),
+            event_type: "webhook.received".into(),
+            payload: serde_json::json!({ "body": "plain payload" }),
+            blocks: Some(vec![meerkat_core::types::ContentBlock::Text {
+                text: "typed owner content".into(),
+            }]),
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        };
+
+        reject_legacy_payload_blocks(&event)
+            .expect("payload without a legacy blocks key must pass");
     }
 
     #[test]
@@ -1660,17 +1640,14 @@ mod tests {
     }
 
     #[test]
-    fn continuation_input_accepts_legacy_system_generated_tag() {
+    fn continuation_input_rejects_legacy_system_generated_tag() {
+        // The pre-rename `system_generated` tag is a retired persisted shape:
+        // it must fail closed instead of being folded into `continuation`.
         let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
         let mut json = serde_json::to_value(&input).unwrap();
         json["input_type"] = serde_json::Value::String("system_generated".into());
-        let parsed: Input = serde_json::from_value(json).unwrap();
-        match parsed {
-            Input::Continuation(continuation) => {
-                assert_eq!(continuation.reason, "detached_background_op_completed");
-            }
-            other => panic!("Expected Continuation, got {other:?}"),
-        }
+        serde_json::from_value::<Input>(json)
+            .expect_err("legacy system_generated input_type tag must be rejected");
     }
 
     #[test]
@@ -1692,7 +1669,9 @@ mod tests {
     }
 
     #[test]
-    fn operation_input_accepts_legacy_projected_tag() {
+    fn operation_input_rejects_legacy_projected_tag() {
+        // The pre-rename `projected` tag is a retired persisted shape: it
+        // must fail closed instead of being folded into `operation`.
         let input = Input::Operation(OperationInput {
             header: InputHeader {
                 durability: InputDurability::Derived,
@@ -1705,16 +1684,51 @@ mod tests {
         });
         let mut json = serde_json::to_value(&input).unwrap();
         json["input_type"] = serde_json::Value::String("projected".into());
-        let parsed: Input = serde_json::from_value(json).unwrap();
-        assert!(matches!(parsed, Input::Operation(_)));
+        serde_json::from_value::<Input>(json)
+            .expect_err("legacy projected input_type tag must be rejected");
+    }
+
+    #[test]
+    fn legacy_dual_carrier_input_shapes_are_rejected() {
+        // The retired persisted shape stored the content fact twice: a textual
+        // carrier (`text` / `body` / `instructions`) plus optional `blocks`.
+        // The single typed `content` owner replaced both; old shapes must fail
+        // closed instead of being coerced.
+        let header = serde_json::to_value(make_header()).unwrap();
+
+        let legacy_prompt = serde_json::json!({
+            "input_type": "prompt",
+            "header": header.clone(),
+            "text": "hello",
+            "blocks": null
+        });
+        serde_json::from_value::<Input>(legacy_prompt)
+            .expect_err("legacy prompt text+blocks shape must be rejected");
+
+        let legacy_peer = serde_json::json!({
+            "input_type": "peer",
+            "header": header.clone(),
+            "convention": { "convention_type": "message" },
+            "body": "hi there"
+        });
+        serde_json::from_value::<Input>(legacy_peer)
+            .expect_err("legacy peer body+blocks shape must be rejected");
+
+        let legacy_flow_step = serde_json::json!({
+            "input_type": "flow_step",
+            "header": header,
+            "step_id": "step-1",
+            "instructions": "analyze the data"
+        });
+        serde_json::from_value::<Input>(legacy_flow_step)
+            .expect_err("legacy flow-step instructions+blocks shape must be rejected");
     }
 
     #[test]
     fn input_kind_id() {
         let prompt = Input::Prompt(PromptInput {
             header: make_header(),
-            text: "hi".into(),
-            blocks: None,
+            content: "hi".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
@@ -1723,9 +1737,8 @@ mod tests {
         let peer_msg = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
@@ -1736,9 +1749,8 @@ mod tests {
                 request_id: "r".into(),
                 intent: "i".into(),
             }),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: Some(serde_json::json!({"subject": "x"})),
-            blocks: None,
             handling_mode: None,
         });
         assert_eq!(peer_req.kind(), InputKind::PeerRequest);
@@ -1805,12 +1817,12 @@ mod tests {
 
     #[test]
     fn peer_input_without_handling_mode_deserializes_as_none() {
-        // Simulate old serialized PeerInput without the handling_mode field.
+        // Serialized PeerInput without the optional handling_mode field.
         let json = serde_json::json!({
             "input_type": "peer",
             "header": serde_json::to_value(make_header()).unwrap(),
             "convention": { "convention_type": "message" },
-            "body": "hello"
+            "content": "hello"
         });
         let parsed: Input = serde_json::from_value(json).unwrap();
         match parsed {
@@ -1824,9 +1836,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1917,9 +1928,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1936,9 +1946,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();

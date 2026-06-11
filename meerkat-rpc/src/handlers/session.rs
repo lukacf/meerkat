@@ -77,7 +77,7 @@ pub struct CreateSessionParams {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
-    pub system_prompt: Option<String>,
+    pub system_prompt: meerkat::SystemPromptOverride,
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
@@ -292,8 +292,7 @@ pub async fn create_session_with_params(
     build_config.resume_override_mask.model = model_was_explicit;
     build_config.resume_override_mask.provider = provider_was_explicit;
     build_config.max_tokens = params.max_tokens;
-    build_config.system_prompt =
-        meerkat::SystemPromptOverride::from_wire_option(params.system_prompt);
+    build_config.system_prompt = params.system_prompt;
     build_config.output_schema = output_schema;
     build_config.structured_output_retries = params.structured_output_retries;
     build_config.hooks_override = params.hooks_override.unwrap_or_default();
@@ -390,9 +389,7 @@ pub async fn create_session_with_params(
     // Deferred creates register on-demand through the session/* router entry
     // points; eagerly attaching here is redundant and can recurse through the
     // runtime control path before the pending session has ever been exercised.
-    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
-        && params.initial_turn != Some(InitialTurn::Deferred)
-    {
+    if params.initial_turn != Some(InitialTurn::Deferred) {
         let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
             runtime.clone(),
             session_id.clone(),

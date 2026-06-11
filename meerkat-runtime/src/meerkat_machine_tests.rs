@@ -1231,8 +1231,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -1902,11 +1901,12 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
             request_id: "req-123".into(),
             intent: "checksum_token".into(),
         }),
-        body: "stale rendered request".into(),
+        content: meerkat_core::types::ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "Inspect this host and respond".into(),
+            },
+        ]),
         payload: Some(serde_json::json!({"subject": "mdm-smoke"})),
-        blocks: Some(vec![meerkat_core::types::ContentBlock::Text {
-            text: "Inspect this host and respond".into(),
-        }]),
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
 
@@ -2174,9 +2174,8 @@ fn make_progress_input(label: &str) -> Input {
             request_id: format!("req-{label}"),
             phase: crate::input::ResponseProgressPhase::InProgress,
         }),
-        body: format!("progress-{label}"),
+        content: format!("progress-{label}").into(),
         payload: Some(serde_json::json!({ "label": label })),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -6053,9 +6052,8 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
             correlation_id: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
-        body: "interrupt while running".into(),
+        content: "interrupt while running".into(),
         payload: None,
-        blocks: None,
         handling_mode: None,
     });
     let peer_input_id = peer_input.id().clone();
@@ -6309,9 +6307,8 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
             correlation_id: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
-        body: "interrupt through service ext ingest".into(),
+        content: "interrupt through service ext ingest".into(),
         payload: None,
-        blocks: None,
         handling_mode: None,
     });
 
@@ -6644,9 +6641,8 @@ fn interrupt_yielding_peer_input_with_idempotency(
             correlation_id: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
-        body: body.to_string(),
+        content: body.into(),
         payload: None,
-        blocks: None,
         handling_mode,
     });
     let input_id = input.id().clone();
@@ -6814,9 +6810,8 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
             correlation_id: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
-        body: "explicit steer should not cancel the active run".into(),
+        content: "explicit steer should not cancel the active run".into(),
         payload: None,
-        blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let steered_peer_input_id = steered_peer_input.id().clone();
@@ -16882,7 +16877,6 @@ fn live_refresh_queued_result_is_machine_owned() {
             mm_dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
                 channel_id,
                 status: mm_dsl::LiveRefreshPublicStatus::Queued,
-                refresh_enqueued: true,
                 sequence: 1,
                 queue_acceptance_sequence: 7,
             } if channel_id == "live-channel-1"
@@ -16944,7 +16938,6 @@ fn live_close_result_is_machine_owned() {
             mm_dsl::MeerkatMachineEffect::LiveCloseResultResolved {
                 channel_id,
                 status: mm_dsl::LiveClosePublicStatus::Closed,
-                closed: true,
                 sequence: 1,
                 close_observation_sequence: 5,
             } if channel_id == "live-channel-1"
@@ -17007,7 +17000,6 @@ fn live_command_result_is_machine_owned() {
             mm_dsl::MeerkatMachineEffect::LiveCommandResultResolved {
                 channel_id,
                 command: mm_dsl::LiveCommandPublicKind::CommitInput,
-                accepted: true,
                 sequence: 1,
                 command_acceptance_sequence: 9,
             } if channel_id == "live-channel-1"
@@ -18334,7 +18326,7 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         .expect_err("replacement must not install deferred names without typed authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "replacement rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
@@ -18464,7 +18456,7 @@ async fn replace_visibility_state_rejects_name_only_inherited_filter_authority()
         .expect_err("replacement must not install inherited names without witnesses");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "inherited filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
@@ -18497,7 +18489,7 @@ async fn replace_visibility_state_rejects_active_filter_without_witnesses() {
         .expect_err("replacement must not install active filter names without witnesses");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "active filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
@@ -18536,7 +18528,7 @@ async fn replace_visibility_state_rejects_staged_filter_with_empty_witness() {
         .expect_err("replacement must not install staged filter names with empty witnesses");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "staged filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
@@ -18581,7 +18573,7 @@ async fn replace_visibility_state_rejects_filter_authority_mismatched_with_visib
         .expect_err("replacement must reject forged active/staged filter authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "mismatched filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
@@ -18620,7 +18612,7 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
         .expect_err("replacement must not install deferred names with empty typed authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "empty deferred-authority rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
@@ -18665,7 +18657,7 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
         .expect_err("replacement must reject forged deferred provenance authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
+        err.to_string().contains("ReplaceVisibilityState"),
         "mismatched deferred-authority rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
@@ -21924,9 +21916,8 @@ fn runtime_parity_peer_message(text: &str) -> Input {
             correlation_id: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
-        body: text.into(),
+        content: text.into(),
         payload: None,
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -22203,9 +22194,8 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                     request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                     status: crate::input::ResponseTerminalStatus::Completed,
                 }),
-                body: "done".to_string(),
+                content: "done".into(),
                 payload: Some(serde_json::json!({ "token": "birch seventeen" })),
-                blocks: None,
                 handling_mode: None,
             }))
             .await

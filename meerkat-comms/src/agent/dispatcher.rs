@@ -4,7 +4,6 @@ use crate::mcp::tools::{
     RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason,
     handle_tools_call_with_context, tools_list,
 };
-use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeersView};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -378,26 +377,12 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
     }
 }
 
-pub fn wrap_with_comms(
-    tools: Arc<dyn AgentToolDispatcher>,
-    runtime: Arc<CommsRuntime>,
-) -> Arc<dyn AgentToolDispatcher> {
-    let router = runtime.router_arc();
-    let trusted_peers = runtime.trusted_peers_shared();
-    Arc::new(DynCommsToolDispatcher::new_with_runtime(
-        router,
-        trusted_peers,
-        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
-        tools,
-    ))
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeers;
+    use crate::trust::TrustStore;
     use meerkat_core::ToolCatalogDeferredEligibility;
     use parking_lot::RwLock;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -505,7 +490,7 @@ mod tests {
 
     fn test_router() -> (Arc<Router>, TrustedPeersView) {
         let (_inbox, inbox_sender) = Inbox::new();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::default()));
+        let trusted_peers = Arc::new(RwLock::new(TrustStore::default()));
         let router = Arc::new(Router::with_shared_peers(
             crate::identity::Keypair::generate(),
             Arc::clone(&trusted_peers),

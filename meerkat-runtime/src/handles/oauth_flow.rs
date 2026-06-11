@@ -57,17 +57,17 @@ fn load_oauth_snapshot_for_release(
         return Ok(None);
     };
     let store = store.upgrade().ok_or_else(|| {
-        DslTransitionError::new(operation, "runtime store is no longer available")
+        DslTransitionError::no_matching(operation, "runtime store is no longer available")
     })?;
     let Some(bytes) = store
         .load_auth_oauth_flow_snapshot()
-        .map_err(|err| DslTransitionError::new(operation, err.to_string()))?
+        .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))?
     else {
         return Ok(None);
     };
     serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes)
         .map(Some)
-        .map_err(|err| DslTransitionError::new(operation, err.to_string()))
+        .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))
 }
 
 #[derive(Debug)]
@@ -209,7 +209,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             SnapshotPersistPolicy::merge(),
         )
         .map_err(|err| {
-            DslTransitionError::new(
+            DslTransitionError::no_matching(
                 "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
                 err.to_string(),
             )

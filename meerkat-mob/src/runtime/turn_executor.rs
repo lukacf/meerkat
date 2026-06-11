@@ -1,5 +1,5 @@
 use crate::error::MobError;
-use crate::ids::{MeerkatId, RunId, StepId};
+use crate::ids::{AgentIdentity, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -56,7 +56,7 @@ pub trait FlowTurnExecutor: Send + Sync {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError>;

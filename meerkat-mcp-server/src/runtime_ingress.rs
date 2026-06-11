@@ -1553,7 +1553,7 @@ mod tests {
         CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: prompt.to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(1024),
             event_tx: None,
             initial_turn,
@@ -1648,7 +1648,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(1024),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1694,7 +1694,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(1024),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1784,7 +1784,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(1024),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -2525,7 +2525,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(1024),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,

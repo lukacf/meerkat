@@ -343,8 +343,8 @@ impl HookEngine for DenyNextPreLlmHookEngine {
 
 fn session_for_request(req: &CreateSessionRequest) -> Session {
     let mut session = Session::new();
-    if let Some(system_prompt) = &req.system_prompt {
-        session.set_system_prompt(system_prompt.clone());
+    if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
+        session.set_system_prompt(system_prompt.to_string());
     }
     session
 }
@@ -855,7 +855,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        system_prompt: None,
+        system_prompt: meerkat_core::SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
 
@@ -1064,7 +1064,6 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         .expect("timed out waiting for session event")
         .expect("stream closed unexpectedly");
     assert_eq!(first.source_session_id(), Some(&sid));
-    assert_eq!(first.source_id, format!("session:{sid}"));
     assert!(
         matches!(
             first.payload,
@@ -1739,7 +1738,8 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
     ));
 
     let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt = Some("Base system prompt".to_string());
+    request.system_prompt =
+        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
     let _ = service
         .create_session(request)
         .await
@@ -1834,7 +1834,8 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
     ));
 
     let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt = Some("Base system prompt".to_string());
+    request.system_prompt =
+        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
     let _ = service
         .create_session(request)
         .await
@@ -1902,7 +1903,8 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
     ));
 
     let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt = Some("Base system prompt".to_string());
+    request.system_prompt =
+        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
     let _ = service
         .create_session(request)
         .await
@@ -1981,7 +1983,8 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
     ));
 
     let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt = Some("Base system prompt".to_string());
+    request.system_prompt =
+        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
     let _ = service
         .create_session(request)
         .await

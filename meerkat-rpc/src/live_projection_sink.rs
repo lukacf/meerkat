@@ -889,14 +889,14 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
 mod tests {
     use super::*;
 
+    use meerkat_core::ToolCallId;
     use meerkat_core::live_adapter::{
         LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterObservation,
         LiveAdapterStatus,
     };
     use meerkat_core::ops::ToolDispatchOutcome;
-    use meerkat_core::types::{ContentBlock, ToolCallView, ToolName, ToolResult};
-    use meerkat_core::{AgentToolDispatcher, ToolCallId, ToolDef};
-    use meerkat_live::LiveAdapterHost;
+    use meerkat_core::types::{ContentBlock, ToolCall, ToolName, ToolResult};
+    use meerkat_live::{LiveAdapterHost, LiveToolDispatchError, LiveToolDispatcher};
     use std::sync::Mutex as StdMutex;
 
     /// #301: the surface mapper routes through the canonical typed owner so
@@ -1241,20 +1241,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for RecordingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-        async fn dispatch(
+    impl LiveToolDispatcher for RecordingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            view: ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((view.id.to_string(), view.name.to_string()));
+                .push((call.id.clone(), call.name.clone()));
             Ok(ToolDispatchOutcome::sync_result(ToolResult {
-                tool_use_id: view.id.to_string(),
+                tool_use_id: call.id,
                 is_error: false,
                 content: ContentBlock::text_vec("ok".to_string()),
             }))
@@ -1331,7 +1329,7 @@ mod tests {
         let dispatcher: Arc<RecordingDispatcher> = Arc::new(RecordingDispatcher::default());
         let adapter: Arc<RecordingAdapter> = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as Arc<dyn AgentToolDispatcher>);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as Arc<dyn LiveToolDispatcher>);
         let session_id = test_session_id();
         let channel = open_test_channel(&host, session_id.clone()).await;
         host.attach_adapter(&channel, Arc::clone(&adapter) as Arc<dyn LiveAdapter>)

@@ -273,7 +273,7 @@ async fn trusted_sender_is_admitted_through_classified_path() {
 /// a classify/admit split. The integration-level signal is the same:
 /// the post-fix admission site never disagrees with the trust read used
 /// at classification because both reads are authoritative against the
-/// same `Arc<RwLock<TrustedPeers>>`.
+/// same `Arc<RwLock<TrustStore>>`.
 #[tokio::test]
 async fn revoked_sender_is_rejected_at_admission() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());

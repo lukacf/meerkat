@@ -2079,8 +2079,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: text.into(),
-            blocks: None,
+            content: text.into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
@@ -2110,9 +2109,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: None,
-            body: "peer message".into(),
+            content: "peer message".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
@@ -2136,9 +2134,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "plain body payload".into(),
+            content: "plain body payload".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2166,9 +2163,8 @@ mod tests {
                 request_id: "req-123".into(),
                 intent: "checksum_token".into(),
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({"subject": "alpha beta gamma"})),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2204,13 +2200,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2256,13 +2251,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2413,13 +2407,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "stale helper-local comms prose".into(),
+            content: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -2490,13 +2483,12 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2545,9 +2537,8 @@ mod tests {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
@@ -2594,13 +2585,12 @@ mod tests {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
         let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
@@ -2658,13 +2648,12 @@ mod tests {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({
                 "request_intent": "checksum_token",
                 "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             })),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -2729,9 +2718,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: body.into(),
+            content: body.into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -2756,9 +2744,8 @@ mod tests {
                 request_id: request_id.into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: String::new(),
+            content: String::new().into(),
             payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -2872,9 +2859,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "see this image".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -2932,9 +2918,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "caption text".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -2986,9 +2971,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: String::new(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -3017,7 +3001,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_image_only_blocks_preserve_rendered_body_text() -> Result<(), String> {
+    fn peer_image_only_blocks_are_the_notice_content() -> Result<(), String> {
         let blocks = vec![meerkat_core::types::ContentBlock::Image {
             media_type: "image/png".into(),
             data: "abc123".into(),
@@ -3039,9 +3023,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "Please describe the attached image.".into(),
+            content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
             payload: None,
-            blocks: Some(blocks.clone()),
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -3062,13 +3045,9 @@ mod tests {
                     peer.as_ref().map(|peer| peer.id),
                     Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
                 );
-                assert_eq!(
-                    content.first(),
-                    Some(&meerkat_core::types::ContentBlock::Text {
-                        text: "Please describe the attached image.".into(),
-                    })
-                );
-                assert_eq!(content.get(1), Some(&blocks[0]));
+                // Single-owner semantics: the typed blocks ARE the content;
+                // no synthesized caption text is merged in beside them.
+                assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
@@ -3101,8 +3080,7 @@ mod tests {
                 correlation_id: None,
             },
             step_id: "step-1".into(),
-            instructions: "analyze this screenshot".into(),
-            blocks: Some(blocks),
+            content: meerkat_core::types::ContentInput::Blocks(blocks),
             turn_metadata: None,
         });
         let input_id = input.id().clone();
@@ -3119,7 +3097,9 @@ mod tests {
                 assert!(matches!(
                     got.first(),
                     Some(meerkat_core::types::SystemNoticeBlock::RuntimeNotice { category, detail, .. })
-                        if category == "flow_step" && detail.as_deref() == Some("analyze this screenshot")
+                        if category == "flow_step"
+                            && detail.as_deref()
+                                == Some("analyze this screenshot\n[image: image/png]")
                 ));
             }
             other => return Err(format!("expected typed content, got {other:?}")),
@@ -3254,14 +3234,14 @@ mod tests {
 
     #[test]
     fn plain_event_and_direct_runtime_external_event_share_projection() -> Result<(), String> {
-        use crate::comms_bridge::peer_input_candidate_to_runtime_input;
+        use crate::comms_bridge::classified_interaction_to_runtime_input;
         use crate::identifiers::LogicalRuntimeId;
         use meerkat_core::interaction::{
             InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass,
         };
 
         let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
-        let from_comms = peer_input_candidate_to_runtime_input(
+        let from_comms = classified_interaction_to_runtime_input(
             &PeerInputCandidate {
                 lifecycle_peer: None,
                 response_terminality: None,
@@ -3822,9 +3802,8 @@ mod tests {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let id = input.id().clone();
@@ -3860,9 +3839,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: "msg".into(),
+            content: "msg".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         let continuation =

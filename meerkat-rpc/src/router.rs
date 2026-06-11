@@ -1530,7 +1530,8 @@ impl MethodRouter {
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(
                 id,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
                 self.skill_runtime.is_some(),
             ),
             "help/ask" => {
@@ -1833,13 +1834,15 @@ impl MethodRouter {
                 id,
                 &self.runtime,
                 &self.config_store,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
                 self.skill_runtime.is_some(),
             ),
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
                 id,
                 &self.runtime,
-                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                // Runtime-backed only: every session runs the v9 runtime.
+                true,
                 self.skill_runtime.is_some(),
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
@@ -5700,9 +5703,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
-            body: "helper finished via comms".to_string(),
+            content: "helper finished via comms".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
 
@@ -5749,9 +5751,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
-            body: "urgent helper update via comms".to_string(),
+            content: "urgent helper update via comms".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
         });
 
@@ -7729,7 +7730,7 @@ mod tests {
         let members = members_value["members"].as_array().expect("members array");
         assert_eq!(members.len(), 1, "retiring member should remain observable");
         assert_eq!(members[0]["agent_identity"], "lead-1");
-        assert_eq!(members[0]["state"], "retiring");
+        assert_eq!(members[0]["status"], "retiring");
 
         let send_resp = router
             .dispatch(make_request(
@@ -9692,7 +9693,7 @@ mod tests {
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,

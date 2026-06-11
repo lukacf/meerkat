@@ -155,7 +155,9 @@ fn future_session_metadata_schema_version_fails_closed_on_session_read() {
 fn stored_input_state_version_is_pinned_to_current() {
     // The runtime crate owns `StoredInputState` serde; this pins the shared
     // constant so the rejection tests there and the authority here agree.
-    assert_eq!(STORED_INPUT_STATE_VERSION, 2);
+    // v3: persisted input content unified onto the single typed
+    // `ContentInput` carrier (dual text/body/instructions + blocks deleted).
+    assert_eq!(STORED_INPUT_STATE_VERSION, 3);
     assert_eq!(SESSION_VERSION, 2);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }

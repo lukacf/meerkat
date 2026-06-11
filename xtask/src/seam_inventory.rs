@@ -2,7 +2,7 @@ use clap::Args;
 use meerkat_machine_schema::{
     CompositionSchema, EffectDisposition, EffectTeardownClass, MachineSchema, Route,
     SeamClassification, TeardownObligationClass, canonical_composition_schemas,
-    canonical_machine_schemas, compat_composition_schemas,
+    canonical_machine_schemas,
 };
 
 /// CLI args for `xtask seam-inventory`.
@@ -266,10 +266,8 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         .filter(|rr| !rr.missing_consumers.is_empty())
         .collect::<Vec<_>>();
 
-    // Typed C-F3 teardown inventory over canonical + compat compositions.
-    let compat = compat_composition_schemas();
-    let all_compositions: Vec<&CompositionSchema> =
-        compositions.iter().chain(compat.iter()).collect();
+    // Typed C-F3 teardown inventory over canonical compositions.
+    let all_compositions: Vec<&CompositionSchema> = compositions.iter().collect();
     let teardown_inventory = collect_teardown_inventory(&all_compositions);
 
     // Print the report

@@ -622,7 +622,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        system_prompt: None,
+        system_prompt: meerkat_core::SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
 

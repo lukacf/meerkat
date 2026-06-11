@@ -1676,7 +1676,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .unwrap();
         dispatcher
@@ -1756,7 +1755,6 @@ mod tests {
             )),
             None,
             Some(SessionId::new().to_string()),
-            true,
         )
         .unwrap();
         dispatcher
@@ -1799,7 +1797,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .unwrap();
         dispatcher

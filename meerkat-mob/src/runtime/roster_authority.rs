@@ -1,5 +1,5 @@
 use crate::event::MobEvent;
-use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, Generation, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 
 mod sealed {
@@ -14,10 +14,10 @@ mod sealed {
 /// the generated `MobMachine`; this wrapper only updates roster display state.
 pub(crate) trait RosterMutator: sealed::Sealed {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool;
-    fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool;
+    fn remove_member(&mut self, agent_identity: &AgentIdentity) -> bool;
     fn set_kickoff(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool;
 }
@@ -52,7 +52,7 @@ impl RosterAuthority {
         self.roster.clone()
     }
 
-    pub(crate) fn get(&self, agent_identity: &MeerkatId) -> Option<&RosterEntry> {
+    pub(crate) fn get(&self, agent_identity: &AgentIdentity) -> Option<&RosterEntry> {
         self.roster.get(agent_identity)
     }
 
@@ -73,7 +73,7 @@ impl RosterAuthority {
     }
 
     /// Get a specific roster entry.
-    pub(crate) fn entry(&self, agent_identity: &MeerkatId) -> Option<RosterEntry> {
+    pub(crate) fn entry(&self, agent_identity: &AgentIdentity) -> Option<RosterEntry> {
         self.roster.get(agent_identity).cloned()
     }
 
@@ -91,7 +91,7 @@ impl RosterAuthority {
         next_peer_id: &str,
         next_address: &str,
         bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
-    ) -> Vec<(AgentIdentity, Generation, Option<[u8; 32]>)> {
+    ) -> Vec<(AgentIdentity, Generation, [u8; 32])> {
         self.roster.replace_backend_peer_binding_for_identities(
             identities,
             next_peer_id,
@@ -106,7 +106,7 @@ impl RosterMutator for RosterAuthority {
         self.roster.add(entry)
     }
 
-    fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool {
+    fn remove_member(&mut self, agent_identity: &AgentIdentity) -> bool {
         if self.roster.get(agent_identity).is_some() {
             self.roster.remove(agent_identity);
             true
@@ -117,7 +117,7 @@ impl RosterMutator for RosterAuthority {
 
     fn set_kickoff(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool {
         self.roster.set_kickoff(agent_identity, kickoff)

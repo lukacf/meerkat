@@ -789,14 +789,6 @@ fn peer_input_from_delivery_payload(
     request_id: meerkat_core::interaction::InteractionId,
     payload: BridgeDeliveryPayload,
 ) -> Input {
-    let (body, blocks) = match payload.content {
-        meerkat_core::types::ContentInput::Text(body) => (body, None),
-        meerkat_core::types::ContentInput::Blocks(blocks) => {
-            let body = meerkat_core::types::text_content(&blocks);
-            (body, Some(blocks))
-        }
-    };
-
     Input::Peer(PeerInput {
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
@@ -816,9 +808,8 @@ fn peer_input_from_delivery_payload(
             correlation_id: Some(crate::identifiers::CorrelationId::from_uuid(request_id.0)),
         },
         convention: Some(PeerConvention::Message),
-        body,
+        content: payload.content,
         payload: None,
-        blocks,
         handling_mode: Some(payload.handling_mode),
     })
 }
@@ -5936,31 +5927,6 @@ mod tests {
             }
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            let peer_id_str = peer.peer_id.as_str();
-            if let Some(message) = self.add_trusted_peer_errors.get(&peer_id_str) {
-                return Err(SendError::Internal(message.clone()));
-            }
-            self.trusted_peer_ids
-                .lock()
-                .await
-                .insert(peer_id_str.clone());
-            self.trusted_peers.lock().await.insert(peer_id_str, peer);
-            Ok(())
-        }
-
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            match self.remove_trusted_peer_errors.get(peer_id) {
-                Some(message) => Err(SendError::Internal(message.clone())),
-                None => {
-                    let removed_id = self.trusted_peer_ids.lock().await.remove(peer_id);
-                    let removed_descriptor =
-                        self.trusted_peers.lock().await.remove(peer_id).is_some();
-                    Ok(removed_id || removed_descriptor)
-                }
-            }
-        }
-
         async fn send(&self, cmd: CommsCommand) -> Result<meerkat_core::SendReceipt, SendError> {
             let receipt = match &cmd {
                 CommsCommand::PeerResponse { in_reply_to, .. } => {
@@ -7274,14 +7240,6 @@ mod tests {
             &self,
         ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
             Some(Arc::new(CountingPeerInteractionHandle::default()))
-        }
-
-        async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            Ok(())
-        }
-
-        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-            Ok(true)
         }
 
         async fn apply_trust_mutation(

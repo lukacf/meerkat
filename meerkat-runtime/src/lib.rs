@@ -422,7 +422,7 @@ pub use runtime_event::{
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
-pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+pub use service_ext::SessionServiceRuntimeExt;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

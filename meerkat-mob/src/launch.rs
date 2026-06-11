@@ -7,7 +7,7 @@
 //! (not in `meerkat-core`) because fork and budget splitting are mob-level
 //! orchestration concepts.
 
-use crate::ids::MeerkatId;
+use crate::ids::AgentIdentity;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
@@ -17,16 +17,6 @@ use serde::{Deserialize, Serialize};
 /// [`crate::runtime::SpawnMemberSpec`] can configure session adoption
 /// (resume an existing bridge session, fork from a sibling member's
 /// history) without reaching into `pub(crate)` internals.
-///
-/// `Fork::source_member_id` is typed as [`MeerkatId`] to match the
-/// legacy DSL identifier carried inside
-/// [`crate::mob_machine::MobMachineCommand`] variants. End-user code
-/// holding an `AgentIdentity` can convert directly via
-/// `MeerkatId::from(&identity)` — see DELETE_ME A5 (identity-first
-/// hot-path conversions). Full DSL-schema migration to
-/// `AgentIdentity` is tracked separately; until then, the public
-/// spawn-policy surface accepts `MeerkatId` for consistency with
-/// every other DSL-command-bearing field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -35,13 +25,10 @@ pub enum MemberLaunchMode {
     #[default]
     Fresh,
     /// Resume an existing bridge session binding by ID.
-    Resume {
-        #[serde(alias = "session_id")]
-        bridge_session_id: SessionId,
-    },
+    Resume { bridge_session_id: SessionId },
     /// Fork from another member's conversation history.
     Fork {
-        source_member_id: MeerkatId,
+        source_member_id: AgentIdentity,
         #[serde(default)]
         fork_context: ForkContext,
     },
@@ -101,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_launch_mode_deserializes_bridge_session_id_alias() {
+    fn resume_launch_mode_deserializes_bridge_session_id() {
         let sid = SessionId::new();
         let payload = serde_json::json!({
             "mode": "resume",
@@ -123,7 +110,7 @@ mod tests {
     /// breaking downstream crates silently.
     #[test]
     fn member_launch_mode_public_seam_covers_all_variants() {
-        use crate::ids::MeerkatId;
+        use crate::ids::AgentIdentity;
 
         // Fresh is the default.
         let fresh = MemberLaunchMode::default();
@@ -140,13 +127,13 @@ mod tests {
         // variants are both reachable — FullHistory (default) and
         // LastMessages { count }.
         let fork_full = MemberLaunchMode::Fork {
-            source_member_id: MeerkatId::from("lead"),
+            source_member_id: AgentIdentity::from("lead"),
             fork_context: ForkContext::default(),
         };
         assert!(fork_full.resume_bridge_session_id().is_none());
 
         let fork_last = MemberLaunchMode::Fork {
-            source_member_id: MeerkatId::from("lead"),
+            source_member_id: AgentIdentity::from("lead"),
             fork_context: ForkContext::LastMessages { count: 5 },
         };
         assert!(fork_last.resume_bridge_session_id().is_none());

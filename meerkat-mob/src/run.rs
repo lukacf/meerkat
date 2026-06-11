@@ -6,7 +6,7 @@ use crate::definition::{
 };
 use crate::error::MobError;
 use crate::ids::{
-    AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId,
+    AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MobId,
     ProfileName, RunId, StepId,
 };
 use crate::machines::mob_machine as mob_dsl;
@@ -3022,7 +3022,7 @@ fn project_flow_run_target_success_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
 ) -> Result<flow_run::Outcome, MobError> {
     let count = projected_run_step_value(
         &machine_state.run_step_target_success_counts,
@@ -3074,7 +3074,7 @@ fn project_flow_run_target_canceled_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     required_machine_value(&machine_state.run_status, &run_key, "run_status")?;
@@ -3100,7 +3100,7 @@ fn project_flow_run_target_failure_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
-    target_id: &MeerkatId,
+    target_id: &AgentIdentity,
     retry_key: &str,
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
@@ -4932,11 +4932,7 @@ impl MobRun {
         }
         let config = FlowRunConfig {
             flow_id: flow_id.clone(),
-            flow_spec: FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
+            flow_spec: FlowSpec::new(None, steps, None),
             topology: None,
             supervisor: None,
             limits: None,
@@ -5429,11 +5425,7 @@ impl MobRun {
         }
         let config = FlowRunConfig {
             flow_id: FlowId::from("placeholder"),
-            flow_spec: FlowSpec {
-                description: None,
-                steps,
-                root: None,
-            },
+            flow_spec: FlowSpec::new(None, steps, None),
             topology: None,
             supervisor: None,
             limits: None,
@@ -6406,11 +6398,7 @@ mod tests {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("flow-a"),
-            FlowSpec {
-                description: Some("demo flow".to_string()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("demo flow".to_string()), steps, None),
         );
 
         let mut profiles = BTreeMap::new();
@@ -6887,11 +6875,7 @@ mod tests {
                 output_format: crate::definition::StepOutputFormat::Json,
             },
         );
-        let spec = FlowSpec {
-            description: None,
-            steps,
-            root: None,
-        };
+        let spec = FlowSpec::new(None, steps, None);
         let error = topological_steps(&spec).expect_err("self-dependency should be rejected");
         assert!(
             error.to_string().contains("self-dependency"),

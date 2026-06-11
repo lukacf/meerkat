@@ -240,7 +240,7 @@ pub(crate) enum MeerkatMachineCommandError {
 /// Unified internal Meerkat machine command surface.
 ///
 /// This replaces the old per-domain dispatch split (session, drain,
-/// drain-local, control, ingress, legacy-run) while keeping the public helper
+/// drain-local, control, ingress) while keeping the public helper
 /// methods and external runtime/machine surface unchanged.
 #[derive(CommandManifest)]
 #[allow(clippy::large_enum_variant)]
@@ -815,7 +815,7 @@ meerkat_machine_runtime_internal_inputs!(
         StageDeferredNames,
         StageVisibilityFilter,
         SurfaceSetRemovalTimeout,
-        SyncVisibilityRevisions,
+        ReplaceVisibilityState,
     ],
     DeferredSessionLifecycle => [
         AbandonDeferredSessionPromotion,

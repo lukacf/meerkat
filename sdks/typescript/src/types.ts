@@ -427,7 +427,6 @@ export type EventSourceIdentity =
 export interface EventEnvelope<T = unknown> {
   readonly timestamp_ms: number;
   readonly source: EventSourceIdentity;
-  readonly source_id: string;
   readonly seq: number;
   readonly event_id: string;
   readonly payload: T;
@@ -531,7 +530,6 @@ export interface MobMember {
   readonly peerId?: string;
   readonly externalPeerSpecs?: Readonly<Record<string, Record<string, unknown>>>;
   readonly runtimeMode?: string;
-  readonly state?: string;
   readonly wiredTo?: readonly string[];
   readonly labels?: Record<string, string>;
   readonly status?: string;
@@ -1068,7 +1066,6 @@ export interface SessionOptions {
 export interface AgentEventEnvelope {
   readonly eventId?: string;
   readonly source?: EventSourceIdentity;
-  readonly sourceId?: string;
   readonly seq?: number;
   readonly timestampMs?: number;
   readonly payload?: import("./events.js").AgentEvent;

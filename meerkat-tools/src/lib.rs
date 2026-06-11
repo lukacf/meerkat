@@ -25,7 +25,6 @@
 //!     None,
 //!     None,
 //!     None,
-//!     true,
 //! )?;
 //! ```
 
@@ -66,10 +65,8 @@ pub use dispatcher::ToolDispatcher;
 pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 #[cfg(feature = "comms")]
-pub use meerkat_comms::agent::{
-    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
-};
-pub use registry::ToolRegistry;
+pub use meerkat_comms::agent::{CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher};
+pub use registry::validate_tool_def;
 pub use schema::{empty_object_schema, schema_for};
 pub use timeout::ToolTimeoutPolicy;
 

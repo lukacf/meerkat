@@ -176,8 +176,8 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
-    /// Optional system prompt override.
-    pub system_prompt: Option<String>,
+    /// Typed per-request system-prompt policy (Inherit/Set/Disable).
+    pub system_prompt: crate::config::SystemPromptOverride,
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.

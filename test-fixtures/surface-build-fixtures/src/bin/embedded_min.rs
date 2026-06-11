@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_session(CreateSessionRequest {
             model: config.agent.model.clone(),
             prompt: "Say ok".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(64),
             event_tx: None,
             initial_turn: InitialTurnPolicy::RunImmediately,

@@ -112,7 +112,7 @@ pub mod machine_schema_exports {
 pub use profile::{
     Profile, ProfileBinding, ProfileSource, ResumeOverrideField, SpawnTooling, ToolConfig,
 };
-pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+pub use roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot,
     LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass,
@@ -166,8 +166,6 @@ pub use store::{
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
-
-pub(crate) use ids::MeerkatId;
 
 /// Closure called at each member spawn to get a fresh snapshot of external tools.
 ///

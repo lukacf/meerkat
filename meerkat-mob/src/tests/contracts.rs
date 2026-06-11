@@ -1477,7 +1477,7 @@ fn keep_alive_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "contract-mock".to_string(),
         prompt: "hello".to_string().into(),
-        system_prompt: None,
+        system_prompt: meerkat_core::SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,

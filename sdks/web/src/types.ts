@@ -328,7 +328,6 @@ export interface MobMember {
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
-  state?: string;
   wired_to?: string[];
   labels?: Record<string, string>;
   status?: string;
@@ -354,8 +353,6 @@ export type MobPeerTarget = string | ExternalPeerTarget;
 export interface MobStatus {
   mob_id: string;
   status: string;
-  /** @deprecated Use `status`. Kept as an inert projection of generated status. */
-  state: string;
 }
 
 /** Unreachable peer entry from a live member connectivity snapshot. */
@@ -431,7 +428,6 @@ export type EventSourceIdentity =
 export interface EventEnvelope {
   event_id: string;
   source: EventSourceIdentity;
-  source_id: string;
   seq: number;
   mob_id?: string;
   timestamp_ms: number;

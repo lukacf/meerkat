@@ -489,7 +489,6 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolExecutionCompleted {
             id: "tc2".to_string(),
             name: "shell".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 100,
@@ -740,7 +739,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolExecutionCompleted {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 1,
@@ -1015,7 +1013,7 @@ fn core_create_params_minimal_deserialize() {
     assert!(params.model.is_none());
     assert!(params.provider.is_none());
     assert!(params.max_tokens.is_none());
-    assert!(params.system_prompt.is_none());
+    assert!(params.system_prompt.is_inherit());
     assert!(params.labels.is_none());
     assert!(params.additional_instructions.is_none());
     assert!(params.app_context.is_none());

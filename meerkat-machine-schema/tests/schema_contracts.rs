@@ -777,7 +777,6 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "SubmitRunPrimitive",
         "PostAdmissionSignal",
         "SubmitOpEvent",
-        "EnqueueClassifiedEntry",
         "PeerIngressClassified",
         "PeerIngressReceiveResolved",
         "PeerIngressDequeueResolved",
@@ -1735,7 +1734,7 @@ mod handoff_binding {
         CompositionStateLimits, EffectHandoffProtocol, FeedbackFieldBinding, FeedbackFieldSource,
         FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
         ProtocolHelperReturnShape, ProtocolRustBinding, canonical_composition_schemas,
-        canonical_machine_schemas, compat_composition_schemas,
+        canonical_machine_schemas,
     };
 
     fn ok_handle_binding() -> ProtocolRustBinding {
@@ -2094,9 +2093,8 @@ mod handoff_binding {
     /// structural loss.
     #[test]
     fn auth_lease_bundle_composition_closes_auth_machine_orphan() {
-        let comp = compat_composition_schemas()
+        let comp = canonical_composition_schemas()
             .into_iter()
-            .chain(canonical_composition_schemas())
             .find(|c| c.name.as_str() == "auth_lease_bundle")
             .expect("auth_lease_bundle must be registered as a canonical composition");
 
@@ -2119,26 +2117,6 @@ mod handoff_binding {
         assert_eq!(protocol.producer_instance.as_str(), "auth_machine");
         assert_eq!(protocol.effect_variant.as_str(), "EmitLifecycleEvent");
         assert_eq!(protocol.realizing_actor.as_str(), "auth_lease_owner");
-    }
-
-    #[test]
-    fn compat_composition_schemas_is_accessible_and_validates_each_returned_entry() {
-        // `compat_composition_schemas()` is invoked by the codegen iteration
-        // alongside canonical. After bridge demolition, every entry it returns
-        // must validate against the canonical machine registry alone.
-        let compositions = compat_composition_schemas();
-        let machines = canonical_machine_schemas();
-        let machine_refs: Vec<_> = machines.iter().collect();
-        for composition in &compositions {
-            composition
-                .validate_against(&machine_refs)
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "compat composition `{}` failed validation: {err:?}",
-                        composition.name
-                    )
-                });
-        }
     }
 
     /// Negative: EffectExtractor with no `authority_type_path` and no

@@ -1,5 +1,5 @@
 use crate::error::MobError;
-use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, ProfileName};
 use crate::machines::mob_machine as mob_dsl;
 use crate::profile::Profile;
 use serde::Serialize;
@@ -20,7 +20,7 @@ pub(super) struct AuthorizedSpawnProfileMaterial {
 
 pub(super) fn authorize_spawn_profile_material(
     authority: &mut mob_dsl::MobMachineAuthority,
-    agent_identity: &MeerkatId,
+    agent_identity: &AgentIdentity,
     profile_name: &ProfileName,
     profile: &Profile,
     context: &str,
@@ -37,7 +37,7 @@ pub(super) fn authorize_spawn_profile_material(
 }
 
 pub(super) fn authorize_spawn_profile_input(
-    agent_identity: &MeerkatId,
+    agent_identity: &AgentIdentity,
     profile_name: &ProfileName,
     profile: &Profile,
 ) -> Result<(mob_dsl::MobMachineInput, AuthorizedSpawnProfileMaterial), MobError> {

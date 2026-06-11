@@ -407,7 +407,7 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
                 "TurnAdmissionPhase",
                 &["Idle", "Admitted", "Running", "Completing", "ShuttingDown"],
             ),
-            // WAVE G1 folds (#345 keep-alive tri-state, #338 live-interrupt handling mode).
+            // WAVE G1 fold (#345 keep-alive tri-state).
             NamedTypeBinding::string_enum(
                 "RuntimeKeepAliveRequest",
                 &["Enable", "Disable", "Preserve"],
@@ -419,7 +419,6 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeKeepAlivePersistenceDecision",
                 &["PersistEnabled", "PersistDisabled", "PreserveExisting"],
             ),
-            NamedTypeBinding::string_enum("TurnHandlingMode", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "StartTurnExecutionKind",
                 &["ContentTurn", "ResumePending"],
@@ -1797,7 +1796,7 @@ runtime_internal_inputs!(
         SurfaceStageAdd,
         SurfaceStageReload,
         SurfaceStageRemove,
-        SyncVisibilityRevisions,
+        ReplaceVisibilityState,
         SupervisorTrustEdgePublishFailed,
         SupervisorTrustEdgePublished,
         SupervisorTrustEdgeRevokeFailed,

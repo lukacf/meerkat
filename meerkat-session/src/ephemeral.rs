@@ -46,7 +46,9 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 
-use crate::staged_registry::{MaterializationStatus, StagedSessionRegistry};
+#[cfg(test)]
+use crate::staged_registry::MaterializationStatus;
+use crate::staged_registry::{PromotionTicket, StagedSessionRegistry};
 pub use crate::turn_admission::ObservedSessionTailKind;
 use crate::turn_admission::{
     RuntimeKeepAliveRequest, StartTurnDispatchAuthorization, StartTurnDisposition,
@@ -96,7 +98,6 @@ enum SessionCommand {
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         active_admission: Option<RuntimeContextAdmissionGuard>,
-        restore_staged_capacity_on_pre_run_failure: bool,
     },
     ReplaceClient {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
@@ -237,8 +238,6 @@ struct SessionHandle {
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
-    /// Capacity reserved for a deferred first turn while the session is staged.
-    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
     /// Capacity currently held by live work for this session. Additional
     /// runtime-routed inputs for the same running session join this lease
     /// instead of consuming another global slot.
@@ -253,79 +252,80 @@ struct SessionHandle {
 }
 
 pub struct RuntimeContextAdmissionGuard {
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
     active_capacity_lease: Option<Arc<std::sync::Mutex<SessionActiveCapacityLease>>>,
     active_permit: Option<OwnedSemaphorePermit>,
-    restore_staged_capacity_on_drop: bool,
 }
 
 #[derive(Default)]
 struct SessionActiveCapacityLease {
     permit: Option<OwnedSemaphorePermit>,
     leases: usize,
-    restore_staged_capacity_on_final_release: bool,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    /// In-flight staged→active promotion bound to this lease. Settled at
+    /// final release through the registry-owned materialization status: an
+    /// uncommitted promotion restores the staged reservation, a committed one
+    /// lets the permit drop back to the gate. There are no shell-side
+    /// restore flags — the registry status *is* the verdict.
+    promotion: Option<PromotionTicket>,
 }
 
 #[derive(Default)]
 struct ActiveCapacityLeaseRelease {
     permit: Option<OwnedSemaphorePermit>,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    promotion: Option<PromotionTicket>,
+}
+
+impl ActiveCapacityLeaseRelease {
+    /// Settle a final lease release: an in-flight promotion is resolved
+    /// through the registry (restore staged vs release capacity); otherwise
+    /// the permit drops and capacity returns to the gate.
+    fn settle(self) {
+        match self.promotion {
+            Some(ticket) => ticket.settle(self.permit),
+            None => drop(self.permit),
+        }
+    }
 }
 
 impl Drop for RuntimeContextAdmissionGuard {
     fn drop(&mut self) {
         if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
-            if self.restore_staged_capacity_on_drop
-                && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
-            {
-                mark_active_capacity_lease_restore_staged(
-                    &active_capacity_lease,
-                    staged_capacity_permit,
-                );
-            }
-            let released = release_active_capacity_lease(&active_capacity_lease);
-            if let Some(staged_capacity_permit) = released.staged_capacity_permit {
-                restore_staged_capacity_permit(&staged_capacity_permit, released.permit);
-            }
-            return;
+            release_active_capacity_lease(&active_capacity_lease).settle();
         }
-        if self.restore_staged_capacity_on_drop
-            && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
-        {
-            restore_staged_capacity_permit(&staged_capacity_permit, self.active_permit.take());
-        }
+        // A capacity-only admission (`active_permit`) drops with the guard,
+        // returning the permit to the gate.
     }
 }
 
 impl RuntimeContextAdmissionGuard {
-    fn into_start_turn_parts(mut self) -> (Self, bool) {
-        let restore_staged_capacity_on_pre_run_failure = self.restore_staged_capacity_on_drop;
-        self.restore_staged_capacity_on_drop = false;
-        (self, restore_staged_capacity_on_pre_run_failure)
+    /// Commit an in-flight staged→active promotion: the run is genuinely
+    /// beginning, so the registry-owned status flips `Promoting -> Active`
+    /// and the final lease release returns capacity to the gate instead of
+    /// restoring the staged reservation. No-op for admissions that did not
+    /// originate from a staged reservation.
+    fn commit_promotion(&self) {
+        let Some(active_capacity_lease) = self.active_capacity_lease.as_ref() else {
+            return;
+        };
+        let ticket = lock_active_capacity_lease(active_capacity_lease)
+            .promotion
+            .take();
+        if let Some(ticket) = ticket {
+            ticket.commit();
+        }
     }
 
     pub(crate) fn into_create_session_permit(mut self) -> Option<OwnedSemaphorePermit> {
-        self.restore_staged_capacity_on_drop = false;
-        self.staged_capacity_permit.take();
         if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
-            return release_active_capacity_lease(&active_capacity_lease).permit;
+            let released = release_active_capacity_lease(&active_capacity_lease);
+            // The capacity unit is being repurposed for a new session, so an
+            // in-flight promotion can no longer be restored: commit it through
+            // the registry before handing the permit over.
+            if let Some(ticket) = released.promotion {
+                ticket.commit();
+            }
+            return released.permit;
         }
         self.active_permit.take()
-    }
-
-    fn restore_staged_capacity(mut self) {
-        if let Some(active_capacity_lease) = self.active_capacity_lease.as_ref()
-            && let Some(staged_capacity_permit) = self.staged_capacity_permit.as_ref()
-        {
-            mark_active_capacity_lease_restore_staged(
-                active_capacity_lease,
-                Arc::clone(staged_capacity_permit),
-            );
-            self.restore_staged_capacity_on_drop = false;
-            return;
-        }
-        self.restore_staged_capacity_on_drop = true;
     }
 }
 
@@ -805,16 +805,19 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
-    /// Single typed owner of session materialization status fused with the
-    /// global active-capacity admission seam.
+    /// Single typed owner of session materialization status, staged-capacity
+    /// custody, and the global active-capacity admission seam.
     ///
-    /// The registry holds the canonical [`MaterializationStatus`] per session
-    /// (`Staged`/`Promoting`/`Active`) AND the global concurrency gate behind
-    /// one lock, so status is never re-derived from permit-existence +
-    /// handle-existence. The embedded semaphore remains a pure RESOURCE GATE:
-    /// it bounds how many sessions hold live work at once and never decides
-    /// whether a session is a valid/admitted authority — that decision is owned
-    /// by runtime/machine admission.
+    /// The registry holds the canonical materialization status per session
+    /// (`Staged`/`Promoting`/`Active`), CUSTODY of each staged session's
+    /// reserved capacity permit, and the global concurrency gate behind one
+    /// lock, so staged-ness is never re-derived from permit-existence in a
+    /// handle-side slot. The staged→active promotion verdict
+    /// (`begin_promotion`) is single-winner and owned here. The embedded
+    /// semaphore remains a pure RESOURCE GATE: it bounds how many sessions
+    /// hold live work at once and never decides whether a session is a
+    /// valid/admitted authority — that decision is owned by runtime/machine
+    /// admission.
     staged_registry: Arc<StagedSessionRegistry>,
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
@@ -1024,23 +1027,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         handle: &SessionHandle,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
-        if let Some(permit) = take_staged_capacity_permit(&handle.staged_capacity_permit) {
-            let restore_staged_capacity_on_drop = {
+        // The staged branch is gated by the registry-owned single-winner
+        // promotion verdict, never by permit presence: `begin_promotion`
+        // flips `Staged -> Promoting` and hands over custody of the staged
+        // capacity permit. A loser (already promoting/active) falls through
+        // to the non-staged admission paths.
+        if let Some(promotion) = self.staged_registry.begin_promotion(id) {
+            let pending_first_turn = {
                 let state = lock_deferred_turn_state(&handle.deferred_turn_state);
                 matches!(state.first_turn_phase(), DeferredFirstTurnPhase::Pending)
             };
-            // Taking the staged permit promotes the session from `Staged` into
-            // live work. Flip the typed status through the registry so the
-            // singular materialization fact tracks the permit it is fused with.
-            // `begin_promotion` guards against a concurrent double-promotion;
-            // either way the session ends `Active`.
-            self.staged_registry.begin_promotion(id);
-            self.staged_registry.mark_active(id);
+            let ticket = if pending_first_turn {
+                // The deferred first turn is still pending: keep the
+                // promotion in flight so a pre-run failure settles back to
+                // `Staged` (reservation restored) while a genuine run-begin
+                // commits it to `Active`.
+                Some(PromotionTicket::new(
+                    Arc::clone(&self.staged_registry),
+                    id.clone(),
+                ))
+            } else {
+                // No deferred first turn left to protect: commit immediately
+                // so a pre-run failure releases capacity instead of
+                // re-staging it for a reservation that no longer exists.
+                self.staged_registry.complete_promotion(id);
+                None
+            };
             return Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
-                Some(permit),
-                Some(Arc::clone(&handle.staged_capacity_permit)),
-                restore_staged_capacity_on_drop,
+                promotion.permit,
+                ticket,
             ));
         }
         if let Some(admission) =
@@ -1048,12 +1064,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         {
             return Ok(admission);
         }
-        match self.try_acquire_active_permit() {
-            Ok(permit) => Ok(acquire_active_capacity_lease(
+        match self.staged_registry.reserve(id) {
+            Ok(outcome) => Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
-                permit,
+                outcome.permit,
                 None,
-                false,
             )),
             Err(err) => {
                 if let Some(admission) =
@@ -1396,11 +1411,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
-        // Clear the singular typed materialization status alongside the
-        // capacity permit so the registry never retains a phantom record for a
-        // session whose handle no longer exists.
+        // Clear the singular typed materialization record. For a staged
+        // session the registry-held capacity permit drops with it, so the
+        // registry never retains a phantom record (or orphaned reservation)
+        // for a session whose handle no longer exists.
         self.staged_registry.forget(id);
-        release_staged_capacity_permit(&handle.staged_capacity_permit);
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.request_shutdown().ok().map(|_| slot.projection())
@@ -2058,10 +2073,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
         let active_permit = self.try_acquire_active_permit()?;
         Ok(RuntimeContextAdmissionGuard {
-            staged_capacity_permit: None,
             active_capacity_lease: None,
             active_permit,
-            restore_staged_capacity_on_drop: false,
         })
     }
 
@@ -2176,18 +2189,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 })?;
             }
 
-            let (active_admission, restore_staged_capacity_on_pre_run_failure) =
-                if let Some(admission) = reserved_admission.take() {
-                    admission.into_start_turn_parts()
-                } else {
-                    match self.acquire_runtime_context_admission_for_handle(id, handle) {
-                        Ok(admission) => admission.into_start_turn_parts(),
-                        Err(err) => {
-                            Self::try_abort_admitted_turn(handle);
-                            return Err((err, None));
-                        }
+            let active_admission = if let Some(admission) = reserved_admission.take() {
+                admission
+            } else {
+                match self.acquire_runtime_context_admission_for_handle(id, handle) {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        Self::try_abort_admitted_turn(handle);
+                        return Err((err, None));
                     }
-                };
+                }
+            };
 
             let command = SessionCommand::StartTurn {
                 prompt,
@@ -2195,22 +2207,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 event_tx: req.event_tx,
                 result_tx,
                 active_admission: Some(active_admission),
-                restore_staged_capacity_on_pre_run_failure,
             };
-            if let Err(send_error) = handle.command_tx.send(command).await {
-                let SessionCommand::StartTurn {
-                    active_admission,
-                    restore_staged_capacity_on_pre_run_failure,
-                    ..
-                } = send_error.0
-                else {
-                    unreachable!("only StartTurn command was sent")
-                };
-                if restore_staged_capacity_on_pre_run_failure
-                    && let Some(admission) = active_admission
-                {
-                    admission.restore_staged_capacity();
-                }
+            if handle.command_tx.send(command).await.is_err() {
+                // Dropping the rejected command drops its admission guard; the
+                // final lease release settles staged-restore vs capacity
+                // release through the registry-owned promotion status.
                 Self::try_abort_admitted_turn(handle);
                 return Err((
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -2336,9 +2337,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
         for (id, handle) in sessions.drain(..) {
-            // Clear the singular typed materialization status with the handle.
+            // Clear the singular typed materialization record with the handle;
+            // a staged session's registry-held permit drops with it.
             self.staged_registry.forget(&id);
-            release_staged_capacity_permit(&handle.staged_capacity_permit);
             let projection = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
                 slot.request_shutdown().ok().map(|_| slot.projection())
@@ -2531,21 +2532,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let turn_admission_slot = TurnAdmissionSlot::new();
         let initial_session_state = turn_admission_slot.projection();
         let turn_admission = Arc::new(std::sync::Mutex::new(turn_admission_slot));
-        let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
         let active_capacity_lease =
             Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
-        let (eager_active_admission, materialization_status) = if defer_initial_turn {
-            *lock_staged_capacity_permit(&staged_capacity_permit) = create_capacity_permit;
-            (None, MaterializationStatus::Staged)
+        // Deferred sessions hand the reserved capacity permit to the registry
+        // (recorded below, once the handle is stored): the registry owns
+        // staged-permit custody, there is no handle-side permit slot. Eager
+        // sessions thread the permit into the active-capacity lease.
+        let (eager_active_admission, staged_create_permit) = if defer_initial_turn {
+            (None, Some(create_capacity_permit))
         } else {
             (
                 Some(acquire_active_capacity_lease(
                     Arc::clone(&active_capacity_lease),
                     create_capacity_permit,
                     None,
-                    false,
                 )),
-                MaterializationStatus::Active,
+                None,
             )
         };
 
@@ -2628,7 +2630,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             system_context_state,
             turn_state_handle,
             deferred_turn_state,
-            staged_capacity_permit,
             active_capacity_lease,
             interrupt_notify,
             cancel_after_boundary_handle,
@@ -2641,13 +2642,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 false
             } else {
                 sessions.insert(session_id.clone(), handle);
-                // Record the singular typed materialization status keyed by
-                // session id. The capacity permit was reserved through the
-                // registry above; this registers the status under the same
-                // owner so it is never re-derived from permit-existence plus
-                // handle-existence elsewhere.
-                self.staged_registry
-                    .record_status(&session_id, materialization_status);
+                // Record the singular typed materialization fact keyed by
+                // session id. For a deferred session the registry also takes
+                // CUSTODY of the reserved capacity permit — staged-ness is
+                // never re-derived from permit-presence elsewhere.
+                match staged_create_permit {
+                    Some(permit) => self.staged_registry.record_staged(&session_id, permit),
+                    None => self.staged_registry.record_active(&session_id),
+                }
                 // Notify waiters (e.g., CLI --stdin) that a session is available.
                 self.session_registered.notify_waiters();
                 true
@@ -2727,7 +2729,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 event_tx: caller_event_tx,
                 result_tx,
                 active_admission: eager_active_admission,
-                restore_staged_capacity_on_pre_run_failure: false,
             })
             .await
             .is_err()
@@ -3015,9 +3016,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
-        // Clear the singular typed materialization status with the handle.
+        // Clear the singular typed materialization record with the handle; a
+        // staged session's registry-held permit drops with it, freeing the
+        // reserved capacity.
         self.staged_registry.forget(id);
-        release_staged_capacity_permit(&handle.staged_capacity_permit);
         self.archived_views
             .write()
             .await
@@ -3351,14 +3353,6 @@ fn lock_deferred_turn_state(
     }
 }
 
-fn lock_staged_capacity_permit(
-    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
-    permit
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 fn lock_active_capacity_lease(
     lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
 ) -> std::sync::MutexGuard<'_, SessionActiveCapacityLease> {
@@ -3367,50 +3361,30 @@ fn lock_active_capacity_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn take_staged_capacity_permit(
-    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) -> Option<OwnedSemaphorePermit> {
-    lock_staged_capacity_permit(permit).take()
-}
-
-fn restore_staged_capacity_permit(
-    slot: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-    permit: Option<OwnedSemaphorePermit>,
-) {
-    let Some(permit) = permit else {
-        return;
-    };
-    let mut guard = lock_staged_capacity_permit(slot);
-    if guard.is_none() {
-        *guard = Some(permit);
-    }
-}
-
-fn release_staged_capacity_permit(permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>) {
-    let _ = lock_staged_capacity_permit(permit).take();
-}
-
 fn acquire_active_capacity_lease(
     active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
     permit: Option<OwnedSemaphorePermit>,
-    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
-    restore_staged_capacity_on_drop: bool,
+    promotion: Option<PromotionTicket>,
 ) -> RuntimeContextAdmissionGuard {
     let mut lease = lock_active_capacity_lease(&active_capacity_lease);
     if lease.leases == 0 {
         lease.permit = permit;
-        lease.restore_staged_capacity_on_final_release = false;
-        lease.staged_capacity_permit = None;
+        lease.promotion = promotion;
     } else {
+        // An existing lease already holds this session's capacity unit, so
+        // the incoming permit folds back into the gate (capacity tokens are
+        // fungible). An in-flight promotion binds to the shared lease so the
+        // FINAL release settles it through the registry.
         drop(permit);
+        if lease.promotion.is_none() {
+            lease.promotion = promotion;
+        }
     }
     lease.leases = lease.leases.saturating_add(1);
     drop(lease);
     RuntimeContextAdmissionGuard {
-        staged_capacity_permit,
         active_capacity_lease: Some(active_capacity_lease),
         active_permit: None,
-        restore_staged_capacity_on_drop,
     }
 }
 
@@ -3424,22 +3398,9 @@ fn try_join_active_capacity_lease(
     lease.leases = lease.leases.saturating_add(1);
     drop(lease);
     Some(RuntimeContextAdmissionGuard {
-        staged_capacity_permit: None,
         active_capacity_lease: Some(active_capacity_lease),
         active_permit: None,
-        restore_staged_capacity_on_drop: false,
     })
-}
-
-fn mark_active_capacity_lease_restore_staged(
-    active_capacity_lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
-    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
-) {
-    let mut lease = lock_active_capacity_lease(active_capacity_lease);
-    lease.restore_staged_capacity_on_final_release = true;
-    if lease.staged_capacity_permit.is_none() {
-        lease.staged_capacity_permit = Some(staged_capacity_permit);
-    }
 }
 
 fn release_active_capacity_lease(
@@ -3451,19 +3412,9 @@ fn release_active_capacity_lease(
     }
     lease.leases -= 1;
     if lease.leases == 0 {
-        let permit = lease.permit.take();
-        if lease.restore_staged_capacity_on_final_release {
-            lease.restore_staged_capacity_on_final_release = false;
-            ActiveCapacityLeaseRelease {
-                permit,
-                staged_capacity_permit: lease.staged_capacity_permit.take(),
-            }
-        } else {
-            lease.staged_capacity_permit = None;
-            ActiveCapacityLeaseRelease {
-                permit,
-                staged_capacity_permit: None,
-            }
+        ActiveCapacityLeaseRelease {
+            permit: lease.permit.take(),
+            promotion: lease.promotion.take(),
         }
     } else {
         ActiveCapacityLeaseRelease::default()
@@ -3613,7 +3564,6 @@ async fn session_task<A: SessionAgent>(
                 event_tx,
                 result_tx,
                 active_admission,
-                restore_staged_capacity_on_pre_run_failure,
             } => {
                 let runtime = *runtime;
                 let metadata = runtime.turn_metadata;
@@ -3657,7 +3607,11 @@ async fn session_task<A: SessionAgent>(
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
-                let mut active_admission = active_admission;
+                // `active_admission` is held for the whole turn. On any
+                // pre-run failure path below it simply drops at the end of
+                // this arm: the final lease release settles staged-restore
+                // vs capacity-release through the registry-owned promotion
+                // status, so there is no shell-side restore flag plumbing.
                 let dispatch_authorization = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     slot.authorize_start_turn_dispatch()
@@ -3713,11 +3667,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         abort_admitted_turn(&control);
                         let _ =
                             result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
@@ -3730,11 +3679,6 @@ async fn session_task<A: SessionAgent>(
                 if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
                     let terminal = resolution.public_terminal;
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let result = if terminal == Some(StartTurnPublicTerminal::NoPendingBoundary) {
                         Err(meerkat_core::error::AgentError::NoPendingBoundary)
@@ -3749,11 +3693,6 @@ async fn session_task<A: SessionAgent>(
                 }
                 if let Some(terminal) = resolution.public_terminal {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ =
                         result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
@@ -3775,11 +3714,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         abort_admitted_turn(&control);
                         let _ = result_tx.send(Err(
                             meerkat_core::error::AgentError::InternalError(format!(
@@ -3804,11 +3738,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         abort_admitted_turn(&control);
                         let _ = result_tx.send(Err(
                             meerkat_core::error::AgentError::InternalError(error.to_string()),
@@ -3820,11 +3749,6 @@ async fn session_task<A: SessionAgent>(
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
                     continue;
@@ -3885,11 +3809,6 @@ async fn session_task<A: SessionAgent>(
                 if let Err(error) = apply_result {
                     let _ = agent.set_flow_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
-                    if restore_staged_capacity_on_pre_run_failure
-                        && let Some(admission) = active_admission.take()
-                    {
-                        admission.restore_staged_capacity();
-                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
                     continue;
@@ -3910,6 +3829,14 @@ async fn session_task<A: SessionAgent>(
                 match begin_phase {
                     Ok(projection) => {
                         control.state_tx.send_replace(projection);
+                        // The run is genuinely beginning: commit any in-flight
+                        // staged->active promotion so the registry-owned
+                        // status flips `Promoting -> Active` and the final
+                        // lease release returns capacity to the gate instead
+                        // of restoring the staged reservation.
+                        if let Some(admission) = active_admission.as_ref() {
+                            admission.commit_promotion();
+                        }
                     }
                     Err(error) => {
                         let _ = agent.set_flow_tool_overlay(None);
@@ -3917,11 +3844,6 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        if restore_staged_capacity_on_pre_run_failure
-                            && let Some(admission) = active_admission.take()
-                        {
-                            admission.restore_staged_capacity();
-                        }
                         let _ =
                             result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
                                 format!("illegal begin-run transition: {error}"),
@@ -4443,6 +4365,15 @@ mod runtime_turn_metadata_tests {
             _observer: Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
         ) {
         }
+
+        fn install_observer_with_baseline(
+            &self,
+            _observer: Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
+        ) -> u64 {
+            // Recording handle never dispatches observer callbacks; the
+            // watermark read is the entire critical section.
+            self.current_watermark_ms()
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -4905,7 +4836,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -4999,7 +4930,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5022,7 +4953,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("again".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5074,7 +5005,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -5118,7 +5049,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5168,7 +5099,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5226,7 +5157,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5288,7 +5219,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5365,7 +5296,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5439,7 +5370,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5550,7 +5481,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5635,7 +5566,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5705,7 +5636,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5798,7 +5729,7 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: None,
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -6029,7 +5960,7 @@ mod admission_window_tests {
         CreateSessionRequest {
             model: "admission-window-test".to_string(),
             prompt: ContentInput::Text("defer".to_string()),
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -6094,7 +6025,6 @@ mod admission_window_tests {
                 event_tx: request.event_tx,
                 result_tx,
                 active_admission: None,
-                restore_staged_capacity_on_pre_run_failure: false,
             })
             .await
             .expect("send start turn");
@@ -6450,7 +6380,7 @@ mod inline_video_admission_tests {
         CreateSessionRequest {
             model: "providerless-video-alias".to_string(),
             prompt,
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn,

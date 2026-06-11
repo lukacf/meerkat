@@ -63,7 +63,6 @@ import type {
   WireMemberRef,
   WireMobBackendKind,
   WireMobProfile,
-  WireMemberState,
   WireMobMemberStatus,
   WireMobRuntimeMode,
   WireMobToolConfig,
@@ -569,11 +568,9 @@ void generatedMobMemberStatus;
 const generatedMobMemberRef: WireMemberRef = "opaque-member-ref";
 
 const generatedMobRuntimeMode: WireMobRuntimeMode = "turn_driven";
-const generatedMobMemberState: WireMemberState = "active";
 const generatedMobMemberListStatus: WireMobMemberStatus = "active";
 
 void generatedMobRuntimeMode;
-void generatedMobMemberState;
 void generatedMobMemberListStatus;
 
 const generatedMobSpawnReceipt: MobSpawnReceiptWire = {
@@ -588,7 +585,6 @@ const generatedMobMemberListEntry: MobMemberListEntryWire = {
   member_ref: generatedMobMemberRef,
   role: "worker",
   runtime_mode: "turn_driven",
-  state: "active",
   status: "active",
   is_final: false,
 };
@@ -635,7 +631,6 @@ const generatedMobBadMemberStatus: MobMemberListEntryWire = {
   member_ref: generatedMobMemberRef,
   role: "worker",
   runtime_mode: "turn_driven",
-  state: "active",
   // @ts-expect-error member-list status is a closed wire enum.
   status: "paused",
   is_final: false,

@@ -4034,19 +4034,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClearTurnToolOverlayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SyncVisibilityRevisionsIdle`
+- `ReplaceVisibilityStateIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SyncVisibilityRevisionsAttached`
+- `ReplaceVisibilityStateAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SyncVisibilityRevisionsRunning`
+- `ReplaceVisibilityStateRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SyncVisibilityRevisionsRetired`
+- `ReplaceVisibilityStateRetired`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
-- `SyncVisibilityRevisionsStopped`
+- `ReplaceVisibilityStateStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `McpServerConnectPendingIdle`
@@ -5287,9 +5287,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RealtimeTranscriptAppended`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `EnqueueClassifiedEntry`
-  - anchors: (unclaimed)
-  - scenarios: `input_admission_and_queueing`
 - `PeerIngressClassified`
   - anchors: (unclaimed)
   - scenarios: `input_admission_and_queueing`

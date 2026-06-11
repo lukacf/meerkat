@@ -24,8 +24,7 @@ fn make_prompt_input(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -47,8 +46,7 @@ fn make_prompt_input_with_handling_mode(
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -86,9 +84,8 @@ fn make_peer_terminal(body: &str) -> Input {
             request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
             status: ResponseTerminalStatus::Completed,
         }),
-        body: body.into(),
+        content: body.into(),
         payload: Some(serde_json::json!({"body": body})),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -113,9 +110,8 @@ fn make_peer_progress() -> Input {
             request_id: "req-1".into(),
             phase: ResponseProgressPhase::InProgress,
         }),
-        body: "working...".into(),
+        content: "working...".into(),
         payload: Some(serde_json::json!({"progress": "working"})),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -289,8 +285,7 @@ async fn reject_derived_prompt() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "hi".into(),
-        blocks: None,
+        content: "hi".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -611,8 +606,10 @@ async fn stop_abandons_all_active_inputs() {
         .await
         .unwrap()
         .unwrap();
-    let state = stored.state;
-    assert!(state.is_terminal());
+    assert!(
+        stored.seed.terminal_outcome.is_some(),
+        "seed must carry the DSL-owned terminal outcome"
+    );
 }
 
 #[tokio::test]
@@ -663,9 +660,8 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
             request_id: "req-1".into(),
             phase: ResponseProgressPhase::InProgress,
         }),
-        body: "working".into(),
+        content: "working".into(),
         payload: Some(serde_json::json!({"progress": "working"})),
-        blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -697,9 +693,8 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
             request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
             status: ResponseTerminalStatus::Completed,
         }),
-        body: "done".into(),
+        content: "done".into(),
         payload: Some(serde_json::json!({"ok": true})),
-        blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -757,9 +752,8 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
             request_id: " ".into(),
             status: ResponseTerminalStatus::Completed,
         }),
-        body: "done".into(),
+        content: "done".into(),
         payload: Some(serde_json::json!({"ok": true})),
-        blocks: None,
         handling_mode: None,
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -788,9 +782,8 @@ async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "hi".into(),
+        content: "hi".into(),
         payload: None,
-        blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -879,9 +872,8 @@ async fn post_admission_signal_steer_is_request_immediate() {
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "urgent".into(),
+        content: "urgent".into(),
         payload: None,
-        blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(steer_input).await.unwrap();
@@ -921,9 +913,8 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "interrupt me".into(),
+        content: "interrupt me".into(),
         payload: None,
-        blocks: None,
         handling_mode: None,
     });
     let outcome = driver.accept_input(peer).await.unwrap();

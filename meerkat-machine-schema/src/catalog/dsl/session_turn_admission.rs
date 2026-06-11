@@ -62,17 +62,6 @@ pub enum PendingContinuationDisposition {
     NoPendingBoundary,
 }
 
-/// Handling mode requested for a turn's contributing inputs, mirrored from
-/// `meerkat_core::types::HandlingMode`. `Steer` means the input requested
-/// injection at the earliest cooperative boundary; for a live (provider-hosted
-/// realtime) session that maps to a required live-adapter interrupt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum TurnHandlingMode {
-    #[default]
-    Queue,
-    Steer,
-}
-
 /// Tri-state runtime keep-alive request carried into the admission machine.
 ///
 /// This is the canonical typed decision the shell previously collapsed into an
@@ -148,7 +137,6 @@ machine! {
             AuthorizeCancelAfterBoundary,
             ResolveLastStartTurnPublicTerminal,
             ResolveRuntimeKeepAlive { keep_alive_request: Enum<RuntimeKeepAliveRequest> },
-            ResolveLiveInterruptRequired { handling_mode: Enum<TurnHandlingMode> },
             ResolveStartTurnDisposition {
                 execution_kind_present: bool,
                 execution_kind: Enum<StartTurnExecutionKind>,
@@ -171,7 +159,6 @@ machine! {
             StartTurnDispositionResolved { disposition: Enum<StartTurnDisposition> },
             StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
             RuntimeKeepAliveResolved { decision: Enum<RuntimeKeepAlivePersistenceDecision> },
-            LiveInterruptRequired { required: bool },
         }
 
         helper is_active_phase(phase: TurnAdmissionPhase) -> bool {
@@ -193,7 +180,6 @@ machine! {
         disposition StartTurnDispositionResolved => local seam NoOwnerRealization,
         disposition StartTurnPublicTerminalResolved => local seam NoOwnerRealization,
         disposition RuntimeKeepAliveResolved => local seam NoOwnerRealization,
-        disposition LiveInterruptRequired => local seam NoOwnerRealization,
 
         transition ProjectTurnAdmission {
             per_phase [Idle, Admitted, Running, Completing, ShuttingDown]
@@ -622,28 +608,6 @@ machine! {
             update {}
             to Admitted
             emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting }
-        }
-
-        transition ResolveLiveInterruptRequiredSteer {
-            on input ResolveLiveInterruptRequired { handling_mode }
-            guard {
-                self.lifecycle_phase == Phase::Admitted
-                && handling_mode == TurnHandlingMode::Steer
-            }
-            update {}
-            to Admitted
-            emit LiveInterruptRequired { required: true }
-        }
-
-        transition ResolveLiveInterruptRequiredQueue {
-            on input ResolveLiveInterruptRequired { handling_mode }
-            guard {
-                self.lifecycle_phase == Phase::Admitted
-                && handling_mode == TurnHandlingMode::Queue
-            }
-            update {}
-            to Admitted
-            emit LiveInterruptRequired { required: false }
         }
 
         transition ResolveLastStartTurnPublicTerminalNoPending {

@@ -366,8 +366,6 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
             base_url: "https://self-hosted.example/v1".to_string(),
             api_style: meerkat_core::SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(

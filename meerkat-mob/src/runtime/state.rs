@@ -261,11 +261,11 @@ pub(super) enum MobCommand {
         result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
     Retire {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Respawn {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
@@ -292,8 +292,8 @@ pub(super) enum MobCommand {
     /// comms runtime and the recipient peer route from the mob wiring graph,
     /// then submits a typed `CommsCommand::PeerMessage`.
     SendPeerMessage {
-        from: MeerkatId,
-        to: MeerkatId,
+        from: AgentIdentity,
+        to: AgentIdentity,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
@@ -309,7 +309,7 @@ pub(super) enum MobCommand {
     },
     #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         outcome: Result<
             meerkat_runtime::completion::CompletionOutcome,
             meerkat_runtime::completion::CompletionWaitError,
@@ -465,7 +465,7 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ForceCancel {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Wire a local mob member to a peer target.
@@ -476,7 +476,7 @@ pub(super) enum MobCommand {
     /// so local/name uniqueness and descriptor/key/address truth are not
     /// collapsed into a member `WiringEdge`.
     Wire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
@@ -489,7 +489,7 @@ pub(super) enum MobCommand {
     /// local member targets forward to `UnwireMembers`, while raw external
     /// descriptors forward to `UnwireExternalPeer`.
     Unwire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },

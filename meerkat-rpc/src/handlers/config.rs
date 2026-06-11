@@ -284,7 +284,6 @@ pub async fn handle_set(
             Ok(snapshot) => snapshot.config,
             Err(e) => return runtime_error_to_response(id, e),
         };
-        let prior_global_model = prior.agent.model.clone();
         match config_runtime.set(config, expected_generation).await {
             Ok(snapshot) => {
                 let committed_registry =
@@ -317,9 +316,7 @@ pub async fn handle_set(
                 // result (`live_propagation`), not reduced to tracing — a
                 // non-clean fan-out is visible to the caller.
                 let live_propagation = if should_fire_live_propagation(&prior, &snapshot.config) {
-                    let report = runtime
-                        .propagate_config_to_live_channels(Some(&prior_global_model))
-                        .await;
+                    let report = runtime.propagate_config_to_live_channels().await;
                     Some(wire_live_propagation_report(&report))
                 } else {
                     None
@@ -348,14 +345,11 @@ pub async fn handle_set(
             Ok(prior) => prior,
             Err(e) => return RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         };
-        let prior_global_model = prior.agent.model.clone();
         match config_store.set(config.clone()).await {
             Ok(()) => {
                 runtime.set_skill_identity_registry(registry);
                 let live_propagation = if should_fire_live_propagation(&prior, &config) {
-                    let report = runtime
-                        .propagate_config_to_live_channels(Some(&prior_global_model))
-                        .await;
+                    let report = runtime.propagate_config_to_live_channels().await;
                     Some(wire_live_propagation_report(&report))
                 } else {
                     None
@@ -400,13 +394,6 @@ pub async fn handle_patch(
             Ok(snapshot) => snapshot.config,
             Err(e) => return runtime_error_to_response(id, e),
         };
-        // Capture the prior global model BEFORE committing the patch.
-        // G5 revisited: the orchestrator no longer consults the prior
-        // baseline (the divergence heuristic broke s72 — see
-        // `should_apply_global_model_hot_swap` for the rationale), but
-        // the value is still threaded through for tracing/telemetry and
-        // signature stability with the rpc shim.
-        let prior_global_model = current.agent.model.clone();
         let preview = match apply_patch_preview(&current, patch.clone()) {
             Ok(config) => config,
             Err(err) => {
@@ -452,10 +439,6 @@ pub async fn handle_patch(
                 // every active live channel so adapters re-seed against
                 // canonical state. No-op when no live host is attached.
                 //
-                // G5 revisited: the prior global model is forwarded for
-                // signature stability but the orchestrator's hot-swap
-                // rule no longer consults it.
-                //
                 // R3-2-4 (P1): only fire when a propagate-affecting
                 // field actually changed. Previously this fired on
                 // every patch — combined with the simplified G5 rule
@@ -468,9 +451,7 @@ pub async fn handle_patch(
                 // K17: the typed propagation report is carried in the wire
                 // result (`live_propagation`), not reduced to tracing.
                 let live_propagation = if should_fire_live_propagation(&current, &snapshot.config) {
-                    let report = runtime
-                        .propagate_config_to_live_channels(Some(&prior_global_model))
-                        .await;
+                    let report = runtime.propagate_config_to_live_channels().await;
                     Some(wire_live_propagation_report(&report))
                 } else {
                     None
@@ -497,11 +478,6 @@ pub async fn handle_patch(
             Ok(config) => config,
             Err(e) => return RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         };
-        // Capture the prior global model BEFORE the patch. G5 revisited:
-        // the orchestrator no longer consults this baseline, but it is
-        // still threaded through for signature stability with the rpc
-        // shim. See `should_apply_global_model_hot_swap` for the rule.
-        let prior_global_model = current.agent.model.clone();
         let preview = match apply_patch_preview(&current, patch.clone()) {
             Ok(config) => config,
             Err(err) => {
@@ -523,9 +499,6 @@ pub async fn handle_patch(
             Ok(config) => {
                 runtime.set_skill_identity_registry(registry);
                 // P1#5: propagate to live channels. See doc-comment above.
-                // G5 revisited: prior_global_model is threaded for
-                // signature stability only; the orchestrator's hot-swap
-                // rule no longer consults it.
                 //
                 // R3-2-4 (P1): gate on prior-vs-new diff. See
                 // `should_fire_live_propagation` for the field set.
@@ -533,9 +506,7 @@ pub async fn handle_patch(
                 // K17: the typed propagation report is carried in the wire
                 // result (`live_propagation`), not reduced to tracing.
                 let live_propagation = if should_fire_live_propagation(&current, &config) {
-                    let report = runtime
-                        .propagate_config_to_live_channels(Some(&prior_global_model))
-                        .await;
+                    let report = runtime.propagate_config_to_live_channels().await;
                     Some(wire_live_propagation_report(&report))
                 } else {
                     None

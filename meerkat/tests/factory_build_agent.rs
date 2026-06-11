@@ -18,7 +18,7 @@ use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmReque
 use meerkat::{AgentError, AgentLlmClient, BuildAgentError, CompiledSchema, LlmStreamResult};
 use meerkat_client::{LlmClient, TestClient};
 #[cfg(feature = "comms")]
-use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
+use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, identity::Keypair};
 use meerkat_core::AssistantBlock;
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::service::MobToolAuthorityContext;
@@ -166,18 +166,10 @@ fn counting_agent_llm_client_decorator(
 }
 
 #[cfg(feature = "comms")]
-fn trusted_peer_descriptor(peer: TrustedPeer) -> meerkat_core::comms::TrustedPeerDescriptor {
-    meerkat_core::comms::TrustedPeerDescriptor {
-        peer_id: peer.pubkey.to_peer_id(),
-        name: meerkat_core::comms::PeerName::new(peer.name).expect("valid peer name"),
-        address: meerkat_core::comms::PeerAddress::parse(peer.addr).expect("valid peer address"),
-        pubkey: *peer.pubkey.as_bytes(),
-    }
-}
-
-#[cfg(feature = "comms")]
-async fn add_trusted_peer_with_generated_authority(runtime: Arc<CommsRuntime>, peer: TrustedPeer) {
-    let peer = trusted_peer_descriptor(peer);
+async fn add_trusted_peer_with_generated_authority(
+    runtime: Arc<CommsRuntime>,
+    peer: meerkat_core::comms::TrustedPeerDescriptor,
+) {
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
     let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -795,8 +787,6 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::Responses,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(
@@ -847,8 +837,6 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         },
     );
     config.self_hosted.models.insert(
@@ -1017,14 +1005,16 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
             .await
             .unwrap(),
     );
+    let peer_a_pubkey = Keypair::generate().public_key();
     add_trusted_peer_with_generated_authority(
         Arc::clone(&comms_runtime),
-        TrustedPeer {
-            name: "peer-a".into(),
-            pubkey: Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: Default::default(),
-        },
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer-a",
+            peer_a_pubkey.to_peer_id().to_string(),
+            *peer_a_pubkey.as_bytes(),
+            "tcp://127.0.0.1:9999",
+        )
+        .expect("trusted peer descriptor"),
     )
     .await;
     let factory = temp_factory(&temp)
@@ -2938,14 +2928,16 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
     let _shared_pubkey = shared_runtime.public_key().to_peer_id();
 
     // Add a sentinel peer to the shared runtime so we can detect reuse.
+    let sentinel_pubkey = meerkat_comms::identity::Keypair::generate().public_key();
     add_trusted_peer_with_generated_authority(
         Arc::clone(&shared_runtime),
-        meerkat_comms::TrustedPeer {
-            name: "sentinel".into(),
-            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: meerkat_comms::PeerMeta::default(),
-        },
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            "sentinel",
+            sentinel_pubkey.to_peer_id().to_string(),
+            *sentinel_pubkey.as_bytes(),
+            "tcp://127.0.0.1:9999",
+        )
+        .expect("trusted peer descriptor"),
     )
     .await;
 
@@ -3513,15 +3505,16 @@ async fn factory_built_agent_honors_config_tools_timeout() {
         if let meerkat::AgentEvent::ToolExecutionCompleted {
             name,
             is_error,
-            result,
+            content,
             ..
         } = event
             && name == "slow_tool"
         {
             assert!(is_error, "timed-out tool result must be an error");
+            let text = meerkat_core::types::text_content(&content);
             assert!(
-                result.contains("\"error\":\"timeout\""),
-                "timed-out tool result must carry the canonical timeout payload, got: {result}"
+                text.contains("\"error\":\"timeout\""),
+                "timed-out tool result must carry the canonical timeout payload, got: {text}"
             );
             saw_timeout_completion = true;
         }

@@ -1,8 +1,6 @@
 use crate::error::MobError;
 use crate::event::{MobEvent, MobEventKind, NewMobEvent};
-use crate::ids::{
-    AgentIdentity, AgentRuntimeId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId,
-};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FlowId, MobId, ProfileName, RunId, StepId};
 use crate::store::MobEventStore;
 use std::sync::Arc;
 
@@ -46,7 +44,7 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     ) -> Result<MobEvent, MobError> {
         let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepDispatched {
@@ -61,7 +59,7 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     ) -> Result<MobEvent, MobError> {
         let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepTargetCompleted {
@@ -76,7 +74,7 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         reason: String,
     ) -> Result<MobEvent, MobError> {
         let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
@@ -141,7 +139,7 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        escalated_to: MeerkatId,
+        escalated_to: AgentIdentity,
     ) -> Result<MobEvent, MobError> {
         self.append(MobEventKind::SupervisorEscalation {
             run_id,
@@ -156,7 +154,7 @@ impl MobEventEmitter {
 mod tests {
     use super::MobEventEmitter;
     use crate::event::MobEventKind;
-    use crate::ids::{MeerkatId, MobId, RunId, StepId};
+    use crate::ids::{AgentIdentity, MobId, RunId, StepId};
     use crate::store::{InMemoryMobEventStore, MobEventStore};
     use std::sync::Arc;
 
@@ -169,7 +167,7 @@ mod tests {
             .step_target_failed(
                 RunId::new(),
                 StepId::from("review"),
-                MeerkatId::from("reviewer"),
+                AgentIdentity::from("reviewer"),
                 "LLM failure terminal turn".to_string(),
             )
             .await

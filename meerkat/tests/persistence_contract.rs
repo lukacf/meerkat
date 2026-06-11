@@ -34,7 +34,7 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: prompt.to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -215,7 +215,7 @@ mod tests {
         CreateSessionRequest {
             model: "mock-model".to_string(),
             prompt: prompt.to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn,

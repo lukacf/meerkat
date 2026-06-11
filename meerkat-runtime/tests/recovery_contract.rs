@@ -82,8 +82,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -133,7 +132,6 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     // The recovery path normalises these to a recovered phase based on the
     // persisted boundary receipt; the history chain is not material to
     // recovery.
-    state.attempt_count = 1;
     StoredInputState {
         state,
         seed: InputStateSeed {
@@ -552,7 +550,6 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         );
 
         for input_id in [&first_id, &second_id] {
-            let recovered = driver.input_state(input_id).unwrap();
             assert_eq!(
                 driver.inner_ref().input_phase(input_id),
                 Some(InputLifecycleState::Consumed),
@@ -560,7 +557,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 harness.name
             );
             assert_eq!(
-                recovered.terminal_outcome().cloned(),
+                driver.inner_ref().input_terminal_outcome(input_id),
                 Some(InputTerminalOutcome::Consumed),
                 "{}: committed contributors should recover with a consumed terminal outcome",
                 harness.name

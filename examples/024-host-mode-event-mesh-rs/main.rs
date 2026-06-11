@@ -105,7 +105,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."
                 .into(),
-            system_prompt: Some(
+            system_prompt: meerkat::SystemPromptOverride::Set(
                 "You are a concise incident-response coordinator. \
                  You maintain context across multiple event injections, building an \
                  evolving picture of the incident. When you receive new information, \

@@ -5,7 +5,7 @@ use super::turn_executor::{
 };
 use crate::error::MobError;
 use crate::event::MemberRef;
-use crate::ids::{AgentIdentity, MeerkatId, RunId, StepId};
+use crate::ids::{AgentIdentity, RunId, StepId};
 use crate::machines::mob_machine as mob_dsl;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -251,13 +251,13 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
             .handle
-            .get_member_by_meerkat_id(target)
+            .get_member(target)
             .await?
             .ok_or_else(|| MobError::MemberNotFound(target.clone()))?;
 

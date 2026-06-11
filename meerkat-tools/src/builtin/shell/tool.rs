@@ -881,7 +881,7 @@ mod tests {
             Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
         let manager = Arc::new(
             crate::builtin::shell::job_manager::JobManager::new(config.clone())
-                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_owner_bridge_session_id(meerkat_core::types::SessionId::new())
                 .with_ops_registry(Arc::clone(&registry)),
         );
         let tool = ShellTool::with_job_manager(config, manager);
@@ -924,7 +924,7 @@ mod tests {
             Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
         let manager = Arc::new(
             crate::builtin::shell::job_manager::JobManager::new(config.clone())
-                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_owner_bridge_session_id(meerkat_core::types::SessionId::new())
                 .with_ops_registry(Arc::clone(&registry)),
         );
         let tool = ShellTool::with_job_manager(config, manager);

@@ -2053,7 +2053,10 @@ mod snapshot_projection_tests {
     }
 
     fn refused() -> DslTransitionError {
-        DslTransitionError::new("stub-turn-state-handle", "transition not exercised in test")
+        DslTransitionError::no_matching(
+            "stub-turn-state-handle",
+            "transition not exercised in test",
+        )
     }
 
     impl TurnStateHandle for StubTurnStateHandle {

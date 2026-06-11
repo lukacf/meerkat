@@ -26,13 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-#[cfg(feature = "comms")]
-type DynCommsAgent = meerkat_comms::agent::CommsAgent<
-    dyn AgentLlmClient,
-    dyn AgentToolDispatcher,
-    dyn AgentSessionStore,
->;
-
 // ============================================================================
 // ADAPTERS - Bridge LlmClient/SessionStore to Agent traits
 // ============================================================================
@@ -930,193 +923,6 @@ mod scenario_07_session_resume {
 }
 
 // ============================================================================
-// SCENARIO 8: Comms exchange (two-agent TCP)
-// ============================================================================
-
-#[cfg(feature = "comms")]
-mod scenario_08_comms {
-    use super::*;
-    use meerkat_comms::agent::{
-        CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
-    };
-    use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
-    use parking_lot::RwLock;
-
-    /// Create a pair of agents that can communicate with each other.
-    async fn create_agent_pair(
-        api_key: &str,
-    ) -> (
-        DynCommsAgent,
-        DynCommsAgent,
-        meerkat_comms::agent::ListenerHandle,
-        meerkat_comms::agent::ListenerHandle,
-        TempDir,
-        TempDir,
-    ) {
-        let keypair_a = Keypair::generate();
-        let keypair_b = Keypair::generate();
-        let pubkey_a = keypair_a.public_key();
-        let pubkey_b = keypair_b.public_key();
-
-        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr_a = listener_a.local_addr().unwrap();
-        drop(listener_a);
-
-        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr_b = listener_b.local_addr().unwrap();
-        drop(listener_b);
-
-        let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "agent-b".to_string(),
-            pubkey: pubkey_b,
-            addr: format!("tcp://{addr_b}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
-
-        let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "agent-a".to_string(),
-            pubkey: pubkey_a,
-            addr: format!("tcp://{addr_a}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
-
-        let config_a = CommsManagerConfig::with_keypair(keypair_a)
-            .trusted_peers(trusted_for_a.clone())
-            .comms_config(CommsConfig::default());
-        let comms_manager_a = CommsManager::new(config_a).unwrap();
-
-        let config_b = CommsManagerConfig::with_keypair(keypair_b)
-            .trusted_peers(trusted_for_b.clone())
-            .comms_config(CommsConfig::default());
-        let comms_manager_b = CommsManager::new(config_b).unwrap();
-
-        let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
-        let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
-
-        let handle_a = spawn_tcp_listener(
-            &addr_a.to_string(),
-            comms_manager_a.keypair_arc(),
-            trusted_a_shared.clone(),
-            comms_manager_a.inbox_sender().clone(),
-        )
-        .await
-        .expect("Failed to start listener A");
-
-        let handle_b = spawn_tcp_listener(
-            &addr_b.to_string(),
-            comms_manager_b.keypair_arc(),
-            trusted_b_shared.clone(),
-            comms_manager_b.inbox_sender().clone(),
-        )
-        .await
-        .expect("Failed to start listener B");
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let llm_client_a = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
-        let llm_adapter_a = Arc::new(LlmClientAdapter::new(llm_client_a, smoke_model()));
-
-        let llm_client_b = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
-        let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, smoke_model()));
-
-        let tools_a = Arc::new(CommsToolDispatcher::new(
-            comms_manager_a.router().clone(),
-            comms_manager_a.router().trusted_peers_view(),
-        ));
-
-        let tools_b = Arc::new(CommsToolDispatcher::new(
-            comms_manager_b.router().clone(),
-            comms_manager_b.router().trusted_peers_view(),
-        ));
-
-        let (_store_a, store_adapter_a, temp_dir_a) = create_temp_store().await;
-        let (_store_b, store_adapter_b, temp_dir_b) = create_temp_store().await;
-
-        let agent_a_inner = AgentBuilder::new()
-            .model(smoke_model())
-            .max_tokens_per_turn(1024)
-            .system_prompt(
-                "You are Agent A. Use the comms tools `send` and `peers`. \
-                 To message agent-b, call `send` with kind `peer_message`.",
-            )
-            .build(llm_adapter_a, tools_a, store_adapter_a)
-            .await
-            .expect("public builder build");
-
-        let agent_b_inner = AgentBuilder::new()
-            .model(smoke_model())
-            .max_tokens_per_turn(1024)
-            .system_prompt(
-                "You are Agent B. You can receive messages from agent-a. \
-                 Acknowledge any messages you receive.",
-            )
-            .build(llm_adapter_b, tools_b, store_adapter_b)
-            .await
-            .expect("public builder build");
-
-        let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
-        let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
-
-        (agent_a, agent_b, handle_a, handle_b, temp_dir_a, temp_dir_b)
-    }
-
-    #[tokio::test]
-    #[ignore = "lane:e2e-smoke"]
-    async fn e2e_smoke_comms_exchange() {
-        let Some(api_key) = anthropic_api_key() else {
-            eprintln!("Skipping scenario 8: missing ANTHROPIC_API_KEY");
-            return;
-        };
-
-        let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
-            create_agent_pair(&api_key).await;
-
-        // Agent A sends a message to Agent B via comms tools.
-        let result_a = agent_a
-            .run(
-                "Use the send_message tool (handling_mode='steer') to send a message to agent-b with body \
-                 exactly: Smoke test ping from Agent A"
-                    .into(),
-            )
-            .await
-            .expect("Agent A run should succeed");
-        eprintln!(
-            "[scenario 8] Agent A: tool_calls={}, text={}",
-            result_a.tool_calls,
-            result_a.text.trim()
-        );
-        assert!(
-            result_a.tool_calls > 0,
-            "Agent A should make at least one comms tool call"
-        );
-
-        // Give time for message delivery
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        // Agent B processes the incoming message
-        let result_b = agent_b
-            .run("Process your inbox and acknowledge what Agent A sent.".into())
-            .await
-            .expect("Agent B inbox processing should succeed");
-
-        eprintln!("[scenario 8] Agent B: text={}", result_b.text.trim());
-        let text_b_lower = result_b.text.to_lowercase();
-        assert!(
-            text_b_lower.contains("agent a")
-                || text_b_lower.contains("ping")
-                || text_b_lower.contains("smoke")
-                || text_b_lower.contains("message")
-                || text_b_lower.contains("received"),
-            "Agent B should acknowledge the message: {}",
-            result_b.text
-        );
-
-        handle_a.abort();
-        handle_b.abort();
-    }
-}
-
-// ============================================================================
 // SCENARIO 9: Session service lifecycle (EphemeralSessionService)
 // ============================================================================
 
@@ -1144,7 +950,9 @@ mod scenario_09_session_service {
             prompt: "Hello, I am testing the session service."
                 .to_string()
                 .into(),
-            system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
+            system_prompt: meerkat::SystemPromptOverride::Set(
+                "You are a helpful assistant. Be brief.".to_string(),
+            ),
             max_tokens: Some(256),
             event_tx: None,
 
@@ -1770,7 +1578,7 @@ mod scenario_22_runtime_host_comms {
             prompt: "You are Agent A. Acknowledge peer messages briefly."
                 .to_string()
                 .into(),
-            system_prompt: Some(
+            system_prompt: meerkat::SystemPromptOverride::Set(
                 "You are Agent A. When you receive a message, acknowledge it.".to_string(),
             ),
             max_tokens: Some(256),

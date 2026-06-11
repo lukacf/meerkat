@@ -127,19 +127,10 @@ impl CanonicalPath {
         &self.0
     }
 
-    pub fn into_string(self) -> String {
-        self.0
-    }
-
     /// Whether this is the reserved signature entry, which is excluded from the
     /// canonical digest.
     pub fn is_signature(&self) -> bool {
         self.0 == Self::SIGNATURE
-    }
-
-    /// The archive section this path belongs to, if any.
-    pub fn section(&self) -> Option<ArchiveSection> {
-        ArchiveSection::classify(&self.0)
     }
 }
 
@@ -606,13 +597,6 @@ mod tests {
         assert!(CanonicalPath::new("signature.toml").is_signature());
         assert!(CanonicalPath::new("./signature.toml").is_signature());
         assert!(!CanonicalPath::new("skills/review.md").is_signature());
-
-        // Section classification routes through the same typed identity.
-        assert_eq!(
-            CanonicalPath::new(".\\hooks\\run.sh").section(),
-            Some(ArchiveSection::Hooks)
-        );
-        assert_eq!(CanonicalPath::new("manifest.toml").section(), None);
     }
 
     #[test]

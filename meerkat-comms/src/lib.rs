@@ -30,7 +30,6 @@ pub(crate) mod peer_types;
 pub mod router;
 pub mod runtime;
 
-pub use agent::types::{DrainedMessage, PlainMessage, drain_inbox_item};
 pub use event_injector::CommsEventInjector;
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{AdmissionOutcome, DropReason, Inbox, InboxError, InboxSender};
@@ -46,10 +45,7 @@ pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
-pub use trust::{
-    TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeer, TrustedPeers,
-    TrustedPeersView,
-};
+pub use trust::{TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeersView};
 pub use types::{Envelope, InboxItem, MessageKind, Status};
 
 // Re-export high-level components
@@ -64,9 +60,8 @@ pub use runtime::comms_runtime::{
     CommsRuntime, CommsRuntimeError, CommsToolMaterial, PeerRequestResponseAuthority,
 };
 
-pub use agent::CommsAgent;
 pub use agent::dispatcher::{
-    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, comms_tool_defs, wrap_with_comms,
+    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, comms_tool_defs,
 };
 pub use mcp::tools::{
     RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason, handle_tools_call,

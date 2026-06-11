@@ -152,13 +152,15 @@ impl Supervisor {
         })?;
         let escalation_turn_timeout = Duration::from_millis(turn_timeout_ms);
 
-        tokio::time::timeout(
-            escalation_turn_timeout,
-            self.handle.internal_turn(
-                escalation_target.agent_identity.clone(),
-                format!("Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"),
-            ),
-        )
+        tokio::time::timeout(escalation_turn_timeout, async {
+            self.handle
+                .member(&escalation_target.agent_identity)
+                .await?
+                .internal_turn(format!(
+                    "Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"
+                ))
+                .await
+        })
         .await
         .map_err(|_| {
             MobError::SupervisorEscalation(format!(

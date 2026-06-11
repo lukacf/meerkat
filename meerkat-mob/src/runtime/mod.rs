@@ -17,8 +17,8 @@ use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
 use crate::ids::{
-    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, MobId, ProfileName, RunId,
-    WorkOrigin, WorkRef, WorkSpec,
+    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MobId, ProfileName, RunId, WorkOrigin,
+    WorkRef, WorkSpec,
 };
 use crate::roster::{Roster, RosterEntry};
 use crate::run::{FlowRunConfig, MobRun};
@@ -52,7 +52,7 @@ pub(crate) type RuntimeAdapterOption = Option<()>;
 
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
 
-pub(crate) fn flow_system_member_id() -> MeerkatId {
+pub(crate) fn flow_system_member_id() -> AgentIdentity {
     crate::ids::AgentIdentity::flow_system_provenance()
 }
 

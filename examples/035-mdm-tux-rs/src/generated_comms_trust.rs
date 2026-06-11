@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use meerkat_comms::{CommsRuntime, TrustedPeer};
+use meerkat_comms::{CommsRuntime, PubKey};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
 use meerkat_core::types::SessionId;
@@ -30,8 +30,13 @@ impl ExampleGeneratedCommsTrustRouter {
         }
     }
 
-    pub async fn add_trusted_peer(&self, peer: TrustedPeer) -> anyhow::Result<()> {
-        let endpoint = endpoint_from_trusted_peer(&peer)?;
+    pub async fn add_trusted_peer(
+        &self,
+        name: &str,
+        pubkey: PubKey,
+        addr: &str,
+    ) -> anyhow::Result<()> {
+        let endpoint = endpoint_from_parts(name, pubkey, addr)?;
         let remove_peer_id = endpoint.peer_id.0.clone();
         let repair_peer_id = remove_peer_id.clone();
         let _guard = self.operations.lock().await;
@@ -43,8 +48,13 @@ impl ExampleGeneratedCommsTrustRouter {
         self.stage_add_locked(endpoint).await
     }
 
-    pub async fn replace_named_trusted_peer(&self, peer: TrustedPeer) -> anyhow::Result<()> {
-        let endpoint = endpoint_from_trusted_peer(&peer)?;
+    pub async fn replace_named_trusted_peer(
+        &self,
+        name: &str,
+        pubkey: PubKey,
+        addr: &str,
+    ) -> anyhow::Result<()> {
+        let endpoint = endpoint_from_parts(name, pubkey, addr)?;
         let peer_name = endpoint.name.0.clone();
         let peer_id = endpoint.peer_id.0.clone();
         let remove_peer_name = peer_name.clone();
@@ -83,9 +93,7 @@ impl ExampleGeneratedCommsTrustRouter {
                 removed = true;
             }
         }
-        if !removed
-            && let Some(peer_id) = repair_peer_id
-        {
+        if !removed && let Some(peer_id) = repair_peer_id {
             self.stage_remove_peer_id_repair_locked(peer_id).await?;
         }
         Ok(())
@@ -134,13 +142,13 @@ impl ExampleGeneratedCommsTrustRouter {
     }
 }
 
-fn endpoint_from_trusted_peer(peer: &TrustedPeer) -> anyhow::Result<PeerEndpoint> {
+fn endpoint_from_parts(name: &str, pubkey: PubKey, addr: &str) -> anyhow::Result<PeerEndpoint> {
     let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
-        peer.name.as_str(),
-        peer.pubkey.to_peer_id().to_string(),
-        *peer.pubkey.as_bytes(),
-        peer.addr.as_str(),
+        name,
+        pubkey.to_peer_id().to_string(),
+        *pubkey.as_bytes(),
+        addr,
     )
-    .map_err(|detail| anyhow::anyhow!("invalid trusted peer {}: {detail}", peer.name))?;
+    .map_err(|detail| anyhow::anyhow!("invalid trusted peer {name}: {detail}"))?;
     Ok(PeerEndpoint::from(&descriptor))
 }

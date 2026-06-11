@@ -591,12 +591,10 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
                     channel_id: effect_channel_id,
                     status,
-                    refresh_enqueued,
                     sequence,
                     queue_acceptance_sequence,
                 } if *effect_channel_id == channel_id => Some(LiveRefreshResultAuthority {
                     status: *status,
-                    refresh_enqueued: *refresh_enqueued,
                     sequence: *sequence,
                     queue_acceptance_sequence: *queue_acceptance_sequence,
                 }),
@@ -633,7 +631,6 @@ impl MeerkatMachine {
             crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCloseResultResolved {
                 channel_id: effect_channel_id,
                 status,
-                closed,
                 sequence,
                 close_observation_sequence,
             } if *effect_channel_id == channel_id
@@ -642,7 +639,6 @@ impl MeerkatMachine {
                 Some(LiveCloseResultAuthority::from_generated_effect(
                     channel_id.clone(),
                     *status,
-                    *closed,
                     *sequence,
                     *close_observation_sequence,
                 ))
@@ -685,7 +681,6 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCommandResultResolved {
                     channel_id: effect_channel_id,
                     command: effect_command,
-                    accepted,
                     sequence,
                     command_acceptance_sequence,
                 } if *effect_channel_id == channel_id
@@ -694,7 +689,6 @@ impl MeerkatMachine {
                 {
                     Some(LiveCommandResultAuthority {
                         command: *effect_command,
-                        accepted: *accepted,
                         sequence: *sequence,
                         command_acceptance_sequence: *command_acceptance_sequence,
                     })

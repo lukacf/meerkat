@@ -1,6 +1,6 @@
 use super::actor::PendingSpawn;
 use crate::error::MobError;
-use crate::ids::MeerkatId;
+use crate::ids::AgentIdentity;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::task::JoinHandle;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +23,7 @@ pub(super) struct PendingSpawnSlot {
 pub(super) enum PendingSpawnInsertImpact {
     Added,
     Collided {
-        replaced_identity: Option<MeerkatId>,
+        replaced_identity: Option<AgentIdentity>,
     },
 }
 
@@ -39,13 +39,13 @@ impl PendingSpawnLineage {
         self.metadata.is_empty()
     }
 
-    pub(super) fn contains_member(&self, agent_identity: &MeerkatId) -> bool {
+    pub(super) fn contains_member(&self, agent_identity: &AgentIdentity) -> bool {
         self.metadata
             .values()
             .any(|pending| &pending.agent_identity == agent_identity)
     }
 
-    pub(super) fn member_identities(&self) -> BTreeSet<MeerkatId> {
+    pub(super) fn member_identities(&self) -> BTreeSet<AgentIdentity> {
         self.metadata
             .values()
             .map(|pending| pending.agent_identity.clone())
@@ -111,7 +111,10 @@ impl PendingSpawnLineage {
         })
     }
 
-    pub(super) fn take_for_member(&mut self, agent_identity: &MeerkatId) -> Vec<PendingSpawnSlot> {
+    pub(super) fn take_for_member(
+        &mut self,
+        agent_identity: &AgentIdentity,
+    ) -> Vec<PendingSpawnSlot> {
         let tickets: Vec<_> = self
             .metadata
             .iter()

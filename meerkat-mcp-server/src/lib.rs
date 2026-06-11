@@ -3466,7 +3466,10 @@ async fn handle_meerkat_run(
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
-        system_prompt: input.system_prompt,
+        system_prompt: match input.system_prompt {
+            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+            None => meerkat::SystemPromptOverride::Inherit,
+        },
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
 
@@ -3958,7 +3961,10 @@ async fn handle_meerkat_resume(
         let req = CreateSessionRequest {
             model,
             prompt: prompt.clone().into(),
-            system_prompt: input.system_prompt.clone(),
+            system_prompt: match input.system_prompt.clone() {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens,
             event_tx: event_tx.clone(),
             initial_turn: InitialTurnPolicy::RunImmediately,
@@ -4163,7 +4169,10 @@ async fn handle_meerkat_resume(
                 let req = CreateSessionRequest {
                     model,
                     prompt: prompt.into(),
-                    system_prompt: input.system_prompt.clone(),
+                    system_prompt: match input.system_prompt.clone() {
+                        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                        None => meerkat::SystemPromptOverride::Inherit,
+                    },
                     max_tokens,
                     event_tx: event_tx.clone(),
 
@@ -6252,7 +6261,7 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(4096),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -6375,7 +6384,7 @@ mod tests {
             CreateSessionRequest {
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(4096),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -7099,7 +7108,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,

@@ -221,9 +221,6 @@ mod tool_dispatch {
 
     #[test]
     fn test_tool_discovery_validates_schema() {
-        let mut registry = ToolRegistry::new();
-
-        // Valid tool definition should be accepted
         let valid_tool = ToolDef {
             name: "test_tool".into(),
             description: "A test tool".to_string(),
@@ -231,14 +228,13 @@ mod tool_dispatch {
             provenance: None,
         };
 
-        // Registry.register returns () - no error case
-        registry.register(valid_tool);
-
-        // Verify tool is registered using get()
-        assert!(
-            registry.get("test_tool").is_some(),
-            "Should find registered tool"
-        );
+        // Arguments matching the schema validate against the live tool def.
+        meerkat_tools::validate_tool_def(
+            &valid_tool,
+            "test_tool",
+            &serde_json::json!({"input": "hello"}),
+        )
+        .expect("valid args should validate against the tool schema");
     }
 
     #[cfg(feature = "mcp")]

@@ -188,15 +188,15 @@ fn decode_flow_spec(
 ) -> Result<(FlowId, FlowSpec), String> {
     Ok((
         FlowId::from(flow_id),
-        FlowSpec {
-            description: input.description,
-            steps: input
+        FlowSpec::new(
+            input.description,
+            input
                 .steps
                 .into_iter()
                 .map(|(step_id, step)| decode_flow_step(step_id, step))
                 .collect::<Result<IndexMap<_, _>, _>>()?,
-            root: input.root.map(decode_frame_spec).transpose()?,
-        },
+            input.root.map(decode_frame_spec).transpose()?,
+        ),
     ))
 }
 
@@ -525,7 +525,7 @@ mod tests {
             .get(&FlowId::from("main"))
             .expect("main flow");
         assert_eq!(flow.description.as_deref(), Some("main flow"));
-        assert!(flow.root.is_some());
+        assert!(!flow.root.nodes.is_empty());
         let step = flow.steps.get(&StepId::from("plan")).expect("plan step");
         assert_eq!(step.branch, Some(BranchId::from("winner")));
         assert_eq!(step.output_format, StepOutputFormat::Text);

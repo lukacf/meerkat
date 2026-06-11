@@ -54,9 +54,8 @@ mod tests {
                 request_id: "req-1".into(),
                 intent: intent_str.into(),
             }),
-            body: "test body".into(),
+            content: "test body".into(),
             payload: Some(serde_json::json!({"intent": intent_str})),
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -74,9 +73,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: "test body".into(),
+            content: "test body".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -126,8 +124,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: "hello".into(),
-            blocks: None,
+            content: "hello".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });

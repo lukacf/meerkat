@@ -36,12 +36,6 @@ impl MobpackCapability {
     pub fn token(&self) -> &str {
         &self.token
     }
-
-    /// Borrow as a [`MobpackCapabilityRequirement`] for policy decisions that
-    /// take the contract view.
-    pub fn requirement(&self) -> MobpackCapabilityRequirement<'_> {
-        MobpackCapabilityRequirement::parse(&self.token)
-    }
 }
 
 impl std::fmt::Display for MobpackCapability {
@@ -94,16 +88,6 @@ pub struct RequiresSection {
 }
 
 impl RequiresSection {
-    /// The borrowed contract view of each capability, for policy that takes a
-    /// [`MobpackCapabilityRequirement`]. The authoritative typed identity is the
-    /// stored [`MobpackCapability::id`]; prefer [`Self::capability_ids`] when only
-    /// the id is needed.
-    pub fn typed_capabilities(
-        &self,
-    ) -> impl Iterator<Item = MobpackCapabilityRequirement<'_>> + '_ {
-        self.capabilities.iter().map(MobpackCapability::requirement)
-    }
-
     /// The typed capability ids, read directly from the stored shape (classified
     /// once at deserialization, not re-parsed here).
     pub fn capability_ids(&self) -> impl Iterator<Item = MobpackCapabilityId> + '_ {

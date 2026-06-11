@@ -1752,11 +1752,10 @@ pub(crate) fn machine_apply_recovered_input_normalization(
     }
 
     seed.phase = next_phase;
-    seed.terminal_outcome = next_terminal.clone();
     if next_terminal.is_some() {
         seed.recovery_lane = None;
     }
-    state.terminal_outcome = next_terminal;
+    seed.terminal_outcome = next_terminal;
 
     if recovered {
         delta.recovered += 1;
@@ -2266,8 +2265,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: "drive the queue".into(),
-            blocks: None,
+            content: "drive the queue".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });

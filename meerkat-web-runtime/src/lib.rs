@@ -30,7 +30,6 @@
 //! - `mob_retire(mob_id, agent_identity)`
 //! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
 //! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — low-level local-local wiring
-//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — low-level aliases
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, agent_identity, request_json)` → JSON
 //! - `mob_member_send(mob_id, agent_identity, request_json)` → JSON delivery receipt
@@ -267,15 +266,6 @@ fn default_max_sessions() -> usize {
     MAX_SESSIONS
 }
 
-/// Normalize a credentials-map provider key to its typed identity.
-///
-/// The `google` alias maps to the Gemini identity; unrecognized keys yield
-/// `None`.
-fn canonical_provider_key(key: &str) -> Option<meerkat_core::Provider> {
-    let normalized = if key == "google" { "gemini" } else { key };
-    meerkat_core::Provider::parse_strict(normalized)
-}
-
 /// Build the bootstrap `Config` from this surface's actual inputs (explicit
 /// model override + configured API keys + base URLs) and resolve the default
 /// model through the canonical create-session ladder.
@@ -389,11 +379,10 @@ fn populate_realm_from_api_keys(
     // Deterministic cross-provider order owned by the model catalog
     // (`provider_priority()` == [Anthropic, OpenAI, Gemini]). Each provider's
     // sort index is its position in that list; providers absent from the list
-    // (and unrecognized strings) sort last. The `google` alias normalizes to
-    // the Gemini identity before lookup.
+    // (and unrecognized strings) sort last.
     let priority = meerkat_core::model_profile::catalog::provider_priority();
     let provider_rank = |key: &str| -> usize {
-        match canonical_provider_key(key) {
+        match meerkat_core::Provider::parse_strict(key) {
             Some(provider) => priority
                 .iter()
                 .position(|p| *p == provider)
@@ -413,7 +402,7 @@ fn populate_realm_from_api_keys(
     let configured = |provider: meerkat_core::Provider| {
         api_keys
             .keys()
-            .any(|key| canonical_provider_key(key) == Some(provider))
+            .any(|key| meerkat_core::Provider::parse_strict(key) == Some(provider))
     };
     if !configured(meerkat_core::Provider::Anthropic) {
         config.models.anthropic.clear();
@@ -863,13 +852,13 @@ fn parse_mobpack_from_files(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedM
     .map_err(|e| format!("invalid definition.json: {e}"))?;
 
     if let Some(requires) = &manifest.requires {
-        for capability in requires.typed_capabilities() {
-            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
+        for capability in &requires.capabilities {
+            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability.id())
                 .is_forbidden()
             {
                 return Err(format!(
                     "forbidden capability '{}' is not allowed in browser-safe mode",
-                    capability.raw()
+                    capability.token()
                 ));
             }
         }
@@ -1470,7 +1459,10 @@ fn build_session_request_with_auth_binding(
     Ok(meerkat_core::service::CreateSessionRequest {
         model: config.model.clone(),
         prompt: "".into(),
-        system_prompt,
+        system_prompt: match system_prompt {
+            Some(prompt) => meerkat_core::SystemPromptOverride::Set(prompt),
+            None => meerkat_core::SystemPromptOverride::Inherit,
+        },
         max_tokens: Some(config.max_tokens),
         event_tx: None,
 
@@ -1922,18 +1914,18 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
 
 /// Get the status of a mob.
 ///
-/// Returns JSON with the generated mob status plus the legacy state projection.
+/// Returns the generated `MobStatusResult` JSON envelope.
 #[wasm_bindgen]
 pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
-    let result = serde_json::json!({
-        "mob_id": mob_id,
-        "status": state.as_str(),
-        "state": state.as_str(),
-    });
-    Ok(JsValue::from_str(&result.to_string()))
+    let result = meerkat_contracts::MobStatusResult {
+        mob_id: mob_id.to_string(),
+        status: meerkat_mob_mcp::wire_mob_lifecycle_status(state),
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// List all mobs.
@@ -1943,16 +1935,14 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mobs = mob_state.mob_list().await;
-    let rows: Vec<serde_json::Value> = mobs
+    let rows: Vec<meerkat_contracts::MobStatusResult> = mobs
         .into_iter()
-        .map(|(id, state)| {
-            serde_json::json!({
-                "mob_id": id.to_string(),
-                "status": state.as_str(),
-            })
+        .map(|(id, state)| meerkat_contracts::MobStatusResult {
+            mob_id: id.to_string(),
+            status: meerkat_mob_mcp::wire_mob_lifecycle_status(state),
         })
         .collect();
-    let result = serde_json::json!({ "mobs": rows });
+    let result = meerkat_contracts::MobListResult { mobs: rows };
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2087,7 +2077,6 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 #[serde(deny_unknown_fields)]
 struct SpawnSpecInput {
     profile: String,
-    #[serde(alias = "meerkat_id")]
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<meerkat_core::types::ContentInput>,
@@ -2101,10 +2090,6 @@ struct SpawnSpecInput {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default)]
     context: Option<serde_json::Value>,
-    /// Legacy 0.6 pre-release SDKs exposed `generation` even though the
-    /// runtime owns member generations. Accept and ignore it for raw JS callers.
-    #[serde(default, rename = "generation")]
-    _generation: Option<u64>,
     /// Additional instruction sections appended to the system prompt.
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
@@ -2136,12 +2121,6 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
 
 /// Wire a local member to a local or external peer target.
 #[wasm_bindgen]
-pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
-    mob_wire_peer(mob_id, local, target_json).await
-}
-
-/// Wire a local member to a local or external peer target.
-#[wasm_bindgen]
 pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
@@ -2166,16 +2145,6 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
         )
         .await
         .map_err(err_mob)
-}
-
-/// Unwire a local member from a local or external peer target.
-#[wasm_bindgen]
-pub async fn mob_unwire_target(
-    mob_id: &str,
-    local: &str,
-    target_json: &str,
-) -> Result<(), JsValue> {
-    mob_unwire_peer(mob_id, local, target_json).await
 }
 
 /// Unwire a local member from a local or external peer target.
@@ -2272,24 +2241,6 @@ pub async fn mob_append_system_context(
             "status": result.status,
         })
         .to_string(),
-    ))
-}
-
-/// Legacy cross-mob bidirectional wire convenience.
-///
-/// No generated composition authority currently owns the two-mob transaction,
-/// so this surface fails closed instead of hand-rolling partial rollback over
-/// two independent MobMachine `WireExternalPeer` commands.
-#[wasm_bindgen]
-pub async fn wire_cross_mob(
-    _mob_a: &str,
-    _agent_a: &str,
-    _mob_b: &str,
-    _agent_b: &str,
-) -> Result<(), JsValue> {
-    Err(err_js(
-        "wire_cross_mob_unsupported",
-        "wire_cross_mob requires generated cross-mob composition authority",
     ))
 }
 
@@ -3282,34 +3233,34 @@ capabilities = [{capability_values}]
         );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_accepts_legacy_meerkat_id_alias() {
+    fn spawn_spec_input_rejects_legacy_meerkat_id_field() {
         let payload = json!([{
             "profile": "worker",
             "meerkat_id": "worker-1",
             "runtime_mode": "turn_driven",
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy meerkat_id alias should deserialize");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "legacy meerkat_id field should be rejected as an unknown field"
+        );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_ignores_legacy_generation() {
+    fn spawn_spec_input_rejects_legacy_generation_field() {
         let payload = json!([{
             "profile": "worker",
             "agent_identity": "worker-1",
             "generation": 99,
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy generation should be ignored");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "legacy generation field should be rejected as an unknown field; the runtime owns member generations"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3480,7 +3431,7 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -3522,7 +3473,7 @@ capabilities = [{capability_values}]
             .create_session(meerkat_core::service::CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -4301,8 +4252,8 @@ capabilities = [{capability_values}]
     // `err_session`/`start_turn` use) carries the typed `SessionError::code()`.
     #[test]
     fn start_turn_agent_error_carries_typed_code_on_err_channel() {
-        let err = meerkat_core::SessionError::Agent(meerkat_core::error::AgentError::ToolError(
-            "boom".to_string(),
+        let err = meerkat_core::SessionError::Agent(meerkat_core::error::AgentError::tool(
+            meerkat_core::ToolError::execution_failed("boom"),
         ));
         // The typed code that `start_turn`'s Err arm now surfaces.
         assert_eq!(err.code(), "AGENT_ERROR");

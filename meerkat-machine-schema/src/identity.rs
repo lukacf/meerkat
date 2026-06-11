@@ -553,7 +553,7 @@ impl NamedTypeBinding {
     /// Construct a binding whose Rust representation is `u64`.
     ///
     /// Panics if `name` is not a valid [`NamedTypeId`] slug. Intended for
-    /// catalog/compat construction sites; callers that want fallible
+    /// catalog construction sites; callers that want fallible
     /// construction should build [`NamedTypeId`] directly and assemble
     /// the struct by hand.
     pub fn u64(name: &str) -> Self {

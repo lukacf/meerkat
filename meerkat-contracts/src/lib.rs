@@ -381,7 +381,6 @@ pub use wire::{
     WireLoginStart,
     WireMemberRef,
     WireMemberRefError,
-    WireMemberState,
     WireMobBackendKind,
     WireMobError,
     WireMobLifecycleAction,

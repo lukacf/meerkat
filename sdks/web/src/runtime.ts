@@ -129,10 +129,8 @@ export interface WasmModule {
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
-  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
-  mob_wire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
-  mob_unwire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -152,12 +150,6 @@ export interface WasmModule {
   mob_subscribe_events: (mobId: string) => Promise<string>;
   poll_subscription: (streamId: string) => string;
   close_subscription: (streamId: string) => void;
-  wire_cross_mob: (
-    mobA: string,
-    meerkatA: string,
-    mobB: string,
-    meerkatB: string,
-  ) => Promise<void>;
 }
 
 /** Entry point for the Meerkat WASM runtime in the browser. */
@@ -354,8 +346,8 @@ export class MeerkatRuntime {
       mob_retire: this.wasm.mob_retire,
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
-      mob_wire_target: this.wasm.mob_wire_target,
-      mob_unwire_target: this.wasm.mob_unwire_target,
+      mob_wire_peer: this.wasm.mob_wire_peer,
+      mob_unwire_peer: this.wasm.mob_unwire_peer,
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,
       mob_member_send: this.wasm.mob_member_send,
@@ -381,16 +373,6 @@ export class MeerkatRuntime {
   async listMobs(): Promise<MobStatus[]> {
     const json = await this.wasm.mob_list();
     return parseMobListResult(parseJsonPayload(json, 'Invalid mob/list response'));
-  }
-
-  /** Wire two agents across different mobs for cross-mob comms. */
-  async wireCrossMob(
-    mobA: string,
-    meerkatA: string,
-    mobB: string,
-    meerkatB: string,
-  ): Promise<void> {
-    await this.wasm.wire_cross_mob(mobA, meerkatA, mobB, meerkatB);
   }
 
   /** Create a direct session façade backed by a real runtime session identity. */

@@ -161,7 +161,7 @@ pub fn live_channel_requires_close_for_identity_change(
 ///
 /// G5 (P1) revisited: the original G5 rule attempted to preserve
 /// "per-session overrides" by skipping when `current_session_model`
-/// differed from `prior_global_model`. That heuristic conflated two
+/// differed from the prior global model. That heuristic conflated two
 /// distinct cases — (a) a session that explicitly chose its initial
 /// model via `CreateSessionRequest.model` while the global differed, and
 /// (b) a session that was later reconfigured via `llm_reconfigure`. Both
@@ -171,15 +171,11 @@ pub fn live_channel_requires_close_for_identity_change(
 /// is the correct default for `config/patch agent.model` because that
 /// patch is itself a global policy change. Sessions that need a sticky
 /// override should issue a session-scoped reconfigure after the patch.
-///
-/// `prior_global_model` is retained on the public signature so existing
-/// callers (the RPC config/patch handler) don't have to be re-plumbed,
-/// but it is no longer consulted: the rule now depends only on the
-/// session's current model and the new global model.
+/// The rule therefore depends only on the session's current model and
+/// the new global model.
 #[must_use]
 pub fn should_apply_global_model_hot_swap(
     current_session_model: &str,
-    _prior_global_model: Option<&str>,
     new_global_model: &str,
 ) -> bool {
     current_session_model != new_global_model
@@ -316,20 +312,21 @@ pub fn realtime_projection_root_system_message(
             session.id()
         )))
     })?;
-    let mut content = build_state
-        .system_prompt
-        .clone()
-        .or_else(|| {
-            session
-                .messages()
-                .first()
-                .and_then(|message| match message {
-                    Message::System(system) => Some(system.content.clone()),
-                    Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-                    _ => None,
-                })
-        })
-        .unwrap_or_default();
+    let mut content = match build_state.system_prompt.clone() {
+        meerkat_core::SystemPromptOverride::Set(prompt) => prompt,
+        // An explicit Disable means no system prompt; do not fall back to the
+        // transcript lead.
+        meerkat_core::SystemPromptOverride::Disable => String::new(),
+        meerkat_core::SystemPromptOverride::Inherit => session
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.clone()),
+                Message::SystemNotice(notice) => Some(notice.model_projection_text()),
+                _ => None,
+            })
+            .unwrap_or_default(),
+    };
 
     if let Some(additional_instructions) = &build_state.additional_instructions
         && !additional_instructions.is_empty()
@@ -614,10 +611,7 @@ mod orchestrator {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt,
-                // Project the typed per-request policy back to the wire
-                // `Option<String>` field. `Disable` cannot be expressed at this
-                // boundary yet (it projects to `None`) — see row #337 note.
-                system_prompt: build_config.system_prompt.to_persisted_option(),
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -916,14 +910,7 @@ mod orchestrator {
         /// authoritative is the correct default for an explicit global
         /// policy change. Sessions that need a sticky override should
         /// issue a session-scoped reconfigure after the patch.
-        ///
-        /// `prior_global_model` is retained on the signature so the
-        /// `config/patch` handler does not have to be re-plumbed, but
-        /// it is no longer consulted by the hot-swap rule.
-        pub async fn propagate_config_to_live_channels(
-            &self,
-            prior_global_model: Option<&str>,
-        ) -> LiveConfigPropagationReport {
+        pub async fn propagate_config_to_live_channels(&self) -> LiveConfigPropagationReport {
             let mut report = LiveConfigPropagationReport::default();
             let Some(host) = self.host.as_ref() else {
                 return report;
@@ -962,11 +949,7 @@ mod orchestrator {
                     // pure helper encodes the rule so it can be
                     // unit-tested in isolation; see its doc-comment for
                     // the s72 regression rationale.
-                    if !should_apply_global_model_hot_swap(
-                        &current_model,
-                        prior_global_model,
-                        &new_global_model,
-                    ) {
+                    if !should_apply_global_model_hot_swap(&current_model, &new_global_model) {
                         report
                             .skipped
                             .push((session_id.clone(), LiveHotSwapSkipReason::NoOpOrOverride));

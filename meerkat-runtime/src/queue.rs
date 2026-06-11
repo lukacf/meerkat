@@ -101,8 +101,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: "test".into(),
-            blocks: None,
+            content: "test".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })

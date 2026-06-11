@@ -106,14 +106,6 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             PeerInput,
         };
 
-        let (body, blocks) = match content {
-            ContentInput::Text(body) => (body, None),
-            ContentInput::Blocks(blocks) => {
-                let body = meerkat_core::types::text_content(&blocks);
-                (body, Some(blocks))
-            }
-        };
-
         // Provenance is the member's canonical runtime identity, not a synthetic
         // `local-bridge:` session string: peer_id/display_identity are stamped
         // from the same `LogicalRuntimeId` carried in `runtime_id`, so the
@@ -138,9 +130,8 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body,
+            content,
             payload: None,
-            blocks,
             handling_mode: match handling_mode {
                 HandlingMode::Queue => None,
                 mode => Some(mode),

@@ -300,14 +300,14 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Regression: old persisted sessions have bool tooling fields.
-/// `true` must deserialize as `Enable`, `false` as `Inherit` (not Disable),
-/// and missing fields default to `Inherit`.
+/// SessionTooling serde contract: tri-state string enum values only.
+/// Pre-typed bool tooling fields must fail closed, missing fields default to
+/// `Inherit`, and the typed form round-trips.
 #[test]
-fn test_tool_category_override_backward_compat_serde() -> Result<(), Box<dyn std::error::Error>> {
+fn test_tool_category_override_serde_contract() -> Result<(), Box<dyn std::error::Error>> {
     use meerkat_core::ToolCategoryOverride;
 
-    // Old-format JSON with bool fields
+    // Pre-typed bool tooling fields are rejected, not folded.
     let old_json = serde_json::json!({
         "builtins": true,
         "shell": false,
@@ -315,24 +315,22 @@ fn test_tool_category_override_backward_compat_serde() -> Result<(), Box<dyn std
         "mob": false,
         "memory": false
     });
-    let tooling: meerkat_core::SessionTooling = serde_json::from_value(old_json)?;
-    assert_eq!(tooling.builtins, ToolCategoryOverride::Enable);
-    assert_eq!(tooling.shell, ToolCategoryOverride::Inherit); // false → Inherit, not Disable
-    assert_eq!(tooling.comms, ToolCategoryOverride::Enable);
-    assert_eq!(tooling.mob, ToolCategoryOverride::Inherit);
-    assert_eq!(tooling.memory, ToolCategoryOverride::Inherit);
+    assert!(
+        serde_json::from_value::<meerkat_core::SessionTooling>(old_json).is_err(),
+        "bool tooling fields must fail closed"
+    );
 
-    // Old-format JSON with missing fields (pre-mob era)
+    // Missing fields default to Inherit.
     let missing_fields_json = serde_json::json!({
-        "builtins": true,
-        "shell": true,
-        "comms": false
+        "builtins": "enable",
+        "shell": "enable",
+        "comms": "disable"
     });
     let tooling: meerkat_core::SessionTooling = serde_json::from_value(missing_fields_json)?;
     assert_eq!(tooling.mob, ToolCategoryOverride::Inherit);
     assert_eq!(tooling.memory, ToolCategoryOverride::Inherit);
 
-    // New-format JSON with string enum values
+    // Typed string enum values deserialize exactly.
     let new_json = serde_json::json!({
         "builtins": "enable",
         "shell": "disable",
@@ -347,7 +345,7 @@ fn test_tool_category_override_backward_compat_serde() -> Result<(), Box<dyn std
     assert_eq!(tooling.mob, ToolCategoryOverride::Enable);
     assert_eq!(tooling.memory, ToolCategoryOverride::Disable);
 
-    // New format round-trips correctly
+    // Typed form round-trips correctly.
     let serialized = serde_json::to_value(&tooling)?;
     let round_tripped: meerkat_core::SessionTooling = serde_json::from_value(serialized)?;
     assert_eq!(round_tripped, tooling);

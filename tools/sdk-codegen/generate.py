@@ -2210,8 +2210,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # R4-5 (P3): typed wire mirror for `live/refresh`.
     # `LiveRefreshStatus` is a tagged union (today: only `queued`; the enum is
     # `non_exhaustive` so future variants land here without breaking the wire);
-    # `LiveRefreshResult` carries both the typed `status` discriminator and
-    # the legacy `refresh_enqueued: true` back-compat boolean.
+    # `LiveRefreshResult` carries the typed `status` discriminator.
     append_python_alias(
         "LiveRefreshStatus",
         wire_schema,
@@ -2220,7 +2219,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveRefreshResult",
         wire_schema,
-        "Response payload for live/refresh: typed `status` plus back-compat `refresh_enqueued` boolean.",
+        "Response payload for live/refresh: typed `status` discriminator.",
     )
     append_python_alias(
         "LiveCloseStatus",
@@ -2230,11 +2229,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveCloseResult",
         wire_schema,
-        "Response payload for live/close: typed `status` plus back-compat `closed` boolean.",
+        "Response payload for live/close: typed `status` discriminator.",
     )
     # #234: typed live-command results (send_input/commit_input/interrupt/truncate).
-    # Each is a dataclass (typed `status` + back-compat boolean); emit the status
-    # alias first so the result's `status` field references the named union.
+    # Each is a dataclass carrying the typed `status` discriminator; emit the
+    # status alias first so the result's `status` field references the named union.
     append_python_alias(
         "LiveSendInputStatus",
         wire_schema,
@@ -2243,7 +2242,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveSendInputResult",
         wire_schema,
-        "Response payload for live/send_input: typed `status` plus back-compat boolean.",
+        "Response payload for live/send_input: typed `status` discriminator.",
     )
     append_python_alias(
         "LiveCommitInputStatus",
@@ -2253,7 +2252,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveCommitInputResult",
         wire_schema,
-        "Response payload for live/commit_input: typed `status` plus back-compat boolean.",
+        "Response payload for live/commit_input: typed `status` discriminator.",
     )
     append_python_alias(
         "LiveInterruptStatus",
@@ -2263,7 +2262,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveInterruptResult",
         wire_schema,
-        "Response payload for live/interrupt: typed `status` plus back-compat boolean.",
+        "Response payload for live/interrupt: typed `status` discriminator.",
     )
     append_python_alias(
         "LiveTruncateStatus",
@@ -2273,7 +2272,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "LiveTruncateResult",
         wire_schema,
-        "Response payload for live/truncate: typed `status` plus back-compat boolean.",
+        "Response payload for live/truncate: typed `status` discriminator.",
     )
     # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
     # tagged-payload helpers. Aliases (not dataclasses) because each is a
@@ -2769,8 +2768,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveCommitInputParams", wire_schema)
     # R4-5 (P3): typed wire mirror for `live/refresh`. `LiveRefreshStatus` is
     # a tagged union (alias) because the schema is a `oneOf` discriminated
-    # on `status`; `LiveRefreshResult` is the wrapping interface that flatten-
-    # composes status with the back-compat `refresh_enqueued` boolean.
+    # on `status`; `LiveRefreshResult` is the wrapping interface that carries
+    # the typed status discriminator.
     append_typescript_alias("LiveRefreshStatus", wire_schema)
     append_typescript_interface("LiveRefreshResult", wire_schema)
     append_typescript_alias("LiveCloseStatus", wire_schema)

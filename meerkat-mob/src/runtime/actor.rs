@@ -385,8 +385,8 @@ struct LocalBatchWiringEndpoint {
 }
 
 struct PeerMessageDeliveryPlan {
-    from: MeerkatId,
-    to: MeerkatId,
+    from: AgentIdentity,
+    to: AgentIdentity,
     sender_comms: Arc<dyn CoreCommsRuntime>,
     command: CommsCommand,
 }
@@ -398,8 +398,8 @@ pub(super) struct PeerDeliveryCompletion {
 }
 
 pub(super) struct PeerDeliveryInflight {
-    from: MeerkatId,
-    to: MeerkatId,
+    from: AgentIdentity,
+    to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
 }
 
@@ -757,7 +757,7 @@ fn resolve_binding(
     backend: Option<crate::MobBackendKind>,
     profile_backend: Option<crate::MobBackendKind>,
     definition_default: crate::MobBackendKind,
-    agent_identity: &MeerkatId,
+    agent_identity: &AgentIdentity,
 ) -> Result<crate::RuntimeBinding, MobError> {
     if let Some(b) = binding {
         return Ok(b);
@@ -888,7 +888,7 @@ fn mob_bridge_rejection_cause(
 
 /// Render forked conversation messages as a text context block for the new member.
 fn render_fork_context(
-    source_member_id: &MeerkatId,
+    source_member_id: &AgentIdentity,
     messages: &[meerkat_core::types::Message],
 ) -> String {
     use meerkat_core::types::Message;
@@ -969,7 +969,7 @@ fn render_fork_context(
 
 pub(super) struct PendingSpawn {
     pub(super) profile_name: ProfileName,
-    pub(super) agent_identity: MeerkatId,
+    pub(super) agent_identity: AgentIdentity,
     pub(super) admitted_bridge_session_id: SessionId,
     pub(super) prompt: ContentInput,
     pub(super) initial_turn_prompt: Option<ContentInput>,
@@ -997,7 +997,7 @@ pub(super) struct PendingSpawnProgress {
 #[derive(Clone, Debug)]
 pub(super) struct PendingSpawnCleanupAnchor {
     spawn_ticket: u64,
-    agent_identity: MeerkatId,
+    agent_identity: AgentIdentity,
     session_id: meerkat_core::types::SessionId,
     operation_id: meerkat_core::ops::OperationId,
     reason: String,
@@ -1005,7 +1005,7 @@ pub(super) struct PendingSpawnCleanupAnchor {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct RestoreWiringPlan {
-    local_peers: Vec<MeerkatId>,
+    local_peers: Vec<AgentIdentity>,
     external_peers: Vec<TrustedPeerDescriptor>,
 }
 
@@ -1105,7 +1105,7 @@ pub(super) struct MobActor {
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
     pub(super) autonomous_initial_turns:
-        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, InitialTurnHandle>>>,
+        Arc<tokio::sync::Mutex<BTreeMap<AgentIdentity, InitialTurnHandle>>>,
     pub(super) next_spawn_ticket: u64,
     /// Monotonically increasing fence token counter.
     /// Each spawn/respawn/reset issues a strictly newer token.
@@ -1123,7 +1123,7 @@ pub(super) struct MobActor {
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics:
-        Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
+        Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
     pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     pub(super) supervisor_bridge: Arc<super::MobSupervisorBridge>,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
@@ -1183,17 +1183,12 @@ impl MobActor {
         peer_id: &str,
         address: &str,
         context: &'static str,
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let peer_name = address
             .strip_prefix("inproc://")
             .map(|value| value.split('?').next().unwrap_or(value).to_string())
             .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
-        let pubkey = pubkey.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "{context}: peer-only runtime spec for '{peer_name}' requires pubkey"
-            ))
-        })?;
         let result = TrustedPeerDescriptor::unsigned_with_pubkey(
             peer_name,
             peer_id.to_string(),
@@ -2581,7 +2576,7 @@ impl MobActor {
         let expected_address = super::bridge_protocol::canonicalize_bridge_address(prior_address);
         if authorized_peer_id != *prior_peer_id
             || canonical_authorized_address != expected_address
-            || Some(authorized_peer.pubkey) != *pubkey
+            || authorized_peer.pubkey != *pubkey
         {
             return Err(MobError::WiringError(format!(
                 "rebound peer binding for '{prior_peer_id}' lacks matching generated MobMachine endpoint authority"
@@ -2665,7 +2660,7 @@ impl MobActor {
         Ok(MemberRef::BackendPeer {
             peer_id: peer.peer_id.to_string(),
             address: peer.address.to_string(),
-            pubkey: Some(peer.pubkey),
+            pubkey: peer.pubkey,
             bootstrap_token,
             session_id: None,
         })
@@ -3235,7 +3230,7 @@ impl MobActor {
 
     async fn restore_failure_for(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
     ) -> Option<super::handle::RestoreFailureDiagnostic> {
         self.restore_diagnostics
             .read()
@@ -3244,7 +3239,10 @@ impl MobActor {
             .cloned()
     }
 
-    async fn ensure_member_not_broken(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+    async fn ensure_member_not_broken(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
             agent_identity.as_str(),
         ));
@@ -4313,7 +4311,7 @@ impl MobActor {
 
     async fn machine_member_material(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         include_session_details: bool,
     ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
         let roster_entry = {
@@ -4386,7 +4384,7 @@ impl MobActor {
 
     async fn record_missing_member_bridge_session(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         bridge_session_id: &SessionId,
         context: &'static str,
     ) -> Option<String> {
@@ -4458,8 +4456,8 @@ impl MobActor {
     fn active_machine_member_ids_for_profile(
         &self,
         profile_name: &ProfileName,
-        excluded_identity: &MeerkatId,
-    ) -> Vec<MeerkatId> {
+        excluded_identity: &AgentIdentity,
+    ) -> Vec<AgentIdentity> {
         let dsl = self.dsl_authority.state();
         dsl.member_profile_names
             .iter()
@@ -4472,7 +4470,7 @@ impl MobActor {
                 {
                     return None;
                 }
-                Some(MeerkatId::from(identity.0.as_str()))
+                Some(AgentIdentity::from(identity.0.as_str()))
             })
             .collect()
     }
@@ -4501,7 +4499,7 @@ impl MobActor {
             else {
                 continue;
             };
-            if !include_retiring && entry.state == crate::roster::MemberState::Retiring {
+            if !include_retiring && entry.status == super::handle::MobMemberStatus::Retiring {
                 continue;
             }
             projected.push(entry);
@@ -4534,7 +4532,7 @@ impl MobActor {
 
     async fn persist_kickoff_state(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         phase: crate::roster::MobMemberKickoffPhase,
         error: Option<String>,
     ) -> Result<(), MobError> {
@@ -4597,7 +4595,7 @@ impl MobActor {
         }
     }
 
-    async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
+    async fn clear_kickoff_state(&mut self, agent_identity: &AgentIdentity) {
         match self
             .apply_kickoff_input(
                 agent_identity,
@@ -4650,7 +4648,7 @@ impl MobActor {
 
     async fn apply_kickoff_input(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         input: mob_dsl::MobMachineInput,
     ) -> Result<bool, MobError> {
         let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
@@ -4861,7 +4859,7 @@ impl MobActor {
 
     async fn cancel_peer_deliveries_for_member(
         &mut self,
-        member: &MeerkatId,
+        member: &AgentIdentity,
         reason: &'static str,
     ) {
         self.cancel_peer_deliveries_matching(reason, |delivery| {
@@ -4872,8 +4870,8 @@ impl MobActor {
 
     async fn cancel_peer_deliveries_for_edge(
         &mut self,
-        a: &MeerkatId,
-        b: &MeerkatId,
+        a: &AgentIdentity,
+        b: &AgentIdentity,
         reason: &'static str,
     ) {
         self.cancel_peer_deliveries_matching(reason, |delivery| {
@@ -5081,7 +5079,7 @@ impl MobActor {
         }
     }
 
-    fn retire_event_key(agent_identity: &MeerkatId, member_ref: &MemberRef) -> String {
+    fn retire_event_key(agent_identity: &AgentIdentity, member_ref: &MemberRef) -> String {
         let member =
             serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
         format!("{agent_identity}|{member}")
@@ -5204,7 +5202,7 @@ impl MobActor {
 
     fn stage_orchestrator_spawn(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         session_id: &SessionId,
     ) -> Result<Option<SessionId>, MobError> {
         let dsl_agent_identity =
@@ -5255,7 +5253,7 @@ impl MobActor {
 
     fn preview_spawn_admission(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         bridge_session_id: Option<&SessionId>,
     ) -> Result<(), MobError> {
@@ -5290,7 +5288,10 @@ impl MobActor {
         .map_err(|_| self.invalid_transition_to(MobState::Running))
     }
 
-    fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+    fn preview_spawn_command_admission(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
         self.require_member_operation_eligible()?;
         self.probe_member_admission(agent_identity)
     }
@@ -5299,7 +5300,7 @@ impl MobActor {
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
     /// `pending_spawns.contains_member` prechecks.
-    fn probe_member_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+    fn probe_member_admission(&self, agent_identity: &AgentIdentity) -> Result<(), MobError> {
         let prepared = self.prepare_dsl_input(
             mob_dsl::MobMachineInput::ProbeMemberAdmission {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
@@ -5333,7 +5334,7 @@ impl MobActor {
     /// increment.
     fn compute_respawn_generation(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
     ) -> Result<crate::ids::Generation, MobError> {
         let prepared = self.prepare_dsl_input(
             mob_dsl::MobMachineInput::ComputeRespawnGeneration {
@@ -5365,7 +5366,7 @@ impl MobActor {
 
     fn authorize_spawn_profile_material(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         profile_name: &ProfileName,
         profile: &crate::profile::Profile,
         context: &str,
@@ -5409,7 +5410,7 @@ impl MobActor {
 
     fn resolve_respawn_topology_restore_result(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         failed_restore_peer_ids: Vec<RespawnTopologyPeerId>,
     ) -> Result<RespawnTopologyRestoreResolution, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from(agent_identity.as_str());
@@ -5487,7 +5488,7 @@ impl MobActor {
         dsl_fence_token: mob_dsl::FenceToken,
         runtime_id: &AgentRuntimeId,
         origin: WorkOrigin,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         current_state: MobState,
     ) -> MobError {
         let dsl_origin = mob_dsl::WorkOrigin::from(origin);
@@ -5564,7 +5565,7 @@ impl MobActor {
         dsl_fence_token: mob_dsl::FenceToken,
         runtime_id: &AgentRuntimeId,
         origin: WorkOrigin,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         current_state: MobState,
     ) -> MobError {
         if declared_submit_work_admitted {
@@ -5648,7 +5649,7 @@ impl MobActor {
         dsl_runtime_id: &mob_dsl::AgentRuntimeId,
         dsl_fence_token: mob_dsl::FenceToken,
         runtime_id: &AgentRuntimeId,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         current_state: MobState,
     ) -> MobError {
         let transition = match mob_dsl::MobMachineMutator::apply(
@@ -5713,7 +5714,7 @@ impl MobActor {
 
     fn preview_policy_spawn_submit_work_admission(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         work_ref: &WorkRef,
         origin: WorkOrigin,
@@ -5780,7 +5781,7 @@ impl MobActor {
     fn complete_orchestrator_spawn(
         &mut self,
         spawn_ticket: Option<u64>,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         context: &'static str,
     ) {
         if let Err(error) = self.apply_dsl_signal(
@@ -5878,7 +5879,7 @@ impl MobActor {
     fn fallback_spawn_prompt(
         &self,
         profile_name: &ProfileName,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
     ) -> String {
         format!(
             "You have been spawned as '{}' (role: {}) in mob '{}'.",
@@ -5901,7 +5902,7 @@ impl MobActor {
     #[cfg(feature = "runtime-adapter")]
     async fn start_autonomous_member(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
         prompt: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
@@ -5967,12 +5968,7 @@ impl MobActor {
                     supersession_key: None,
                     correlation_id: None,
                 },
-                text: prompt.text_content(),
-                blocks: if prompt.has_images() {
-                    Some(prompt.into_blocks())
-                } else {
-                    None
-                },
+                content: prompt,
                 typed_turn_appends: Vec::new(),
                 turn_metadata: None,
             });
@@ -6024,7 +6020,7 @@ impl MobActor {
 
     async fn ensure_autonomous_runtime_ready(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         // Session registration + RuntimeLoop attachment is owned by the
@@ -6040,7 +6036,7 @@ impl MobActor {
 
     async fn ensure_mob_comms_drain(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
@@ -6105,7 +6101,7 @@ impl MobActor {
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
         provisioner: &Arc<dyn MobProvisioner>,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
@@ -6130,7 +6126,7 @@ impl MobActor {
     #[cfg(feature = "runtime-adapter")]
     async fn resolve_kickoff_outcome(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         outcome: Result<
             meerkat_runtime::completion::CompletionOutcome,
             meerkat_runtime::completion::CompletionWaitError,
@@ -6209,7 +6205,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn maybe_mark_kickoff_cancelled(&mut self, agent_identity: &MeerkatId) {
+    async fn maybe_mark_kickoff_cancelled(&mut self, agent_identity: &AgentIdentity) {
         if let Err(error) = self
             .apply_kickoff_input(
                 agent_identity,
@@ -6229,7 +6225,7 @@ impl MobActor {
 
     async fn ensure_autonomous_dispatch_capability(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         Self::ensure_autonomous_dispatch_capability_for_provisioner(
@@ -6246,7 +6242,7 @@ impl MobActor {
     /// This allows resume to re-spawn the comms drain without re-registering.
     async fn stop_autonomous_member(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         // Abort any in-flight initial turn.
@@ -6345,7 +6341,7 @@ impl MobActor {
     async fn stop_autonomous_member_entry(
         &mut self,
         entry: RosterEntry,
-    ) -> Result<(), (MeerkatId, MobError)> {
+    ) -> Result<(), (AgentIdentity, MobError)> {
         self.stop_autonomous_member(&entry.agent_identity, &entry.member_ref)
             .await
             .map_err(|error| (entry.agent_identity, error))
@@ -6362,7 +6358,7 @@ impl MobActor {
             .state()
             .member_restore_failures
             .keys()
-            .map(|identity| MeerkatId::from(identity.0.as_str()))
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
             .collect::<HashSet<_>>();
         let entries = {
             let roster = self.roster.read().await;
@@ -6413,7 +6409,7 @@ impl MobActor {
                     // success when comms-drain readiness was never observed.
                     if first_error.is_none() {
                         first_error = Some(MobError::ReadyWaitTimedOut {
-                            pending_member_ids: vec![MeerkatId::from(
+                            pending_member_ids: vec![AgentIdentity::from(
                                 entry.agent_identity.as_str(),
                             )],
                         });
@@ -6451,7 +6447,7 @@ impl MobActor {
                     // observed.
                     if first_error.is_none() {
                         first_error = Some(MobError::ReadyWaitTimedOut {
-                            pending_member_ids: vec![MeerkatId::from(
+                            pending_member_ids: vec![AgentIdentity::from(
                                 entry.agent_identity.as_str(),
                             )],
                         });
@@ -6968,7 +6964,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let _ = reply_tx.send(
-                        self.machine_member_material(&MeerkatId::from(&agent_identity), true)
+                        self.machine_member_material(&agent_identity, true)
                             .await
                             .map(|material| material.to_snapshot()),
                     );
@@ -7820,7 +7816,7 @@ impl MobActor {
 
     async fn cancel_pending_spawns_for_member(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         reason: &str,
     ) -> Result<usize, MobError> {
         self.drain_pending_spawn_cleanup_anchors(reason).await?;
@@ -7935,7 +7931,7 @@ impl MobActor {
             system_prompt_override,
             continuity_intent,
         } = spec;
-        let agent_identity = MeerkatId::from(identity.as_str());
+        let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
             let _ = reply_tx.send(Err(error));
             return;
@@ -8463,8 +8459,8 @@ impl MobActor {
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        let spawn_meerkat_id = agent_identity.clone();
-        let spawn_meerkat_id_for_log = spawn_meerkat_id.clone();
+        let spawn_member_identity = agent_identity.clone();
+        let spawn_member_identity_for_log = spawn_member_identity.clone();
         let spawn_runtime_mode = selected_runtime_mode;
         let pending_progress = Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default()));
 
@@ -8506,7 +8502,7 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let command_tx = self.command_tx.clone();
         let task = tokio::spawn(async move {
-            let panic_meerkat_id = spawn_meerkat_id.clone();
+            let panic_member_identity = spawn_member_identity.clone();
             let provision_result = std::panic::AssertUnwindSafe(async {
                 let spawn_receipt = provisioner.provision_member(provision_request).await?;
                 if let Some(bridge_session_id) =
@@ -8530,7 +8526,7 @@ impl MobActor {
                     && let Err(capability_error) =
                         Self::ensure_autonomous_dispatch_capability_for_provisioner(
                             &provisioner,
-                            &spawn_meerkat_id,
+                            &spawn_member_identity,
                             &spawn_receipt.member_ref,
                         )
                         .await
@@ -8539,7 +8535,7 @@ impl MobActor {
                         provisioner.retire_member(&spawn_receipt.member_ref).await
                     {
                         return Err(MobError::Internal(format!(
-                            "autonomous capability check failed for '{spawn_meerkat_id}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
+                            "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
                             spawn_receipt.member_ref
                         )));
                     }
@@ -8552,7 +8548,7 @@ impl MobActor {
             let provision_result = match provision_result {
                 Ok(result) => result,
                 Err(_) => Err(MobError::Internal(format!(
-                    "spawn provisioning task panicked for '{panic_meerkat_id}'"
+                    "spawn provisioning task panicked for '{panic_member_identity}'"
                 ))),
             };
 
@@ -8599,7 +8595,7 @@ impl MobActor {
 
         tracing::debug!(
             spawn_ticket,
-            agent_identity = %spawn_meerkat_id_for_log,
+            agent_identity = %spawn_member_identity_for_log,
             runtime_mode = ?spawn_runtime_mode,
             "MobActor::enqueue_spawn queued provisioning task"
         );
@@ -8650,7 +8646,7 @@ impl MobActor {
                 if let Ok(spawn_receipt) = result {
                     let orphan = PendingProvision::new(
                         spawn_receipt.member_ref,
-                        MeerkatId::from("__unknown_ticket__"),
+                        AgentIdentity::from("__unknown_ticket__"),
                         self.provisioner.clone(),
                     );
                     if let Err(error) = orphan.rollback().await {
@@ -8752,7 +8748,7 @@ impl MobActor {
 
     async fn spawn_from_policy_inline(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         spawn_spec: super::spawn_policy::SpawnSpec,
         work_ref: &WorkRef,
         origin: WorkOrigin,
@@ -9014,7 +9010,7 @@ impl MobActor {
     async fn finalize_spawn_from_pending(
         &mut self,
         profile_name: &ProfileName,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         generation: crate::ids::Generation,
         fence_token: crate::ids::FenceToken,
         runtime_mode: crate::MobRuntimeMode,
@@ -9382,7 +9378,7 @@ impl MobActor {
         if let Some(plan) = restore_wiring.as_ref() {
             planned_wiring_targets.retain(|target| !plan.local_peers.contains(target));
         }
-        let mut wired_spawn_targets: Vec<MeerkatId> = Vec::new();
+        let mut wired_spawn_targets: Vec<AgentIdentity> = Vec::new();
         for target in &planned_wiring_targets {
             let target_identity = crate::ids::AgentIdentity::from(target.as_str());
             let local_meerkat = agent_identity.clone();
@@ -9615,8 +9611,8 @@ impl MobActor {
     async fn spawn_wiring_targets(
         &self,
         profile_name: &ProfileName,
-        agent_identity: &MeerkatId,
-    ) -> Vec<MeerkatId> {
+        agent_identity: &AgentIdentity,
+    ) -> Vec<AgentIdentity> {
         let mut targets = Vec::new();
 
         if self.definition.wiring.auto_wire_orchestrator
@@ -9657,8 +9653,8 @@ impl MobActor {
     async fn resolve_auto_wire_parent_target(
         &self,
         owner_bridge_session_id: Option<&SessionId>,
-        spawned_meerkat_id: &MeerkatId,
-    ) -> Option<MeerkatId> {
+        spawned_member_identity: &AgentIdentity,
+    ) -> Option<AgentIdentity> {
         let owner_bridge_session_id = owner_bridge_session_id?;
         let dsl_session_id = mob_dsl::SessionId::from_domain(owner_bridge_session_id);
         let dsl = self.dsl_authority.state();
@@ -9666,13 +9662,13 @@ impl MobActor {
             .iter()
             .find(|(identity, bound_session_id)| {
                 **bound_session_id == dsl_session_id
-                    && identity.0.as_str() != spawned_meerkat_id.as_str()
+                    && identity.0.as_str() != spawned_member_identity.as_str()
                     && !dsl.member_restore_failures.contains_key(*identity)
                     && MobMemberLifecycleProjection::is_active_machine_lifecycle(
                         &dsl.member_lifecycle_for_identity(identity),
                     )
             })
-            .map(|(identity, _)| MeerkatId::from(identity.0.as_str()))
+            .map(|(identity, _)| AgentIdentity::from(identity.0.as_str()))
     }
 
     async fn spawner_for_bridge_session(
@@ -9703,7 +9699,7 @@ impl MobActor {
     ///
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
-    async fn handle_force_cancel(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
+    async fn handle_force_cancel(&mut self, agent_identity: AgentIdentity) -> Result<(), MobError> {
         let prepared = self.prepare_command_admission(
             mob_dsl::MobMachineInput::ForceCancel {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
@@ -9765,7 +9761,7 @@ impl MobActor {
     /// internal callers and tests.
     async fn handle_wire(
         &mut self,
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<(), MobError> {
         let peer_identity = match target {
@@ -9785,7 +9781,7 @@ impl MobActor {
         };
 
         let local_identity = AgentIdentity::from(local.as_str());
-        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+        let peer_member_identity = AgentIdentity::from(peer_identity.as_str());
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
         let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
         let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
@@ -9802,7 +9798,7 @@ impl MobActor {
         }
         self.ensure_member_not_broken(&local).await?;
 
-        self.ensure_member_not_broken(&peer_meerkat_id).await?;
+        self.ensure_member_not_broken(&peer_member_identity).await?;
 
         // Pre-flight: roster lookups. Missing members fail fast before
         // any authority mutation.
@@ -9814,9 +9810,9 @@ impl MobActor {
                     .cloned()
                     .ok_or_else(|| MobError::MemberNotFound(local.clone()))?,
                 roster
-                    .get(&peer_meerkat_id)
+                    .get(&peer_member_identity)
                     .cloned()
-                    .ok_or_else(|| MobError::MemberNotFound(peer_meerkat_id.clone()))?,
+                    .ok_or_else(|| MobError::MemberNotFound(peer_member_identity.clone()))?,
             )
         };
 
@@ -9859,13 +9855,13 @@ impl MobActor {
                 ) => {
                     let peer_key = Self::trusted_peer_removal_key(peer_spec);
                     let local_key = Self::trusted_peer_removal_key(local_spec);
-                    handoff.require_peer_id_for(&peer_meerkat_id, &peer_key)?;
+                    handoff.require_peer_id_for(&peer_member_identity, &peer_key)?;
                     let local_trust_created = match self
                         .apply_trusted_peer_add_report(
                             local_comms.as_ref(),
                             peer_spec.clone(),
                             handoff.repair_authority_for(
-                                &peer_meerkat_id,
+                                &peer_member_identity,
                                 &peer_key,
                                 &self.dsl_authority,
                             )?,
@@ -9892,7 +9888,7 @@ impl MobActor {
                             self.rollback_peer_only_trust(
                                 &edge,
                                 local_comms.as_ref(),
-                                &peer_meerkat_id,
+                                &peer_member_identity,
                                 &peer_key,
                                 "wire_members_repair_rollback_trust_authority",
                             )
@@ -9940,7 +9936,7 @@ impl MobActor {
                             false,
                             WiringSides::local(),
                             &local,
-                            &peer_meerkat_id,
+                            &peer_member_identity,
                             local_spec,
                             peer_spec,
                         )
@@ -9960,13 +9956,13 @@ impl MobActor {
                     },
                 ) => {
                     let peer_key = Self::trusted_peer_removal_key(peer_spec);
-                    handoff.require_peer_id_for(&peer_meerkat_id, &peer_key)?;
+                    handoff.require_peer_id_for(&peer_member_identity, &peer_key)?;
                     let local_trust_created = match self
                         .apply_trusted_peer_add_report(
                             local_comms.as_ref(),
                             peer_spec.clone(),
                             handoff.repair_authority_for(
-                                &peer_meerkat_id,
+                                &peer_member_identity,
                                 &peer_key,
                                 &self.dsl_authority,
                             )?,
@@ -9989,7 +9985,7 @@ impl MobActor {
                             self.rollback_peer_only_trust(
                                 &edge,
                                 local_comms.as_ref(),
-                                &peer_meerkat_id,
+                                &peer_member_identity,
                                 &peer_key,
                                 "wire_members_peer_only_repair_rollback_trust_authority",
                             )
@@ -10078,7 +10074,7 @@ impl MobActor {
                     dsl_added,
                     WiringSides::empty(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     peer_spec,
                 )
@@ -10099,7 +10095,7 @@ impl MobActor {
                     dsl_added,
                     WiringSides::local(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     peer_spec,
                 )
@@ -10122,7 +10118,7 @@ impl MobActor {
                         dsl_added,
                         WiringSides::both(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         peer_spec,
                     )
@@ -10149,13 +10145,13 @@ impl MobActor {
             let dsl_added = authority.dsl_added();
             let handoff = authority.member_handoff()?;
             let peer_key = Self::trusted_peer_removal_key(peer_spec);
-            handoff.require_peer_id_for(&peer_meerkat_id, &peer_key)?;
+            handoff.require_peer_id_for(&peer_member_identity, &peer_key)?;
             let local_trust_created = match self
                 .apply_trusted_peer_add_report(
                     local_comms.as_ref(),
                     peer_spec.clone(),
                     handoff.wiring_authority_for(
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         &peer_key,
                         &self.dsl_authority,
                     )?,
@@ -10169,7 +10165,7 @@ impl MobActor {
                         dsl_added,
                         WiringSides::empty(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         peer_spec,
                     )
@@ -10190,7 +10186,7 @@ impl MobActor {
                     self.rollback_peer_only_trust(
                         &edge,
                         local_comms.as_ref(),
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         &peer_key,
                         "wire_members_peer_only_rollback_trust_authority",
                     )
@@ -10201,7 +10197,7 @@ impl MobActor {
                     dsl_added,
                     WiringSides::empty(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     peer_spec,
                 )
@@ -10223,7 +10219,7 @@ impl MobActor {
                         self.rollback_peer_only_trust(
                             &edge,
                             local_comms.as_ref(),
-                            &peer_meerkat_id,
+                            &peer_member_identity,
                             &peer_key,
                             "wire_members_peer_only_event_rollback_trust_authority",
                         )
@@ -10234,7 +10230,7 @@ impl MobActor {
                         dsl_added,
                         WiringSides::peer(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         peer_spec,
                     )
@@ -10277,7 +10273,7 @@ impl MobActor {
                         dsl_added,
                         WiringSides::empty(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         peer_spec,
                     )
@@ -10309,7 +10305,7 @@ impl MobActor {
                     dsl_added,
                     WiringSides::empty(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     peer_spec,
                 )
@@ -10342,7 +10338,7 @@ impl MobActor {
                         dsl_added,
                         WiringSides::local(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         peer_spec,
                     )
@@ -10381,13 +10377,13 @@ impl MobActor {
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
 
         // A-side trust install.
-        handoff.require_peer_id_for(&peer_meerkat_id, &peer_peer_id)?;
+        handoff.require_peer_id_for(&peer_member_identity, &peer_peer_id)?;
         let local_trust_created = match self
             .apply_trusted_peer_add_report(
                 local_comms.as_ref(),
                 peer_spec.clone(),
                 handoff.wiring_authority_for(
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     &peer_peer_id,
                     &self.dsl_authority,
                 )?,
@@ -10442,7 +10438,7 @@ impl MobActor {
 
         // Notify A that B is now wired.
         if let Err(err) = self
-            .notify_peer_added(&peer_comms, &local_spec, &peer_meerkat_id, &peer_entry)
+            .notify_peer_added(&peer_comms, &local_spec, &peer_member_identity, &peer_entry)
             .await
         {
             self.rollback_wire_side_effects(
@@ -10751,8 +10747,8 @@ impl MobActor {
 
     async fn prepare_send_peer_message(
         &mut self,
-        from: MeerkatId,
-        to: MeerkatId,
+        from: AgentIdentity,
+        to: AgentIdentity,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<PeerMessageDeliveryPlan, MobError> {
@@ -11314,7 +11310,7 @@ impl MobActor {
     /// idempotency is a generated no-op transition.
     async fn handle_unwire(
         &mut self,
-        local: MeerkatId,
+        local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<(), MobError> {
         let peer_identity = match target {
@@ -11367,7 +11363,7 @@ impl MobActor {
             )));
         }
 
-        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+        let peer_member_identity = AgentIdentity::from(peer_identity.as_str());
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
         let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
         let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
@@ -11380,9 +11376,9 @@ impl MobActor {
                     .cloned()
                     .ok_or_else(|| MobError::MemberNotFound(local.clone()))?,
                 roster
-                    .get(&peer_meerkat_id)
+                    .get(&peer_member_identity)
                     .cloned()
-                    .ok_or_else(|| MobError::MemberNotFound(peer_meerkat_id.clone()))?,
+                    .ok_or_else(|| MobError::MemberNotFound(peer_member_identity.clone()))?,
             )
         };
 
@@ -11414,8 +11410,12 @@ impl MobActor {
                 )));
             }
 
-            self.cancel_peer_deliveries_for_edge(&local, &peer_meerkat_id, "members are unwiring")
-                .await;
+            self.cancel_peer_deliveries_for_edge(
+                &local,
+                &peer_member_identity,
+                "members are unwiring",
+            )
+            .await;
             let _unwire_handoff = self.apply_unwire_members_idempotent(&edge)?;
             if let Err(error) = self
                 .unwire_peer_only_recipient(
@@ -11430,7 +11430,7 @@ impl MobActor {
                     &edge,
                     WiringSides::empty(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     local_binding,
                     peer_spec,
@@ -11452,7 +11452,7 @@ impl MobActor {
                     &edge,
                     WiringSides::local(),
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     local_spec,
                     local_binding,
                     peer_spec,
@@ -11477,7 +11477,7 @@ impl MobActor {
                         &edge,
                         WiringSides::both(),
                         &local,
-                        &peer_meerkat_id,
+                        &peer_member_identity,
                         local_spec,
                         local_binding,
                         peer_spec,
@@ -11532,7 +11532,7 @@ impl MobActor {
             return Ok(());
         }
 
-        self.cancel_peer_deliveries_for_edge(&local, &peer_meerkat_id, "members are unwiring")
+        self.cancel_peer_deliveries_for_edge(&local, &peer_member_identity, "members are unwiring")
             .await;
 
         // Submit DSL input first. Already-absent idempotency is a generated
@@ -11556,7 +11556,7 @@ impl MobActor {
             .notify_peer_event(
                 "mob.peer_unwired",
                 &peer_spec,
-                &peer_meerkat_id,
+                &peer_member_identity,
                 &peer_entry,
                 &local_comms,
             )
@@ -11574,7 +11574,7 @@ impl MobActor {
                 &local_spec,
                 &peer_spec,
                 &local,
-                &peer_meerkat_id,
+                &peer_member_identity,
                 &local_entry,
                 &peer_entry,
                 &unwire_handoff,
@@ -11606,7 +11606,7 @@ impl MobActor {
                 &local_spec,
                 &peer_spec,
                 &local,
-                &peer_meerkat_id,
+                &peer_member_identity,
                 &local_entry,
                 &peer_entry,
                 &unwire_handoff,
@@ -11617,12 +11617,12 @@ impl MobActor {
         sent_unwired_from_peer = true;
 
         // A-side trust removal (after notifications succeeded).
-        unwire_handoff.require_peer_id_for(&peer_meerkat_id, &peer_peer_id)?;
+        unwire_handoff.require_peer_id_for(&peer_member_identity, &peer_peer_id)?;
         if let Err(err) = self
             .apply_trusted_peer_remove(
                 local_comms.as_ref(),
                 peer_peer_id.clone(),
-                unwire_handoff.unwiring_authority_for(&peer_meerkat_id, &peer_peer_id)?,
+                unwire_handoff.unwiring_authority_for(&peer_member_identity, &peer_peer_id)?,
             )
             .await
         {
@@ -11638,7 +11638,7 @@ impl MobActor {
                 &local_spec,
                 &peer_spec,
                 &local,
-                &peer_meerkat_id,
+                &peer_member_identity,
                 &local_entry,
                 &peer_entry,
                 &unwire_handoff,
@@ -11670,7 +11670,7 @@ impl MobActor {
                 &local_spec,
                 &peer_spec,
                 &local,
-                &peer_meerkat_id,
+                &peer_member_identity,
                 &local_entry,
                 &peer_entry,
                 &unwire_handoff,
@@ -11704,7 +11704,7 @@ impl MobActor {
                     &local_spec,
                     &peer_spec,
                     &local,
-                    &peer_meerkat_id,
+                    &peer_member_identity,
                     &local_entry,
                     &peer_entry,
                     &unwire_handoff,
@@ -11893,8 +11893,8 @@ impl MobActor {
         peer_comms: &Arc<dyn CoreCommsRuntime>,
         local_spec: &TrustedPeerDescriptor,
         peer_spec: &TrustedPeerDescriptor,
-        local_meerkat_id: &MeerkatId,
-        peer_meerkat_id: &MeerkatId,
+        local_member_identity: &AgentIdentity,
+        peer_member_identity: &AgentIdentity,
         local_entry: &RosterEntry,
         peer_entry: &RosterEntry,
         _handoff: &MemberTrustHandoff,
@@ -11939,7 +11939,7 @@ impl MobActor {
                     })
                     .and_then(|handoff| {
                         handoff.add_authority_for(
-                            peer_meerkat_id,
+                            peer_member_identity,
                             &peer_key,
                             &self.dsl_authority,
                         )
@@ -11979,7 +11979,7 @@ impl MobActor {
                     })
                     .and_then(|handoff| {
                         handoff.add_authority_for(
-                            local_meerkat_id,
+                            local_member_identity,
                             &local_key,
                             &self.dsl_authority,
                         )
@@ -12008,7 +12008,7 @@ impl MobActor {
         // Compensate peer_unwired notifications by re-sending peer_added.
         if sent_unwired_from_local {
             if let Err(err) = self
-                .notify_peer_added(local_comms, peer_spec, peer_meerkat_id, peer_entry)
+                .notify_peer_added(local_comms, peer_spec, peer_member_identity, peer_entry)
                 .await
             {
                 tracing::warn!(
@@ -12020,7 +12020,7 @@ impl MobActor {
         }
         if sent_unwired_from_peer {
             if let Err(err) = self
-                .notify_peer_added(peer_comms, local_spec, local_meerkat_id, local_entry)
+                .notify_peer_added(peer_comms, local_spec, local_member_identity, local_entry)
                 .await
             {
                 tracing::warn!(
@@ -12071,7 +12071,7 @@ impl MobActor {
     /// with the same descriptor is treated as a no-op success.
     async fn handle_wire_external(
         &mut self,
-        local: MeerkatId,
+        local: AgentIdentity,
         spec: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
         TrustedPeerDescriptor::validate_pubkey_for_peer_id(spec.peer_id, &spec.pubkey).map_err(
@@ -12235,7 +12235,7 @@ impl MobActor {
     /// success.
     async fn handle_unwire_external(
         &mut self,
-        local: MeerkatId,
+        local: AgentIdentity,
         peer_name: meerkat_core::comms::PeerName,
         stale_cleanup_spec: Option<TrustedPeerDescriptor>,
     ) -> Result<(), MobError> {
@@ -12426,7 +12426,7 @@ impl MobActor {
     /// Mark-then-cleanup: event first, mark Retiring, disposal pipeline
     /// (policy-driven), then roster removal only after critical archive cleanup
     /// succeeds.
-    async fn handle_retire(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
+    async fn handle_retire(&mut self, agent_identity: AgentIdentity) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
         self.cancel_peer_deliveries_for_member(&agent_identity, "member is retiring")
             .await;
@@ -12484,7 +12484,7 @@ impl MobActor {
 
     fn acknowledge_absent_session_ingress_for_mob_destroy(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         obligation: MobDestroyingSessionIngressObligation,
     ) -> Result<(), MobError> {
         crate::generated::protocol_mob_destroying_session_ingress::submit_session_ingress_detached_for_mob_destroy(
@@ -12637,7 +12637,7 @@ impl MobActor {
 
     async fn handle_retire_inner(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         bulk: bool,
         preserve_realtime_binding: bool,
         retain_roster_on_archive_failure: bool,
@@ -12742,9 +12742,8 @@ impl MobActor {
         let preserve_topology_for_respawn = preserve_realtime_binding;
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
         // K3 (#26): the Retiring marker is owned by MobMachine
-        // (`member_state_markers`). Trust that fact alone; do NOT OR-in the
-        // `roster.state` projection, which is a materialized view of this same
-        // machine fact and must not be a second source of truth.
+        // (`member_state_markers`). Trust that machine fact alone; it has no
+        // second source of truth.
         let cleanup_retry = retire_event_already_present
             || matches!(
                 self.dsl_authority
@@ -12947,7 +12946,7 @@ impl MobActor {
     /// structured error on failure.
     async fn handle_respawn(
         &mut self,
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError> {
         use super::handle::{MemberRespawnReceipt, MobRespawnError};
@@ -13012,9 +13011,8 @@ impl MobActor {
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
             let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-            // K3 (#26): trust the MobMachine-owned Retiring marker alone; the
-            // `roster.state` projection is a materialized view of this fact, not
-            // an independent source of truth.
+            // K3 (#26): trust the MobMachine-owned Retiring marker alone; it
+            // has no second source of truth.
             let cleanup_retry = matches!(
                 self.dsl_authority
                     .state()
@@ -13633,7 +13631,7 @@ impl MobActor {
         &mut self,
         retiring_identity: &AgentIdentity,
     ) -> Result<(), MobError> {
-        let local = MeerkatId::from(retiring_identity.as_str());
+        let local = AgentIdentity::from(retiring_identity.as_str());
         for edge in self.machine_external_peer_edges_for(retiring_identity) {
             let peer_name = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone())
                 .map_err(|error| {
@@ -13652,7 +13650,7 @@ impl MobActor {
 
     async fn member_retire_trust_cleanup_plan(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         entry: &RosterEntry,
     ) -> Result<RetireTrustCleanupPlan, MobError> {
         let retiring_identity = AgentIdentity::from(agent_identity.as_str());
@@ -13788,7 +13786,7 @@ impl MobActor {
     /// Snapshot member state for disposal from a roster entry.
     async fn disposal_context_from_entry(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         entry: &RosterEntry,
         trust_cleanup_plan: RetireTrustCleanupPlan,
     ) -> DisposalContext {
@@ -13879,9 +13877,9 @@ impl MobActor {
         if archive_failed && retain_roster_on_archive_failure {
             // Respawn retry path: the session was NOT archived (archive failed),
             // so it may still exist as an orphan. Retain the retiring roster
-            // anchor in Retiring state so the respawn retry can re-attempt
-            // cleanup via the cleanup_retry path (handle_respawn keys on
-            // `entry.state == Retiring`); removing it would lose track of the
+            // anchor so the respawn retry can re-attempt cleanup via the
+            // cleanup_retry path (handle_respawn keys on the MobMachine-owned
+            // Retiring marker); removing it would lose track of the
             // un-archived session and defeat that retry. handle_retire_inner
             // still returns the archive error to the caller. (Plain retire keeps
             // the unconditional removal below, per its remove-on-archive-failure
@@ -14848,7 +14846,7 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &mut self,
         remote_entries: Vec<RosterEntry>,
-        trust_unwire_authority_by_member: &mut BTreeMap<MeerkatId, RetireTrustCleanupPlan>,
+        trust_unwire_authority_by_member: &mut BTreeMap<AgentIdentity, RetireTrustCleanupPlan>,
         report: &mut super::handle::MobDestroyReport,
     ) {
         if remote_entries.is_empty() {
@@ -14911,7 +14909,7 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &self,
         remote_entries: Vec<RosterEntry>,
-        _trust_unwire_authority_by_member: &mut BTreeMap<MeerkatId, RetireTrustCleanupPlan>,
+        _trust_unwire_authority_by_member: &mut BTreeMap<AgentIdentity, RetireTrustCleanupPlan>,
         report: &mut super::handle::MobDestroyReport,
     ) {
         for entry in remote_entries {
@@ -15008,7 +15006,7 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
-        let mut trust_cleanup_plan_by_member: BTreeMap<MeerkatId, RetireTrustCleanupPlan> =
+        let mut trust_cleanup_plan_by_member: BTreeMap<AgentIdentity, RetireTrustCleanupPlan> =
             BTreeMap::new();
         if destroy_input_needed {
             for entry in &entries {
@@ -15324,7 +15322,6 @@ impl MobActor {
                     rotated_peer_count: repair_accepted_peer_ids.len(),
                     rollback_succeeded: false,
                     pending_authority_recorded: true,
-                    pending_authority_process_local: false,
                     rollback_error: Some(error.to_string()),
                     reason: "failed to reconcile stale accepted supervisor authority before retry"
                         .to_string(),
@@ -15435,7 +15432,6 @@ impl MobActor {
                                     .is_some_and(|result| result.rollback_succeeded),
                                 pending_authority_recorded: pending_persistence
                                     .pending_authority_recorded,
-                                pending_authority_process_local: false,
                                 rollback_error: recovery
                                     .as_ref()
                                     .and_then(|result| result.rollback_error.clone()),
@@ -15488,7 +15484,7 @@ impl MobActor {
                                                     &authorized_bind.peer.address.to_string(),
                                                 ),
                                             bootstrap_token: Some(effective_bootstrap_token),
-                                            pubkey: Some(authorized_bind.peer.pubkey),
+                                            pubkey: authorized_bind.peer.pubkey,
                                         };
                                         effective_peer = authorized_bind.peer.clone();
                                         if let Err(error) = self
@@ -15606,7 +15602,6 @@ impl MobActor {
                                     rollback_succeeded: true,
                                     pending_authority_recorded: pending_persistence
                                         .pending_authority_recorded,
-                                    pending_authority_process_local: false,
                                     rollback_error: None,
                                     reason,
                                 });
@@ -15629,7 +15624,6 @@ impl MobActor {
                                     rollback_succeeded: false,
                                     pending_authority_recorded: pending_persistence
                                         .pending_authority_recorded,
-                                    pending_authority_process_local: false,
                                     rollback_error: Some(rollback_error.to_string()),
                                     reason,
                                 });
@@ -15654,7 +15648,6 @@ impl MobActor {
                             rollback_succeeded: false,
                             pending_authority_recorded: pending_persistence
                                 .pending_authority_recorded,
-                            pending_authority_process_local: false,
                             rollback_error: None,
                             reason,
                         });
@@ -15696,7 +15689,6 @@ impl MobActor {
                             rollback_succeeded: recovery.rollback_succeeded,
 	                            pending_authority_recorded: pending_persistence
 	                                .pending_authority_recorded,
-	                            pending_authority_process_local: false,
                             rollback_error: recovery.rollback_error,
                             reason:
                                 "failed to persist pending supervisor rotation after a remote accepted attempted authority"
@@ -15761,7 +15753,6 @@ impl MobActor {
                     rotated_peer_count: accepted_peer_ids.len(),
                     rollback_succeeded,
                     pending_authority_recorded: pending_persistence.pending_authority_recorded,
-                    pending_authority_process_local: false,
                     rollback_error,
                     reason: format!(
                         "failed to commit confirmed supervisor authority: {}",
@@ -16462,7 +16453,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn retire_one(&mut self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
+    async fn retire_one(&mut self, id: AgentIdentity) -> Result<(), (AgentIdentity, MobError)> {
         self.handle_retire_inner(&id, true, false, false)
             .await
             .map_err(|error| (id, error))
@@ -16511,7 +16502,7 @@ impl MobActor {
         );
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
-        let agent_identity = MeerkatId::from(&runtime_id.identity);
+        let agent_identity = runtime_id.identity.clone();
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let declared_dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&runtime_id);
@@ -16719,7 +16710,7 @@ impl MobActor {
 
     async fn dispatch_turn_driven_spawn_initial_turn(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         agent_runtime_id: &AgentRuntimeId,
         fence_token: FenceToken,
         operation_id: &meerkat_core::ops::OperationId,
@@ -16820,7 +16811,7 @@ impl MobActor {
         runtime_id: AgentRuntimeId,
         fence_token: FenceToken,
     ) -> Result<(), MobError> {
-        let agent_identity = MeerkatId::from(&runtime_id.identity);
+        let agent_identity = runtime_id.identity.clone();
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let entry = {
@@ -17059,7 +17050,7 @@ impl MobActor {
                     .interaction_event_injector(&bridge_session_id)
                     .await
                     .ok_or_else(|| MobError::MissingMemberCapability {
-                        member_id: crate::ids::MeerkatId::from(entry.agent_identity.as_str()),
+                        member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
                         capability: crate::error::MobMemberCapability::InteractionEventInjector,
                         context: "autonomous direct turn delivery",
                     })?;
@@ -18178,11 +18169,11 @@ impl MobActor {
     /// Compensate a failed spawn wiring path to avoid partial state.
     async fn rollback_failed_spawn(
         &mut self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         profile_name: &ProfileName,
         member_ref: &MemberRef,
-        successful_wiring_targets: &[MeerkatId],
-        planned_wiring_targets: &[MeerkatId],
+        successful_wiring_targets: &[AgentIdentity],
+        planned_wiring_targets: &[AgentIdentity],
     ) -> Result<(), MobError> {
         let spawned_entry = {
             let roster = self.roster.read().await;
@@ -18207,10 +18198,10 @@ impl MobActor {
         }
         let mut cleanup_handoffs = BTreeMap::new();
         if spawned_entry.is_some() {
-            for peer_meerkat_id in &cleanup_peers {
+            for peer_member_identity in &cleanup_peers {
                 let peer_entry = {
                     let roster = self.roster.read().await;
-                    roster.get(peer_meerkat_id).cloned()
+                    roster.get(peer_member_identity).cloned()
                 };
                 let Some(peer_entry) = peer_entry else {
                     continue;
@@ -18274,12 +18265,12 @@ impl MobActor {
                 .await
                 .map(|p| p.peer_description)
                 .unwrap_or_default();
-            for peer_meerkat_id in &wired_peers {
+            for peer_member_identity in &wired_peers {
                 let peer_spec = {
                     let roster = self.roster.read().await;
-                    let peer_entry = roster.get(peer_meerkat_id).cloned().ok_or_else(|| {
+                    let peer_entry = roster.get(peer_member_identity).cloned().ok_or_else(|| {
                         MobError::WiringError(format!(
-                            "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
+                            "spawn rollback requires roster entry for wired peer '{peer_member_identity}'"
                         ))
                     })?;
                     drop(roster);
@@ -18305,7 +18296,7 @@ impl MobActor {
                 }
                 rollback.defer(
                     format!(
-                        "compensating mob.peer_added '{agent_identity}' -> '{peer_meerkat_id}'"
+                        "compensating mob.peer_added '{agent_identity}' -> '{peer_member_identity}'"
                     ),
                     {
                         let spawned_sender = spawned_sender.clone();
@@ -18357,10 +18348,10 @@ impl MobActor {
                 WiringEndpoint::Local { comms, spec, .. } => (spec, Some(comms), None),
                 WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
             };
-            for peer_meerkat_id in &cleanup_peers {
+            for peer_member_identity in &cleanup_peers {
                 let peer_entry = {
                     let roster = self.roster.read().await;
-                    roster.get(peer_meerkat_id).cloned()
+                    roster.get(peer_member_identity).cloned()
                 };
                 let Some(peer_entry) = peer_entry else {
                     continue;
@@ -18589,7 +18580,6 @@ impl MobActor {
                     runtime_mode: crate::MobRuntimeMode::TurnDriven,
                     peer_id: spawned_comms.as_ref().and_then(|c| c.peer_id()),
                     transport_public_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
-                    state: crate::roster::MemberState::Active,
                     wired_to: std::collections::BTreeSet::new(),
                     external_peer_specs: std::collections::BTreeMap::new(),
                     labels: std::collections::BTreeMap::new(),
@@ -18639,7 +18629,7 @@ impl MobActor {
 
     async fn retire_event_exists(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<bool, MobError> {
         let key = Self::retire_event_key(agent_identity, member_ref);
@@ -18688,7 +18678,7 @@ impl MobActor {
 
     fn machine_restore_wiring_plan(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
     ) -> Result<RestoreWiringPlan, MobError> {
         let local =
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
@@ -18702,7 +18692,7 @@ impl MobActor {
                 None
             };
             if let Some(peer) = peer {
-                local_peers.push(MeerkatId::from(peer.0.as_str()));
+                local_peers.push(AgentIdentity::from(peer.0.as_str()));
             }
         }
         local_peers.sort();
@@ -18843,7 +18833,7 @@ impl MobActor {
         &self,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
         recipient_spec: &TrustedPeerDescriptor,
-        new_peer_id: &MeerkatId,
+        new_peer_id: &AgentIdentity,
         new_peer_entry: &RosterEntry,
     ) -> Result<(), MobError> {
         let peer_description = self
@@ -18891,7 +18881,7 @@ impl MobActor {
         &self,
         intent: &'static str,
         recipient_spec: &TrustedPeerDescriptor,
-        other_peer_id: &MeerkatId,
+        other_peer_id: &AgentIdentity,
         other_peer_entry: &RosterEntry,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
@@ -18916,7 +18906,7 @@ impl MobActor {
         &self,
         intent: &'static str,
         recipient_spec: &TrustedPeerDescriptor,
-        other_peer_id: &MeerkatId,
+        other_peer_id: &AgentIdentity,
         other_peer_entry: &RosterEntry,
         other_peer_spec: &TrustedPeerDescriptor,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
@@ -18969,7 +18959,7 @@ impl MobActor {
 
     async fn notify_kickoff_event(
         &self,
-        agent_identity: &MeerkatId,
+        agent_identity: &AgentIdentity,
         intent: &'static str,
     ) -> Result<(), MobError> {
         let (entry, wired_peers) = {
@@ -18979,7 +18969,7 @@ impl MobActor {
             let Some(entry) = roster.get(agent_identity).cloned() else {
                 return Ok(());
             };
-            let wired_peers: Vec<MeerkatId> = machine_peer_identities
+            let wired_peers: Vec<AgentIdentity> = machine_peer_identities
                 .iter()
                 .filter_map(|id| roster.get_by_identity(id).map(|e| e.agent_identity.clone()))
                 .collect();
@@ -19034,7 +19024,7 @@ impl MobActor {
     async fn notify_peer_retired(
         &self,
         recipient_spec: &TrustedPeerDescriptor,
-        retired_id: &MeerkatId,
+        retired_id: &AgentIdentity,
         retired_entry: &RosterEntry,
         retired_spec: &TrustedPeerDescriptor,
         retiring_comms: &Arc<dyn CoreCommsRuntime>,
@@ -19054,7 +19044,7 @@ impl MobActor {
     async fn notify_peer_unwired(
         &self,
         recipient_spec: &TrustedPeerDescriptor,
-        unwired_id: &MeerkatId,
+        unwired_id: &AgentIdentity,
         unwired_entry: &RosterEntry,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {

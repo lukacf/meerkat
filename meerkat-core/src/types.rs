@@ -1427,24 +1427,20 @@ pub enum SystemNoticeDirection {
 ///
 /// Wire form is a plain string. The canonical tags match the strings the
 /// runtime producer has always emitted (`message`, `request`,
-/// `response_progress`, `response_terminal`); the `peer_`-prefixed forms emitted
-/// by other surfaces (`peer_request`, ...) deserialize into the same variants
-/// for back-read compatibility. Any genuinely-unknown wire value is captured
-/// explicitly as [`CommsNoticeKind::Other`] (NOT a silent fall-through) so the
-/// projection match stays exhaustive while remaining forward-compatible; an
-/// `Other` value round-trips to its original string.
+/// `response_progress`, `response_terminal`). Any unknown wire value is
+/// captured explicitly as [`CommsNoticeKind::Other`] (NOT a silent
+/// fall-through) so the projection match stays exhaustive while remaining
+/// forward-compatible; an `Other` value round-trips to its original string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsNoticeKind {
     /// Simple peer-to-peer message (wire tag `message`).
     Message,
-    /// Correlated request expecting a response (wire tag `request`, alias
-    /// `peer_request`).
+    /// Correlated request expecting a response (wire tag `request`).
     Request,
-    /// Progress update for an in-flight response (wire tag `response_progress`,
-    /// alias `peer_response_progress`).
+    /// Progress update for an in-flight response (wire tag
+    /// `response_progress`).
     ResponseProgress,
-    /// Terminal response, completed or failed (wire tag `response_terminal`,
-    /// alias `peer_response_terminal`).
+    /// Terminal response, completed or failed (wire tag `response_terminal`).
     ResponseTerminal,
     /// Forward-compatible escape hatch for an unrecognized wire kind. Projects
     /// as a plain peer message but is matched explicitly, never silently.
@@ -1464,16 +1460,15 @@ impl CommsNoticeKind {
         }
     }
 
-    /// Classify a wire string into the typed vocabulary, folding in the
-    /// `peer_`-prefixed aliases. Unrecognized values become
-    /// [`CommsNoticeKind::Other`].
+    /// Classify a wire string into the typed vocabulary. Unrecognized values
+    /// become [`CommsNoticeKind::Other`].
     #[must_use]
     pub fn from_wire(raw: &str) -> Self {
         match raw {
             "message" => Self::Message,
-            "request" | "peer_request" => Self::Request,
-            "response_progress" | "peer_response_progress" => Self::ResponseProgress,
-            "response_terminal" | "peer_response_terminal" => Self::ResponseTerminal,
+            "request" => Self::Request,
+            "response_progress" => Self::ResponseProgress,
+            "response_terminal" => Self::ResponseTerminal,
             other => Self::Other(other.to_string()),
         }
     }

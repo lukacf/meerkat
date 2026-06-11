@@ -43,11 +43,6 @@ pub fn noop_request_action() -> RequestAsyncAction {
     request_action(|| async {})
 }
 
-/// Compatibility marker for the duplicate-admission case represented by
-/// [`RequestAdmissionError::AlreadyExists`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestAlreadyExists;
-
 /// Typed rejection from surface request admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAdmissionError {

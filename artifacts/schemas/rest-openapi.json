@@ -3169,20 +3169,11 @@
       },
       "HookCapability": {
         "description": "Declared capability determines default failure behavior and constraints.",
-        "oneOf": [
-          {
-            "enum": [
-              "observe",
-              "guardrail"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "rewrite",
-            "description": "Legacy fail-closed capability label. Semantic patch authority has been\nremoved from hooks; retained entries may observe and deny only.",
-            "type": "string"
-          }
-        ]
+        "enum": [
+          "observe",
+          "guardrail"
+        ],
+        "type": "string"
       },
       "HookEntryConfig": {
         "description": "One hook registration entry.",
@@ -5417,10 +5408,8 @@
             ]
           },
           "system_prompt": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "$ref": "#/components/schemas/SystemPromptOverride",
+            "description": "Typed per-request system-prompt policy: omit/`null` to inherit, a\nstring to set an explicit prompt, or `{\"action\": \"disable\"}` to\nsuppress every prompt source."
           },
           "verbose": {
             "default": false,
@@ -7533,6 +7522,32 @@
         ],
         "type": "object"
       },
+      "SystemPromptOverride": {
+        "anyOf": [
+          {
+            "description": "Inherit the configured/default prompt sources.",
+            "type": "null"
+          },
+          {
+            "description": "Explicit per-request system prompt.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Suppress every prompt source.",
+            "properties": {
+              "action": {
+                "const": "disable"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "Per-request system-prompt policy: omit/null to inherit, a string to set an explicit prompt, or {\"action\": \"disable\"} to suppress every prompt source."
+      },
       "TargetBinding": {
         "oneOf": [
           {
@@ -7732,7 +7747,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -7768,9 +7783,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/components/schemas/ToolConfigChangeStatus"
           },
@@ -7781,7 +7793,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],

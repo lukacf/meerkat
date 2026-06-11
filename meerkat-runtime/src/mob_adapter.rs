@@ -27,12 +27,6 @@ pub fn create_flow_step_input(
     step_index: usize,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
 ) -> Input {
-    let instructions_text = instructions.text_content();
-    let blocks = if instructions.has_images() {
-        Some(instructions.into_blocks())
-    } else {
-        None
-    };
     Input::FlowStep(FlowStepInput {
         header: InputHeader {
             id: InputId::new(),
@@ -48,8 +42,7 @@ pub fn create_flow_step_input(
             correlation_id: None,
         },
         step_id: step_id.into(),
-        instructions: instructions_text,
-        blocks,
+        content: instructions,
         turn_metadata,
     })
 }
@@ -174,8 +167,14 @@ mod tests {
             Input::FlowStep(flow_step) => flow_step,
             other => return Err(format!("expected flow step input, got {other:?}")),
         };
-        assert_eq!(flow_step.instructions, "inspect image\n[image: image/png]");
-        assert_eq!(flow_step.blocks.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            flow_step.content.text_content(),
+            "inspect image\n[image: image/png]"
+        );
+        assert!(matches!(
+            &flow_step.content,
+            meerkat_core::types::ContentInput::Blocks(blocks) if blocks.len() == 2
+        ));
         Ok(())
     }
 

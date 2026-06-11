@@ -38,7 +38,9 @@ pub async fn handle_ask(
         model: request.model,
         provider: request.provider,
         max_tokens: request.max_tokens,
-        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
+        system_prompt: meerkat::SystemPromptOverride::Set(
+            meerkat::help::help_system_prompt().to_string(),
+        ),
         output_schema: None,
         structured_output_retries: None,
         hooks_override: None,

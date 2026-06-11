@@ -2437,7 +2437,6 @@ where
                             emit_event!(AgentEvent::ToolExecutionCompleted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                result: tool_result.text_content(),
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                                 duration_ms,
@@ -6330,15 +6329,16 @@ mod tests {
             if let crate::event::AgentEvent::ToolExecutionCompleted {
                 name,
                 is_error,
-                result,
+                content,
                 ..
             } = event
                 && name == "slow_tool"
             {
                 assert!(is_error, "timed-out tool result must be an error");
+                let text = crate::types::text_content(&content);
                 assert!(
-                    result.contains("\"error\":\"timeout\""),
-                    "timed-out tool result must carry the canonical timeout payload, got: {result}"
+                    text.contains("\"error\":\"timeout\""),
+                    "timed-out tool result must carry the canonical timeout payload, got: {text}"
                 );
                 saw_timeout_completion = true;
             }

@@ -59,19 +59,17 @@ fn normalize(s: &str) -> String {
     s.replace("\r\n", "\n").trim_end().to_string()
 }
 
-/// For every declared protocol in canonical + compat composition
-/// catalogs, regenerate the source and compare byte-for-byte against
-/// the committed on-disk file.
+/// For every declared protocol in the canonical composition catalog,
+/// regenerate the source and compare byte-for-byte against the
+/// committed on-disk file.
 #[test]
 fn every_declared_protocol_file_matches_codegen_output() {
     use meerkat_machine_schema::{
         MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
-        compat_composition_schemas,
     };
 
     let root = repo_root();
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
     let machines = canonical_machine_schemas();
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();
@@ -154,10 +152,9 @@ fn terminal_surface_mapping_matches_codegen_output() {
 
 #[test]
 fn comms_trust_authority_sources_matches_codegen_output() {
-    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+    use meerkat_machine_schema::canonical_composition_schemas;
 
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
     let rendered = xtask::protocol_codegen::render_comms_trust_authority_sources(&compositions)
         .expect("render comms_trust_authority_sources");
     let rendered = rustfmt(&rendered);
@@ -176,10 +173,9 @@ fn comms_trust_authority_sources_matches_codegen_output() {
 
 #[test]
 fn auth_lease_transition_authority_sources_matches_codegen_output() {
-    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+    use meerkat_machine_schema::canonical_composition_schemas;
 
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
     let rendered =
         xtask::protocol_codegen::render_auth_lease_transition_authority_sources(&compositions)
             .expect("render auth_lease_transition_authority_sources");
@@ -199,10 +195,9 @@ fn auth_lease_transition_authority_sources_matches_codegen_output() {
 
 #[test]
 fn auth_lease_durable_lifecycle_marker_matches_codegen_output() {
-    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+    use meerkat_machine_schema::canonical_composition_schemas;
 
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
     let rendered =
         xtask::protocol_codegen::render_auth_lease_durable_lifecycle_marker_contract(&compositions)
             .expect("render auth_lease_durable_lifecycle_marker");
@@ -325,11 +320,10 @@ fn session_document_authority_matches_codegen_output() {
 /// that cargo will later compile.
 #[test]
 fn every_protocol_helper_lands_under_an_owning_crate_generated_module() {
-    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+    use meerkat_machine_schema::canonical_composition_schemas;
 
     let root = repo_root();
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
 
     let mut checked = 0;
     for composition in &compositions {

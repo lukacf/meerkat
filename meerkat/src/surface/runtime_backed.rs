@@ -1011,7 +1011,9 @@ mod tests {
         CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
-            system_prompt: Some("surface runtime regression".to_string()),
+            system_prompt: crate::SystemPromptOverride::Set(
+                "surface runtime regression".to_string(),
+            ),
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,

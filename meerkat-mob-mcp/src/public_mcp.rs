@@ -1074,7 +1074,7 @@ fn runtime_binding_from_wire(
                 peer_id: resolved.peer_id.to_string(),
                 address,
                 bootstrap_token,
-                pubkey: Some(resolved.pubkey),
+                pubkey: resolved.pubkey,
             })
         }
     }
@@ -1310,7 +1310,7 @@ mod tests {
             peer_id,
             meerkat_core::comms::PeerId::from_ed25519_pubkey(&expected_pubkey).to_string()
         );
-        assert_eq!(pubkey, Some(expected_pubkey));
+        assert_eq!(pubkey, expected_pubkey);
     }
 
     #[test]

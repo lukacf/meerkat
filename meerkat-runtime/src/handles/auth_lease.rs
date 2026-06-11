@@ -368,7 +368,7 @@ fn auth_lease_transition_from_generated_publication(
         lease_key, authority, transition, context,
     )? {
         Some(transition) => Ok(transition),
-        None => Err(DslTransitionError::new(
+        None => Err(DslTransitionError::no_matching(
             context,
             "AuthMachine transition emitted no lifecycle publication obligation",
         )),
@@ -387,7 +387,7 @@ fn maybe_auth_lease_transition_from_generated_publication(
         return Ok(None);
     }
     if obligations.len() != 1 {
-        return Err(DslTransitionError::new(
+        return Err(DslTransitionError::no_matching(
             context,
             format!(
                 "AuthMachine transition emitted {} lifecycle publication obligations",
@@ -405,7 +405,7 @@ fn maybe_auth_lease_transition_from_generated_publication(
         .into_auth_lease_transition(scope)
         .map(Some)
         .map_err(|err| {
-            DslTransitionError::new(
+            DslTransitionError::no_matching(
                 context,
                 format!("AuthMachine lifecycle publication handoff failed: {err}"),
             )
@@ -586,7 +586,7 @@ impl RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !create_if_missing && !guard.authorities.contains_key(lease_key) {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 context,
                 format!("no auth lease registered for lease_key `{lease_key}`"),
             ));
@@ -601,7 +601,7 @@ impl RuntimeAuthLeaseHandle {
                 match guard.authorities.get_mut(lease_key) {
                     Some(m) => m,
                     None => {
-                        return Err(DslTransitionError::new(
+                        return Err(DslTransitionError::no_matching(
                             context,
                             format!("no auth lease registered for lease_key `{lease_key}`"),
                         ));
@@ -708,7 +708,7 @@ impl RuntimeAuthLeaseHandle {
             let entry = match guard.authorities.get_mut(&lease_key) {
                 Some(m) => m,
                 None => {
-                    return Err(DslTransitionError::new(
+                    return Err(DslTransitionError::no_matching(
                         context,
                         format!("no auth machine registered for lease_key `{lease_key}`"),
                     ));
@@ -751,7 +751,7 @@ impl RuntimeAuthLeaseHandle {
             let entry = match guard.authorities.get_mut(&lease_key) {
                 Some(m) => m,
                 None => {
-                    return Err(DslTransitionError::new(
+                    return Err(DslTransitionError::no_matching(
                         context,
                         format!("no auth machine registered for lease_key `{lease_key}`"),
                     ));
@@ -1175,7 +1175,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         if captured.captured_by_type_id() != std::any::TypeId::of::<RuntimeAuthLeaseHandle>()
             || captured.captured_by_instance_id() != self.auth_lifecycle_restore_instance_id()
         {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
                 "auth lifecycle restore snapshot was not captured from this RuntimeAuthLeaseHandle",
             ));
@@ -1238,7 +1238,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             lease_key.profile.clone(),
         );
         if publication.token_key() != &lease_token_key {
-            return Err(DslTransitionError::new(
+            return Err(DslTransitionError::no_matching(
                 context,
                 "durable auth lifecycle marker identity does not match restore lease key",
             ));
@@ -1309,7 +1309,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 effect
                 && resolved.replace(*disposition).is_some()
             {
-                return Err(DslTransitionError::new(
+                return Err(DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted multiple credential-use dispositions for `{lease_key}`"
@@ -1321,7 +1321,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         resolved
             .map(credential_use_disposition_from_dsl)
             .ok_or_else(|| {
-                DslTransitionError::new(
+                DslTransitionError::no_matching(
                     CONTEXT,
                     format!("AuthMachine emitted no credential-use disposition for `{lease_key}`"),
                 )
@@ -1364,7 +1364,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 effect
                 && resolved.replace(*disposition).is_some()
             {
-                return Err(DslTransitionError::new(
+                return Err(DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted multiple OAuth-login credential dispositions for `{lease_key}`"
@@ -1376,7 +1376,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         resolved
             .map(credential_use_disposition_from_dsl)
             .ok_or_else(|| {
-                DslTransitionError::new(
+                DslTransitionError::no_matching(
                     CONTEXT,
                     format!(
                         "AuthMachine emitted no OAuth-login credential disposition for `{lease_key}`"
@@ -1854,7 +1854,7 @@ mod tests {
             &self,
             _released: &ReleasedOAuthFlows,
         ) -> Result<(), DslTransitionError> {
-            Err(DslTransitionError::new(
+            Err(DslTransitionError::no_matching(
                 "test_release_observer",
                 "injected release observer failure",
             ))

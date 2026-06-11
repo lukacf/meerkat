@@ -523,12 +523,6 @@ impl Config {
                     if server_table.contains_key("api_style") {
                         merged.api_style = server_layer.api_style;
                     }
-                    if server_table.contains_key("bearer_token") {
-                        merged.bearer_token = server_layer.bearer_token.clone();
-                    }
-                    if server_table.contains_key("bearer_token_env") {
-                        merged.bearer_token_env = server_layer.bearer_token_env.clone();
-                    }
                     merged_servers.insert(server_id.clone(), merged);
                 }
                 self.self_hosted.servers = merged_servers;
@@ -1097,16 +1091,20 @@ pub enum SelfHostedApiStyle {
     ChatCompletions,
 }
 
+/// Self-hosted server connection target.
+///
+/// Carries connection/transport facts only. Credentials have exactly one
+/// owner: the realm auth profile selected via `auth_binding` or a realm
+/// default binding. The legacy `bearer_token` / `bearer_token_env` fields are
+/// gone and `deny_unknown_fields` rejects them (and any other unknown key) at
+/// config parse with a typed [`ConfigError::Parse`] instead of silently
+/// tolerating dead credential material in config files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SelfHostedServerConfig {
     pub transport: SelfHostedTransport,
     pub base_url: String,
     pub api_style: SelfHostedApiStyle,
-    #[serde(default, skip_serializing)]
-    pub bearer_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearer_token_env: Option<String>,
 }
 
 impl Default for SelfHostedServerConfig {
@@ -1115,8 +1113,6 @@ impl Default for SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: String::new(),
             api_style: SelfHostedApiStyle::ChatCompletions,
-            bearer_token: None,
-            bearer_token_env: None,
         }
     }
 }
@@ -1583,6 +1579,178 @@ impl CallTimeoutOverride {
     /// Returns `true` when this override is `Inherit` (the default / absent state).
     pub fn is_inherit(&self) -> bool {
         matches!(self, Self::Inherit)
+    }
+}
+
+/// Typed per-request system-prompt policy.
+///
+/// **Dogma §10:** inherit, set, and disable are three distinct facts that an
+/// overloaded `Option<String>` cannot express — `None` collapses "inherit
+/// config/AGENTS/default" together with "no opinion", and there is no way to
+/// say "suppress every prompt source". This mirrors the `Inherit`/`Set`/`Clear`
+/// shape of `TurnMetadataOverride` and the `Inherit`/`Disabled`/`Value` shape
+/// of [`CallTimeoutOverride`].
+///
+/// This is the canonical type at every boundary that carries the decision:
+/// the wire `CreateSessionRequest`/`CoreCreateParams.system_prompt` field, the
+/// persisted `SessionBuildState.system_prompt` field, and
+/// `AgentBuildConfig.system_prompt`. Its serde implementation below IS the
+/// wire/persisted representation — there is no adapter pair:
+///
+/// - absent / `null` ⇔ `Inherit` (lossless with the retired `Option<String>`
+///   `None` shape)
+/// - JSON/TOML string ⇔ `Set` (lossless with the retired `Some(prompt)` shape)
+/// - `{"action": "disable"}` ⇔ `Disable`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SystemPromptOverride {
+    /// No per-request opinion: fall through to the config-file override, the
+    /// config inline override, then the default prompt + AGENTS.md files.
+    #[default]
+    Inherit,
+    /// Explicit per-request prompt. Wins outright, skipping the config and
+    /// AGENTS.md sources (dispatcher/tool/extra sections are still appended).
+    Set(String),
+    /// Explicitly suppress *every* prompt source: no config override, no
+    /// AGENTS.md, no default prompt. Only the appended sections
+    /// (extra/config-tool/dispatcher) remain.
+    Disable,
+}
+
+impl SystemPromptOverride {
+    /// Returns `true` when this override is `Inherit` (the default / absent
+    /// state). Used by `skip_serializing_if` at field sites.
+    #[must_use]
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+
+    /// Whether this override carries an explicit per-request decision (either a
+    /// `Set` prompt or an explicit `Disable`). Used to decide whether the
+    /// prompt must be (re)assembled even for a resumed session.
+    #[must_use]
+    pub fn is_explicit(&self) -> bool {
+        !matches!(self, Self::Inherit)
+    }
+
+    /// The explicit per-request prompt text, if any (`Set` only).
+    #[must_use]
+    pub fn as_set_prompt(&self) -> Option<&str> {
+        match self {
+            Self::Set(prompt) => Some(prompt.as_str()),
+            Self::Inherit | Self::Disable => None,
+        }
+    }
+}
+
+const SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION: &str = "disable";
+
+impl Serialize for SystemPromptOverride {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Inherit is the default; field sites pair this with
+            // `skip_serializing_if = "SystemPromptOverride::is_inherit"` so it
+            // is normally omitted entirely.
+            Self::Inherit => serializer.serialize_none(),
+            Self::Set(prompt) => serializer.serialize_str(prompt),
+            Self::Disable => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("action", SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemPromptOverride {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SystemPromptOverrideVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SystemPromptOverrideVisitor {
+            type Value = SystemPromptOverride;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(
+                    "a system prompt string, null (inherit), or {\"action\": \"disable\"}",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Set(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Set(value))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Inherit)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SystemPromptOverride::Inherit)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Self::Value, D2::Error> {
+                deserializer.deserialize_any(SystemPromptOverrideVisitor)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut action: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "action" => {
+                            if action.is_some() {
+                                return Err(serde::de::Error::duplicate_field("action"));
+                            }
+                            action = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(serde::de::Error::unknown_field(other, &["action"]));
+                        }
+                    }
+                }
+                let action = action.ok_or_else(|| serde::de::Error::missing_field("action"))?;
+                if action == SYSTEM_PROMPT_OVERRIDE_DISABLE_ACTION {
+                    Ok(SystemPromptOverride::Disable)
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "unknown system_prompt override action '{action}' (expected \"disable\")"
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SystemPromptOverrideVisitor)
+    }
+}
+
+impl JsonSchema for SystemPromptOverride {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SystemPromptOverride".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Per-request system-prompt policy: omit/null to inherit, a string to set an explicit prompt, or {\"action\": \"disable\"} to suppress every prompt source.",
+            "anyOf": [
+                { "type": "null", "description": "Inherit the configured/default prompt sources." },
+                { "type": "string", "description": "Explicit per-request system prompt." },
+                {
+                    "type": "object",
+                    "properties": { "action": { "const": "disable" } },
+                    "required": ["action"],
+                    "additionalProperties": false,
+                    "description": "Suppress every prompt source."
+                }
+            ]
+        })
     }
 }
 
@@ -2308,7 +2476,7 @@ api_style = "responses"
             .merge_toml_str(
                 r#"
 [self_hosted.servers.local]
-bearer_token_env = "OLLAMA_TOKEN"
+transport = "openai_compatible"
 "#,
             )
             .expect("overlay server");
@@ -2320,7 +2488,7 @@ bearer_token_env = "OLLAMA_TOKEN"
             .expect("merged server");
         assert_eq!(server.base_url, "http://127.0.0.1:11434");
         assert_eq!(server.api_style, SelfHostedApiStyle::Responses);
-        assert_eq!(server.bearer_token_env.as_deref(), Some("OLLAMA_TOKEN"));
+        assert_eq!(server.transport, SelfHostedTransport::OpenAiCompatible);
     }
 
     #[test]
@@ -2356,7 +2524,7 @@ family = "gemma-4"
             .merge_toml_str(
                 r#"
 [self_hosted.servers.local]
-bearer_token_env = "OLLAMA_TOKEN"
+api_style = "responses"
 "#,
             )
             .expect("overlay self-hosted config");
@@ -2408,22 +2576,64 @@ family = "gemma-4"
     }
 
     #[test]
-    fn test_self_hosted_bearer_token_is_not_serialized() {
-        let config: Config = toml::from_str(
+    fn test_self_hosted_legacy_bearer_token_rejected_at_parse() {
+        // Pre-1.0 clean break: server credentials live exclusively in realm
+        // auth profiles. The retired `bearer_token` carrier is rejected at
+        // config parse with a typed error, never tolerated.
+        let err = toml::from_str::<Config>(
             r#"
 [self_hosted.servers.local]
 base_url = "http://127.0.0.1:11434"
 bearer_token = "secret-token"
 "#,
         )
-        .expect("config");
-
-        let value = serde_json::to_value(&config).expect("serialize config");
-        let server = &value["self_hosted"]["servers"]["local"];
+        .expect_err("legacy bearer_token must be rejected at config parse");
         assert!(
-            server.get("bearer_token").is_none(),
-            "literal bearer tokens must be redacted from serialized config"
+            err.to_string().contains("bearer_token"),
+            "rejection must name the offending field: {err}"
         );
+    }
+
+    #[test]
+    fn test_self_hosted_legacy_bearer_token_env_rejected_at_parse() {
+        let err = toml::from_str::<Config>(
+            r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+        )
+        .expect_err("legacy bearer_token_env must be rejected at config parse");
+        assert!(
+            err.to_string().contains("bearer_token_env"),
+            "rejection must name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_self_hosted_legacy_bearer_token_rejected_in_layered_merge() {
+        // The layered merge path parses each overlay through the same typed
+        // Config deserializer, so a legacy credential field in any layer is
+        // rejected with the same typed parse error.
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+"#,
+            )
+            .expect("base server");
+        let err = config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+            )
+            .expect_err("legacy bearer_token_env overlay must be rejected");
+        assert!(matches!(err, ConfigError::Parse(_)));
+        assert!(err.to_string().contains("bearer_token_env"));
     }
 
     // Plan §6.10 deleted the ProviderSettings struct (and its api_keys /
@@ -2876,6 +3086,105 @@ event_address = "127.0.0.1:4201"
             w.call_timeout,
             CallTimeoutOverride::Value(Duration::from_secs(150))
         );
+    }
+
+    // ── SystemPromptOverride tests ──
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct SystemPromptWrapper {
+        #[serde(default, skip_serializing_if = "SystemPromptOverride::is_inherit")]
+        system_prompt: SystemPromptOverride,
+    }
+
+    #[test]
+    fn system_prompt_override_default_is_inherit() {
+        assert_eq!(
+            SystemPromptOverride::default(),
+            SystemPromptOverride::Inherit
+        );
+        assert!(SystemPromptOverride::default().is_inherit());
+        assert!(!SystemPromptOverride::default().is_explicit());
+        assert!(SystemPromptOverride::Set("p".to_string()).is_explicit());
+        assert!(SystemPromptOverride::Disable.is_explicit());
+        assert_eq!(
+            SystemPromptOverride::Set("p".to_string()).as_set_prompt(),
+            Some("p")
+        );
+        assert_eq!(SystemPromptOverride::Disable.as_set_prompt(), None);
+    }
+
+    #[test]
+    fn system_prompt_override_absent_field_parses_as_inherit() {
+        // Lossless with the retired `Option<String>` shape: an omitted field
+        // (old `None`) is `Inherit`.
+        let w: SystemPromptWrapper = serde_json::from_str("{}").unwrap();
+        assert_eq!(w.system_prompt, SystemPromptOverride::Inherit);
+    }
+
+    #[test]
+    fn system_prompt_override_null_parses_as_inherit() {
+        let w: SystemPromptWrapper = serde_json::from_str(r#"{"system_prompt": null}"#).unwrap();
+        assert_eq!(w.system_prompt, SystemPromptOverride::Inherit);
+    }
+
+    #[test]
+    fn system_prompt_override_string_round_trips_as_set() {
+        // Lossless with the retired `Some(prompt)` shape.
+        let w: SystemPromptWrapper =
+            serde_json::from_str(r#"{"system_prompt": "You are helpful."}"#).unwrap();
+        assert_eq!(
+            w.system_prompt,
+            SystemPromptOverride::Set("You are helpful.".to_string())
+        );
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"system_prompt":"You are helpful."}"#);
+        let back: SystemPromptWrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn system_prompt_override_disable_round_trips() {
+        // The suppression fact survives serialize → deserialize: no lossy
+        // Disable→Inherit collapse at any persist/wire boundary.
+        let w = SystemPromptWrapper {
+            system_prompt: SystemPromptOverride::Disable,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"system_prompt":{"action":"disable"}}"#);
+        let back: SystemPromptWrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.system_prompt, SystemPromptOverride::Disable);
+    }
+
+    #[test]
+    fn system_prompt_override_inherit_is_omitted_when_serialized() {
+        let w = SystemPromptWrapper {
+            system_prompt: SystemPromptOverride::Inherit,
+        };
+        assert_eq!(serde_json::to_string(&w).unwrap(), "{}");
+    }
+
+    #[test]
+    fn system_prompt_override_unknown_action_rejected() {
+        let err = serde_json::from_str::<SystemPromptWrapper>(
+            r#"{"system_prompt": {"action": "clear"}}"#,
+        )
+        .expect_err("unknown action must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unknown system_prompt override action")
+        );
+    }
+
+    #[test]
+    fn system_prompt_override_unknown_key_rejected() {
+        serde_json::from_str::<SystemPromptWrapper>(r#"{"system_prompt": {"disable": true}}"#)
+            .expect_err("object form must carry exactly the action key");
+    }
+
+    #[test]
+    fn system_prompt_override_non_string_rejected() {
+        serde_json::from_str::<SystemPromptWrapper>(r#"{"system_prompt": 42}"#)
+            .expect_err("numeric system_prompt must be rejected");
     }
 
     #[test]

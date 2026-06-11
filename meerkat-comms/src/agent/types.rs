@@ -1,88 +1,16 @@
 //! CommsMessage types for session-injectable messages.
 //!
-//! These types bridge the gap between raw `InboxItem` envelopes and
-//! the format needed for injection into an agent's session.
+//! These types project classified inbox entries into the format needed for
+//! injection into an agent's session.
 
 use crate::inproc::InprocRegistry;
-use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
-use meerkat_core::PlainEventSource;
+use crate::{InboxItem, MessageKind, PubKey};
 use meerkat_core::comms::PeerLifecycleKind;
-use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
+use meerkat_core::types::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use uuid::Uuid;
-
-/// A plain (unauthenticated) event message from an external source.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlainMessage {
-    /// The event body (plain text or serialized JSON).
-    pub body: String,
-    /// Where the event originated from.
-    pub source: PlainEventSource,
-    /// Optional interaction ID for subscription correlation.
-    pub interaction_id: Option<uuid::Uuid>,
-    /// Handling mode for ordinary external/member submissions.
-    pub handling_mode: HandlingMode,
-    /// Optional multimodal content blocks.
-    pub blocks: Option<Vec<ContentBlock>>,
-    /// Optional normalized rendering metadata.
-    pub render_metadata: Option<RenderMetadata>,
-}
-
-impl PlainMessage {
-    /// Format this message for injection into an LLM session.
-    pub fn to_user_message_text(&self) -> String {
-        meerkat_core::interaction::format_external_event_projection(
-            &self.source.to_string(),
-            Some(&self.body),
-        )
-    }
-}
-
-/// A message drained from the inbox, distinguishing authenticated peer
-/// messages from unauthenticated external events.
-///
-/// The compiler enforces this distinction — authenticated messages have
-/// verified sender identity (`CommsMessage`), plain events do not (`PlainMessage`).
-#[derive(Debug, Clone)]
-pub enum DrainedMessage {
-    /// A message from an authenticated peer (Ed25519-verified envelope).
-    Authenticated(CommsMessage),
-    /// A plain event from an external (unauthenticated) source.
-    Plain(PlainMessage),
-}
-
-/// Convert an inbox item into a `DrainedMessage`.
-///
-/// Returns `None` for Ack messages and unknown peers when peer auth is required.
-pub fn drain_inbox_item(
-    item: &InboxItem,
-    trusted_peers: &TrustedPeers,
-    require_peer_auth: bool,
-) -> Option<DrainedMessage> {
-    match item {
-        InboxItem::External { .. } => {
-            CommsMessage::from_inbox_item(item, trusted_peers, require_peer_auth)
-                .map(DrainedMessage::Authenticated)
-        }
-        InboxItem::PlainEvent {
-            body,
-            source,
-            handling_mode,
-            interaction_id,
-            blocks,
-            render_metadata,
-        } => Some(DrainedMessage::Plain(PlainMessage {
-            body: body.clone(),
-            source: *source,
-            handling_mode: *handling_mode,
-            interaction_id: *interaction_id,
-            blocks: blocks.clone(),
-            render_metadata: render_metadata.clone(),
-        })),
-    }
-}
 
 /// Standard message intents for inter-agent communication.
 ///
@@ -254,7 +182,7 @@ impl From<CommsStatus> for crate::Status {
 pub struct CommsMessage {
     /// The envelope ID (for reference in responses).
     pub envelope_id: Uuid,
-    /// The peer name (resolved from pubkey via TrustedPeers).
+    /// The peer name (ingress-resolved display identity).
     pub from_peer: String,
     /// The peer's public key (for explicit reference).
     pub from_pubkey: PubKey,
@@ -308,38 +236,6 @@ impl CommsMessage {
             from_pubkey: envelope.from,
             content,
         })
-    }
-
-    /// Create a CommsMessage from an InboxItem and trusted peers list.
-    /// Resolves sender only from trusted peers.
-    ///
-    /// Returns `None` if:
-    /// - The item is not an External envelope
-    /// - The sender cannot be resolved and `require_peer_auth` is enabled
-    /// - The message kind is Ack (acks are not injected into session)
-    pub fn from_inbox_item(
-        item: &InboxItem,
-        trusted_peers: &TrustedPeers,
-        require_peer_auth: bool,
-    ) -> Option<Self> {
-        let envelope = match item {
-            InboxItem::External { envelope } => envelope,
-            InboxItem::PlainEvent { .. } => return None,
-        };
-
-        // Resolve peer name from pubkey
-        let from_peer = match trusted_peers
-            .get_peer(&envelope.from)
-            .map(|peer| peer.name.clone())
-        {
-            Some(name) => name,
-            None if require_peer_auth => return None,
-            None => InprocRegistry::global()
-                .get_name_by_pubkey(&envelope.from)
-                .unwrap_or_else(|| envelope.from.to_pubkey_string()),
-        };
-
-        Self::from_external_with_resolved_peer(envelope, from_peer)
     }
 
     /// Create a `CommsMessage` from a classified inbox entry.
@@ -441,54 +337,10 @@ impl meerkat_core::TurnBoundaryMessage for CommsMessage {
     }
 }
 
-/// Create a CommsMessage from an Envelope directly (for testing).
-#[cfg(test)]
-impl CommsMessage {
-    pub fn from_envelope(
-        envelope: &crate::Envelope,
-        trusted_peers: &TrustedPeers,
-        require_peer_auth: bool,
-    ) -> Option<Self> {
-        Self::from_inbox_item(
-            &InboxItem::External {
-                envelope: envelope.clone(),
-            },
-            trusted_peers,
-            require_peer_auth,
-        )
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{Envelope, Keypair, Signature, TrustedPeer};
-
-    fn make_keypair() -> Keypair {
-        Keypair::generate()
-    }
-
-    fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers::from_peers(vec![TrustedPeer {
-            name: name.to_string(),
-            pubkey: *pubkey,
-            addr: "tcp://127.0.0.1:4200".to_string(),
-            meta: crate::PeerMeta::default(),
-        }])
-    }
-
-    fn make_envelope(from: &Keypair, to: PubKey, kind: MessageKind) -> Envelope {
-        let mut envelope = Envelope {
-            id: Uuid::new_v4(),
-            from: from.public_key(),
-            to,
-            kind,
-            sig: Signature::new([0u8; 64]),
-        };
-        envelope.sign(from);
-        envelope
-    }
 
     #[test]
     fn test_comms_message_struct() {
@@ -525,223 +377,6 @@ mod tests {
             result: serde_json::json!({"approved": true}),
             blocks: None,
         };
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
-
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Message {
-                body: "hello world".to_string(),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true);
-
-        assert!(msg.is_some());
-        let msg = msg.unwrap();
-        assert_eq!(msg.from_peer, "sender-agent");
-        match msg.content {
-            CommsContent::Message { body, blocks } => {
-                assert_eq!(body, "hello world");
-                assert_eq!(blocks, None);
-            }
-            _ => unreachable!("expected Message"),
-        }
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_request() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("requester", &sender.public_key());
-
-        // Use standard "review" intent to test enum mapping
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Request {
-                intent: "review".to_string(),
-                params: serde_json::json!({"pr": 123}),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-        let request_id = envelope.id;
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true).unwrap();
-
-        match msg.content {
-            CommsContent::Request {
-                request_id: rid,
-                intent,
-                params,
-                blocks,
-            } => {
-                assert_eq!(rid, request_id);
-                assert_eq!(intent, MessageIntent::Review);
-                assert_eq!(params["pr"], 123);
-                assert_eq!(blocks, None);
-            }
-            _ => unreachable!("expected Request"),
-        }
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_request_custom_intent() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("requester", &sender.public_key());
-
-        // Custom intent should be preserved as Custom variant
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Request {
-                intent: "review-pr".to_string(),
-                params: serde_json::json!({"pr": 456}),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true).unwrap();
-
-        match msg.content {
-            CommsContent::Request { intent, params, .. } => {
-                assert_eq!(intent, MessageIntent::Custom("review-pr".to_string()));
-                assert_eq!(params["pr"], 456);
-            }
-            _ => unreachable!("expected Request"),
-        }
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_response() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("responder", &sender.public_key());
-
-        let orig_request_id = Uuid::new_v4();
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Response {
-                in_reply_to: orig_request_id,
-                status: crate::Status::Completed,
-                result: serde_json::json!({"approved": true}),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true).unwrap();
-
-        match msg.content {
-            CommsContent::Response {
-                in_reply_to,
-                status,
-                result,
-                blocks: _,
-            } => {
-                assert_eq!(in_reply_to, orig_request_id);
-                assert_eq!(status, CommsStatus::Completed);
-                assert_eq!(result["approved"], true);
-            }
-            _ => unreachable!("expected Response"),
-        }
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_ignores_ack() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("sender", &sender.public_key());
-
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Ack {
-                in_reply_to: Uuid::new_v4(),
-            },
-        );
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true);
-
-        assert!(
-            msg.is_none(),
-            "Acks should not be converted to CommsMessage"
-        );
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_ignores_unknown_peer() {
-        let sender = make_keypair();
-        let other = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("other", &other.public_key()); // sender NOT trusted
-
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Message {
-                body: "hello".to_string(),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true);
-
-        assert!(msg.is_none(), "Unknown peers should return None");
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_uses_inproc_name_without_auth() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = TrustedPeers::new();
-        let sender_name = format!("sender-no-auth-{name}", name = Uuid::new_v4().simple());
-
-        let (_, sender_inbox_sender) = crate::Inbox::new();
-        InprocRegistry::global().register(
-            sender_name.clone(),
-            sender.public_key(),
-            sender_inbox_sender,
-        );
-
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Message {
-                body: "hello".to_string(),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-        let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, false).unwrap();
-
-        assert_eq!(msg.from_peer, sender_name);
-        match msg.content {
-            CommsContent::Message { body, .. } => assert_eq!(body, "hello"),
-            _ => unreachable!("expected Message"),
-        }
-
-        assert!(InprocRegistry::global().unregister(&sender.public_key()));
     }
 
     #[test]
@@ -894,102 +529,5 @@ mod tests {
         // Unknown strings deserialize to Custom
         let intent: MessageIntent = serde_json::from_str("\"my-custom\"").unwrap();
         assert_eq!(intent, MessageIntent::Custom("my-custom".to_string()));
-    }
-
-    // === DrainedMessage / PlainMessage tests ===
-
-    #[test]
-    fn test_drained_message_from_external() {
-        let sender = make_keypair();
-        let receiver = make_keypair();
-        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
-
-        let envelope = make_envelope(
-            &sender,
-            receiver.public_key(),
-            MessageKind::Message {
-                body: "hello".to_string(),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-        let item = InboxItem::External { envelope };
-        let drained = drain_inbox_item(&item, &trusted, true);
-
-        assert!(drained.is_some());
-        match drained.unwrap() {
-            DrainedMessage::Authenticated(msg) => {
-                assert_eq!(msg.from_peer, "sender-agent");
-            }
-            DrainedMessage::Plain(_) => panic!("Expected Authenticated"),
-        }
-    }
-
-    #[test]
-    fn test_drained_message_from_plain_event() {
-        use meerkat_core::PlainEventSource;
-
-        let trusted = TrustedPeers::new();
-        let item = InboxItem::PlainEvent {
-            body: "New email arrived".to_string(),
-            source: PlainEventSource::Tcp,
-            handling_mode: HandlingMode::Queue,
-            interaction_id: None,
-            blocks: None,
-            render_metadata: None,
-        };
-        let drained = drain_inbox_item(&item, &trusted, true);
-
-        assert!(drained.is_some());
-        match drained.unwrap() {
-            DrainedMessage::Plain(msg) => {
-                assert_eq!(msg.body, "New email arrived");
-                assert_eq!(msg.source, PlainEventSource::Tcp);
-                assert_eq!(msg.interaction_id, None);
-            }
-            DrainedMessage::Authenticated(_) => panic!("Expected Plain"),
-        }
-    }
-
-    #[test]
-    fn test_plain_message_to_user_message_text() {
-        use meerkat_core::PlainEventSource;
-
-        let msg = PlainMessage {
-            body: "CPU > 95% on prod-3".to_string(),
-            source: PlainEventSource::Webhook,
-            handling_mode: HandlingMode::Queue,
-            interaction_id: None,
-            blocks: None,
-            render_metadata: None,
-        };
-        let text = msg.to_user_message_text();
-        assert_eq!(text, "External event via webhook: CPU > 95% on prod-3");
-    }
-
-    #[test]
-    fn test_plain_message_formatting_all_sources() {
-        use meerkat_core::PlainEventSource;
-
-        for (source, label) in [
-            (PlainEventSource::Tcp, "tcp"),
-            (PlainEventSource::Uds, "uds"),
-            (PlainEventSource::Stdin, "stdin"),
-            (PlainEventSource::Webhook, "webhook"),
-            (PlainEventSource::Rpc, "rpc"),
-        ] {
-            let msg = PlainMessage {
-                body: "test".to_string(),
-                source,
-                handling_mode: HandlingMode::Queue,
-                interaction_id: None,
-                blocks: None,
-                render_metadata: None,
-            };
-            assert!(
-                msg.to_user_message_text().contains(label),
-                "PlainMessage should contain source label '{label}'"
-            );
-        }
     }
 }

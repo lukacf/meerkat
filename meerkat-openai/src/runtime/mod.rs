@@ -80,16 +80,26 @@ fn openai_oauth_refresh_error(
     ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
-fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
+/// The pre-`/codex` ChatGPT backend base URL that older persisted `.rkat`
+/// backend profiles carried. Rejected, never healed: a stale config fails
+/// loudly once with a typed [`ProviderClientError::InvalidBaseUrl`] and
+/// re-seeds the canonical base URL at the next login.
+const LEGACY_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
+
+fn chatgpt_backend_base_url(configured: Option<&str>) -> Result<String, ProviderClientError> {
     let Some(raw) = configured.filter(|url| !url.trim().is_empty()) else {
-        return OpenAiBackendKind::ChatGptBackend.default_base_url().into();
+        return Ok(OpenAiBackendKind::ChatGptBackend.default_base_url().into());
     };
     let trimmed = raw.trim_end_matches('/');
-    if OpenAiBackendKind::is_legacy_chatgpt_base_url(trimmed) {
-        OpenAiBackendKind::ChatGptBackend.default_base_url().into()
-    } else {
-        trimmed.to_string()
+    if trimmed == LEGACY_CHATGPT_BASE_URL {
+        return Err(ProviderClientError::InvalidBaseUrl(format!(
+            "legacy ChatGPT backend base_url `{LEGACY_CHATGPT_BASE_URL}` is no longer \
+             accepted; update the backend profile to `{}` (re-running `rkat login` \
+             re-seeds it)",
+            OpenAiBackendKind::ChatGptBackend.default_base_url()
+        )));
     }
+    Ok(trimmed.to_string())
 }
 
 fn azure_openai_base_url(configured: Option<&str>) -> Result<String, ProviderClientError> {
@@ -407,7 +417,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url = match backend_kind {
                 OpenAiBackendKind::ChatGptBackend => {
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?
                 }
                 OpenAiBackendKind::AzureOpenAi => {
                     azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
@@ -455,7 +465,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 // ChatGPT backend: emit account_id + fedramp wire
                 // headers per Codex bearer_auth_provider.rs:23-38.
                 let base_url =
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?;
                 let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
                     .with_extra_headers(chatgpt_backend_extra_headers(&connection))
                     .with_chatgpt_backend_wire();
@@ -493,7 +503,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url = match backend_kind {
                 OpenAiBackendKind::ChatGptBackend => {
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?
                 }
                 OpenAiBackendKind::AzureOpenAi => {
                     azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
@@ -531,7 +541,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             },
             OpenAiBackendKind::ChatGptBackend => {
                 let base_url =
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?;
                 crate::OpenAiClient::new_with_base_url(secret, base_url)
                     .with_extra_headers(chatgpt_backend_extra_headers(&connection))
                     .with_chatgpt_backend_wire()
@@ -593,6 +603,49 @@ mod tests {
     #[test]
     fn provider_id_is_openai() {
         assert_eq!(OpenAiProviderRuntime.provider_id(), Provider::OpenAI);
+    }
+
+    #[test]
+    fn chatgpt_backend_base_url_resolves_default_and_explicit_values() {
+        // Missing / blank → the canonical default.
+        assert_eq!(
+            chatgpt_backend_base_url(None).unwrap(),
+            OpenAiBackendKind::ChatGptBackend.default_base_url()
+        );
+        assert_eq!(
+            chatgpt_backend_base_url(Some("   ")).unwrap(),
+            OpenAiBackendKind::ChatGptBackend.default_base_url()
+        );
+        // Explicit non-legacy values pass through (trailing slash trimmed).
+        assert_eq!(
+            chatgpt_backend_base_url(Some("https://example.com/proxy/")).unwrap(),
+            "https://example.com/proxy"
+        );
+    }
+
+    #[test]
+    fn chatgpt_backend_base_url_rejects_legacy_persisted_value() {
+        // Pre-`/codex` persisted configs are REJECTED with a typed error —
+        // never silently healed. Stale `.rkat` profiles fail loudly once and
+        // re-seed the canonical base URL at the next login.
+        for legacy in [
+            "https://chatgpt.com/backend-api",
+            "https://chatgpt.com/backend-api/",
+        ] {
+            match chatgpt_backend_base_url(Some(legacy)) {
+                Err(ProviderClientError::InvalidBaseUrl(message)) => {
+                    assert!(
+                        message.contains("https://chatgpt.com/backend-api"),
+                        "rejection must name the legacy URL: {message}"
+                    );
+                    assert!(
+                        message.contains(OpenAiBackendKind::ChatGptBackend.default_base_url()),
+                        "rejection must name the canonical replacement: {message}"
+                    );
+                }
+                other => panic!("legacy base URL must be rejected, got {other:?}"),
+            }
+        }
     }
 
     fn backend(kind: &str) -> BackendProfile {

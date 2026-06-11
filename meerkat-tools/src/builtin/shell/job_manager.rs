@@ -225,12 +225,6 @@ impl JobManager {
         self
     }
 
-    /// Compatibility wrapper retained while older call sites still speak in
-    /// session-centric terms.
-    pub(crate) fn with_owner_session_id(self, session_id: SessionId) -> Self {
-        self.with_owner_bridge_session_id(session_id)
-    }
-
     /// Override the lifecycle registry used for background operations.
     pub(crate) fn with_ops_registry(mut self, ops_registry: Arc<dyn OpsLifecycleRegistry>) -> Self {
         self.ops_registry = ops_registry;

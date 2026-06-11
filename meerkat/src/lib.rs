@@ -320,7 +320,7 @@ pub use meerkat_store::SqliteSessionStore;
 
 // Re-export tools
 #[cfg(not(target_arch = "wasm32"))]
-pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
+pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolValidationError};
 
 // Embedded skill registration.
 //
@@ -407,10 +407,10 @@ pub use meerkat_contracts::{
 // Surface infrastructure
 pub mod surface;
 
-// Typed per-request system-prompt policy (always compiled; consumed by
-// AgentBuildConfig on every target and by prompt assembly on non-wasm).
-mod system_prompt_override;
-pub use system_prompt_override::SystemPromptOverride;
+// Typed per-request system-prompt policy. Canonically owned by
+// `meerkat_core::config` (its serde IS the wire/persisted representation);
+// re-exported here for surface crates.
+pub use meerkat_core::config::SystemPromptOverride;
 
 // Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
 #[cfg(not(target_arch = "wasm32"))]

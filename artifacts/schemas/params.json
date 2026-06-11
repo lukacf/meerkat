@@ -2173,6 +2173,32 @@
         "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
+      "SystemPromptOverride": {
+        "anyOf": [
+          {
+            "description": "Inherit the configured/default prompt sources.",
+            "type": "null"
+          },
+          {
+            "description": "Explicit per-request system prompt.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Suppress every prompt source.",
+            "properties": {
+              "action": {
+                "const": "disable"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "Per-request system-prompt policy: omit/null to inherit, a string to set an explicit prompt, or {\"action\": \"disable\"} to suppress every prompt source."
+      },
       "WireAuthBindingRef": {
         "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
@@ -2222,7 +2248,7 @@
             "type": "null"
           }
         ],
-        "description": "Phase 4c — realm-scoped binding reference. When set, the session\nis built through the realm connection set; when omitted, the\nlegacy flat `provider + api_key` path is used."
+        "description": "Realm-scoped binding reference. When set, the session is built through\nthe named realm connection set; when omitted, resolution falls back to\nthe realm default binding for the provider (including the synthesized\n`env_default` realm)."
       },
       "labels": {
         "additionalProperties": {
@@ -2271,10 +2297,8 @@
         ]
       },
       "system_prompt": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "$ref": "#/$defs/SystemPromptOverride",
+        "description": "Typed per-request system-prompt policy: omit/`null` to inherit, a\nstring to set an explicit prompt, or `{\"action\": \"disable\"}` to\nsuppress every prompt source."
       }
     },
     "required": [
@@ -5327,7 +5351,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -5363,9 +5387,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -5376,7 +5397,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],
@@ -7175,7 +7195,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -7211,9 +7231,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -7224,7 +7241,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],
@@ -10570,25 +10586,28 @@
               "null"
             ]
           },
-          "state": {
+          "status": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WireMemberState"
+                "$ref": "#/$defs/WireMobMemberStatus"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Required roster state."
+            "description": "Required canonical machine-projected member status."
           }
         },
         "type": "object"
       },
-      "WireMemberState": {
-        "description": "Roster member lifecycle state for `MobMemberFilterWire`.",
+      "WireMobMemberStatus": {
+        "description": "Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.",
         "enum": [
           "active",
-          "retiring"
+          "retiring",
+          "broken",
+          "completed",
+          "unknown"
         ],
         "type": "string"
       }
@@ -17465,7 +17484,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -17501,9 +17520,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -17514,7 +17530,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],

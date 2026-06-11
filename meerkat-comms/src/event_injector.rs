@@ -168,11 +168,11 @@ mod tests {
     use super::*;
     use crate::classify::test_support;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeers;
+    use crate::trust::TrustStore;
 
     fn classified_inbox() -> (Inbox, InboxSender) {
         Inbox::new_classified(test_support::classification_context(
-            TrustedPeers::new(),
+            TrustStore::new(),
             false,
         ))
     }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_comms_event_injector_reports_full() {
         let (_inbox, sender) = Inbox::new_classified_with_capacity_for_test(
-            test_support::classification_context(TrustedPeers::new(), false),
+            test_support::classification_context(TrustStore::new(), false),
             1,
         );
         let injector = CommsEventInjector::new(sender, new_subscriber_registry());
@@ -296,7 +296,7 @@ mod tests {
 
         let registry = new_subscriber_registry();
         let (_inbox, sender) = Inbox::new_classified_with_capacity_for_test(
-            test_support::classification_context(TrustedPeers::new(), false),
+            test_support::classification_context(TrustStore::new(), false),
             1,
         );
         let injector = CommsEventInjector::new(sender, registry.clone());

@@ -49,9 +49,8 @@ fn make_progress_input(label: &str) -> Input {
             request_id: format!("req-{label}"),
             phase: ResponseProgressPhase::InProgress,
         }),
-        body: format!("progress-{label}"),
+        content: format!("progress-{label}").into(),
         payload: Some(serde_json::json!({ "label": label })),
-        blocks: None,
         handling_mode: None,
     })
 }
@@ -210,7 +209,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -287,7 +286,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -353,7 +352,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -478,7 +477,7 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Retired,
         })

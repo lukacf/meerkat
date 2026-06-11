@@ -629,10 +629,8 @@ pub struct LiveStatusResult {
 /// value and fail closed for values outside the generated contract they were
 /// built with.
 ///
-/// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
-/// place this typed status alongside the back-compat `refresh_enqueued`
-/// boolean as ordinary sibling fields, which keeps SDK codegen on the
-/// simple-struct path.
+/// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps
+/// SDK codegen on the simple-struct path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -647,9 +645,7 @@ pub enum LiveRefreshStatus {
 /// Response payload for `live/refresh`.
 ///
 /// R4-5 (P3): replaces the previous untyped `{"refresh_enqueued": true}`
-/// JSON blob. The boolean `refresh_enqueued` field is preserved for back-
-/// compat (legacy clients that pattern-match on it stay on the green path)
-/// alongside the typed `status` discriminator. New code should route on
+/// JSON blob with the typed `status` discriminator. Clients route on
 /// `status`.
 ///
 /// See [`LiveRefreshStatus`] for the variant set and the contract on
@@ -660,10 +656,6 @@ pub struct LiveRefreshResult {
     /// Typed refresh status emitted by generated runtime authority.
     /// Today: always [`LiveRefreshStatus::Queued`].
     pub status: LiveRefreshStatus,
-    /// Back-compat mirror of the generated queued-authority result. Always
-    /// `true` when paired with `status: queued`. New code should route on
-    /// `status`.
-    pub refresh_enqueued: bool,
 }
 
 impl LiveRefreshResult {
@@ -671,7 +663,6 @@ impl LiveRefreshResult {
     pub fn queued() -> Self {
         Self {
             status: LiveRefreshStatus::Queued,
-            refresh_enqueued: true,
         }
     }
 }
@@ -693,17 +684,13 @@ pub enum LiveCloseStatus {
 
 /// Response payload for `live/close`.
 ///
-/// The boolean `closed` field is preserved for back-compat alongside the typed
-/// `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveCloseResult {
     /// Typed close status emitted by generated runtime authority.
     /// Today: always [`LiveCloseStatus::Closed`].
     pub status: LiveCloseStatus,
-    /// Back-compat mirror of the generated close-authority result. Always
-    /// `true` when paired with `status: closed`.
-    pub closed: bool,
 }
 
 impl LiveCloseResult {
@@ -711,7 +698,6 @@ impl LiveCloseResult {
     pub fn closed() -> Self {
         Self {
             status: LiveCloseStatus::Closed,
-            closed: true,
         }
     }
 }
@@ -724,8 +710,7 @@ impl LiveCloseResult {
 // true})` blobs from the RPC handler — untyped at the SDK boundary and
 // invisible to schema codegen. These typed result shapes mirror the
 // `LiveCloseResult` / `LiveCloseStatus` precedent above: a typed `status`
-// discriminator emitted by generated runtime authority, with the legacy
-// boolean preserved as a sibling back-compat field. Each `status` enum is
+// discriminator emitted by generated runtime authority. Each `status` enum is
 // `#[non_exhaustive]` so future generated contracts can add explicit result
 // classes without reshaping the object.
 // ---------------------------------------------------------------------------
@@ -746,17 +731,13 @@ pub enum LiveSendInputStatus {
 
 /// Response payload for `live/send_input`.
 ///
-/// The boolean `sent` field is preserved for back-compat alongside the typed
-/// `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveSendInputResult {
     /// Typed send-input status emitted by generated runtime authority.
     /// Today: always [`LiveSendInputStatus::Sent`].
     pub status: LiveSendInputStatus,
-    /// Back-compat mirror of the generated send-input-authority result.
-    /// Always `true` when paired with `status: sent`.
-    pub sent: bool,
 }
 
 impl LiveSendInputResult {
@@ -764,7 +745,6 @@ impl LiveSendInputResult {
     pub fn sent() -> Self {
         Self {
             status: LiveSendInputStatus::Sent,
-            sent: true,
         }
     }
 }
@@ -785,17 +765,13 @@ pub enum LiveCommitInputStatus {
 
 /// Response payload for `live/commit_input`.
 ///
-/// The boolean `committed` field is preserved for back-compat alongside the
-/// typed `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveCommitInputResult {
     /// Typed commit-input status emitted by generated runtime authority.
     /// Today: always [`LiveCommitInputStatus::Committed`].
     pub status: LiveCommitInputStatus,
-    /// Back-compat mirror of the generated commit-input-authority result.
-    /// Always `true` when paired with `status: committed`.
-    pub committed: bool,
 }
 
 impl LiveCommitInputResult {
@@ -803,7 +779,6 @@ impl LiveCommitInputResult {
     pub fn committed() -> Self {
         Self {
             status: LiveCommitInputStatus::Committed,
-            committed: true,
         }
     }
 }
@@ -824,17 +799,13 @@ pub enum LiveInterruptStatus {
 
 /// Response payload for `live/interrupt`.
 ///
-/// The boolean `interrupted` field is preserved for back-compat alongside the
-/// typed `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveInterruptResult {
     /// Typed interrupt status emitted by generated runtime authority.
     /// Today: always [`LiveInterruptStatus::Interrupted`].
     pub status: LiveInterruptStatus,
-    /// Back-compat mirror of the generated interrupt-authority result.
-    /// Always `true` when paired with `status: interrupted`.
-    pub interrupted: bool,
 }
 
 impl LiveInterruptResult {
@@ -842,7 +813,6 @@ impl LiveInterruptResult {
     pub fn interrupted() -> Self {
         Self {
             status: LiveInterruptStatus::Interrupted,
-            interrupted: true,
         }
     }
 }
@@ -863,17 +833,13 @@ pub enum LiveTruncateStatus {
 
 /// Response payload for `live/truncate`.
 ///
-/// The boolean `truncated` field is preserved for back-compat alongside the
-/// typed `status` discriminator. New code should route on `status`.
+/// Clients route on the typed `status` discriminator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveTruncateResult {
     /// Typed truncate status emitted by generated runtime authority.
     /// Today: always [`LiveTruncateStatus::Truncated`].
     pub status: LiveTruncateStatus,
-    /// Back-compat mirror of the generated truncate-authority result.
-    /// Always `true` when paired with `status: truncated`.
-    pub truncated: bool,
 }
 
 impl LiveTruncateResult {
@@ -881,7 +847,6 @@ impl LiveTruncateResult {
     pub fn truncated() -> Self {
         Self {
             status: LiveTruncateStatus::Truncated,
-            truncated: true,
         }
     }
 }
@@ -2563,41 +2528,21 @@ mod tests {
         assert_eq!(v, back);
     }
 
-    /// R4-5 (P3): the typed `LiveRefreshResult` round-trips through JSON
-    /// preserving both the new typed `status` discriminator and the legacy
-    /// `refresh_enqueued: true` back-compat field. The `status: queued`
-    /// shape mirrors the generated authority result after host queue
-    /// acceptance.
+    /// R4-5 (P3): the typed `LiveRefreshResult` round-trips through JSON on
+    /// the typed `status` discriminator alone. The `status: queued` shape
+    /// mirrors the generated authority result after host queue acceptance;
+    /// the deleted legacy `refresh_enqueued` boolean must not reappear.
     #[test]
     fn live_refresh_result_queued_round_trip() {
         let v = LiveRefreshResult::queued();
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["status"], "queued");
-        assert_eq!(j["refresh_enqueued"], serde_json::Value::Bool(true));
+        assert!(
+            j.get("refresh_enqueued").is_none(),
+            "deleted legacy `refresh_enqueued` boolean must not be on the wire"
+        );
         let back: LiveRefreshResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
-    }
-
-    /// R4-5 (P3): legacy clients that pattern-match on the old untyped
-    /// `{"refresh_enqueued": true}` shape continue to see the field, and
-    /// new clients that route on `status` see the typed variant. Both
-    /// surfaces are byte-coexistent on the same payload.
-    #[test]
-    fn live_refresh_result_back_compat_field_present() {
-        let v = LiveRefreshResult::queued();
-        let j = serde_json::to_value(&v).expect("round-trip should succeed");
-        // Legacy: callers checking the boolean directly still pass.
-        assert_eq!(
-            j.get("refresh_enqueued"),
-            Some(&serde_json::Value::Bool(true)),
-            "back-compat `refresh_enqueued: true` must remain on the wire"
-        );
-        // New: typed status discriminator is also present.
-        assert_eq!(
-            j.get("status"),
-            Some(&serde_json::Value::String("queued".into())),
-            "typed `status: queued` must be present alongside the legacy field"
-        );
     }
 
     #[test]
@@ -2605,7 +2550,10 @@ mod tests {
         let v = LiveCloseResult::closed();
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["status"], "closed");
-        assert_eq!(j["closed"], serde_json::Value::Bool(true));
+        assert!(
+            j.get("closed").is_none(),
+            "deleted legacy `closed` boolean must not be on the wire"
+        );
         let back: LiveCloseResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }

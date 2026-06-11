@@ -365,7 +365,6 @@ export type ToolConfigChangedPayload = {
   domain?: ToolConfigChangeDomain | null;
   operation: ToolConfigChangeOperation;
   persisted: boolean;
-  status: string;
   status_info: ToolConfigChangeStatus;
   target: string;
 };
@@ -532,7 +531,7 @@ export interface ToolCallRequestedEvent {
 }
 
 export interface ToolResultReceivedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   id: string;
   is_error: boolean;
   name: string;
@@ -552,12 +551,11 @@ export interface ToolExecutionStartedEvent {
 }
 
 export interface ToolExecutionCompletedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   duration_ms: number;
   id: string;
   is_error: boolean;
   name: string;
-  result: string;
   type: "tool_execution_completed";
 }
 
@@ -607,7 +605,7 @@ export interface SkillsResolvedEvent {
 }
 
 export interface SkillResolutionFailedEvent {
-  reason?: SkillResolutionFailureReason;
+  reason: SkillResolutionFailureReason;
   skill_key?: SkillKey | null;
   type: "skill_resolution_failed";
 }

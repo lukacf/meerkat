@@ -22,13 +22,14 @@ use meerkat_contracts::{
 use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveAudioConfig, LiveChannelCapabilities, LiveContinuityMode,
-    LiveInputChunk, LiveProjectionSnapshot, LiveTransportBootstrap,
+    LiveProjectionSnapshot, LiveTransportBootstrap,
 };
 use meerkat_core::types::SessionId;
 #[cfg(feature = "live-webrtc")]
 use meerkat_live::{LIVE_WEBRTC_ANSWER_METHOD, LiveWebrtcState};
 use meerkat_live::{
     LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation, LiveChannelId, LiveWsState,
+    live_input_chunk_from_wire,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,33 +54,27 @@ fn live_webrtc_duration_ms(duration: std::time::Duration) -> Result<u64, String>
 
 fn live_refresh_result_from_machine_authority(
     authority: &meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority,
-) -> Result<LiveRefreshResult, String> {
+) -> LiveRefreshResult {
+    // Exhaustive: generated authority emits only `Queued` today. A future
+    // generated status variant forces a compile error here, so the wire
+    // projection can never silently misreport an unmapped authority class.
     match authority.status {
-        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued
-            if authority.refresh_enqueued =>
-        {
-            Ok(LiveRefreshResult::queued())
+        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued => {
+            LiveRefreshResult::queued()
         }
-        other => Err(format!(
-            "LiveRefreshResultResolved emitted unsupported status {other:?} with refresh_enqueued={}",
-            authority.refresh_enqueued
-        )),
     }
 }
 
 fn live_close_result_from_machine_authority(
     authority: &meerkat_runtime::meerkat_machine::LiveCloseResultAuthority,
-) -> Result<LiveCloseResult, String> {
+) -> LiveCloseResult {
+    // Exhaustive: generated authority emits only `Closed` today. A future
+    // generated status variant forces a compile error here, so the wire
+    // projection can never silently misreport an unmapped authority class.
     match authority.status {
-        meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed
-            if authority.closed =>
-        {
-            Ok(LiveCloseResult::closed())
+        meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed => {
+            LiveCloseResult::closed()
         }
-        other => Err(format!(
-            "LiveCloseResultResolved emitted unsupported status {other:?} with closed={}",
-            authority.closed
-        )),
     }
 }
 
@@ -89,19 +84,18 @@ fn live_command_result_from_machine_authority(
 ) -> Result<serde_json::Value, String> {
     use meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind;
 
-    if authority.command != expected || !authority.accepted {
+    if authority.command != expected {
         return Err(format!(
-            "LiveCommandResultResolved emitted command {:?} accepted={} for expected {:?}",
-            authority.command, authority.accepted, expected
+            "LiveCommandResultResolved emitted command {:?} for expected {:?}",
+            authority.command, expected
         ));
     }
 
     // #234: return typed result shapes (mirroring the `LiveCloseResult`
     // precedent) instead of ad-hoc `json!` blobs. The typed struct carries a
-    // typed `status` discriminator plus the legacy boolean as a back-compat
-    // sibling, so SDK codegen sees a named shape rather than `Value` / `Any`.
-    // Serde failures surface as `String` to match the sibling
-    // `live_close_result_from_machine_authority` helper's error channel.
+    // typed `status` discriminator, so SDK codegen sees a named shape rather
+    // than `Value` / `Any`. Serde failures surface as `String` so the caller
+    // maps them onto the RPC error channel.
     match expected {
         LiveCommandPublicKind::SendInput => serde_json::to_value(LiveSendInputResult::sent())
             .map_err(|err| format!("failed to serialize LiveSendInputResult: {err}")),
@@ -1585,10 +1579,7 @@ pub async fn handle_live_close(
                     format!("live close host commit failed after generated authority: {error}"),
                 );
             }
-            let result = match live_close_result_from_machine_authority(&authority) {
-                Ok(result) => result,
-                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
-            };
+            let result = live_close_result_from_machine_authority(&authority);
             let body = match serde_json::to_value(result) {
                 Ok(body) => body,
                 Err(error) => {
@@ -1644,8 +1635,8 @@ pub async fn handle_live_close(
 /// apply mutable config live should either no-op or surface a typed error
 /// observation.
 ///
-/// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
-/// not `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
+/// **R7 — honest response shape.** The reply is `status: queued`, not
+/// `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
 /// the adapter command channel and returns typed queue-acceptance evidence;
 /// generated MeerkatMachine authority projects that evidence to the public
 /// result class. The adapter pump applies the refresh asynchronously. Callers
@@ -1717,9 +1708,9 @@ pub async fn handle_live_refresh(
 
     match host.enqueue_refresh(&channel_id, snapshot).await {
         // R7 + Dogma #1: host queue acceptance is an observation only. The
-        // public `status: queued` discriminator and the back-compat
-        // `refresh_enqueued` mirror are emitted by generated MeerkatMachine
-        // authority before the RPC surface projects the wire payload.
+        // public `status: queued` discriminator is emitted by generated
+        // MeerkatMachine authority before the RPC surface projects the wire
+        // payload.
         Ok(acceptance) => {
             let authority = match runtime
                 .runtime_adapter()
@@ -1735,10 +1726,7 @@ pub async fn handle_live_refresh(
                     );
                 }
             };
-            let result = match live_refresh_result_from_machine_authority(&authority) {
-                Ok(result) => result,
-                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
-            };
+            let result = live_refresh_result_from_machine_authority(&authority);
             let body = match serde_json::to_value(result) {
                 Ok(body) => body,
                 Err(error) => {
@@ -1761,82 +1749,6 @@ pub async fn handle_live_refresh(
                 &err,
             )
             .await
-        }
-    }
-}
-
-/// `live/send_input` parameters.
-///
-/// **`BREAKING_LIVE_WIRE_FORMAT_V1`** (H48): the chunk previously appeared as
-/// flattened sibling fields next to `channel_id`. It is now a nested object
-/// under the `chunk` field. WS protocol clients that piggyback on this shape
-/// must update accordingly.
-/// Errors returned when admitting a wire-format input chunk.
-///
-/// D24: previously a malformed base64 audio payload silently decoded to a
-/// zero-length chunk indistinguishable from real silence. Decode failures
-/// now propagate as a typed error and the RPC handler returns
-/// `INVALID_PARAMS` to the caller instead of swallowing the malformed input.
-#[derive(Debug, thiserror::Error)]
-pub enum LiveSendInputError {
-    #[error("invalid base64 audio payload: {0}")]
-    InvalidAudioBase64(base64::DecodeError),
-    #[error("invalid base64 image payload: {0}")]
-    InvalidImageBase64(base64::DecodeError),
-    #[error("invalid base64 video-frame payload: {0}")]
-    InvalidVideoFrameBase64(base64::DecodeError),
-}
-
-/// Decode a wire-format input chunk into the core `LiveInputChunk` shape.
-///
-/// Handler-local conversion (the wire type lives in `meerkat-contracts`, the
-/// core domain type lives in `meerkat-core::live_adapter`; the base64 decode
-/// is the only step that needs to fail with a typed error and is therefore
-/// kept here in the handler crate).
-fn live_input_chunk_from_wire(
-    wire: LiveInputChunkWire,
-) -> Result<LiveInputChunk, LiveSendInputError> {
-    match wire {
-        LiveInputChunkWire::Audio {
-            data,
-            sample_rate_hz,
-            channels,
-        } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidAudioBase64)?;
-            Ok(LiveInputChunk::Audio {
-                data: decoded,
-                sample_rate_hz,
-                channels,
-            })
-        }
-        LiveInputChunkWire::Text { text } => Ok(LiveInputChunk::Text { text }),
-        LiveInputChunkWire::Image { mime, data } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidImageBase64)?;
-            Ok(LiveInputChunk::Image {
-                mime,
-                data: decoded,
-            })
-        }
-        LiveInputChunkWire::VideoFrame {
-            codec,
-            data,
-            timestamp_ms,
-        } => {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&data)
-                .map_err(LiveSendInputError::InvalidVideoFrameBase64)?;
-            Ok(LiveInputChunk::VideoFrame {
-                codec,
-                data: decoded,
-                timestamp_ms,
-            })
         }
     }
 }
@@ -2130,8 +2042,9 @@ pub async fn handle_live_truncate(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    //! H46 round-trip tests + D24 base64-decode error tests + H48 nested
-    //! `chunk` shape tests for the `live/*` wire types.
+    //! H46 round-trip tests + H48 nested `chunk` shape tests for the
+    //! `live/*` wire types. (D24 base64-decode rejection is owned by
+    //! `meerkat_live::wire_input` and tested there.)
 
     use super::*;
     use meerkat_core::live_adapter::{
@@ -2440,14 +2353,14 @@ mod tests {
             "generated live close authority should carry host commit handoff"
         );
 
-        let reply = serde_json::to_value(
-            live_close_result_from_machine_authority(&authority)
-                .expect("generated close authority should project to wire"),
-        )
-        .expect("LiveCloseResult must round-trip through serde");
+        let reply = serde_json::to_value(live_close_result_from_machine_authority(&authority))
+            .expect("LiveCloseResult must round-trip through serde");
 
         assert_eq!(reply["status"], "closed");
-        assert_eq!(reply["closed"], true);
+        assert!(
+            reply.get("closed").is_none(),
+            "deleted legacy `closed` boolean must not be on the wire"
+        );
     }
 
     /// #355: open-failure cleanup is fail-closed. When the graceful close path
@@ -2535,44 +2448,6 @@ mod tests {
             "wire format must NOT flatten kind to top-level"
         );
         assert_eq!(round_trip(&v), v);
-    }
-
-    #[test]
-    fn into_chunk_audio_decodes_valid_base64() {
-        let wire = LiveInputChunkWire::Audio {
-            data: "AAEC".into(), // base64 for [0, 1, 2]
-            sample_rate_hz: 24_000,
-            channels: 1,
-        };
-        let chunk = live_input_chunk_from_wire(wire).expect("valid base64 should decode");
-        match chunk {
-            LiveInputChunk::Audio { data, .. } => assert_eq!(data, vec![0u8, 1, 2]),
-            other => panic!("expected Audio, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn into_chunk_audio_rejects_invalid_base64() {
-        // D24: malformed base64 must NOT silently produce empty PCM.
-        let wire = LiveInputChunkWire::Audio {
-            data: "!!!not-base64!!!".into(),
-            sample_rate_hz: 24_000,
-            channels: 1,
-        };
-        let err = live_input_chunk_from_wire(wire).expect_err("invalid base64 must error");
-        assert!(matches!(err, LiveSendInputError::InvalidAudioBase64(_)));
-    }
-
-    #[test]
-    fn into_chunk_text_passes_through() {
-        let wire = LiveInputChunkWire::Text {
-            text: "hello".into(),
-        };
-        let chunk = live_input_chunk_from_wire(wire).unwrap();
-        match chunk {
-            LiveInputChunk::Text { text } => assert_eq!(text, "hello"),
-            other => panic!("expected Text, got {other:?}"),
-        }
     }
 
     // -- A7 wire round-trips --
@@ -2923,50 +2798,42 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // R7: live/refresh's reply field is `refresh_enqueued`, not
-    // `refreshed`, because `LiveAdapterHost::enqueue_refresh` returns typed
-    // evidence that the command was queued on the adapter command channel —
-    // not that the pump has applied it. The field name documents the honest
+    // R7: live/refresh's reply is `status: queued`, not `refreshed`,
+    // because `LiveAdapterHost::enqueue_refresh` returns typed evidence
+    // that the command was queued on the adapter command channel — not
+    // that the pump has applied it. The status name documents the honest
     // semantics; the realtime stream is the source of truth for the actual
     // outcome.
     // ---------------------------------------------------------------------
 
     /// R7: reconstruct the success-reply shape `handle_live_refresh` emits
-    /// on the host-accepted path. The reply must carry `refresh_enqueued:
-    /// true` (back-compat) and must NOT contain a `refreshed` key.
-    ///
-    /// R4-5 (P3): the same payload now also carries the typed
-    /// `status: "queued"` discriminator projected from generated authority.
+    /// on the host-accepted path. The reply must carry the typed
+    /// `status: "queued"` discriminator projected from generated authority
+    /// and must NOT contain a `refreshed` key.
     #[test]
-    fn live_refresh_success_reply_is_refresh_enqueued_not_refreshed() {
+    fn live_refresh_success_reply_is_status_queued_not_refreshed() {
         let authority = meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority {
             status: meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued,
-            refresh_enqueued: true,
             sequence: 1,
             queue_acceptance_sequence: 1,
         };
-        let reply = serde_json::to_value(
-            live_refresh_result_from_machine_authority(&authority)
-                .expect("generated queued authority should project to wire"),
-        )
-        .expect("LiveRefreshResult must round-trip through serde");
-        assert_eq!(
-            reply.get("refresh_enqueued"),
-            Some(&serde_json::json!(true)),
-            "back-compat `refresh_enqueued: true` must remain on the wire"
-        );
+        let reply = serde_json::to_value(live_refresh_result_from_machine_authority(&authority))
+            .expect("LiveRefreshResult must round-trip through serde");
         assert!(
             reply.get("refreshed").is_none(),
             "post-R7 reply must not advertise `refreshed: true` — the adapter \
              pump is async and the field name was a lie about completion timing"
         );
-        // R4-5 (P3): typed status discriminator coexists with the legacy
-        // boolean. SDKs fail closed for statuses outside their generated
-        // contract.
+        assert!(
+            reply.get("refresh_enqueued").is_none(),
+            "deleted legacy `refresh_enqueued` boolean must not be on the wire"
+        );
+        // SDKs route on the typed status discriminator and fail closed for
+        // statuses outside their generated contract.
         assert_eq!(
             reply.get("status"),
             Some(&serde_json::Value::String("queued".into())),
-            "typed `status: queued` must be present alongside the legacy field"
+            "typed `status: queued` must be the reply discriminator"
         );
     }
 

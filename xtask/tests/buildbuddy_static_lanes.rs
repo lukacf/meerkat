@@ -87,9 +87,8 @@ fn find_all_between(text: &str, start: &str, end: &str) -> Option<String> {
 }
 
 fn workspace_member_dirs(root: &Path) -> Vec<PathBuf> {
-    let workspace: toml::Value = read(root.join("Cargo.toml"))
-        .parse()
-        .expect("parse Cargo.toml");
+    let workspace: toml::Value =
+        toml::from_str(&read(root.join("Cargo.toml"))).expect("parse Cargo.toml");
     workspace["workspace"]["members"]
         .as_array()
         .expect("workspace members")
@@ -346,16 +345,14 @@ fn rust_sources_are_formatted() {
 #[test]
 fn public_version_surfaces_are_in_sync() {
     let root = repo_root();
-    let workspace: toml::Value = read(root.join("Cargo.toml"))
-        .parse()
-        .expect("parse Cargo.toml");
+    let workspace: toml::Value =
+        toml::from_str(&read(root.join("Cargo.toml"))).expect("parse Cargo.toml");
     let cargo_version = workspace["workspace"]["package"]["version"]
         .as_str()
         .expect("workspace package version");
 
-    let pyproject: toml::Value = read(root.join("sdks/python/pyproject.toml"))
-        .parse()
-        .expect("parse pyproject");
+    let pyproject: toml::Value =
+        toml::from_str(&read(root.join("sdks/python/pyproject.toml"))).expect("parse pyproject");
     let python_version = pyproject["project"]["version"]
         .as_str()
         .expect("python sdk version");

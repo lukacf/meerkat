@@ -16158,6 +16158,37 @@ default_model = "gemma"
         assert_eq!(args[3], std::ffi::OsString::from("run"));
         assert_eq!(args[4], std::ffi::OsString::from("hello"));
 
+        // --default-model is a root flag with a value: bare invocation must
+        // NOT inject `run` (set-and-exit semantics).
+        let args =
+            normalize_cli_args(["rkat", "--default-model", "claude-fable-5"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model", "claude-fable-5"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        // --default-model followed by a bare prompt still gets the `run`
+        // shorthand, with the flag preserved ahead of it.
+        let args = normalize_cli_args(
+            ["rkat", "--default-model", "gpt-5.4", "fix the tests"].map(Into::into),
+        );
+        assert_eq!(args[3], std::ffi::OsString::from("run"));
+        assert_eq!(args[4], std::ffi::OsString::from("fix the tests"));
+
+        // --default-model followed by an explicit subcommand is left intact.
+        let args =
+            normalize_cli_args(["rkat", "--default-model", "gpt-5.4", "doctor"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model", "gpt-5.4", "doctor"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
         let args = normalize_cli_args(["rkat", "--isolated", "doctor"].map(Into::into));
         assert_eq!(
             args,
@@ -20313,6 +20344,68 @@ supports_reasoning = true
         assert_eq!(matches[1].state_root, state_root);
         assert_eq!(matches[0].session_id, sid);
         assert_eq!(matches[1].session_id, sid);
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_persists_catalog_model_via_scope_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        handle_set_default_model("claude-fable-5", &scope)
+            .await
+            .expect("catalog model persists");
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(config.agent.model, "claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_honors_configured_custom_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        // Register a custom model first (provider owned by ModelRegistry).
+        handle_config_patch(
+            None,
+            Some(
+                serde_json::json!({
+                    "models": { "my-local-llm": { "provider": "openai" } }
+                })
+                .to_string(),
+            ),
+            None,
+            &scope,
+        )
+        .await
+        .expect("register custom model");
+
+        handle_set_default_model("my-local-llm", &scope)
+            .await
+            .expect("custom model persists");
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(config.agent.model, "my-local-llm");
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_rejects_unknown_model_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        let error = handle_set_default_model("not-a-model", &scope)
+            .await
+            .expect_err("unknown model must fail closed");
+        assert!(
+            error.to_string().contains("unknown model `not-a-model`"),
+            "error names the rejected model: {error}"
+        );
+        assert!(
+            error.to_string().contains("Known models:"),
+            "error lists known models: {error}"
+        );
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_ne!(config.agent.model, "not-a-model");
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {

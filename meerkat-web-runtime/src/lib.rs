@@ -3766,8 +3766,15 @@ capabilities = [{capability_values}]
             .expect("openai catalog default")
             .to_string();
         assert_eq!(model, expected);
-        // Must NOT hardcode the anthropic global default when anthropic is absent.
-        assert_ne!(model, meerkat_models::global_default_model());
+        // Must come from per-provider resolution, not a hardcoded global
+        // fallback. The global default currently coincides with the OpenAI
+        // default, so prove the distinction with the highest-priority
+        // ABSENT provider instead: anthropic's default must not leak in.
+        assert_ne!(
+            model,
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
+                .expect("anthropic catalog default")
+        );
         assert_eq!(
             model,
             meerkat::resolve_create_session_default_model(&config)

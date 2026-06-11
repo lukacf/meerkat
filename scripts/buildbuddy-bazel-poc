@@ -801,6 +801,18 @@ if [[ -n "${BUILDBUDDY_REPOSITORY_CACHE:-}" ]]; then
   mkdir -p "${BUILDBUDDY_REPOSITORY_CACHE}"
   common_args+=(--repository_cache="${BUILDBUDDY_REPOSITORY_CACHE}")
 fi
+if [[ -z "${BUILDBUDDY_NO_DEFAULT_REPO_CONTENTS_CACHE:-}" ]]; then
+  # Bazel 9 places a shared "repo contents cache" (extracted external repo
+  # directories, symlinked into every output base's external/ tree) inside
+  # --repository_cache by default. With many concurrent per-lane Bazel
+  # servers sharing it, a corrupt or deleted entry poisons every output base
+  # that links into it, and the poison survives `clean --expunge` of any one
+  # output base. Keep the concurrency-safe content-addressed download cache,
+  # but disable the shared contents cache so extracted repos live inside each
+  # lane's own output base (the pre-Bazel-9 semantics this lane was built
+  # for). Set BUILDBUDDY_REPO_CONTENTS_CACHE to a path to opt back in.
+  common_args+=(--repo_contents_cache="${BUILDBUDDY_REPO_CONTENTS_CACHE:-}")
+fi
 
 apple_platform_args=()
 if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
@@ -907,10 +919,85 @@ if [[ -n "${target}" ]]; then
 fi
 bb_args+=("$@")
 
-set +e
-"${bb_bin}" "${bb_args[@]}"
-status="$?"
-set -e
+# --- Corrupt external-repo state detection and auto-repair -------------------
+# Bazel 9's shared repo contents cache (now disabled above) used to symlink
+# every external repo in a lane output base into /tmp shared state. If those
+# entries are deleted or corrupted (e.g. by a cache wipe racing a live fetch),
+# Bazel keeps trusting the repo .marker files and fails with errors like
+# "No MODULE.bazel file found in .../contents/<hash>/<uuid>" or "BUILD file
+# not found in directory '' of external repository". `clean --expunge` of the
+# affected lane output base is the only reliable repair. Detect the condition
+# (pre-flight via stale symlinks, post-failure via error signatures), repair,
+# and retry once. Set BUILDBUDDY_NO_CACHE_REPAIR=1 to disable.
+
+lane_output_base_has_stale_external_links() {
+  local external_root="${BUILDBUDDY_OUTPUT_BASE:-}/external"
+  [[ -n "${BUILDBUDDY_OUTPUT_BASE:-}" && -d "${external_root}" ]] || return 1
+  local link target
+  while IFS= read -r link; do
+    target="$(readlink "${link}" 2>/dev/null)" || continue
+    if [[ -n "${BUILDBUDDY_REPOSITORY_CACHE:-}" && "${target}" == "${BUILDBUDDY_REPOSITORY_CACHE}/contents/"* ]]; then
+      # Linked into the shared Bazel 9 repo contents cache: stale regime,
+      # whether or not the target currently resolves.
+      return 0
+    fi
+    if [[ "${target}" == */contents/*-*-*-*-* && ! -e "${link}" ]]; then
+      # Dangling link into some repo contents cache entry (uuid-shaped dir).
+      return 0
+    fi
+  done < <(find "${external_root}" -mindepth 1 -maxdepth 1 -type l 2>/dev/null)
+  return 1
+}
+
+repair_lane_output_base() {
+  echo "buildbuddy-bazel-poc: repairing corrupt external repository state (clean --expunge of lane output base)" >&2
+  "${bb_bin}" "${startup_args[@]}" clean --expunge 1>&2 || true
+}
+
+fetch_corruption_signature() {
+  local log="$1"
+  [[ -s "${log}" ]] || return 1
+  if grep -q \
+    -e "No MODULE.bazel file found in" \
+    -e "BUILD file not found in directory '' of external repository" \
+    -e "Error loading '@@.*must have a corresponding package" \
+    "${log}"; then
+    return 0
+  fi
+  if [[ -n "${BUILDBUDDY_REPOSITORY_CACHE:-}" ]] &&
+    grep -q "ERROR" "${log}" &&
+    grep -Fq "${BUILDBUDDY_REPOSITORY_CACHE}/contents/" "${log}"; then
+    return 0
+  fi
+  return 1
+}
+
+if [[ -z "${BUILDBUDDY_NO_CACHE_REPAIR:-}" ]] && lane_output_base_has_stale_external_links; then
+  echo "buildbuddy-bazel-poc: lane output base has external repos linked into the shared Bazel 9 repo contents cache; auto-repairing before the run" >&2
+  repair_lane_output_base
+fi
+
+run_log="$(mktemp "${TMPDIR:-/tmp}/meerkat-buildbuddy-run.XXXXXX")"
+
+status=0
+for attempt in 1 2; do
+  : >"${run_log}"
+  set +e
+  "${bb_bin}" "${bb_args[@]}" 2> >(tee "${run_log}" >&2)
+  status="$?"
+  # Let the tee process substitution finish flushing before the log is read.
+  wait 2>/dev/null
+  set -e
+  if [[ "${status}" -eq 0 || "${attempt}" -eq 2 || -n "${BUILDBUDDY_NO_CACHE_REPAIR:-}" ]]; then
+    break
+  fi
+  if ! fetch_corruption_signature "${run_log}"; then
+    break
+  fi
+  echo "buildbuddy-bazel-poc: detected corrupt external-repo fetch state; auto-repairing and retrying once" >&2
+  repair_lane_output_base
+done
+rm -f "${run_log}"
 
 cleanup
 trap - EXIT

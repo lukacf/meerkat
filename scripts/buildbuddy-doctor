@@ -262,6 +262,21 @@ else
   bad "BuildBuddy CI does not guard against transient remote/cache failures"
 fi
 
+if [[ -f .bazelversion ]] && grep -q -E '^[0-9]+\.[0-9]+\.[0-9]+$' .bazelversion; then
+  pass ".bazelversion pins the Bazel release for BuildBuddy lanes ($(tr -d '[:space:]' <.bazelversion))"
+else
+  bad ".bazelversion is missing or does not pin an exact Bazel release"
+fi
+
+if grep -Fq -- '--repo_contents_cache=' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'lane_output_base_has_stale_external_links' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'fetch_corruption_signature' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'clean --expunge' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy launcher disables the shared Bazel 9 repo contents cache and auto-repairs corrupt external-repo state"
+else
+  bad "BuildBuddy launcher does not guard against Bazel 9 repo contents cache corruption"
+fi
+
 if [[ -x scripts/run-surface-feature-matrix ]] &&
   grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
   grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&

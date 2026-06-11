@@ -1864,7 +1864,7 @@ impl CompositionSchema {
                     }
                 }
                 for binding in &feedback.field_bindings {
-                    input_variant_schema
+                    let target_field = input_variant_schema
                         .field_named(binding.input_field.as_str())
                         .map_err(
                             |_| CompositionSchemaError::UnknownHandoffFeedbackInputField {
@@ -1874,15 +1874,52 @@ impl CompositionSchema {
                                 field: binding.input_field.as_str().to_owned(),
                             },
                         )?;
-                    if let FeedbackFieldSource::ObligationField(field) = &binding.source
-                        && !protocol.obligation_fields.contains(field)
-                    {
-                        return Err(
-                            CompositionSchemaError::UnknownHandoffBindingObligationField {
-                                protocol: protocol.name.as_str().to_owned(),
-                                field: field.as_str().to_owned(),
-                            },
-                        );
+                    match &binding.source {
+                        FeedbackFieldSource::ObligationField(field) => {
+                            if !protocol.obligation_fields.contains(field) {
+                                return Err(
+                                    CompositionSchemaError::UnknownHandoffBindingObligationField {
+                                        protocol: protocol.name.as_str().to_owned(),
+                                        field: field.as_str().to_owned(),
+                                    },
+                                );
+                            }
+                            // Obligation fields are fields of the producer's
+                            // effect variant (validated above), so the
+                            // producer-side `TypeRef` is known. Name-level
+                            // existence is not enough: the bound value must
+                            // carry the exact type the feedback input field
+                            // declares, mirroring the strict equality direct
+                            // route field bindings enforce.
+                            let source_field = effect_variant_schema
+                                .field_named(field.as_str())
+                                .map_err(CompositionSchemaError::MachineSchema)?;
+                            if source_field.ty != target_field.ty {
+                                return Err(
+                                    CompositionSchemaError::HandoffFeedbackBindingTypeMismatch {
+                                        protocol: protocol.name.as_str().to_owned(),
+                                        machine: feedback.machine_instance.as_str().to_owned(),
+                                        input: feedback.input_variant.as_str().to_owned(),
+                                        input_field: binding.input_field.as_str().to_owned(),
+                                        obligation_field: field.as_str().to_owned(),
+                                        source_ty: source_field.ty.clone(),
+                                        target_ty: target_field.ty.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        FeedbackFieldSource::OwnerContext(_) => {
+                            // Owner-context sources carry no schema-side
+                            // producer type to compare: the value is supplied
+                            // by the realizing owner at feedback time, and the
+                            // generated feedback constructor/submitter types
+                            // that argument against the target field's Rust
+                            // type, so the contract is enforced by the Rust
+                            // compiler at the generated seam. The handoff
+                            // protocol itself is the governance bundle for the
+                            // owner's participation (the same anchoring
+                            // `RouteBindingSource::OwnerProvided` requires).
+                        }
                     }
                 }
                 for correlation_field in &protocol.correlation_fields {
@@ -2744,6 +2781,20 @@ pub enum CompositionSchemaError {
         input: String,
         obligation_field: String,
     },
+    /// A handoff feedback binding maps an obligation-carried value onto an
+    /// input field whose declared type differs from the obligation field's
+    /// type on the producer's effect variant. Name-level existence is not
+    /// enough — `FieldSchema` carries `TypeRef` on both sides, so the binding
+    /// must agree on type exactly, as direct route field bindings do.
+    HandoffFeedbackBindingTypeMismatch {
+        protocol: String,
+        machine: String,
+        input: String,
+        input_field: String,
+        obligation_field: String,
+        source_ty: TypeRef,
+        target_ty: TypeRef,
+    },
     InvalidHandoffRustBinding {
         protocol: String,
         detail: String,
@@ -3144,6 +3195,18 @@ impl fmt::Display for CompositionSchemaError {
                 f,
                 "handoff protocol `{protocol}` does not bind correlation obligation field `{obligation_field}` into {machine}.{input}"
             ),
+            Self::HandoffFeedbackBindingTypeMismatch {
+                protocol,
+                machine,
+                input,
+                input_field,
+                obligation_field,
+                source_ty,
+                target_ty,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` feedback binding type mismatch: obligation field `{obligation_field}`:{source_ty:?} -> {machine}.{input}.{input_field}:{target_ty:?}"
+            ),
             Self::InvalidHandoffRustBinding { protocol, detail } => write!(
                 f,
                 "handoff protocol `{protocol}` has invalid Rust binding metadata: {detail}"
@@ -3414,5 +3477,93 @@ mod rust_metadata_validation_tests {
             RustMethodName::from("handle_request").as_str(),
             "handle_request"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod handoff_feedback_type_tests {
+    use super::CompositionSchemaError;
+    use crate::{TypeRef, canonical_composition_schemas, canonical_machine_schemas};
+
+    /// Positive control: with feedback-binding type checking live, the
+    /// canonical catalog is the regression corpus — every canonical
+    /// composition must still validate against the canonical machines.
+    #[test]
+    fn canonical_compositions_validate_with_feedback_type_checking() {
+        let machines = canonical_machine_schemas();
+        let refs: Vec<_> = machines.iter().collect();
+        for composition in canonical_composition_schemas() {
+            composition.validate_against(&refs).unwrap_or_else(|err| {
+                panic!(
+                    "canonical composition `{}` must validate with feedback type checking live: {err:?}",
+                    composition.name.as_str()
+                )
+            });
+        }
+    }
+
+    /// Planted mismatch: names line up but types differ. The canonical
+    /// `surface_snapshot_alignment` protocol binds the producer's
+    /// `RefreshVisibleSurfaceSet.snapshot_epoch: u64` obligation field onto
+    /// the `SurfaceSnapshotAligned.epoch` input field. Mutating the input
+    /// field's declared type to `String` must fail validation with the typed
+    /// mismatch error instead of passing on name existence alone.
+    #[test]
+    fn handoff_feedback_binding_rejects_planted_type_mismatch() {
+        let mut machines = canonical_machine_schemas();
+        let meerkat = machines
+            .iter_mut()
+            .find(|schema| schema.machine.as_str() == "MeerkatMachine")
+            .expect("canonical MeerkatMachine schema");
+        let epoch_field = meerkat
+            .inputs
+            .variants
+            .iter_mut()
+            .find(|variant| variant.name.as_str() == "SurfaceSnapshotAligned")
+            .expect("SurfaceSnapshotAligned input variant")
+            .fields
+            .iter_mut()
+            .find(|field| field.name.as_str() == "epoch")
+            .expect("epoch field on SurfaceSnapshotAligned");
+        assert_eq!(
+            epoch_field.ty,
+            TypeRef::U64,
+            "fixture expects the canonical u64 baseline"
+        );
+        epoch_field.ty = TypeRef::String;
+
+        // `external_tool_bundle` is a private catalog helper; its handoff
+        // protocols (including surface_snapshot_alignment) are folded into
+        // the canonical `meerkat_mob_seam` composition.
+        let composition = canonical_composition_schemas()
+            .into_iter()
+            .find(|composition| composition.name.as_str() == "meerkat_mob_seam")
+            .expect("canonical meerkat_mob_seam composition");
+
+        let refs: Vec<_> = machines.iter().collect();
+        let err = composition
+            .validate_against(&refs)
+            .expect_err("planted feedback binding type mismatch must be rejected");
+        match err {
+            CompositionSchemaError::HandoffFeedbackBindingTypeMismatch {
+                protocol,
+                machine,
+                input,
+                input_field,
+                obligation_field,
+                source_ty,
+                target_ty,
+            } => {
+                assert_eq!(protocol, "surface_snapshot_alignment");
+                assert_eq!(machine, "meerkat");
+                assert_eq!(input, "SurfaceSnapshotAligned");
+                assert_eq!(input_field, "epoch");
+                assert_eq!(obligation_field, "snapshot_epoch");
+                assert_eq!(source_ty, TypeRef::U64);
+                assert_eq!(target_ty, TypeRef::String);
+            }
+            other => panic!("expected HandoffFeedbackBindingTypeMismatch, got {other:?}"),
+        }
     }
 }

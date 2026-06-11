@@ -366,7 +366,7 @@ bridge-no-responsestatus-gate:
 # so edits to docs/architecture/meerkat-dogma*.md must be re-synced and staged.
 sync-meerkat-dogma-skill-docs:
 	@echo "$(GREEN)Checking dogma skill doctrine mirror...$(NC)"
-	@scripts/sync-meerkat-dogma-skill-docs.sh
+	@scripts/sync-meerkat-dogma-skill-docs.sh --check
 
 deprecated-backend-inventory:
 	@echo "$(GREEN)Generating deprecated backend inventory...$(NC)"

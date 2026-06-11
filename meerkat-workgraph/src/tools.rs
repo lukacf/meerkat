@@ -1,6 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use strum::IntoEnumIterator;
 
 use crate::store::WorkGraphEventFilter;
 use crate::types::{
@@ -67,7 +68,15 @@ impl WorkGraphToolError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Closed catalog of WorkGraph tool operations.
+///
+/// The iteration order of [`strum::EnumIter`] is declaration order, so the
+/// variant list below IS the catalog — there is no parallel hand-maintained
+/// `ALL` slice to drift. Adding a variant automatically extends the advertised
+/// tool list and the dispatch surface, and the compiler forces the exhaustive
+/// `name()`/`description()`/`schema()` matches (and the dispatch match in
+/// [`handle_workgraph_tools_call`]) to acknowledge it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 enum WorkGraphToolContract {
     Create,
     Get,
@@ -85,22 +94,6 @@ enum WorkGraphToolContract {
 }
 
 impl WorkGraphToolContract {
-    const ALL: &'static [Self] = &[
-        Self::Create,
-        Self::Get,
-        Self::List,
-        Self::Ready,
-        Self::Snapshot,
-        Self::Events,
-        Self::Claim,
-        Self::Release,
-        Self::Update,
-        Self::Block,
-        Self::Close,
-        Self::Link,
-        Self::AddEvidence,
-    ];
-
     const fn name(self) -> &'static str {
         match self {
             Self::Create => "workgraph_create",
@@ -155,9 +148,7 @@ impl WorkGraphToolContract {
     }
 
     fn parse(name: &str) -> Result<Self, WorkGraphToolError> {
-        Self::ALL
-            .iter()
-            .copied()
+        Self::iter()
             .find(|contract| contract.name() == name)
             .ok_or_else(|| {
                 WorkGraphToolError::new(
@@ -169,8 +160,7 @@ impl WorkGraphToolContract {
 }
 
 pub fn workgraph_tools_list() -> Vec<Value> {
-    WorkGraphToolContract::ALL
-        .iter()
+    WorkGraphToolContract::iter()
         .map(|contract| tool(contract.name(), contract.description(), contract.schema()))
         .collect()
 }
@@ -693,9 +683,10 @@ mod tests {
 
     /// Canonical WorkGraph tool operation set, in `make ci` via the crate unit
     /// lane. This is the single hand-authored snapshot of the operation surface;
-    /// the drift gate below proves the `WorkGraphToolContract` catalog, the
-    /// advertised tool list, and the dispatch entry point (`parse`) all agree
-    /// with it exactly, in both directions.
+    /// the drift gate below proves the derived `WorkGraphToolContract` catalog
+    /// (`strum::EnumIter` over the enum — no hand list exists in the production
+    /// code), the advertised tool list, and the dispatch entry point (`parse`)
+    /// all agree with it exactly, in both directions.
     const CANONICAL_WORKGRAPH_TOOL_NAMES: &[&str] = &[
         "workgraph_create",
         "workgraph_get",
@@ -725,20 +716,19 @@ mod tests {
             "canonical WorkGraph operation names must be unique"
         );
 
-        // The hand-authored contract catalog must equal the canonical set
-        // exactly — neither a missing operation nor an undeclared extra.
-        let catalog = WorkGraphToolContract::ALL
-            .iter()
+        // The derived contract catalog must equal the canonical set exactly —
+        // neither a missing operation nor an undeclared extra.
+        let catalog = WorkGraphToolContract::iter()
             .map(|contract| contract.name().to_string())
             .collect::<BTreeSet<_>>();
         assert_eq!(
             catalog.len(),
-            WorkGraphToolContract::ALL.len(),
-            "WorkGraphToolContract::ALL must not contain duplicate operation names"
+            WorkGraphToolContract::iter().count(),
+            "WorkGraphToolContract variants must not share operation names"
         );
         assert_eq!(
             catalog, canonical,
-            "WorkGraphToolContract::ALL drifted from the canonical operation set"
+            "derived WorkGraphToolContract catalog drifted from the canonical operation set"
         );
 
         // The advertised tool list must expose exactly the canonical surface.

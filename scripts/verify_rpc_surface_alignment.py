@@ -16,7 +16,16 @@ This gate owns the remaining projections of that catalog:
     schema or ``meerkat-rpc`` surface type (no phantom contracts), and
   * every method must carry a typed result contract (no schema-light
     descriptors — the Rust catalog has no schema-less constructor; this
-    fails closed if a stale artifact still carries one).
+    fails closed if a stale artifact still carries one), and
+  * the SDK wrapper surfaces (Python ``sdks/python/meerkat`` and TypeScript
+    ``sdks/typescript/src``) must agree with the catalog in BOTH directions:
+    every catalog method appears in hand-written SDK source (generated
+    mirrors do not count as coverage), and every RPC-shaped method literal
+    in SDK source resolves to a catalog method, a catalog notification, or
+    a named ``SDK_STRING_ALLOWLIST`` entry — no phantom SDK methods, and
+  * the web SDK (``sdks/web/src``) is the WASM-embedded runtime surface, not
+    an RPC client; it must stay free of RPC-shaped method literals or be
+    promoted into the checked RPC SDK list above.
 """
 
 from __future__ import annotations
@@ -28,6 +37,128 @@ import sys
 
 # JSON pass-through markers that are intentionally untyped on the wire.
 UNTYPED_REFS = {"Value"}
+
+# Shape of a JSON-RPC method name in this codebase: lowercase namespaced
+# segments joined by `/` (e.g. `session/create`, `auth/login/start`). The
+# catalog also carries a handful of slash-less names (`initialize`,
+# `initialized`, `cancel`); those are covered by the catalog->SDK direction
+# (exact-literal search) and intentionally excluded from the phantom scan,
+# where bare words would be hopelessly noisy.
+RPC_METHOD_SHAPE = re.compile(r"^[a-z][a-z0-9_.-]*(?:/[a-z0-9_.-]+)+$")
+
+# Single- or double-quoted string literal (single line), for Python and
+# TypeScript SDK sources alike.
+STRING_LITERAL = re.compile(r'"([^"\n]*)"|\'([^\'\n]*)\'')
+
+# RPC-shaped strings that legitimately appear in SDK source without being
+# catalog methods. Every entry must carry a named justification — silent
+# filtering is exactly how catalog<->SDK drift goes unnoticed. This extends
+# the `internal_exclusions` convention from verify_sdk_wrapper_freshness.py
+# with explicit per-entry reasons.
+SDK_STRING_ALLOWLIST: dict[str, str] = {
+    "tools/register": (
+        "callback-tool registration method handled directly by the RPC "
+        "server transport loop (meerkat-rpc/src/server.rs), deliberately "
+        "outside the catalog-driven router; both SDKs invoke it"
+    ),
+    "tool/execute": (
+        "server->client reverse request the SDKs *receive* to run a "
+        "registered callback tool (meerkat-rpc/src/callback_dispatcher.rs); "
+        "never a client-callable catalog method"
+    ),
+    "lukacf/meerkat": (
+        "GitHub repository slug used by the TypeScript client's release "
+        "metadata lookup (sdks/typescript/src/client.ts MEERKAT_REPO); "
+        "matches the method shape but is not an RPC method"
+    ),
+}
+
+# SDKs whose hand-written sources are full JSON-RPC clients and must cover
+# the entire catalog. (sdk label, repo-relative root, file suffix)
+RPC_SDK_SURFACES = [
+    ("Python SDK", pathlib.Path("sdks") / "python" / "meerkat", ".py"),
+    ("TypeScript SDK", pathlib.Path("sdks") / "typescript" / "src", ".ts"),
+]
+
+# The web SDK is the WASM-embedded runtime surface (`@rkat/web` calls
+# wasm_bindgen exports, not JSON-RPC). It must stay RPC-string-free; if it
+# ever grows RPC method literals it has silently become an RPC client and
+# must be moved into RPC_SDK_SURFACES instead.
+NON_RPC_SDK_SURFACES = [
+    ("Web SDK", pathlib.Path("sdks") / "web" / "src", ".ts"),
+]
+
+
+def collect_sdk_source(sdk_root: pathlib.Path, suffix: str) -> tuple[set[str], str]:
+    """RPC-shaped string literals + concatenated hand-written SDK source.
+
+    Generated mirrors (``generated/`` trees) are excluded on both sides: a
+    method name surviving only in a generated docstring is not wrapper
+    coverage, and generated content is projected from the catalog so it can
+    never be a phantom.
+    """
+    literals: set[str] = set()
+    blob_parts: list[str] = []
+    for path in sorted(sdk_root.rglob(f"*{suffix}")):
+        if "generated" in path.parts or "__pycache__" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        blob_parts.append(text)
+        for double_quoted, single_quoted in STRING_LITERAL.findall(text):
+            value = double_quoted or single_quoted
+            if RPC_METHOD_SHAPE.match(value):
+                literals.add(value)
+    return literals, "\n".join(blob_parts)
+
+
+def check_sdk_surfaces(
+    root: pathlib.Path,
+    catalog_methods: set[str],
+    notification_names: set[str],
+) -> list[str]:
+    """Catalog<->SDK divergence in both directions. Returns failure lines."""
+    failures: list[str] = []
+    known = catalog_methods | notification_names | set(SDK_STRING_ALLOWLIST)
+
+    for label, rel_root, suffix in RPC_SDK_SURFACES:
+        literals, blob = collect_sdk_source(root / rel_root, suffix)
+
+        phantoms = sorted(literals - known)
+        if phantoms:
+            failures.append(
+                f"{label} ({rel_root}) references RPC-shaped method strings "
+                "that are neither catalog methods, catalog notifications, nor "
+                "named SDK_STRING_ALLOWLIST entries:"
+            )
+            failures.extend(f"  - {name}" for name in phantoms)
+
+        missing = sorted(
+            method
+            for method in catalog_methods
+            if f'"{method}"' not in blob and f"'{method}'" not in blob
+        )
+        if missing:
+            failures.append(
+                f"{label} ({rel_root}) hand-written source has no wrapper/"
+                "usage for catalog methods (generated mirrors do not count):"
+            )
+            failures.extend(f"  - {name}" for name in missing)
+
+    for label, rel_root, suffix in NON_RPC_SDK_SURFACES:
+        literals, _ = collect_sdk_source(root / rel_root, suffix)
+        stray = sorted(literals - set(SDK_STRING_ALLOWLIST))
+        if stray:
+            failures.append(
+                f"{label} ({rel_root}) is a WASM-backed surface and must not "
+                "hand-roll RPC method strings; either remove these or promote "
+                "the SDK into RPC_SDK_SURFACES so it is fully gated:"
+            )
+            failures.extend(f"  - {name}" for name in stray)
+
+    return failures
 
 
 def split_type_refs(type_ref: str | None) -> list[str]:
@@ -200,9 +331,25 @@ def main() -> int:
             print(line)
         return 1
 
+    # -------------------------------------------------------------------
+    # SDK wrapper surfaces: catalog <-> SDK method-name parity in both
+    # directions (no phantom SDK methods, no uncovered catalog methods),
+    # plus the web-SDK is-not-an-RPC-client invariant.
+    # -------------------------------------------------------------------
+    notification_names = {
+        entry["name"]
+        for entry in generated.get("notifications", [])
+        if isinstance(entry, dict) and "name" in entry
+    }
+    sdk_failures = check_sdk_surfaces(root, catalog_methods, notification_names)
+    if sdk_failures:
+        for line in sdk_failures:
+            print(line)
+        return 1
+
     print(
-        "RPC surface alignment OK: generated catalog, docs method table, and "
-        "typed param/result refs are in sync."
+        "RPC surface alignment OK: generated catalog, docs method table, "
+        "typed param/result refs, and SDK wrapper surfaces are in sync."
     )
     return 0
 

@@ -214,6 +214,20 @@ pub fn tokens_lifecycle_published_credential_time(tokens: &PersistedTokens) -> O
         .map(|marker| marker.credential_published_at_millis)
 }
 
+/// Record a credential acquisition in the AuthMachine lease (an in-memory DSL
+/// transition; no durable I/O).
+///
+/// Acquire-first ordering contract (shared by the MCP OAuth login and the
+/// REST/CLI/RPC token-commit surfaces): call this BEFORE any durable
+/// `TokenStore::save`, stamp the durable lifecycle marker from the returned
+/// transition via [`mark_tokens_lifecycle_published_for_transition`], and
+/// persist the credential in that single marked write. The marker is the
+/// durable proof-of-acquisition; an unmarked persisted token is dead data and
+/// is rejected by `restore_marked_token_lifecycle` /
+/// [`rehydrate_marked_tokens_for_status`] and the resolver admission gate. A
+/// rejected acquisition mutates nothing, so the caller propagates the error
+/// without compensation; if the durable save fails AFTER acquisition, the
+/// caller must roll the acquired lease back so no half-state survives.
 pub fn publish_token_lifecycle_acquired(
     handle: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -523,6 +537,32 @@ mod tests {
 
         assert!(tokens_lifecycle_published(&marked));
         assert_eq!(marked.metadata["provider"], "openai");
+    }
+
+    #[test]
+    fn unmarked_orphan_tokens_are_dead_data_for_lifecycle_restore() {
+        // Vault property: a persisted token WITHOUT the durable lifecycle
+        // marker (the on-disk shape an interrupted save-then-acquire commit
+        // used to leave behind) carries no proof-of-acquisition. Every
+        // restore/rehydration entry point must treat it as dead data.
+        let key = marker_test_key();
+        let orphan = oauth_tokens_with_metadata(serde_json::Value::Null);
+
+        assert!(!tokens_lifecycle_published(&orphan));
+        assert!(tokens_lifecycle_publication(&orphan).is_none());
+        assert!(
+            durable_marker::restore_publication_from_metadata(&orphan.metadata, &key).is_none()
+        );
+
+        // Arbitrary non-marker metadata is equally dead.
+        let decorated = oauth_tokens_with_metadata(serde_json::json!({
+            "provider": "openai",
+            "source": "legacy-import",
+        }));
+        assert!(!tokens_lifecycle_published(&decorated));
+        assert!(
+            durable_marker::restore_publication_from_metadata(&decorated.metadata, &key).is_none()
+        );
     }
 
     #[test]

@@ -333,11 +333,23 @@ impl McpOAuthAuthority {
         // lease-publish transition so the credential write is owned by the
         // machine, not a bare `store.save`. Fail closed if the transition is
         // rejected — no token is persisted without a committed lease.
+        //
+        // Acquire-first ordering: the lease is acquired and the durable
+        // lifecycle marker stamped BEFORE the single `save` below, so a crash
+        // can never leave an unmarked orphan token (the marker is the durable
+        // proof-of-acquisition; unmarked tokens are rejected at every read).
+        // If the save fails, the acquired lease is released eagerly — the
+        // same failure shape as the REST/CLI/RPC token-commit surfaces — so
+        // no in-memory lease ever points at a credential that durable truth
+        // does not hold.
         let published = self.publish_login_tokens_via_lease(target, &key, &persisted)?;
-        self.token_store
-            .save(&key, &published)
-            .await
-            .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
+        if let Err(error) = self.token_store.save(&key, &published).await {
+            let lease_key = target.lease_key()?;
+            let _ = self.auth_lease.release_lease(&lease_key);
+            return Err(McpOAuthError::TokenStore(format!(
+                "{error}; acquired lease rolled back"
+            )));
+        }
         Ok(token.access_token)
     }
 

@@ -24,7 +24,7 @@ impl ContractVersion {
         minor: 7,
         patch: 0,
     };
-    pub const PRERELEASE: Option<&'static str> = Some("alpha.0");
+    pub const PRERELEASE: Option<&'static str> = None;
 
     /// Check compatibility: same major version (for 1.0+), or same major+minor (for 0.x).
     pub fn is_compatible_with(&self, other: &Self) -> bool {

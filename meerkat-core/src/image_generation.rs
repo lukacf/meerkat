@@ -1055,6 +1055,20 @@ pub struct SessionModelRoutingStatus {
     pub baseline_model: ModelId,
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub effective_model: ModelId,
+    /// Typed provider of the session's current LLM identity, projected from
+    /// the machine-owned `current_session_llm_identity`
+    /// (`SessionLlmIdentity.provider`). This is the single owner of the
+    /// "which provider is this session on" fact at planning time — it is
+    /// hydrated at session construction and recommitted by the live
+    /// identity hot-swap transition, so consumers (e.g. the image
+    /// auto-planner) must read it instead of re-deriving a provider from
+    /// the effective model string through the built-in catalog (which
+    /// silently disagrees for `ModelRegistry`-owned custom models).
+    ///
+    /// `None` means the machine has no hydrated session LLM identity yet
+    /// (pre-hydration); it is not a fallback signal to re-derive one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provider: Option<crate::Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_turn_override: Option<ScopedModelOverrideSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1079,10 +1093,21 @@ impl SessionModelRoutingStatus {
         Self {
             baseline_model,
             effective_model,
+            session_provider: None,
             active_turn_override,
             active_operation_override,
             pending_switch_turn,
         }
+    }
+
+    /// Attach the session's typed LLM provider identity to the status.
+    ///
+    /// The runtime projection sets this from the machine-owned
+    /// `current_session_llm_identity`; `None` faithfully mirrors a machine
+    /// state with no hydrated identity.
+    pub fn with_session_provider(mut self, session_provider: Option<crate::Provider>) -> Self {
+        self.session_provider = session_provider;
+        self
     }
 }
 
@@ -1360,6 +1385,28 @@ mod tests {
             operation_active.effective_model,
             ModelId::new("operation-model")
         );
+    }
+
+    #[test]
+    fn session_model_routing_status_carries_typed_session_provider() {
+        // The hydrated path: the provider is the typed identity fact, encoded
+        // with the canonical Provider wire names and round-trip stable.
+        let status =
+            SessionModelRoutingStatus::new(ModelId::new("my-custom-model"), None, None, None)
+                .with_session_provider(Some(crate::Provider::OpenAI));
+        assert_eq!(status.session_provider, Some(crate::Provider::OpenAI));
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert_eq!(encoded["session_provider"], "openai");
+        roundtrip(status);
+
+        // The pre-hydration path: no identity fact exists, the field is
+        // absent on the wire and reads back as None — never a minted default.
+        let unhydrated = SessionModelRoutingStatus::new(ModelId::new("baseline"), None, None, None);
+        assert_eq!(unhydrated.session_provider, None);
+        let encoded = serde_json::to_value(&unhydrated).unwrap();
+        assert!(encoded.get("session_provider").is_none());
+        let decoded: SessionModelRoutingStatus = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.session_provider, None);
     }
 
     #[test]

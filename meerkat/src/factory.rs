@@ -314,7 +314,7 @@ pub struct AgentBuildConfig {
     pub custom_models: std::collections::BTreeMap<String, meerkat_core::config::CustomModelConfig>,
     /// Configured default provider for `Auto` image-generation targets.
     /// When set, the planner resolves `Auto` against this provider instead of
-    /// inferring one from the session's effective text model.
+    /// the session's typed LLM provider identity.
     pub image_generation_provider: Option<Provider>,
     /// Per-build auto-compaction threshold override (tokens, non-zero).
     /// Wins over the global config knob and model-aware scaling.
@@ -1322,8 +1322,8 @@ mod image_generation_executor_routing_tests {
 struct CompositeImageGenerationPlanner {
     profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
     /// Configured default provider for `Auto` targets. When set, `Auto`
-    /// resolves against this provider instead of inferring one from the
-    /// session's effective text model.
+    /// resolves against this provider instead of the session's typed LLM
+    /// provider identity (`SessionModelRoutingStatus.session_provider`).
     auto_target_provider: Option<meerkat_core::Provider>,
 }
 
@@ -1393,16 +1393,20 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
             return Err(ImageOperationDenialReason::UnsupportedCount);
         }
 
-        let effective_provider =
-            meerkat_core::Provider::infer_from_model(status.effective_model.as_str());
         let (target_provider, profile) = match &request.target {
             ImageGenerationTargetPreference::Auto => {
                 // A configured image-generation provider is the declared
                 // `Auto` default; only absent that does `Auto` fall back to
-                // the session's effective text provider.
+                // the session's typed LLM provider identity. The provider
+                // fact is owned by the resolved `SessionLlmIdentity` and
+                // projected into the routing status by the machine (hydrated
+                // at construction, recommitted on hot-swap) — it is never
+                // re-derived here from the model string through the built-in
+                // catalog, which has no row for `ModelRegistry`-owned custom
+                // models.
                 let provider = self
                     .auto_target_provider
-                    .or(effective_provider)
+                    .or(status.session_provider)
                     .ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
                 let profile = self
                     .profile_for_provider(provider)
@@ -1439,7 +1443,8 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
         let machine_routing_realtime_capable = if requires_scoped_override {
             model_realtime_capable(target_provider, resolution.provider_call_model.as_str())
         } else {
-            effective_provider
+            status
+                .session_provider
                 .map(|provider| model_realtime_capable(provider, status.effective_model.as_str()))
                 .unwrap_or(false)
         };
@@ -8863,9 +8868,9 @@ mod tests {
     fn image_planner_auto_uses_configured_image_generation_provider() {
         use meerkat_core::ImageGenerationPlanner as _;
 
-        // The session's effective text model is Anthropic — a provider with no
-        // image-generation profile — yet the configured default must let `Auto`
-        // resolve against Gemini.
+        // The session's typed provider identity is Anthropic — a provider
+        // with no image-generation profile — yet the configured default must
+        // take precedence and let `Auto` resolve against Gemini.
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)])
             .with_auto_target_provider(Some(meerkat_core::Provider::Gemini));
         let status = meerkat_core::SessionModelRoutingStatus::new(
@@ -8873,7 +8878,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .with_session_provider(Some(meerkat_core::Provider::Anthropic));
 
         let plan = planner
             .resolve_image_generation_plan(
@@ -8893,8 +8899,8 @@ mod tests {
     fn image_planner_auto_without_configured_provider_fails_closed_for_anthropic() {
         use meerkat_core::ImageGenerationPlanner as _;
 
-        // Without a configured default, `Auto` still resolves via the
-        // effective text provider; Anthropic has no image profile, so the
+        // Without a configured default, `Auto` resolves via the session's
+        // typed provider identity; Anthropic has no image profile, so the
         // typed denial is preserved (no silent fallback).
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
         let status = meerkat_core::SessionModelRoutingStatus::new(
@@ -8902,7 +8908,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .with_session_provider(Some(meerkat_core::Provider::Anthropic));
 
         let result = planner.resolve_image_generation_plan(
             &status,
@@ -8913,6 +8920,213 @@ mod tests {
             result,
             Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
         ));
+    }
+
+    /// Regression for the dogma row "Image auto-routing loses session
+    /// provider identity": a session on a `ModelRegistry`-owned custom model
+    /// (unknown to the built-in catalog, so `Provider::infer_from_model`
+    /// returns `None`) must auto-plan against the session provider's
+    /// registered image default WITHOUT any separate image-provider config.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_auto_follows_session_provider_for_custom_models() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("my-custom-gemini"),
+            None,
+            None,
+            None,
+        )
+        .with_session_provider(Some(meerkat_core::Provider::Gemini));
+
+        let plan = planner
+            .resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &auto_target_image_request(),
+            )
+            .expect("Auto must resolve through the session's typed provider identity");
+        assert_eq!(
+            plan.provider_model.as_str(),
+            "gemini-3.1-flash-image-preview",
+            "the session provider's registered image default must be selected"
+        );
+    }
+
+    /// After a live LLM identity hot-swap, the routing status carries the
+    /// swapped provider (recommitted by the machine), and `Auto` planning
+    /// follows it — not the construction-time identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_auto_follows_swapped_session_provider() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
+        let operation_id: meerkat_core::ImageOperationId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap();
+        let status_for = |provider: meerkat_core::Provider| {
+            meerkat_core::SessionModelRoutingStatus::new(
+                meerkat_core::lifecycle::run_primitive::ModelId::new("my-custom-model"),
+                None,
+                None,
+                None,
+            )
+            .with_session_provider(Some(provider))
+        };
+
+        // Pre-swap identity: a provider with no image profile is denied.
+        let result = planner.resolve_image_generation_plan(
+            &status_for(meerkat_core::Provider::Anthropic),
+            operation_id,
+            &auto_target_image_request(),
+        );
+        assert!(matches!(
+            result,
+            Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+        ));
+
+        // Post-swap identity: the same planner resolves against the swapped
+        // provider's registered image default.
+        let plan = planner
+            .resolve_image_generation_plan(
+                &status_for(meerkat_core::Provider::Gemini),
+                operation_id,
+                &auto_target_image_request(),
+            )
+            .expect("Auto must follow the swapped session provider");
+        assert_eq!(
+            plan.provider_model.as_str(),
+            "gemini-3.1-flash-image-preview"
+        );
+    }
+
+    /// One condition, one path: the planner must NOT silently re-derive a
+    /// provider from the effective model string through the built-in catalog.
+    /// Even with a catalogued Gemini text model, an unhydrated session
+    /// provider plus no configured image provider is a typed denial.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_auto_does_not_rederive_provider_from_model_string() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
+        // "gemini-3.5-flash" IS in the built-in catalog; the old
+        // `Provider::infer_from_model` path would have resolved Gemini here.
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gemini-3.5-flash"),
+            None,
+            None,
+            None,
+        );
+
+        let result = planner.resolve_image_generation_plan(
+            &status,
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+            &auto_target_image_request(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+            ),
+            "missing session identity must fail closed, not fall back to model-string inference"
+        );
+    }
+
+    /// The non-scoped realtime capability check pairs the session's typed
+    /// provider with the effective model — `(session_provider, model)` is the
+    /// same pair the LLM client actually runs with.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_unscoped_realtime_capability_follows_session_provider() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        struct HostedOpenAiProfile;
+
+        impl meerkat_core::ImageGenerationProviderProfile for HostedOpenAiProfile {
+            fn canonical_provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::OpenAI
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _operation_id: meerkat_core::ImageOperationId,
+                model: &meerkat_core::model_profile::catalog::ImageGenerationModelProfile,
+                _request: &meerkat_core::GenerateImageRequest,
+                capabilities: meerkat_core::ImageGenerationTargetCapabilities,
+                max_count: std::num::NonZeroU32,
+            ) -> Result<
+                meerkat_core::ImageGenerationProviderResolution,
+                meerkat_core::ImageOperationDenialReason,
+            > {
+                Ok(meerkat_core::ImageGenerationProviderResolution {
+                    provider_call_model: meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        model.model_id,
+                    ),
+                    execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                        provider: meerkat_core::ProviderId::new("openai"),
+                        backend: meerkat_core::ImageGenerationBackendKind::HostedTool,
+                        max_count,
+                        capabilities,
+                        requires_scoped_override: false,
+                        provider_plan: serde_json::Value::Null,
+                    },
+                })
+            }
+        }
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(HostedOpenAiProfile)]);
+        let operation_id: meerkat_core::ImageOperationId =
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap();
+        let request = meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::ProviderDefault {
+                provider: meerkat_core::ProviderId::new("openai"),
+            },
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+
+        let base_status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-realtime-2"),
+            None,
+            None,
+            None,
+        );
+
+        let with_identity = planner
+            .resolve_image_generation_plan(
+                &base_status
+                    .clone()
+                    .with_session_provider(Some(meerkat_core::Provider::OpenAI)),
+                operation_id,
+                &request,
+            )
+            .expect("hosted plan with hydrated identity");
+        assert!(
+            with_identity.machine_routing_realtime_capable,
+            "(openai, gpt-realtime-2) is realtime-capable in the catalog"
+        );
+
+        let without_identity = planner
+            .resolve_image_generation_plan(&base_status, operation_id, &request)
+            .expect("hosted plan without hydrated identity");
+        assert!(
+            !without_identity.machine_routing_realtime_capable,
+            "no hydrated session provider must mean no realtime claim — never \
+             a provider re-derived from the model string"
+        );
     }
 
     #[test]

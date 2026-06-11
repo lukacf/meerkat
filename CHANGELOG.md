@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-11
+
+Meerkat 0.7.0 promotes the 0.7 line from generated-authority canary to the
+stable release train. The stable delta focuses on dogma-driven correctness:
+typed ownership at decision points, fail-closed terminality, generated-artifact
+freshness gates, and surface/runtime alignment across the Rust crates, SDKs,
+WASM, REST/RPC/MCP, and release tooling.
+
+### Added
+
+- **Contributor-visible generated-artifact gates** (#756) — REST surface
+  alignment, schema freshness, SDK codegen freshness, RPC/REST wrapper parity,
+  and machine drift checks now run in the default contributor CI lanes instead
+  of only owner-only BuildBuddy paths.
+- **Typed governance and remediation gates** (#760) — doctrine mirror checking,
+  stricter RPC SDK wrapper alignment, and machine-backed evidence for previously
+  overflagged dogma rows are now part of the workspace gates.
+- **Provider/auth lease ownership** (#757) — MCP OAuth freshness is bound to an
+  injected per-binding `AuthMachine` lease, while provider backend and auth
+  defaults now flow through typed provider-matrix owners.
+
+### Changed
+
+- **Typed decision ownership across surfaces** (#754, #755, #757, #760) —
+  string/JSON/Option/bool re-derivation was replaced with typed owners across
+  LLM identity overrides, mob bindings, auth methods, model/provider defaults,
+  structured-output retry policy, SDK status parsing, and image routing.
+- **Generated contracts and SDK surfaces aligned** (#756) — RPC catalog types,
+  REST OpenAPI paths, MCP tool rosters, docs tables, SDK wrappers, Web SDK
+  runtime version checks, and workspace crate version inheritance are now bound
+  to their source authorities by tests or rerun-and-diff gates.
+- **Dependency floor refreshed for the 0.7 release** (#761) — updates include
+  `tokio` 1.52.3, `uuid` 1.23.3, `tempfile` 3.27.0, `toml` 0.9,
+  `toml_edit` 0.25, `strum` 0.28, `fs4` 0.13, and Bazel `platforms` 1.1.0,
+  with the Bazel lockfile refreshed.
+
+### Fixed
+
+- **Terminal faults now propagate instead of laundering to success or empty
+  defaults** (#758, #759) — malformed provider stream data, incomplete
+  Anthropic EOF, ops-lifecycle invariant failures, poisoned completion cursors,
+  config-read failures, durable projection writes, corrupt realm leases,
+  pending-event lag, SDK registration errors, RPC result serialization failures,
+  and session-store sidecar faults now retain typed fault information.
+- **Mob/comms trust and routing correctness** (#754, #759, #760) — typed member
+  bindings fixed the `mob.{id}`/`mob:{id}` persisted-session mismatch, comms
+  namespace authority moved behind typed peers, supervisor trust rollback is now
+  scope-correct and machine-owned, and bridge acknowledgements carry canonical
+  truth.
+- **Auth and surface correctness regressions** (#755, #759, #760) — direct-secret
+  auth profile creation no longer rejects valid methods, scheduled sessions now
+  honor configured structured-output retries, token writes acquire durable
+  lifecycle markers before persisting bytes, and SDK/WASM parsing paths fail
+  closed on unknown or malformed wire data.
+
 ## [0.7.0-alpha.0] - 2026-06-04
 
 Meerkat 0.7.0-alpha.0 publishes the generated-authority canary for downstream
@@ -2069,7 +2124,9 @@ Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime o
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.6.23...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/lukacf/meerkat/compare/alpha/v0.7.0-alpha.0...v0.7.0
+[0.7.0-alpha.0]: https://github.com/lukacf/meerkat/releases/tag/alpha/v0.7.0-alpha.0
 [0.6.23]: https://github.com/lukacf/meerkat/compare/v0.6.22...v0.6.23
 [0.6.22]: https://github.com/lukacf/meerkat/compare/v0.6.21...v0.6.22
 [0.6.21]: https://github.com/lukacf/meerkat/compare/v0.6.20...v0.6.21

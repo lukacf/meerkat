@@ -909,8 +909,10 @@ mod tests {
             meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             crate::router::NotificationSink::noop(),
         );
-        let config_store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),

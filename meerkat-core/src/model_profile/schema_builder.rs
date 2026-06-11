@@ -2,9 +2,10 @@
 //! [`ModelCapabilities`] row.
 //!
 //! The schema here is the single source of truth for UI-facing param shapes.
-//! It replaces the previous approach of emitting schemars-derived schemas from
-//! hand-written struct buckets (`AnthropicOpus46Params`, `OpenAiGpt5Params`,
-//! etc.), which conflated unrelated models into the same bucket.
+//! It is pure mechanics over the capability vocabulary: the function maps a
+//! capability row to a schema and consults no catalog data. The canonical
+//! rows live in `meerkat-models`, whose tests pin the emitted schema for
+//! every real model.
 
 use crate::Provider;
 use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
@@ -272,17 +273,10 @@ fn effort_enum_schema(description: &str, levels: &[EffortLevel]) -> Value {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::collapsible_match,
-    clippy::redundant_closure,
-    clippy::redundant_closure_for_method_calls
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::model_profile::capabilities::{all_capabilities, capabilities_for};
+    use crate::model_profile::test_catalog::TEST_CATALOG;
 
     /// Extract the set of property names from a params schema.
     fn property_keys(schema: &Value) -> std::collections::BTreeSet<String> {
@@ -308,14 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn builder_emits_properties_for_every_catalog_model() {
-        for caps in all_capabilities() {
+    fn builder_emits_object_schema_for_every_capability_row() {
+        for caps in TEST_CATALOG.capabilities {
             let schema = build_params_schema(caps);
-            assert!(
-                schema.is_object(),
-                "schema for {} must be a JSON object",
-                caps.id
-            );
             assert_eq!(
                 schema.get("type").and_then(|t| t.as_str()),
                 Some("object"),
@@ -330,177 +319,52 @@ mod tests {
         }
     }
 
-    /// Parity test: new builder property keys match the current profile_for output.
-    ///
-    /// This is the regression net for commit 2 — it proves introducing the
-    /// capability table does not change what the UI sees. When individual rows
-    /// are later corrected (commit 4), the expected keys for those rows diverge
-    /// intentionally; at that point the parity test is replaced by golden
-    /// schemas per model.
-    #[test]
-    fn builder_property_keys_match_current_profile() {
-        use crate::model_profile::profile_for;
-
-        for caps in all_capabilities() {
-            let built = build_params_schema(caps);
-            let legacy = profile_for(caps.provider, caps.id)
-                .unwrap_or_else(|| panic!("no profile for {}", caps.id))
-                .params_schema;
-
-            let built_keys = property_keys(&built);
-            let legacy_keys = property_keys(&legacy);
-            assert_eq!(
-                built_keys, legacy_keys,
-                "property keys differ for {} (left=built, right=legacy)",
-                caps.id
-            );
-        }
-    }
-
-    /// Parity test: for string-enum properties, value sets match.
-    #[test]
-    fn builder_enum_values_match_current_profile() {
-        use crate::model_profile::profile_for;
-
-        for caps in all_capabilities() {
-            let built = build_params_schema(caps);
-            let legacy = profile_for(caps.provider, caps.id)
-                .unwrap_or_else(|| panic!("no profile for {}", caps.id))
-                .params_schema;
-
-            let check_prop = |prop: &str| {
-                if let (Some(built_values), legacy_values) = (
-                    enum_values_for(&built, prop),
-                    enum_values_for(&legacy, prop),
-                ) {
-                    // The legacy shape wraps the enum in a $ref to $defs; skip
-                    // if the legacy schema doesn't expose the enum inline.
-                    if let Some(legacy_values) = legacy_values {
-                        assert_eq!(
-                            built_values, legacy_values,
-                            "enum values differ for {}.{}",
-                            caps.id, prop
-                        );
-                    }
-                }
-            };
-            check_prop("effort");
-            check_prop("reasoning_effort");
-        }
-    }
-
-    /// Gate (row #30): the advertised effort/reasoning_effort enum values are
-    /// projected from the typed `EffortLevel` vocabulary, never from string
-    /// literals. Every emitted value must round-trip back to a typed level.
     #[test]
     fn effort_enum_values_derive_from_typed_effort_levels() {
-        use crate::model_profile::capabilities::EffortLevel;
+        use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
 
-        let typed_wire = |s: &str| -> bool {
-            [
-                EffortLevel::None,
-                EffortLevel::Minimal,
-                EffortLevel::Low,
-                EffortLevel::Medium,
-                EffortLevel::High,
-                EffortLevel::Xhigh,
-                EffortLevel::Max,
-            ]
-            .iter()
-            .any(|level| level.as_wire_str() == s)
+        let base = TEST_CATALOG
+            .capabilities_for(crate::Provider::Anthropic, "test-anthropic-default")
+            .expect("test anthropic row");
+        let caps = ModelCapabilities {
+            thinking: ThinkingSupport::AnthropicAdaptiveAndEnabled,
+            effort_levels: &[EffortLevel::Low, EffortLevel::High, EffortLevel::Max],
+            ..*base
         };
-
-        for caps in all_capabilities() {
-            let schema = build_params_schema(caps);
-            let declared: std::collections::BTreeSet<String> = caps
-                .effort_levels
-                .iter()
-                .map(|level| level.as_wire_str().to_string())
-                .collect();
-
-            for prop in ["effort", "reasoning_effort"] {
-                if let Some(values) = enum_values_for(&schema, prop) {
-                    for v in &values {
-                        assert!(
-                            typed_wire(v),
-                            "{}.{} emitted '{}' which is not a typed EffortLevel wire value",
-                            caps.id,
-                            prop,
-                            v
-                        );
-                    }
-                    assert_eq!(
-                        values, declared,
-                        "{}.{} enum must equal the catalog's typed effort_levels",
-                        caps.id, prop
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn opus_48_effort_includes_xhigh() {
-        let caps =
-            capabilities_for(crate::Provider::Anthropic, "claude-opus-4-8").expect("opus 4.8 row");
-        let schema = build_params_schema(caps);
+        let schema = build_params_schema(&caps);
         let values = enum_values_for(&schema, "effort").expect("effort enum");
-        assert!(values.contains("xhigh"), "opus 4.8 must advertise xhigh");
-        assert!(values.contains("low"));
-        assert!(values.contains("max"));
-    }
-
-    #[test]
-    fn fable_5_schema_is_adaptive_only_with_full_effort_ladder() {
-        let caps =
-            capabilities_for(crate::Provider::Anthropic, "claude-fable-5").expect("fable 5 row");
-        let schema = build_params_schema(caps);
-
-        let keys = property_keys(&schema);
-        assert!(
-            !keys.contains("thinking_budget"),
-            "fable 5 must not advertise the legacy thinking budget"
-        );
-
-        let values = enum_values_for(&schema, "effort").expect("effort enum");
-        assert!(values.contains("xhigh"), "fable 5 must advertise xhigh");
-        assert!(values.contains("max"), "fable 5 must advertise max");
-
-        // The thinking schema admits only {"type": "adaptive"} — Fable 5
-        // rejects both enabled and explicit disabled modes.
-        let thinking_type = schema
-            .get("properties")
-            .and_then(|p| p.get("thinking"))
-            .and_then(|t| t.get("properties"))
-            .and_then(|p| p.get("type"))
-            .and_then(|t| t.get("enum"))
-            .expect("fable 5 thinking type enum");
-        assert_eq!(thinking_type, &serde_json::json!(["adaptive"]));
-    }
-
-    #[test]
-    fn sonnet_45_has_no_effort_property() {
-        let caps = capabilities_for(crate::Provider::Anthropic, "claude-sonnet-4-5")
-            .expect("sonnet 4.5 row");
-        let schema = build_params_schema(caps);
-        let keys = property_keys(&schema);
-        assert!(
-            !keys.contains("effort"),
-            "sonnet 4.5 must not advertise effort"
+        let declared: std::collections::BTreeSet<String> = caps
+            .effort_levels
+            .iter()
+            .map(|level| level.as_wire_str().to_string())
+            .collect();
+        assert_eq!(
+            values, declared,
+            "effort enum must equal the row's typed effort_levels"
         );
     }
 
     #[test]
-    fn gemini_3_schema_exposes_thinking_level() {
-        let caps = capabilities_for(crate::Provider::Gemini, "gemini-3.5-flash")
-            .expect("gemini 3 flash row");
+    fn empty_effort_levels_emit_no_effort_property() {
+        let caps = TEST_CATALOG
+            .capabilities_for(crate::Provider::Anthropic, "test-anthropic-default")
+            .expect("test anthropic row");
+        assert!(caps.effort_levels.is_empty());
+        let schema = build_params_schema(caps);
+        assert!(!property_keys(&schema).contains("effort"));
+    }
+
+    #[test]
+    fn gemini_thinking_level_rows_expose_thinking_level() {
+        let caps = TEST_CATALOG
+            .capabilities_for(crate::Provider::Gemini, "test-gemini-video")
+            .expect("test gemini row");
         let schema = build_params_schema(caps);
         let keys = property_keys(&schema);
         assert!(
             keys.contains("thinking_level"),
-            "gemini 3 must advertise thinking_level"
+            "GeminiThinkingLevel rows must advertise thinking_level"
         );
-
         let values = enum_values_for(&schema, "thinking_level").expect("thinking_level enum");
         let expected: std::collections::BTreeSet<String> = ["high", "low", "medium", "minimal"]
             .into_iter()
@@ -510,25 +374,16 @@ mod tests {
     }
 
     #[test]
-    fn gemini_schema_has_no_include_thoughts() {
-        for caps in all_capabilities().filter(|c| c.provider == crate::Provider::Gemini) {
-            let schema = build_params_schema(caps);
-            let keys = property_keys(&schema);
-            assert!(
-                !keys.contains("include_thoughts"),
-                "gemini {} must not advertise include_thoughts (client ignores it)",
-                caps.id,
-            );
-            // Inspect nested thinking object too.
-            let thinking = schema.get("properties").and_then(|p| p.get("thinking"));
-            if let Some(inner_props) = thinking.and_then(|t| t.get("properties")) {
-                let obj = inner_props.as_object().expect("inner properties");
-                assert!(
-                    !obj.contains_key("include_thoughts"),
-                    "gemini {} must not advertise thinking.include_thoughts",
-                    caps.id,
-                );
-            }
+    fn gemini_rows_have_no_include_thoughts() {
+        let caps = TEST_CATALOG
+            .capabilities_for(crate::Provider::Gemini, "test-gemini-video")
+            .expect("test gemini row");
+        let schema = build_params_schema(caps);
+        assert!(!property_keys(&schema).contains("include_thoughts"));
+        let thinking = schema.get("properties").and_then(|p| p.get("thinking"));
+        if let Some(inner_props) = thinking.and_then(|t| t.get("properties")) {
+            let obj = inner_props.as_object().expect("inner properties");
+            assert!(!obj.contains_key("include_thoughts"));
         }
     }
 }

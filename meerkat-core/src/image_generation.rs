@@ -1333,7 +1333,7 @@ mod tests {
             revised_prompt: RevisedPromptDisposition::Unchanged,
             native_metadata: ProviderImageMetadata::Gemini(GeminiImageMetadata {
                 target_model: "provider-native-image-model".into(),
-                response_id: Some("gemini-response".into()),
+                response_id: Some("image-response".into()),
                 continuity_ref: Some(ImageContinuityRef::new("continuity-1")),
             }),
             warnings: vec![ImageGenerationWarning::ContinuityDegraded],
@@ -1638,7 +1638,7 @@ mod tests {
         }));
         roundtrip(ProviderImageMetadata::Gemini(GeminiImageMetadata {
             target_model: "provider-native-image-model".into(),
-            response_id: Some("gemini-70".into()),
+            response_id: Some("resp-70".into()),
             continuity_ref: Some(ImageContinuityRef::new("continuity-71")),
         }));
 
@@ -1775,14 +1775,14 @@ mod tests {
 
         roundtrip(SwitchTurnControlResult::Applied {
             request_id: SwitchTurnRequestId::new(uuid(80)),
-            target_model: ModelId::new("gpt-5.5"),
+            target_model: ModelId::new("test-openai-default"),
             duration: SwitchTurnDuration::Finite {
                 duration: FiniteScopedTurnDuration::OneTurn,
             },
         });
         roundtrip(SwitchTurnControlResult::AwaitingApproval {
             approval_id: ApprovalId::new(),
-            target_model: ModelId::new("claude-opus-4-8"),
+            target_model: ModelId::new("test-anthropic-default"),
             duration: SwitchTurnDuration::UntilChanged,
             reason: SwitchTurnApprovalReason::UntilChangedFromModelOrigin,
         });

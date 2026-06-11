@@ -711,7 +711,7 @@ mod tests {
         session
             .set_session_metadata(SessionMetadata {
                 schema_version: crate::session_metadata_schema_version(),
-                model: "claude-sonnet-4-5".to_string(),
+                model: "test-anthropic-default".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,
                 provider: Provider::Anthropic,
@@ -883,7 +883,7 @@ mod tests {
         let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                model: Some("gpt-5.2".to_string()),
+                model: Some("test-openai-other".to_string()),
                 provider: Some(Provider::OpenAI),
                 provider_params: Some(TurnMetadataOverride::Set(
                     crate::lifecycle::run_primitive::ProviderParamsOverride {
@@ -902,7 +902,7 @@ mod tests {
         )
         .expect("recovered session");
 
-        assert_eq!(recovered.model, "gpt-5.2");
+        assert_eq!(recovered.model, "test-openai-other");
         assert_eq!(
             recovered.system_prompt.as_set_prompt(),
             Some("override system prompt")
@@ -1349,7 +1349,7 @@ mod tests {
         session
             .set_session_metadata(SessionMetadata {
                 schema_version: crate::session_metadata_schema_version(),
-                model: "claude-sonnet-4-5".to_string(),
+                model: "test-anthropic-default".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,
                 provider: Provider::Anthropic,

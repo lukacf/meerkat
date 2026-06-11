@@ -813,7 +813,7 @@ async fn init_project_config() -> anyhow::Result<()> {
     })?;
 
     if !global_path.exists() {
-        let _ = meerkat_core::FileConfigStore::global().await?;
+        let _ = meerkat_core::FileConfigStore::global(meerkat_models::canonical()).await?;
     }
 
     let project_config = rkat_dir.join("config.toml");
@@ -3655,7 +3655,10 @@ async fn resolve_config_store(
             .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     }
     Ok((
-        Arc::new(FileConfigStore::new(paths.config_path)),
+        Arc::new(FileConfigStore::new(
+            paths.config_path,
+            meerkat_models::canonical(),
+        )),
         paths.root,
     ))
 }
@@ -3670,7 +3673,7 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
         .apply_env_overrides()
         .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
     config
-        .validate()
+        .validate(meerkat_models::canonical())
         .map_err(|e| anyhow::anyhow!("Invalid runtime config: {e}"))?;
     Ok((config, base_dir))
 }
@@ -3694,7 +3697,7 @@ const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
 
 fn model_provider(config: &Config, model: &str) -> Option<Provider> {
     config
-        .model_registry()
+        .model_registry(meerkat_models::canonical())
         .ok()
         .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
         .and_then(Provider::from_core)
@@ -3707,7 +3710,12 @@ fn provider_default_model(config: &Config, provider: Provider) -> Option<String>
         Provider::Gemini => &config.models.gemini,
         Provider::SelfHosted => return None,
     };
-    (!model.is_empty()).then(|| model.clone())
+    if model.is_empty() {
+        // No operator override: fall through to the catalog-owned
+        // per-provider default (core's `ModelDefaults::default` is empty).
+        return meerkat_models::default_model(provider.as_core()).map(str::to_string);
+    }
+    Some(model.clone())
 }
 
 fn resolve_cli_default_agent_model(config: &Config) -> String {
@@ -3719,10 +3727,16 @@ fn resolve_cli_default_agent_model(config: &Config) -> String {
         return meerkat::resolve_provider_catalog_default_model(config);
     }
 
-    config.agent.model.clone()
+    // Canonical ladder: operator-set `config.agent.model` (tier 1), else the
+    // per-provider/catalog defaults. An unset agent model is the normal state
+    // (core embeds no provider data), not an error.
+    meerkat::resolve_create_session_default_model(config)
 }
 
 fn resolve_provider_constrained_default_model(config: &Config, provider: Provider) -> String {
+    if config.agent.model.is_empty() {
+        return provider_default_model(config, provider).unwrap_or_default();
+    }
     match model_provider(config, &config.agent.model) {
         Some(model_provider) if model_provider == provider => config.agent.model.clone(),
         Some(_) => {
@@ -4596,7 +4610,7 @@ impl LoginProvider {
     }
 
     fn sample_model(self) -> &'static str {
-        meerkat_core::model_profile::catalog::default_model(self.provider())
+        meerkat_models::default_model(self.provider())
             .expect("login provider must have a catalog default model")
     }
 
@@ -12717,8 +12731,10 @@ where
     let session_store = persistence.session_store();
     let paths =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    let base_store: Arc<dyn ConfigStore> =
-        Arc::new(FileConfigStore::new(paths.config_path.clone()));
+    let base_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
+        paths.config_path.clone(),
+        meerkat_models::canonical(),
+    ));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
@@ -12935,11 +12951,11 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Infer provider from the built-in model catalog.
+    /// Infer provider from the canonical model catalog.
     /// Returns None for uncatalogued models; self-hosted aliases resolve
     /// through `Config::model_registry()` in `resolve_cli_provider`.
     pub fn infer_from_model(model: &str) -> Option<Self> {
-        meerkat_core::Provider::infer_from_model(model).and_then(Provider::from_core)
+        meerkat_models::infer_provider(model).and_then(Provider::from_core)
     }
 
     /// Convert to string for storage in session metadata
@@ -12990,16 +13006,20 @@ fn resolve_cli_provider(
     explicit: Option<Provider>,
 ) -> anyhow::Result<Provider> {
     if let Some(provider) = explicit {
-        if let Some(reason) = config.model_registry().ok().and_then(|registry| {
-            registry.provider_override_mismatch_reason(provider.as_core(), model)
-        }) {
+        if let Some(reason) = config
+            .model_registry(meerkat_models::canonical())
+            .ok()
+            .and_then(|registry| {
+                registry.provider_override_mismatch_reason(provider.as_core(), model)
+            })
+        {
             anyhow::bail!(reason);
         }
         return Ok(provider);
     }
 
     if let Some(provider) = config
-        .model_registry()
+        .model_registry(meerkat_models::canonical())
         .ok()
         .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
         .and_then(Provider::from_core)
@@ -13071,9 +13091,13 @@ fn resolve_cli_provider_with_auth_binding(
     }
 
     if let Some(selection) = auth_binding {
-        if let Some(reason) = config.model_registry().ok().and_then(|registry| {
-            registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
-        }) {
+        if let Some(reason) = config
+            .model_registry(meerkat_models::canonical())
+            .ok()
+            .and_then(|registry| {
+                registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
+            })
+        {
             anyhow::bail!(
                 "--auth-binding selects provider '{}', but {reason}",
                 selection.provider.as_str()
@@ -13385,14 +13409,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+            meerkat_models::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13437,14 +13461,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+            meerkat_models::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13476,9 +13500,7 @@ mod tests {
                     .binding
                     .get("anthropic_oauth")
                     .and_then(|binding| binding.default_model.as_deref()),
-                meerkat_core::model_profile::catalog::default_model(
-                    meerkat_core::Provider::Anthropic
-                )
+                meerkat_models::default_model(meerkat_core::Provider::Anthropic)
             );
         }
     }
@@ -19516,16 +19538,27 @@ capabilities = ["definitely_missing_capability"]
     fn test_resolve_cli_default_agent_model_heals_legacy_builtin_default() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
-        // A legacy builtin default heals to the highest-priority available
-        // provider's configured model. Priority is owned by the catalog seam
-        // (`meerkat_core::model_profile::catalog::provider_priority()` —
-        // anthropic first), so even with a customized OpenAI model the heal
-        // resolves to anthropic, not whichever provider happened to be set.
+        // A legacy builtin default heals through the canonical ladder.
+        // Priority is owned by the catalog seam
+        // (`meerkat_models::provider_priority()` — anthropic first), so even
+        // with a customized OpenAI model the heal resolves to the configured
+        // anthropic override, not whichever provider happened to be set.
+        config.models.anthropic = "custom-anthropic".to_string();
         config.models.openai = "gpt-5.5-custom".to_string();
+
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-anthropic");
+    }
+
+    #[test]
+    fn test_resolve_cli_default_agent_model_heals_to_global_default_without_overrides() {
+        // With no per-provider operator overrides (core leaves them empty),
+        // the heal terminates at the catalog-owned global default.
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
 
         assert_eq!(
             resolve_cli_default_agent_model(&config),
-            config.models.anthropic
+            meerkat_models::global_default_model()
         );
     }
 
@@ -19533,17 +19566,19 @@ capabilities = ["definitely_missing_capability"]
     fn test_resolve_cli_default_agent_model_falls_back_by_best_available_priority() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
+        config.models.openai = "custom-openai".to_string();
+        config.models.gemini = "custom-gemini".to_string();
+
+        // anthropic unset: the next provider in catalog priority order wins.
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-openai");
+
         config.models.openai.clear();
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-gemini");
 
+        config.models.gemini.clear();
         assert_eq!(
             resolve_cli_default_agent_model(&config),
-            config.models.anthropic
-        );
-
-        config.models.anthropic.clear();
-        assert_eq!(
-            resolve_cli_default_agent_model(&config),
-            config.models.gemini
+            meerkat_models::global_default_model()
         );
     }
 
@@ -19575,7 +19610,8 @@ capabilities = ["definitely_missing_capability"]
 
         assert_eq!(
             resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
-            config.models.anthropic
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
+                .expect("anthropic catalog default")
         );
     }
 
@@ -19619,7 +19655,8 @@ capabilities = ["definitely_missing_capability"]
 
         assert_eq!(
             resolve_cli_effective_model(&config, None, None, Some(&selection)),
-            config.models.gemini
+            meerkat_models::default_model(meerkat_core::Provider::Gemini)
+                .expect("gemini catalog default")
         );
     }
 

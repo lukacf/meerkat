@@ -1,8 +1,9 @@
 //! meerkat-gemini — Google (Gemini / Vertex AI / Code Assist) vertical.
 //!
 //! Owns the Gemini LLM client, provider runtime, and Google OAuth (Code
-//! Assist) + ADC backends. Capability tables and profile rules live in
-//! `meerkat_core::model_profile` (Phase 1 of the B2 split).
+//! Assist) + ADC backends. Capability vocabulary lives in
+//! `meerkat_core::model_profile`; the capability data rows live in
+//! `meerkat-models`.
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {

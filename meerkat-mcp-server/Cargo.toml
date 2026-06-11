@@ -24,6 +24,7 @@ path = "tests/live_mcp_matrix.rs"
 meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
+meerkat-models = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }

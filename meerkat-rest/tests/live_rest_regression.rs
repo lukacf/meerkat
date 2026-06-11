@@ -46,7 +46,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
     let mut config = Config::default();
     config.agent.max_tokens_per_turn = 256;
     config.agent.model = smoke_model();
-    let config_store = MemoryConfigStore::new(config.clone());
+    let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
 
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);

@@ -150,23 +150,17 @@ fn catalog_beta_value(
     request: &LlmRequest,
     feature: meerkat_core::model_profile::capabilities::BetaFeature,
 ) -> Option<&'static str> {
-    meerkat_core::model_profile::capabilities::capabilities_for(
-        Provider::Anthropic,
-        &request.model,
-    )?
-    .beta_headers
-    .iter()
-    .find(|header| header.feature == feature)
-    .map(|header| header.header_value)
+    meerkat_models::capabilities_for(Provider::Anthropic, &request.model)?
+        .beta_headers
+        .iter()
+        .find(|header| header.feature == feature)
+        .map(|header| header.header_value)
 }
 
 fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
-    let header = meerkat_core::model_profile::capabilities::capabilities_for(
-        Provider::Anthropic,
-        &request.model,
-    )?
-    .context_window_beta?
-    .header;
+    let header = meerkat_models::capabilities_for(Provider::Anthropic, &request.model)?
+        .context_window_beta?
+        .header;
     header.strip_prefix("anthropic-beta: ")
 }
 
@@ -358,7 +352,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
 
 impl AnthropicClient {
     fn model_supports_temperature(model: &str) -> bool {
-        meerkat_core::model_profile::anthropic::supports_temperature(model)
+        crate::request_support::supports_temperature(model)
     }
 
     fn request_supports_temperature(request: &LlmRequest) -> bool {

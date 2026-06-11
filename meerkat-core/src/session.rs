@@ -5098,9 +5098,13 @@ mod tests {
 
     #[test]
     fn llm_identity_model_override_switches_to_catalog_provider() {
-        let registry = crate::Config::default().model_registry().unwrap();
+        let registry = crate::ModelRegistry::from_config(
+            &crate::Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .unwrap();
         let current = SessionLlmIdentity {
-            model: "claude-sonnet-4-5".to_string(),
+            model: "test-anthropic-default".to_string(),
             provider: Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
@@ -5116,7 +5120,7 @@ mod tests {
             &current,
             &registry,
             SessionLlmIdentityOverride {
-                model: Some("gpt-5.5"),
+                model: Some("test-openai-default"),
                 provider: None,
                 provider_params: None,
                 auth_binding: None,
@@ -5124,7 +5128,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.model, "gpt-5.5");
+        assert_eq!(resolved.model, "test-openai-default");
         assert_eq!(resolved.provider, Provider::OpenAI);
         assert!(
             resolved.auth_binding.is_none(),
@@ -5134,7 +5138,11 @@ mod tests {
 
     #[test]
     fn llm_identity_model_override_keeps_uncatalogued_model_on_current_provider() {
-        let registry = crate::Config::default().model_registry().unwrap();
+        let registry = crate::ModelRegistry::from_config(
+            &crate::Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .unwrap();
         let current = SessionLlmIdentity {
             model: "custom-model".to_string(),
             provider: Provider::Anthropic,

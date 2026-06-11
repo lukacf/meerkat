@@ -1,30 +1,16 @@
-//! Per-model capability table — the authoritative, data-driven source of truth.
+//! Per-model capability vocabulary — the typed shape of capability truth.
 //!
-//! Every catalog model has exactly one `ModelCapabilities` record describing its
-//! accepted parameters, thinking modes, modalities, headers, and operational
-//! defaults. `ModelProfile` is derived from this record; `params_schema` is
-//! built from it by [`super::profile::schema_builder`].
+//! Every catalog model has exactly one [`ModelCapabilities`] record describing
+//! its accepted parameters, thinking modes, modalities, headers, and
+//! operational defaults. `ModelProfile` is derived from this record;
+//! `params_schema` is built from it by [`super::schema_builder`].
 //!
-//! This replaces the previous heuristic-driven approach (struct-per-bucket with
-//! `schemars::schema_for!`). The old structs advertised capabilities across
-//! broad model groups (e.g. "opus 4 bucket" served Opus 4.7 and 4.8;
-//! "standard" served everything else), flattening real differences such as
-//! Opus 4.8's `xhigh` effort tier or Sonnet 4.5's 1M context beta.
-//!
-//! Public callers must cross the typed [`crate::Provider`] boundary before
-//! reading capability truth; raw row iteration is intentionally crate-private:
-//!
-//! ```compile_fail
-//! let _ = meerkat_core::model_profile::capabilities::all_capabilities();
-//! ```
-//!
-//! ```compile_fail
-//! let _ = meerkat_core::model_profile::capabilities::gemini::CAPABILITIES;
-//! ```
-
-mod anthropic;
-mod gemini;
-mod openai;
+//! This module owns only the *types*. The capability rows themselves are
+//! provider data and live in the `meerkat-models` crate, injected into core
+//! consumers through [`super::ModelCatalog`]. Lookups go through
+//! [`super::ModelCatalog::capabilities_for`], which crosses the typed
+//! [`crate::Provider`] boundary; uncatalogued model IDs do not receive
+//! synthesized semantic capabilities.
 
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
@@ -50,7 +36,7 @@ use crate::model_profile::catalog::ModelTier;
 #[derive(Debug, Clone, Copy)]
 pub struct ModelCapabilities {
     // ── Identity ──────────────────────────────────────────────────────
-    /// Model identifier (e.g. `"claude-opus-4-8"`).
+    /// Model identifier.
     pub id: &'static str,
     /// Typed provider that owns this capability row.
     pub provider: Provider,
@@ -58,7 +44,7 @@ pub struct ModelCapabilities {
     pub display_name: &'static str,
     /// Recommendation tier.
     pub tier: ModelTier,
-    /// Model family identifier (e.g. `"claude-opus-4"`, `"gpt-5"`, `"gemini-3"`).
+    /// Model family identifier (a stable grouping key for related model ids).
     pub model_family: &'static str,
 
     // ── Context / output ──────────────────────────────────────────────
@@ -78,8 +64,7 @@ pub struct ModelCapabilities {
     pub image_tool_results: bool,
     /// Whether the model accepts inline video content in user messages.
     pub inline_video: bool,
-    /// Whether the model supports a realtime bidirectional streaming transport
-    /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints).
+    /// Whether the model supports a realtime bidirectional streaming transport.
     pub realtime: bool,
     /// Realtime transport: whether the model's realtime session supports
     /// provider-managed turn detection (server VAD). Only meaningful when
@@ -134,7 +119,7 @@ pub struct ModelCapabilities {
     pub supports_web_search: bool,
     /// Anthropic data-residency hint via `inference_geo`.
     pub supports_inference_geo: bool,
-    /// Anthropic `compaction` / `context_management` (with `compact-2026-01-12` beta header).
+    /// Anthropic `compaction` / `context_management` (with the compaction beta header).
     pub supports_compaction: bool,
     /// Structured output (`output_config.format` / `text.format` / `responseJsonSchema`).
     pub supports_structured_output: bool,
@@ -145,7 +130,6 @@ pub struct ModelCapabilities {
 
     // ── Beta headers ──────────────────────────────────────────────────
     /// Beta headers the client may set when interacting with this model.
-    /// Captured here so the wire layer can surface them in a later PR.
     pub beta_headers: &'static [BetaHeader],
 
     // ── Runtime ───────────────────────────────────────────────────────
@@ -157,7 +141,7 @@ pub struct ModelCapabilities {
 /// A capability value that is only available when a specific beta header is set.
 #[derive(Debug, Clone, Copy)]
 pub struct BetaValue<T: 'static> {
-    /// Full header to send (`"anthropic-beta: context-1m-2025-08-07"` style).
+    /// Full header to send (`"<header-name>: <header-value>"` style).
     pub header: &'static str,
     /// The value enabled by the header (e.g. extended context window size).
     pub value: T,
@@ -196,9 +180,9 @@ impl BetaFeature {
 pub struct BetaHeader {
     /// Typed semantic feature this header gates.
     pub feature: BetaFeature,
-    /// HTTP header name (usually `"anthropic-beta"`).
+    /// HTTP header name.
     pub header_name: &'static str,
-    /// HTTP header value (e.g. `"compact-2026-01-12"`).
+    /// HTTP header value.
     pub header_value: &'static str,
 }
 
@@ -238,7 +222,7 @@ pub enum EffortLevel {
     Medium,
     /// High reasoning effort.
     High,
-    /// Extended-high reasoning effort (e.g. Opus 4.8, GPT-5 recent).
+    /// Extended-high reasoning effort.
     Xhigh,
     /// Maximum reasoning effort (Anthropic-only top tier).
     Max,
@@ -259,146 +243,15 @@ impl EffortLevel {
     }
 }
 
-/// Lookup a model's capabilities by typed provider + id.
-///
-/// Returns `None` when the provider/model pair has no capability row.
-/// Callers must treat `None` as unknown capability truth; uncatalogued model
-/// IDs must not synthesize semantic facts from model-name folklore.
-///
-/// Provider/display strings are intentionally rejected at compile time:
-///
-/// ```compile_fail
-/// let _ = meerkat_core::model_profile::capabilities::capabilities_for(
-///     "gemini",
-///     "gemini-3.5-flash",
-/// );
-/// ```
-pub fn capabilities_for(provider: Provider, model_id: &str) -> Option<&'static ModelCapabilities> {
-    let table: &'static [ModelCapabilities] = match provider {
-        Provider::Anthropic => anthropic::CAPABILITIES,
-        Provider::OpenAI => openai::CAPABILITIES,
-        Provider::Gemini => gemini::CAPABILITIES,
-        _ => return None,
-    };
-    table.iter().find(|c| c.id == model_id)
-}
-
-/// Iterate every known capability record across all providers.
-///
-/// This is crate-internal so public callers cannot obtain semantic capability
-/// rows through provider/model string filtering or model-only row scans.
-pub(crate) fn all_capabilities() -> impl Iterator<Item = &'static ModelCapabilities> {
-    anthropic::CAPABILITIES
-        .iter()
-        .chain(openai::CAPABILITIES.iter())
-        .chain(gemini::CAPABILITIES.iter())
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
     #[test]
-    fn every_capability_matches_a_catalog_entry() {
-        for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id);
-            assert!(
-                entry.is_some(),
-                "capability row '{}' (provider '{}') has no catalog entry",
-                caps.id,
-                caps.provider.as_str(),
-            );
-        }
-    }
-
-    #[test]
-    fn no_duplicate_capability_ids_within_provider() {
-        for provider_name in crate::model_profile::catalog::provider_names() {
-            let provider = Provider::parse_strict(provider_name)
-                .unwrap_or_else(|| panic!("catalog provider '{provider_name}' must parse"));
-            let ids: Vec<&str> = all_capabilities()
-                .filter(|c| c.provider == provider)
-                .map(|c| c.id)
-                .collect();
-            let mut unique: Vec<&str> = ids.clone();
-            unique.sort_unstable();
-            unique.dedup();
-            assert_eq!(ids.len(), unique.len(), "duplicate ids in {provider_name}");
-        }
-    }
-
-    #[test]
-    fn every_catalog_entry_has_capabilities() {
-        for entry in crate::model_profile::catalog::catalog() {
-            let provider = Provider::parse_strict(entry.provider)
-                .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
-            let caps = capabilities_for(provider, entry.id);
-            assert!(
-                caps.is_some(),
-                "catalog model '{}' (provider '{}') has no capability row",
-                entry.id,
-                entry.provider,
-            );
-        }
-    }
-
-    #[test]
-    fn tier_matches_catalog_entry() {
-        for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
-                .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
-            assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
-        }
-    }
-
-    #[test]
-    fn claude_haiku_45_is_cataloged_with_official_limits() {
-        for model in ["claude-haiku-4-5-20251001", "claude-haiku-4-5"] {
-            let caps = capabilities_for(Provider::Anthropic, model)
-                .unwrap_or_else(|| panic!("{model} must be in the Anthropic catalog"));
-            assert_eq!(caps.model_family, "claude-haiku-4");
-            assert_eq!(caps.context_window, 200_000);
-            assert_eq!(caps.max_output_tokens, 64_000);
-            assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
-            assert!(!caps.supports_compaction);
-        }
-    }
-
-    #[test]
-    fn claude_fable_5_is_cataloged_with_official_limits() {
-        let caps = capabilities_for(Provider::Anthropic, "claude-fable-5")
-            .expect("claude-fable-5 must be in the Anthropic catalog");
-        assert_eq!(caps.provider, Provider::Anthropic);
-        assert_eq!(caps.model_family, "claude-fable-5");
-        assert_eq!(caps.context_window, 1_000_000);
-        assert_eq!(caps.max_output_tokens, 128_000);
-        assert!(
-            caps.max_output_tokens_beta.is_none(),
-            "Fable 5 is not listed for the output-300k batch beta"
-        );
-        assert_eq!(caps.thinking, ThinkingSupport::AnthropicAdaptiveOnly);
-        assert!(
-            !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
-            "Fable 5 rejects all sampling parameters"
-        );
-        assert!(
-            !caps.supports_thinking_budget_legacy,
-            "budget_tokens is fully removed on Fable 5"
-        );
-        assert!(caps.vision);
-        assert!(caps.supports_compaction);
-        assert!(caps.supports_structured_output);
-        assert!(caps.supports_web_search);
-        assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
-        assert!(caps.effort_levels.contains(&EffortLevel::Max));
-    }
-
-    #[test]
-    fn beta_feature_is_typed_owner_with_projected_wire_labels() {
+    fn beta_feature_wire_labels_are_pinned_projections() {
         // The semantic beta-feature domain is the typed enum; the wire label is
-        // a derived projection. Pin the projection so the catalog/wire shape
-        // cannot silently drift.
+        // a derived projection. Pin the projection so the wire shape cannot
+        // silently drift.
         assert_eq!(BetaFeature::Compaction.as_wire_str(), "compaction");
         assert_eq!(
             BetaFeature::StructuredOutput.as_wire_str(),
@@ -408,33 +261,16 @@ mod tests {
             BetaFeature::InterleavedThinking.as_wire_str(),
             "interleaved_thinking"
         );
-        // Every catalog beta header declares a typed feature (exhaustive match
-        // proves the field is enum-typed, not a string label).
-        for caps in all_capabilities() {
-            for header in caps.beta_headers {
-                match header.feature {
-                    BetaFeature::Compaction
-                    | BetaFeature::StructuredOutput
-                    | BetaFeature::InterleavedThinking => {}
-                }
-            }
-        }
     }
 
     #[test]
-    fn typed_provider_mismatch_fails_closed() {
-        assert!(capabilities_for(Provider::Anthropic, "gpt-5.4").is_none());
-        assert!(capabilities_for(Provider::OpenAI, "gemini-3.5-flash").is_none());
-        assert!(capabilities_for(Provider::Other, "gpt-5.4").is_none());
-    }
-
-    #[test]
-    fn display_provider_string_cannot_be_promoted_to_capability_owner() {
-        let display_provider = Provider::parse_strict("Gemini").unwrap_or(Provider::Other);
-        assert_eq!(display_provider, Provider::Other);
-        assert!(
-            capabilities_for(display_provider, "gemini-3.5-flash").is_none(),
-            "display provider strings must fail closed at the typed capability boundary"
-        );
+    fn effort_level_wire_values_are_pinned_projections() {
+        assert_eq!(EffortLevel::None.as_wire_str(), "none");
+        assert_eq!(EffortLevel::Minimal.as_wire_str(), "minimal");
+        assert_eq!(EffortLevel::Low.as_wire_str(), "low");
+        assert_eq!(EffortLevel::Medium.as_wire_str(), "medium");
+        assert_eq!(EffortLevel::High.as_wire_str(), "high");
+        assert_eq!(EffortLevel::Xhigh.as_wire_str(), "xhigh");
+        assert_eq!(EffortLevel::Max.as_wire_str(), "max");
     }
 }

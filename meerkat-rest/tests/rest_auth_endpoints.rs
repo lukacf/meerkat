@@ -74,8 +74,10 @@ fn build_app() -> axum::Router {
         Some(runtime_adapter.clone()),
         None,
     );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(config.clone()));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+        config.clone(),
+        meerkat_models::canonical(),
+    ));
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store),
         store_path.join("config_state.json"),

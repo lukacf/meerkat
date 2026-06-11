@@ -395,7 +395,7 @@ remains runtime-host owned rather than a REST-backed CLI command.
 rkat models
 ```
 
-Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat_core::model_profile` catalog.
+Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat-models` catalog (injected into `meerkat-core` as a `ModelCatalog`).
 
 ## capabilities
 

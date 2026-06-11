@@ -537,7 +537,7 @@ Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`)
 
 ### Model catalog
 
-The model catalog (canonical: `meerkat_core::model_profile`; `meerkat-models` is now a thin compatibility shim) is queryable from all surfaces:
+The model catalog (canonical data: `meerkat-models`; `meerkat_core::model_profile` owns the vocabulary types and `ModelCatalog` mechanics) is queryable from all surfaces:
 
 - CLI: `rkat models`
 - RPC: `models/catalog`

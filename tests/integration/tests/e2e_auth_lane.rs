@@ -548,7 +548,10 @@ impl AuthHarness {
         let registry = factory.provider_runtime_registry();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
-        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(config.clone()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
         let mut runtime = SessionRuntime::new(
             factory,
             config.clone(),

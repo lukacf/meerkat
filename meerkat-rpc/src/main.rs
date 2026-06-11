@@ -223,8 +223,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let realm_paths =
         meerkat_store::realm_paths_in(&locator.state_root, &locator.realm.to_string());
 
-    let base_store: Arc<dyn ConfigStore> =
-        Arc::new(FileConfigStore::new(realm_paths.config_path.clone()));
+    let base_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
+        realm_paths.config_path.clone(),
+        meerkat_models::canonical(),
+    ));
     let tagged = TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
@@ -247,7 +249,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| Config::default());
     config.apply_env_overrides()?;
     config
-        .validate()
+        .validate(meerkat_models::canonical())
         .map_err(|err| std::io::Error::other(format!("invalid runtime config: {err}")))?;
     let cli_user_root = cli.user_config_root.clone();
     let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);

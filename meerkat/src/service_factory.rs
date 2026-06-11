@@ -678,7 +678,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         self.resolve_config()
             .await
             .ok()?
-            .model_registry()
+            .model_registry(meerkat_models::canonical())
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
             .map(|profile| profile.inline_video)
@@ -950,8 +950,9 @@ mod tests {
     async fn inline_video_capability_reads_current_config_store() {
         let initial_config = self_hosted_inline_video_config(false);
         let current_config = self_hosted_inline_video_config(true);
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(meerkat_core::MemoryConfigStore::new(current_config));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(current_config, meerkat_models::canonical()),
+        );
         let builder = FactoryAgentBuilder::new_with_config_store(
             AgentFactory::minimal(),
             initial_config,

@@ -3,12 +3,12 @@
 ## Dependency Order (bottom to top)
 
 ```
-meerkat-models            (compatibility shim — re-exports meerkat-core::model_profile)
+meerkat-models            (canonical provider model catalog/capabilities data; core stays provider-free)
 meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
 meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
                            cloud authorizers — no meerkat-core deps)
 
-meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile catalog,
+meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile vocabulary + ModelCatalog mechanics,
                            DSL handle traits)
   ├── meerkat-capabilities    (typed capability vocabulary, feature-owned declaration collection)
   ├── meerkat-contracts       (wire types, error codes, generated surface schema projections)

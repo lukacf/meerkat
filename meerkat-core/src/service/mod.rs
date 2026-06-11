@@ -172,7 +172,7 @@ impl SystemContextStageError {
 /// (dogma K10) — callers populate the typed carrier in `build`.
 #[derive(Debug)]
 pub struct CreateSessionRequest {
-    /// Model name (e.g. "claude-opus-4-8").
+    /// Model name (a catalog or custom model id).
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,

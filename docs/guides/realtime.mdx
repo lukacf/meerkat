@@ -48,7 +48,7 @@ Key invariants:
 
 ## Realtime-capable models
 
-`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat_core::model_profile`). Capability is catalog data, not prefix inference:
+`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`; the `ModelCapabilities` type lives in `meerkat_core::model_profile`). Capability is catalog data, not prefix inference:
 
 - **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog.
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.

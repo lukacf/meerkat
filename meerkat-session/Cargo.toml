@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 meerkat-capabilities = { workspace = true }
 meerkat-core = { workspace = true }
+meerkat-models = { workspace = true }
 meerkat-contracts = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"

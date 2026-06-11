@@ -330,11 +330,11 @@ pub(crate) fn project_openai_replay_messages(
 
 impl OpenAiClient {
     fn model_supports_temperature(model: &str) -> bool {
-        meerkat_core::model_profile::openai::supports_temperature(model)
+        crate::request_support::supports_temperature(model)
     }
 
     fn model_supports_reasoning_payload(model: &str) -> bool {
-        meerkat_core::model_profile::openai::supports_reasoning(model)
+        crate::request_support::supports_reasoning(model)
     }
 
     fn request_supports_temperature(request: &LlmRequest) -> bool {

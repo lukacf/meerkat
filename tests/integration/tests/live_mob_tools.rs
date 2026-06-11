@@ -140,7 +140,8 @@ async fn make_smoke_rpc_stack(
         persistence,
         NotificationSink::noop(),
     );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(config));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
     runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         paths.runtime_root.join("config_state.json"),

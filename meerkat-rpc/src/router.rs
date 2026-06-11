@@ -3984,7 +3984,11 @@ mod tests {
     }
 
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
-        test_router_with_config_store(Arc::new(MemoryConfigStore::new(Config::default()))).await
+        test_router_with_config_store(Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        )))
+        .await
     }
 
     async fn test_router_with_config_store(
@@ -4032,7 +4036,8 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(config));
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -4326,8 +4331,10 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         runtime.set_default_llm_client(Some(llm_client));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -4355,8 +4362,10 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         runtime.set_default_llm_client(Some(llm_client));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -4384,8 +4393,10 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -4526,8 +4537,10 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),

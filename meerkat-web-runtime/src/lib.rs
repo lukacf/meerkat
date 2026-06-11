@@ -380,7 +380,7 @@ fn populate_realm_from_api_keys(
     // (`provider_priority()` == [Anthropic, OpenAI, Gemini]). Each provider's
     // sort index is its position in that list; providers absent from the list
     // (and unrecognized strings) sort last.
-    let priority = meerkat_core::model_profile::catalog::provider_priority();
+    let priority = meerkat_models::provider_priority();
     let provider_rank = |key: &str| -> usize {
         match meerkat_core::Provider::parse_strict(key) {
             Some(provider) => priority
@@ -393,25 +393,33 @@ fn populate_realm_from_api_keys(
     entries.sort_by_key(|(k, _)| provider_rank(k));
 
     // A per-provider default model is only a true config fact for providers
-    // that have a key-backed binding in this realm — but `Config::default()`
-    // pre-fills `config.models` for every catalog provider. Clear the
-    // unconfigured entries so the canonical create-session default-model
-    // ladder (which walks non-empty `config.models` entries in catalog
-    // priority order) sees only the providers this surface actually
-    // configured.
+    // that have a key-backed binding in this realm. `Config::default()`
+    // leaves `config.models` empty (core embeds no provider data), so fill
+    // each key-backed provider's entry from the catalog default (unless the
+    // caller already pinned one) and clear unconfigured entries. The
+    // canonical create-session default-model ladder then walks non-empty
+    // `config.models` entries in catalog priority order and sees exactly the
+    // providers this surface actually configured.
     let configured = |provider: meerkat_core::Provider| {
         api_keys
             .keys()
             .any(|key| meerkat_core::Provider::parse_strict(key) == Some(provider))
     };
-    if !configured(meerkat_core::Provider::Anthropic) {
-        config.models.anthropic.clear();
-    }
-    if !configured(meerkat_core::Provider::OpenAI) {
-        config.models.openai.clear();
-    }
-    if !configured(meerkat_core::Provider::Gemini) {
-        config.models.gemini.clear();
+    for (provider, entry) in [
+        (
+            meerkat_core::Provider::Anthropic,
+            &mut config.models.anthropic,
+        ),
+        (meerkat_core::Provider::OpenAI, &mut config.models.openai),
+        (meerkat_core::Provider::Gemini, &mut config.models.gemini),
+    ] {
+        if !configured(provider) {
+            entry.clear();
+        } else if entry.is_empty()
+            && let Some(default) = meerkat_models::default_model(provider)
+        {
+            *entry = default.to_string();
+        }
     }
 
     let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
@@ -3754,16 +3762,12 @@ capabilities = [{capability_values}]
     fn bootstrap_default_model_for_only_openai_is_openai_catalog_default() {
         let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
         let (config, model) = build_bootstrap_config(None, &keys, None);
-        let expected =
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
-                .expect("openai catalog default")
-                .to_string();
+        let expected = meerkat_models::default_model(meerkat_core::Provider::OpenAI)
+            .expect("openai catalog default")
+            .to_string();
         assert_eq!(model, expected);
         // Must NOT hardcode the anthropic global default when anthropic is absent.
-        assert_ne!(
-            model,
-            meerkat_core::model_profile::catalog::global_default_model()
-        );
+        assert_ne!(model, meerkat_models::global_default_model());
         assert_eq!(
             model,
             meerkat::resolve_create_session_default_model(&config)
@@ -3782,7 +3786,7 @@ capabilities = [{capability_values}]
         let (config, model) = build_bootstrap_config(None, &keys, None);
         assert_eq!(
             model,
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+            meerkat_models::default_model(meerkat_core::Provider::OpenAI)
                 .expect("openai catalog default")
         );
         assert_eq!(
@@ -3796,10 +3800,7 @@ capabilities = [{capability_values}]
     fn bootstrap_default_model_unrecognized_key_falls_back_to_global_default() {
         let keys = HashMap::from([("notaprovider".to_string(), "x".to_string())]);
         let (config, model) = build_bootstrap_config(None, &keys, None);
-        assert_eq!(
-            model,
-            meerkat_core::model_profile::catalog::global_default_model()
-        );
+        assert_eq!(model, meerkat_models::global_default_model());
         assert_eq!(
             model,
             meerkat::resolve_create_session_default_model(&config)
@@ -3839,7 +3840,7 @@ capabilities = [{capability_values}]
 
         // The highest-priority configured provider (anthropic) seeds the
         // per-realm default_binding.
-        let top = meerkat_core::model_profile::catalog::provider_priority()
+        let top = meerkat_models::provider_priority()
             .first()
             .expect("at least one provider in priority");
         let expected_binding = format!("default_{}", top.as_str());
@@ -3913,7 +3914,7 @@ capabilities = [{capability_values}]
             .and_then(|id| id.strip_prefix("default_"))
             .expect("default binding uses default_<provider> form");
         assert!(
-            meerkat_core::model_profile::catalog::provider_priority()
+            meerkat_models::provider_priority()
                 .iter()
                 .any(|p| p.as_str() == default_provider),
             "default binding provider '{default_provider}' must be catalog-owned"

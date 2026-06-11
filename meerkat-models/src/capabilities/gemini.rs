@@ -4,9 +4,9 @@
 //! `ai.google.dev/gemini-api/docs/models/*`, `ai.google.dev/gemini-api/docs/thinking`,
 //! and `ai.google.dev/gemini-api/docs/gemini-3`.
 
-use super::{ModelCapabilities, ThinkingSupport};
-use crate::Provider;
-use crate::model_profile::catalog::ModelTier;
+use meerkat_core::Provider;
+use meerkat_core::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
+use meerkat_core::model_profile::catalog::ModelTier;
 
 /// Capability rows for Gemini catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[

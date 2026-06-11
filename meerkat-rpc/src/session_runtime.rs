@@ -3257,11 +3257,13 @@ impl SessionRuntime {
             meerkat_core::Config::default()
         };
 
-        config.model_registry().map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!("Failed to resolve model registry: {e}"),
-            data: None,
-        })
+        config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("Failed to resolve model registry: {e}"),
+                data: None,
+            })
     }
 
     /// #61/#67: resolve the provider for a direct session create through
@@ -8759,7 +8761,7 @@ mod tests {
     ///
     /// - A model string with **no** explicit provider and **no** registered
     ///   catalog owner returns `INVALID_PARAMS` — pre-fix this path inferred
-    ///   a provider from the model string (`Provider::infer_from_model`),
+    ///   a provider from the model string (`ModelCatalog::infer_provider`),
     ///   minting an unblessed provider hint instead of failing closed.
     /// - A registered catalog model with no provider resolves to the catalog
     ///   owner.
@@ -8810,7 +8812,7 @@ mod tests {
     #[test]
     fn realtime_capability_lookup_table() {
         use meerkat_core::Provider;
-        use meerkat_core::model_profile::capabilities::capabilities_for;
+        use meerkat_models::capabilities_for;
 
         let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime-2")
             .expect("gpt-realtime-2 should be present in the catalog");
@@ -8845,7 +8847,7 @@ mod tests {
     /// sessions whose provider is not OpenAI (the only realtime factory
     /// wired in Wave 1). The catalog cannot naturally produce a
     /// realtime-capable non-OpenAI capability row — every Gemini and
-    /// Anthropic row in `meerkat_core::model_profile::capabilities` has
+    /// Anthropic row in the `meerkat-models` capability tables has
     /// `realtime: false` — so e2e tests never reach this branch and M73
     /// surfaces `ModelNotRealtime` instead of `ProviderHasNoLiveAdapter`
     /// even when the test exercises a Gemini provider.
@@ -12686,6 +12688,7 @@ mod tests {
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::new(meerkat_core::MemoryConfigStore::new(
                 config_with_openai_managed_store_binding(),
+                meerkat_models::canonical(),
             )),
             temp.path().join("config_state.json"),
         )));
@@ -12920,9 +12923,11 @@ mod tests {
     async fn create_session_accepts_video_for_self_hosted_alias_from_runtime_config() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", true)),
-        );
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                self_hosted_test_config("local", true),
+                meerkat_models::canonical(),
+            ));
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
             store,
             temp.path().join("config_state.json"),
@@ -12947,9 +12952,11 @@ mod tests {
     async fn create_session_pins_self_hosted_server_id_before_materialization() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", false)),
-        );
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                self_hosted_test_config("local", false),
+                meerkat_models::canonical(),
+            ));
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             store,
             temp.path().join("config_state.json"),
@@ -12990,9 +12997,11 @@ mod tests {
     async fn provider_param_override_keeps_pinned_self_hosted_server_binding() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", false)),
-        );
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                self_hosted_test_config("local", false),
+                meerkat_models::canonical(),
+            ));
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             store,
             temp.path().join("config_state.json"),

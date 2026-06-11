@@ -1,6 +1,7 @@
 //! Config store abstraction.
 
 use crate::config::{Config, ConfigDelta, ConfigError};
+use crate::model_profile::ModelCatalog;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -52,12 +53,16 @@ pub trait ConfigStore: Send + Sync {
 /// In-memory config store for ephemeral settings.
 pub struct MemoryConfigStore {
     config: tokio::sync::RwLock<Config>,
+    catalog: ModelCatalog,
 }
 
 impl MemoryConfigStore {
-    pub fn new(config: Config) -> Self {
+    /// Create a store validating against the injected model catalog
+    /// (canonically `meerkat_models::canonical()`).
+    pub fn new(config: Config, catalog: ModelCatalog) -> Self {
         Self {
             config: tokio::sync::RwLock::new(config),
+            catalog,
         }
     }
 }
@@ -70,7 +75,7 @@ impl ConfigStore for MemoryConfigStore {
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
-        config.validate()?;
+        config.validate(self.catalog)?;
         *self.config.write().await = config;
         Ok(())
     }
@@ -80,7 +85,7 @@ impl ConfigStore for MemoryConfigStore {
         let mut value = serde_json::to_value(&*config).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
         let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
-        updated.validate()?;
+        updated.validate(self.catalog)?;
         *config = updated.clone();
         Ok(updated)
     }
@@ -122,33 +127,38 @@ impl ConfigStore for TaggedConfigStore {
 pub struct FileConfigStore {
     path: PathBuf,
     create_if_missing: bool,
+    catalog: ModelCatalog,
 }
 
 impl FileConfigStore {
-    /// Create a new file-backed store for an explicit path.
-    pub fn new(path: PathBuf) -> Self {
+    /// Create a new file-backed store for an explicit path, validating
+    /// against the injected model catalog (canonically
+    /// `meerkat_models::canonical()`).
+    pub fn new(path: PathBuf, catalog: ModelCatalog) -> Self {
         Self {
             path,
             create_if_missing: false,
+            catalog,
         }
     }
 
     /// Create a store that bootstraps a global config file if missing.
-    pub async fn global() -> Result<Self, ConfigError> {
+    pub async fn global(catalog: ModelCatalog) -> Result<Self, ConfigError> {
         let path = Config::global_config_path()
             .ok_or_else(|| ConfigError::MissingField("HOME".to_string()))?;
         let store = Self {
             path,
             create_if_missing: true,
+            catalog,
         };
         store.ensure_exists().await?;
         Ok(store)
     }
 
     /// Create a store rooted at the provided project directory.
-    pub fn project(project_root: impl Into<PathBuf>) -> Self {
+    pub fn project(project_root: impl Into<PathBuf>, catalog: ModelCatalog) -> Self {
         let root = project_root.into();
-        Self::new(root.join(".rkat").join("config.toml"))
+        Self::new(root.join(".rkat").join("config.toml"), catalog)
     }
 
     /// Return the config file path.
@@ -187,7 +197,7 @@ impl ConfigStore for FileConfigStore {
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
-        config.validate()?;
+        config.validate(self.catalog)?;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -213,7 +223,7 @@ impl ConfigStore for FileConfigStore {
         let mut value = serde_json::to_value(self.get().await?).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
         let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
-        updated.validate()?;
+        updated.validate(self.catalog)?;
         self.set(updated.clone()).await?;
         Ok(updated)
     }
@@ -305,7 +315,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join(".rkat").join("config.toml");
-        let store = FileConfigStore::new(path.clone());
+        let store = FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
         let mut config = Config::default();
         let mut section = crate::RealmConfigSection::default();
         section.backend.insert(
@@ -336,7 +349,7 @@ mod tests {
             crate::ProviderBindingConfig {
                 backend_profile: "openai_chatgpt".to_string(),
                 auth_profile: "openai_oauth".to_string(),
-                default_model: Some("gpt-5.5".to_string()),
+                default_model: Some("test-openai-default".to_string()),
                 policy: Default::default(),
                 provider_default: false,
             },

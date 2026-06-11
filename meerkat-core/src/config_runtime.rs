@@ -301,7 +301,10 @@ mod tests {
     #[tokio::test]
     async fn generation_conflict_is_enforced() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(MemoryConfigStore::new(Config::default()));
+        let store = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
         let runtime = ConfigRuntime::new(store, temp.path().join("state.json"));
 
         let baseline = runtime.get().await.unwrap();
@@ -331,7 +334,10 @@ mod tests {
     #[tokio::test]
     async fn concurrent_writes_with_same_expected_generation_conflict() {
         let temp = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
         let runtime_a = Arc::new(ConfigRuntime::new(
             Arc::clone(&store),
             temp.path().join("state.json"),

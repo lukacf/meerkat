@@ -222,9 +222,7 @@ mod tests {
         ImageFormatPreference, ImageGenerationIntent, ImageGenerationTargetPreference,
         ImageQualityPreference, PromptSource, PromptText, ToolCallId,
     };
-    use meerkat_core::model_profile::catalog::{
-        default_image_generation_model, image_generation_model,
-    };
+    use meerkat_models::{default_image_generation_model, image_generation_model};
     use serde_json::json;
 
     fn capabilities() -> ImageGenerationTargetCapabilities {

@@ -124,6 +124,9 @@ This is a large workspace (~40 crates). Careless builds waste minutes. Follow th
 ```
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
+                     Owns the model-catalog vocabulary types + ModelCatalog mechanics (no provider data)
+meerkat-models    → Provider model catalog/capabilities data (core stays provider-free);
+                     exposes `canonical()` ModelCatalog injected into core seams
 meerkat-llm-core  → LLM wire-client trait + streaming plumbing (LlmClient, BlockAssembler, LlmClientAdapter)
 meerkat-anthropic / meerkat-openai / meerkat-gemini → Per-provider clients implementing AgentLlmClient
 meerkat-client    → Thin shim re-exporting meerkat-llm-core + the per-provider clients (B2 split)
@@ -244,8 +247,9 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-session/src/event_store.rs` - EventStore trait
 - `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
 - `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
-- `meerkat-core/src/model_profile/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
-- `meerkat-core/src/model_profile/mod.rs` - Model profile rules (capability detection, param schemas)
+- `meerkat-models/src/catalog.rs` - Curated model catalog data (single source of truth for defaults/allowlists; `canonical()` ModelCatalog)
+- `meerkat-models/src/capabilities/` - Per-provider model capability rows
+- `meerkat-core/src/model_profile/mod.rs` - Model profile vocabulary + ModelCatalog mechanics (capability projection, param schemas; zero provider data)
 - `meerkat-mcp/src/router.rs` - MCP tool routing
 - `meerkat-runtime/src/ops_lifecycle.rs` - RuntimeOpsLifecycleRegistry, PersistedOpsSnapshot, persistence channel
 - `meerkat-runtime/src/meerkat_machine/` - MeerkatMachine module (mod.rs, composition.rs, dispatch_*, dsl_*), prepare_bindings(), recover_or_create_ops_state()
@@ -311,7 +315,7 @@ make audit       # Security audit via cargo-deny
 | `build_web_sdk_package` | Always | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
 | `update_homebrew` | After GitHub release | Updates the Homebrew tap formula |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 36 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 37 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual | Publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -373,7 +377,7 @@ Six files must agree on the same version:
 | `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all internal crate dependencies in `Cargo.toml` (37 path deps) must match the workspace version.
+Additionally, all internal crate dependencies in `Cargo.toml` (38 path deps) must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -425,7 +429,7 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 36 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 37 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -441,8 +445,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (36 crates, dependency order):
-`meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (37 crates, dependency order):
+`meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 ### Key Rules for AI Agents
 
@@ -462,7 +466,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 | Gemini | `gemini-3.5-flash` |
 | Anthropic | `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` |
 
-These are the exact text-model ids in the curated catalog (`meerkat-core/src/model_profile/catalog.rs`); models outside the catalog require a `ModelRegistry` entry.
+These are the exact text-model ids in the curated catalog (`meerkat-models/src/capabilities/`); models outside the catalog require a `ModelRegistry` entry.
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 

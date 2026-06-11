@@ -39,7 +39,7 @@ async fn inner_test_rest_resume_metadata() {
 
     let mut config = Config::default();
     config.agent.max_tokens_per_turn = 128;
-    let config_store = MemoryConfigStore::new(config.clone());
+    let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
 
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
@@ -136,7 +136,7 @@ async fn inner_test_rest_resume_metadata() {
     let app = router(state_run);
     let run_payload = json!({
         "prompt": "Say the word 'ok' and nothing else.",
-        "model": config.agent.model,
+        "model": meerkat::resolve_create_session_default_model(&config),
         "max_tokens": config.agent.max_tokens_per_turn
     });
     let request = Request::builder()
@@ -217,8 +217,10 @@ async fn inner_test_rest_resume_metadata() {
     // state); resume must preserve the session's persisted values regardless.
     let mut resume_config = config.clone();
     resume_config.agent.model = "gpt-5.2".to_string();
-    let config_store_resume: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(resume_config));
+    let config_store_resume: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+        resume_config,
+        meerkat_models::canonical(),
+    ));
     let config_runtime_resume = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_resume),
         store_path.join("config_state.json"),

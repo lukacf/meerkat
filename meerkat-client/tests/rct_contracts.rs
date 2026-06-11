@@ -179,7 +179,7 @@ async fn test_llm_adapter_event_tap_mirrors_text_delta() -> Result<(), Box<dyn s
 #[test]
 fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>> {
     fn infer(m: &str) -> Provider {
-        Provider::infer_from_model(m).unwrap_or(Provider::Other)
+        meerkat_models::infer_provider(m).unwrap_or(Provider::Other)
     }
     assert_eq!(infer("claude-opus-4-8"), Provider::Anthropic);
     assert_eq!(infer("gpt-5.4"), Provider::OpenAI);
@@ -190,7 +190,7 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
     // from this struct. The RKAT_*-preferred env resolution now lives
     // inside the factory's env-var fallback (meerkat/src/factory.rs)
     // and inside the provider-runtime registry's env_lookup seam.
-    // This test stays focused on the catalog-backed infer_from_model contract above;
+    // This test stays focused on the catalog-backed infer_provider contract above;
     // env-precedence is covered by integration tests that exercise
     // the registry.
 
@@ -199,6 +199,6 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn test_inv_006_provider_inference_uses_resolver() {
-    let provider = Provider::infer_from_model("claude-sonnet-4-6").unwrap_or(Provider::Other);
+    let provider = meerkat_models::infer_provider("claude-sonnet-4-6").unwrap_or(Provider::Other);
     assert_eq!(provider, Provider::Anthropic);
 }

@@ -719,52 +719,16 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobFlowStatusResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/run_result",
+                "Get the typed output envelope for a mob run",
+                "MobRunResultParams",
+                "MobRunResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/flow_cancel",
                 "Cancel a mob flow run",
                 "MobFlowCancelParams",
                 "MobFlowCancelResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_start",
-                "Start an AdaptiveRun on an adaptive mobpack control mob",
-                "MobAdaptiveStartParams",
-                "MobAdaptiveStartResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_status",
-                "Read AdaptiveRun status from kernel state",
-                "MobAdaptiveRunParams",
-                "MobAdaptiveStatusResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_layers",
-                "List AdaptiveRun layer ledger entries",
-                "MobAdaptiveRunParams",
-                "MobAdaptiveLayersResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_events",
-                "Read AdaptiveRun event projection entries",
-                "MobAdaptiveRunParams",
-                "MobAdaptiveEventsResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_result",
-                "Read the final AdaptiveRun result body",
-                "MobAdaptiveRunParams",
-                "MobAdaptiveResultResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_cancel",
-                "Request host cancellation for an active AdaptiveRun",
-                "MobAdaptiveRunParams",
-                "MobAdaptiveCancelResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/adaptive_retry_layer",
-                "Request a retry for a failed AdaptiveRun layer",
-                "MobAdaptiveRetryLayerParams",
-                "MobAdaptiveRetryLayerResult",
             ),
             RpcMethodDescriptor::typed(
                 "mob/spawn_helper",
@@ -1466,6 +1430,11 @@ mod tests {
                 "mob/flow_status",
                 Some("MobFlowStatusParams"),
                 Some("MobFlowStatusResult"),
+            ),
+            (
+                "mob/run_result",
+                Some("MobRunResultParams"),
+                Some("MobRunResult"),
             ),
             (
                 "mob/flow_cancel",

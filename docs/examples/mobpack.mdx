@@ -45,23 +45,24 @@ Check structural integrity, schema conformance, and signature validity.
 rkat mob validate ./dist/release-triage.mobpack
 ```
 
-## Deploy a pack
+## Run a pack
 
-Run a `.mobpack` as a live mob with a prompt. The trust policy controls whether unsigned or unknown-signer packs are accepted.
+Invoke a `.mobpack` as a typed callable run. The input schema is validated
+before the flow starts; `--prompt` is sugar for `--param prompt=<text>`.
 
 ```bash
-rkat mob deploy ./dist/release-triage.mobpack \
-  "triage latest regressions" \
+rkat mob run ./dist/release-triage.mobpack \
+  --prompt "triage latest regressions" \
   --trust-policy strict \
-  --model claude-sonnet-4-6
+  --json
 ```
 
-Deploy to an RPC service instead of one-shot CLI:
+Use `--detach` to get a run id, then inspect or attach to the same run resource:
 
 ```bash
-rkat mob deploy ./dist/release-triage.mobpack \
-  "boot triage service" \
-  --surface rpc
+rkat mob run release-triage --flow main --param severity='"high"' --detach
+rkat mob status release-triage <RUN_ID> --json
+rkat mob attach release-triage <RUN_ID> --json
 ```
 
 ## Trust policies

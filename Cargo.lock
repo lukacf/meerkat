@@ -4814,6 +4814,7 @@ dependencies = [
  "dirs",
  "futures",
  "humantime",
+ "jsonschema",
  "meerkat",
  "meerkat-anthropic",
  "meerkat-auth-core",

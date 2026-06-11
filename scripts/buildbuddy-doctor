@@ -271,6 +271,7 @@ fi
 if grep -Fq -- '--repo_contents_cache=' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'lane_output_base_has_stale_external_links' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'fetch_corruption_signature' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'error replanting symlinks in repo' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'clean --expunge' scripts/buildbuddy-bazel-poc; then
   pass "BuildBuddy launcher disables the shared Bazel 9 repo contents cache and auto-repairs corrupt external-repo state"
 else
@@ -590,6 +591,7 @@ if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &
   grep -Fq 'name = "machine_verify_all_tlc_test"' xtask/BUILD.bazel &&
   grep -Fq 'machine-verify --all --skip-cargo-tests' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '--skip-tlc-composition adaptive_mob_bundle' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin' xtask/BUILD.bazel &&

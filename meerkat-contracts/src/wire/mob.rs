@@ -1797,6 +1797,40 @@ pub struct MobFlowStatusResult {
     pub run: Option<WireMobRun>,
 }
 
+/// Request payload for `mob/run_result`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRunResultParams {
+    pub mob_id: String,
+    pub run_id: String,
+}
+
+/// Typed output envelope for a completed or in-flight mob flow run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobRunResultEnvelope {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub status: WireMobRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, Value>,
+}
+
+/// Response payload for `mob/run_result`.
+///
+/// `run` is `None` when the requested run id has no persisted run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRunResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<WireMobRunResultEnvelope>,
+}
+
 /// Request payload for `mob/flow_cancel`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1811,185 +1845,6 @@ pub struct MobFlowCancelParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobFlowCancelResult {
     pub canceled: bool,
-}
-
-/// Request payload for `mob/adaptive_start`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobAdaptiveStartParams {
-    pub mob_id: String,
-    pub objective: String,
-}
-
-/// Lifecycle phase of an AdaptiveRun on the wire.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireAdaptiveRunPhase {
-    Active,
-    CleanupRequired,
-    EvidenceMissing,
-    Finished,
-    Failed,
-    Canceled,
-}
-
-/// Terminal reason of an AdaptiveRun on the wire.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireAdaptiveStopReason {
-    FinishDecision,
-    DepthLimit,
-    PlanLimit,
-    RepairLimit,
-    FailureLimit,
-    BudgetExhausted,
-    DeadlineExceeded,
-    HostCancel,
-}
-
-/// Lifecycle phase of a layer inside an AdaptiveRun.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireAdaptiveLayerPhase {
-    Validating,
-    Admitted,
-    Provisioning,
-    Running,
-    Collecting,
-    Completed,
-    SetupFailed,
-    RunFailed,
-    ResultInvalid,
-    Canceled,
-}
-
-/// Public projection of one AdaptiveRun layer ledger entry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireAdaptiveLayer {
-    pub layer_id: String,
-    pub phase: WireAdaptiveLayerPhase,
-    pub attempt: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_mob_id: Option<String>,
-}
-
-/// Public projection of AdaptiveRun kernel state and host result metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireAdaptiveRun {
-    pub adaptive_run_id: String,
-    pub mob_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<WireAdaptiveRunPhase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<WireAdaptiveStopReason>,
-    pub depth: u64,
-    pub total_decisions: u64,
-    pub repair_attempts: u64,
-    pub layer_failures: u64,
-    pub total_spawned_members: u64,
-    pub active_members: u64,
-    pub retained_layer_mobs: u64,
-    pub aggregate_token_reserved: u64,
-    pub aggregate_token_actual: u64,
-    pub aggregate_tool_call_reserved: u64,
-    pub aggregate_tool_call_actual: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub missing_body_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_result_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layers: Vec<WireAdaptiveLayer>,
-}
-
-/// Response payload for `mob/adaptive_start`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveStartResult {
-    pub run: WireAdaptiveRun,
-}
-
-/// Request payload for adaptive read/cancel methods.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobAdaptiveRunParams {
-    pub mob_id: String,
-    pub adaptive_run_id: String,
-}
-
-/// Response payload for `mob/adaptive_status`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveStatusResult {
-    pub run: WireAdaptiveRun,
-}
-
-/// Response payload for `mob/adaptive_layers`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveLayersResult {
-    pub mob_id: String,
-    pub adaptive_run_id: String,
-    pub layers: Vec<WireAdaptiveLayer>,
-}
-
-/// Response payload for `mob/adaptive_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveEventsResult {
-    pub mob_id: String,
-    pub adaptive_run_id: String,
-    pub events: Vec<Value>,
-}
-
-/// Response payload for `mob/adaptive_result`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveResultResult {
-    pub mob_id: String,
-    pub adaptive_run_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-}
-
-/// Response payload for `mob/adaptive_cancel`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveCancelResult {
-    pub canceled: bool,
-}
-
-/// Request payload for `mob/adaptive_retry_layer`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobAdaptiveRetryLayerParams {
-    pub mob_id: String,
-    pub adaptive_run_id: String,
-    pub layer_id: String,
-}
-
-/// Response payload for `mob/adaptive_retry_layer`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobAdaptiveRetryLayerResult {
-    pub retry_started: bool,
 }
 
 /// Request payload for `mob/spawn_helper`.

@@ -53,6 +53,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
+    "WireMobRunResultEnvelope",
     "WireMobRunStatus",
     "WirePeerConnectivity",
     "WirePeerConnectivitySnapshot",
@@ -88,23 +89,10 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobFlowRunResult",
     "MobFlowStatusParams",
     "MobFlowStatusResult",
+    "MobRunResultParams",
+    "MobRunResult",
     "MobFlowCancelParams",
     "MobFlowCancelResult",
-    "MobAdaptiveStartParams",
-    "MobAdaptiveStartResult",
-    "MobAdaptiveRunParams",
-    "MobAdaptiveStatusResult",
-    "MobAdaptiveLayersResult",
-    "MobAdaptiveEventsResult",
-    "MobAdaptiveResultResult",
-    "MobAdaptiveCancelResult",
-    "MobAdaptiveRetryLayerParams",
-    "MobAdaptiveRetryLayerResult",
-    "WireAdaptiveRun",
-    "WireAdaptiveRunPhase",
-    "WireAdaptiveStopReason",
-    "WireAdaptiveLayer",
-    "WireAdaptiveLayerPhase",
     "MobSpawnHelperParams",
     "MobForkHelperParams",
     "MobHelperResult",
@@ -4347,6 +4335,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("MobEventsResult")
     append_interface("MobMemberSendResult")
     append_interface("MobFlowStatusResult")
+    append_interface("MobRunResult")
     append_interface("MobHelperResult")
     append_interface("WireResolvedModelCapabilities")
     append_interface("MobMemberStatusResult")

@@ -12,20 +12,17 @@ use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
 use meerkat_contracts::{
-    ErrorCode, MobAdaptiveCancelResult, MobAdaptiveEventsResult, MobAdaptiveLayersResult,
-    MobAdaptiveResultResult, MobAdaptiveRetryLayerParams, MobAdaptiveRetryLayerResult,
-    MobAdaptiveRunParams, MobAdaptiveStartParams, MobAdaptiveStartResult, MobAdaptiveStatusResult,
-    MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult, MobCreateParams,
-    MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult, MobFlowRunResult,
-    MobFlowsResult, MobForceCancelResult, MobHelperResult, MobLifecycleResult, MobListResult,
-    MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult, MobRespawnReceipt,
-    MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobSnapshotResult,
-    MobSpawnManyResult, MobSpawnManyResultEntry, MobSpawnResult, MobStatusResult, MobUnwireResult,
-    MobWaitMembersResult, MobWireMembersBatchEdge, MobWireMembersBatchParams,
-    MobWireMembersBatchResult, MobWireResult, SupervisorRotationIncompleteDataWire,
-    SupervisorRotationIncompleteDetailsWire, SupervisorRotationReportWire,
-    SupervisorRotationRetryAuthority, SupervisorRotationRetryScope, WireMobBackendKind,
-    WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
+    ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
+    MobCreateParams, MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult,
+    MobFlowRunResult, MobFlowsResult, MobForceCancelResult, MobHelperResult, MobLifecycleResult,
+    MobListResult, MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult,
+    MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunResult,
+    MobRunResultParams, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
+    MobSpawnResult, MobStatusResult, MobUnwireResult, MobWaitMembersResult,
+    MobWireMembersBatchEdge, MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
+    SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
+    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
+    WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
@@ -1240,6 +1237,32 @@ pub async fn handle_flow_status(
     }
 }
 
+pub async fn handle_run_result(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobRunResultParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let run_id = match RunId::from_str(&params.run_id) {
+        Ok(run_id) => run_id,
+        Err(err) => return invalid_params(id, format!("Invalid run_id: {err}")),
+    };
+    match state.mob_flow_status(&mob_id, run_id).await {
+        Ok(run) => match meerkat_mob::MobRun::public_run_result_value(run.as_ref()) {
+            Ok(run) => RpcResponse::success(id, MobRunResult { run }),
+            Err(err) => invalid_params(id, err.to_string()),
+        },
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MobFlowCancelParams {
     pub mob_id: String,
@@ -1267,164 +1290,6 @@ pub async fn handle_flow_cancel(
         Ok(()) => RpcResponse::success(id, MobFlowCancelResult { canceled: true }),
         Err(err) => invalid_params(id, err.to_string()),
     }
-}
-
-pub async fn handle_adaptive_start(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobAdaptiveStartParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state.mob_run_adaptive(&mob_id, params.objective).await {
-        Ok(run) => RpcResponse::success(id, MobAdaptiveStartResult { run }),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_adaptive_status(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobAdaptiveRunParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_adaptive_projection(&mob_id, &params.adaptive_run_id)
-        .await
-    {
-        Ok(run) => RpcResponse::success(id, MobAdaptiveStatusResult { run }),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_adaptive_layers(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobAdaptiveRunParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_adaptive_projection(&mob_id, &params.adaptive_run_id)
-        .await
-    {
-        Ok(run) => RpcResponse::success(
-            id,
-            MobAdaptiveLayersResult {
-                mob_id: run.mob_id,
-                adaptive_run_id: run.adaptive_run_id,
-                layers: run.layers,
-            },
-        ),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_adaptive_events(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobAdaptiveRunParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_adaptive_events(&mob_id, &params.adaptive_run_id)
-        .await
-    {
-        Ok(events) => RpcResponse::success(
-            id,
-            MobAdaptiveEventsResult {
-                mob_id: mob_id.to_string(),
-                adaptive_run_id: params.adaptive_run_id,
-                events,
-            },
-        ),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_adaptive_result(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobAdaptiveRunParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_adaptive_projection(&mob_id, &params.adaptive_run_id)
-        .await
-    {
-        Ok(run) => RpcResponse::success(
-            id,
-            MobAdaptiveResultResult {
-                mob_id: run.mob_id,
-                adaptive_run_id: run.adaptive_run_id,
-                result_digest: run.final_result_digest,
-                result: run.final_result,
-            },
-        ),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_adaptive_cancel(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let _params: MobAdaptiveRunParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    RpcResponse::success(id, MobAdaptiveCancelResult { canceled: false })
-}
-
-pub async fn handle_adaptive_retry_layer(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let _params: MobAdaptiveRetryLayerParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    RpcResponse::success(
-        id,
-        MobAdaptiveRetryLayerResult {
-            retry_started: false,
-        },
-    )
 }
 
 // ---------------------------------------------------------------------------

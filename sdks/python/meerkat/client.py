@@ -61,17 +61,9 @@ from .generated.types import (
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
-    MobAdaptiveCancelResult,
-    MobAdaptiveEventsResult,
-    MobAdaptiveLayersResult,
-    MobAdaptiveResultResult,
-    MobAdaptiveRetryLayerParams,
-    MobAdaptiveRetryLayerResult,
-    MobAdaptiveRunParams,
-    MobAdaptiveStartParams,
-    MobAdaptiveStartResult,
-    MobAdaptiveStatusResult,
     MobDefinitionInput,
+    MobRunResult,
+    MobRunResultParams,
     MobSpawnManyFailedResult,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
@@ -2531,80 +2523,15 @@ class MeerkatClient:
         result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
         return result.get("run")
 
+    async def get_mob_run_result(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
+        params = MobRunResultParams(mob_id=mob_id, run_id=run_id)
+        result: MobRunResult | dict[str, Any] = await self._request("mob/run_result", _wire_params(params))
+        if isinstance(result, dict):
+            return result.get("run")
+        return result.run
+
     async def cancel_mob_flow(self, mob_id: str, run_id: str) -> None:
         await self._request("mob/flow_cancel", {"mob_id": mob_id, "run_id": run_id})
-
-    async def start_mob_adaptive_run(self, mob_id: str, objective: str) -> dict[str, Any]:
-        params = MobAdaptiveStartParams(mob_id=mob_id, objective=objective)
-        result = cast(
-            MobAdaptiveStartResult,
-            await self._request("mob/adaptive_start", asdict(params)),
-        )
-        return result.get("run", {})
-
-    async def get_mob_adaptive_status(self, mob_id: str, adaptive_run_id: str) -> dict[str, Any]:
-        params = MobAdaptiveRunParams(mob_id=mob_id, adaptive_run_id=adaptive_run_id)
-        result = cast(
-            MobAdaptiveStatusResult,
-            await self._request("mob/adaptive_status", asdict(params)),
-        )
-        return result.get("run", {})
-
-    async def list_mob_adaptive_layers(
-        self,
-        mob_id: str,
-        adaptive_run_id: str,
-    ) -> list[dict[str, Any]]:
-        params = MobAdaptiveRunParams(mob_id=mob_id, adaptive_run_id=adaptive_run_id)
-        result = cast(
-            MobAdaptiveLayersResult,
-            await self._request("mob/adaptive_layers", asdict(params)),
-        )
-        return result.get("layers", [])
-
-    async def list_mob_adaptive_events(
-        self,
-        mob_id: str,
-        adaptive_run_id: str,
-    ) -> list[dict[str, Any]]:
-        params = MobAdaptiveRunParams(mob_id=mob_id, adaptive_run_id=adaptive_run_id)
-        result = cast(
-            MobAdaptiveEventsResult,
-            await self._request("mob/adaptive_events", asdict(params)),
-        )
-        return result.get("events", [])
-
-    async def get_mob_adaptive_result(self, mob_id: str, adaptive_run_id: str) -> dict[str, Any]:
-        params = MobAdaptiveRunParams(mob_id=mob_id, adaptive_run_id=adaptive_run_id)
-        return cast(
-            MobAdaptiveResultResult,
-            await self._request("mob/adaptive_result", asdict(params)),
-        )
-
-    async def cancel_mob_adaptive_run(self, mob_id: str, adaptive_run_id: str) -> bool:
-        params = MobAdaptiveRunParams(mob_id=mob_id, adaptive_run_id=adaptive_run_id)
-        result = cast(
-            MobAdaptiveCancelResult,
-            await self._request("mob/adaptive_cancel", asdict(params)),
-        )
-        return bool(result.get("canceled", False))
-
-    async def retry_mob_adaptive_layer(
-        self,
-        mob_id: str,
-        adaptive_run_id: str,
-        layer_id: str,
-    ) -> bool:
-        params = MobAdaptiveRetryLayerParams(
-            mob_id=mob_id,
-            adaptive_run_id=adaptive_run_id,
-            layer_id=layer_id,
-        )
-        result = cast(
-            MobAdaptiveRetryLayerResult,
-            await self._request("mob/adaptive_retry_layer", asdict(params)),
-        )
-        return bool(result.get("retry_started", False))
 
     async def subscribe_mob_events(self, mob_id: str) -> EventSubscription:
         return await self._open_event_subscription(

@@ -204,6 +204,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s86_mob_provider_image_relay_readout, 86);
             scenario(e2e_smoke_s87_rpc_transcript_rewrite_revision_graph, 87);
             scenario(e2e_smoke_s88_adaptive_mobpack_finish_decision_live, 88);
+            scenario(e2e_smoke_s89_cli_mobpack_callable_flow_run_live, 89);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -2804,6 +2805,25 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 package: "rkat",
                 test_target: "cli_mobpack_live_smoke",
                 test_name: "e2e_smoke_s88_adaptive_mobpack",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        89 => Some(&Spec {
+            id: Some(89),
+            lane: Lane::Smoke,
+            title: "CLI mobpack callable flow run",
+            timeout_secs: 1200,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "rkat",
+                test_target: "cli_mobpack_live_smoke",
+                test_name: "e2e_smoke_mobpack_callable_flow_run_live",
                 features: &["integration-real-tests"],
                 all_features: false,
             },

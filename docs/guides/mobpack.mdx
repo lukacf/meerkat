@@ -4,7 +4,8 @@ description: "Portable multi-agent deployment with signed .mobpack artifacts and
 icon: "box"
 ---
 
-`mobpack` is the portable artifact for mobs. You build it once, then deploy consistently in CLI, service, or browser workflows.
+`mobpack` is the portable artifact for mobs. You build it once, then invoke it
+as a typed callable run, install/deploy it for reuse, or build a browser bundle.
 
 ## What this guide is for
 
@@ -12,14 +13,14 @@ Use this guide when you want to:
 
 - package a mob into a portable artifact
 - sign and validate that artifact
-- deploy it consistently across CLI, service, and browser targets
+- invoke it consistently across CLI, service, and browser targets
 
 ## What you get
 
 - Single-file artifact: `.mobpack`
 - Optional signing and trust verification
 - Deterministic `inspect` and `validate` boundaries
-- Direct deploy (`mob deploy`) and browser bundle target (`mob web build`)
+- Typed callable invocation (`mob run`) and browser bundle target (`mob web build`)
 
 ## Directory to artifact
 
@@ -43,10 +44,10 @@ Sign at pack time:
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key --signer-id release@example.com
 ```
 
-Deploy with strict trust:
+Run with strict trust:
 
 ```bash
-rkat mob deploy ./dist/release-triage.mobpack "triage release regressions" --trust-policy strict
+rkat mob run ./dist/release-triage.mobpack --prompt "triage release regressions" --trust-policy strict
 ```
 
 Trust policy resolution:
@@ -63,18 +64,19 @@ Strict mode rejects:
 - invalid signatures
 - signer key mismatches
 
-## Deploy modes
+## Run Modes
 
 One-shot CLI run:
 
 ```bash
-rkat mob deploy ./dist/release-triage.mobpack "triage latest incidents"
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest incidents"
 ```
 
-RPC service deployment:
+Detached reusable run:
 
 ```bash
-rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
+rkat mob run release-triage --flow main --param severity='"high"' --detach
+rkat mob attach release-triage <RUN_ID>
 ```
 
 ## Browser target: `mob web build`

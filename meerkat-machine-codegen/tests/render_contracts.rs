@@ -14,8 +14,9 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
-    canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
-    meerkat_mob_seam_composition, schedule_runtime_bundle_composition,
+    adaptive_mob_bundle_composition, canonical_composition_coverage_manifests,
+    canonical_machine_coverage_manifests, meerkat_mob_seam_composition,
+    schedule_runtime_bundle_composition,
 };
 use meerkat_machine_schema::identity::{EnumVariantId, RustTypeAtom};
 use meerkat_machine_schema::{
@@ -209,6 +210,37 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
         assert!(
             rendered.contains(helper),
             "composition model must define namespaced MobMachine native helper `{helper}`"
+        );
+    }
+}
+
+#[test]
+fn adaptive_bundle_scopes_obligations_by_producer_instance() {
+    let rendered = render_composition_semantic_model(&adaptive_mob_bundle_composition())
+        .expect("render adaptive composition semantic model");
+
+    for symbol in [
+        "obligation_control_mob_mob_destroying_session_ingress",
+        "obligation_layer_mob_mob_destroying_session_ingress",
+        "NoOpenObligationsOnTerminal_control_mob_mob_destroying_session_ingress ==",
+        "NoOpenObligationsOnTerminal_layer_mob_mob_destroying_session_ingress ==",
+        "OwnerFeedback_control_mob_mob_destroying_session_ingress ==",
+        "OwnerFeedback_layer_mob_mob_destroying_session_ingress ==",
+    ] {
+        assert!(
+            rendered.contains(symbol),
+            "adaptive composition model must scope obligation symbol `{symbol}` by producer instance"
+        );
+    }
+
+    for stale_symbol in [
+        "obligation_mob_destroying_session_ingress",
+        "NoOpenObligationsOnTerminal_mob_destroying_session_ingress ==",
+        "OwnerFeedback_mob_destroying_session_ingress ==",
+    ] {
+        assert!(
+            !rendered.contains(stale_symbol),
+            "adaptive composition model must not render unscoped obligation symbol `{stale_symbol}`"
         );
     }
 }

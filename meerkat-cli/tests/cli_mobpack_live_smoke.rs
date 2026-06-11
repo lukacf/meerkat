@@ -160,17 +160,13 @@ fn output_ok_or_err(output: std::process::Output, args: &[&str]) -> Result<Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn adaptive_result_json(stdout: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let line = stdout
-        .lines()
-        .find(|line| line.starts_with("adaptive\t"))
-        .ok_or("missing adaptive output line")?;
-    for field in line.split('\t').skip(1) {
-        if let Some(json) = field.strip_prefix("result_json=") {
-            return Ok(serde_json::from_str(json)?);
-        }
-    }
-    Err("adaptive output line missing result_json field".into())
+fn leading_json(stdout: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let json_text = stdout
+        .split("\nwarning\t")
+        .next()
+        .ok_or("missing leading JSON output")?
+        .trim();
+    Ok(serde_json::from_str(json_text)?)
 }
 
 fn signer_from_pack(pack_bytes: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
@@ -294,6 +290,50 @@ async fn write_flow_probe_mobpack_fixture(
           "role":"lead",
           "message":"Synthesize the prior outputs and include the literal token FLOW_MATRIX_23 in your answer.",
           "depends_on":["review"],
+          "timeout_ms":120000
+        }}
+      }}
+    }}
+  }},
+  "skills":{{}}
+}}"#,
+        model = smoke_model()
+    );
+    tokio::fs::write(mob_dir.join("definition.json"), definition).await?;
+    Ok(mob_dir)
+}
+
+async fn write_callable_flow_mobpack_fixture(
+    project_dir: &Path,
+    mob_id: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mob_dir = project_dir.join(format!("{mob_id}-fixture"));
+    tokio::fs::create_dir_all(&mob_dir).await?;
+    tokio::fs::write(
+        mob_dir.join("manifest.toml"),
+        format!("[mobpack]\nname = \"{mob_id}\"\nversion = \"1.0.0\"\n"),
+    )
+    .await?;
+
+    let definition = format!(
+        r#"{{
+  "id":"{mob_id}",
+  "profiles":{{
+    "worker":{{
+      "model":"{model}",
+      "tools":{{"comms":true}},
+      "peer_description":"Callable smoke worker"
+    }}
+  }},
+  "flows":{{
+    "main":{{
+      "description":"Single-step callable smoke",
+      "steps":{{
+        "answer":{{
+          "role":"worker",
+          "message":"Reply in one sentence and include the literal token CALLABLE_FLOW_OK exactly once.",
+          "output_format":"text",
+          "collection_policy":{{"type":"any"}},
           "timeout_ms":120000
         }}
       }}
@@ -712,6 +752,67 @@ async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_mobpack_callable_flow_run_live() -> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let api_key = anthropic_api_key().ok_or("missing API key")?;
+    let tmp = TempDir::new()?;
+    let project_dir = tmp.path().join("project");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    let mob_dir = write_callable_flow_mobpack_fixture(&project_dir, "callable-flow-smoke").await?;
+    let pack = project_dir.join("callable-flow.mobpack");
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+
+    let pack_args = [
+        "mob".to_string(),
+        "pack".to_string(),
+        mob_dir.display().to_string(),
+        "-o".to_string(),
+        pack.display().to_string(),
+    ];
+    let pack_refs: Vec<&str> = pack_args.iter().map(String::as_str).collect();
+    let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, Some(&api_key)).await?;
+    let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
+
+    let run_args = [
+        "mob".to_string(),
+        "run".to_string(),
+        pack.display().to_string(),
+        "--flow".to_string(),
+        "main".to_string(),
+        "--prompt".to_string(),
+        "Produce the required smoke tokens.".to_string(),
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
+        "--json".to_string(),
+    ];
+    let run_refs: Vec<&str> = run_args.iter().map(String::as_str).collect();
+    let run_out = run_rkat(&rkat, &project_dir, &run_refs, Some(&api_key)).await?;
+    let run_stderr = String::from_utf8_lossy(&run_out.stderr).to_string();
+    let run_stdout = output_ok_or_err(run_out, &run_refs).map_err(std::io::Error::other)?;
+    let envelope = leading_json(&run_stdout)?;
+    assert_eq!(envelope["mob_id"], "callable-flow-smoke");
+    assert_eq!(envelope["flow_id"], "main");
+    assert_eq!(
+        envelope["status"], "completed",
+        "callable flow smoke should complete; stdout:\n{run_stdout}\nstderr:\n{run_stderr}"
+    );
+    assert!(
+        envelope["result"].to_string().contains("CALLABLE_FLOW_OK"),
+        "typed run envelope should include callable smoke token: {run_stdout}"
+    );
+    assert!(
+        run_stdout.contains("warning\tunsigned pack accepted in permissive mode"),
+        "permissive unsigned warning expected: {run_stdout}"
+    );
+
+    Ok(())
+}
+
 async fn run_adaptive_finish_smoke(
     prompt: &str,
     expected_nonce: &str,
@@ -740,40 +841,56 @@ async fn run_adaptive_finish_smoke(
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, Some(&api_key)).await?;
     let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
 
-    let deploy_args = [
+    let run_args = [
         "mob".to_string(),
-        "deploy".to_string(),
+        "run".to_string(),
         pack.display().to_string(),
+        "--prompt".to_string(),
         prompt.to_string(),
         "--trust-policy".to_string(),
         "permissive".to_string(),
+        "--json".to_string(),
     ];
-    let deploy_refs: Vec<&str> = deploy_args.iter().map(String::as_str).collect();
-    let deploy_out = run_rkat(&rkat, &project_dir, &deploy_refs, Some(&api_key)).await?;
-    let deploy_stdout =
-        output_ok_or_err(deploy_out, &deploy_refs).map_err(std::io::Error::other)?;
+    let run_refs: Vec<&str> = run_args.iter().map(String::as_str).collect();
+    let run_out = run_rkat(&rkat, &project_dir, &run_refs, Some(&api_key)).await?;
+    let run_stdout = output_ok_or_err(run_out, &run_refs).map_err(std::io::Error::other)?;
+    let envelope = leading_json(&run_stdout)?;
     assert!(
-        deploy_stdout.contains("deployed\tmob=adaptive-smoke\tsurface=cli"),
-        "adaptive deploy output missing deployment marker: {deploy_stdout}"
+        envelope["run_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "adaptive run output missing generic run_id: {run_stdout}"
+    );
+    assert_eq!(envelope["mob_id"], "adaptive-smoke");
+    assert_eq!(envelope["status"], "completed");
+    assert!(
+        envelope["result_digest"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:")),
+        "run output missing result digest: {run_stdout}"
     );
     assert!(
-        deploy_stdout.contains("adaptive\tresult_digest=sha256:"),
-        "adaptive deploy output missing result digest: {deploy_stdout}"
+        !run_stdout
+            .lines()
+            .any(|line| line.starts_with("adaptive\t")),
+        "run output leaked adaptive surface marker: {run_stdout}"
     );
-    let result = adaptive_result_json(&deploy_stdout)?;
+    let result = envelope
+        .get("result")
+        .ok_or("run output missing result envelope field")?;
     assert_eq!(
         result.get("nonce").and_then(Value::as_str),
         Some(expected_nonce),
-        "adaptive result did not preserve prompt nonce: {deploy_stdout}"
+        "adaptive result did not preserve prompt nonce: {run_stdout}"
     );
     assert_eq!(
         result.get("summary").and_then(Value::as_str),
         Some(expected_summary),
-        "adaptive result did not preserve prompt summary: {deploy_stdout}"
+        "adaptive result did not preserve prompt summary: {run_stdout}"
     );
     assert!(
-        deploy_stdout.contains("warning\tunsigned pack accepted in permissive mode"),
-        "permissive unsigned warning expected: {deploy_stdout}"
+        run_stdout.contains("warning\tunsigned pack accepted in permissive mode"),
+        "permissive unsigned warning expected: {run_stdout}"
     );
 
     Ok(())

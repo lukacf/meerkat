@@ -394,29 +394,11 @@ class Mob:
     async def flow_status(self, run_id: str) -> dict[str, Any] | None:
         return await self._client.get_mob_flow_status(self.id, run_id)
 
+    async def run_result(self, run_id: str) -> dict[str, Any] | None:
+        return await self._client.get_mob_run_result(self.id, run_id)
+
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
-
-    async def start_adaptive_run(self, objective: str) -> dict[str, Any]:
-        return await self._client.start_mob_adaptive_run(self.id, objective)
-
-    async def adaptive_status(self, adaptive_run_id: str) -> dict[str, Any]:
-        return await self._client.get_mob_adaptive_status(self.id, adaptive_run_id)
-
-    async def adaptive_layers(self, adaptive_run_id: str) -> list[dict[str, Any]]:
-        return await self._client.list_mob_adaptive_layers(self.id, adaptive_run_id)
-
-    async def adaptive_events(self, adaptive_run_id: str) -> list[dict[str, Any]]:
-        return await self._client.list_mob_adaptive_events(self.id, adaptive_run_id)
-
-    async def adaptive_result(self, adaptive_run_id: str) -> dict[str, Any]:
-        return await self._client.get_mob_adaptive_result(self.id, adaptive_run_id)
-
-    async def cancel_adaptive_run(self, adaptive_run_id: str) -> bool:
-        return await self._client.cancel_mob_adaptive_run(self.id, adaptive_run_id)
-
-    async def retry_adaptive_layer(self, adaptive_run_id: str, layer_id: str) -> bool:
-        return await self._client.retry_mob_adaptive_layer(self.id, adaptive_run_id, layer_id)
 
     async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
         """Subscribe to events for a single mob member."""

@@ -7288,6 +7288,10 @@ impl MobActor {
                         .await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::PreviewRunFlowAdmission { reply_tx } => {
+                    let result = self.preview_run_flow_command_admission(&RunId::new());
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::CancelFlow { run_id, reply_tx } => {
                     let result = self.handle_cancel_flow(run_id).await;
                     let _ = reply_tx.send(result);
@@ -9023,27 +9027,26 @@ impl MobActor {
                 PendingProvision::new(member_ref, agent_identity.clone(), self.provisioner.clone());
             // Go straight to finalization — no async provisioning task needed.
             let fence = self.issue_fence_token();
-            let result = self
-                .finalize_spawn_from_pending(
-                    &profile_name,
-                    &agent_identity,
-                    crate::ids::Generation::INITIAL,
-                    fence,
-                    selected_runtime_mode,
-                    prompt,
-                    initial_turn_prompt,
-                    resolved_labels,
-                    provision,
-                    operation_id,
-                    spawn_owner_bridge_session_id,
-                    auto_wire_parent,
-                    None,
-                    effective_profile_override,
-                    authorized_profile_material,
-                    continuity_intent,
-                )
-                .await
-                .map(|outcome| outcome.receipt);
+            let result = Box::pin(self.finalize_spawn_from_pending(
+                &profile_name,
+                &agent_identity,
+                crate::ids::Generation::INITIAL,
+                fence,
+                selected_runtime_mode,
+                prompt,
+                initial_turn_prompt,
+                resolved_labels,
+                provision,
+                operation_id,
+                spawn_owner_bridge_session_id,
+                auto_wire_parent,
+                None,
+                effective_profile_override,
+                authorized_profile_material,
+                continuity_intent,
+            ))
+            .await
+            .map(|outcome| outcome.receipt);
             let _ = reply_tx.send(result);
             return;
         }
@@ -9362,7 +9365,7 @@ impl MobActor {
                             agent_identity = %agent_identity,
                             "MobActor::handle_spawn_provisioned_batch calling finalize_spawn_from_pending"
                         );
-                        self.finalize_spawn_from_pending(
+                        Box::pin(self.finalize_spawn_from_pending(
                             &profile_name,
                             &agent_identity,
                             crate::ids::Generation::INITIAL,
@@ -9379,7 +9382,7 @@ impl MobActor {
                             effective_profile_override,
                             authorized_profile_material,
                             continuity_intent,
-                        )
+                        ))
                         .await
                         .map(|outcome| outcome.receipt)
                     }
@@ -9657,7 +9660,7 @@ impl MobActor {
                 return Err(error);
             }
             let fence = self.issue_fence_token();
-            self.finalize_spawn_from_pending(
+            Box::pin(self.finalize_spawn_from_pending(
                 &profile_name,
                 agent_identity,
                 crate::ids::Generation::INITIAL,
@@ -9674,7 +9677,7 @@ impl MobActor {
                 override_profile, // policy spawns usually use definition profiles; customizers may supply an override
                 authorized_profile_material,
                 continuity_intent,
-            )
+            ))
             .await
             .map(|outcome| outcome.receipt)
         })
@@ -9807,7 +9810,13 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending resolving supervisor comms"
         );
-        let supervisor_private_trust_install = if let (Some(session_id), Some(comms)) = (
+        let supervisor_private_trust_install = if agent_identity.as_str().starts_with("__flow_") {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                "MobActor::finalize_spawn_from_pending skipped supervisor private trust for run-scoped flow member"
+            );
+            None
+        } else if let (Some(session_id), Some(comms)) = (
             provision.member_ref().bridge_session_id().cloned(),
             self.provisioner_comms(provision.member_ref()).await,
         ) {
@@ -9816,9 +9825,11 @@ impl MobActor {
                 session_id = %session_id,
                 "MobActor::finalize_spawn_from_pending installing supervisor private trust"
             );
-            match self
-                .install_supervisor_private_trust_for_session(&session_id, &comms, None)
-                .await
+            match Box::pin(async {
+                self.install_supervisor_private_trust_for_session(&session_id, &comms, None)
+                    .await
+            })
+            .await
             {
                 Ok(install) => {
                     tracing::debug!(
@@ -9858,8 +9869,12 @@ impl MobActor {
                 if let Some((session_id, comms, install)) =
                     supervisor_private_trust_install.as_ref()
                 {
-                    self.cleanup_supervisor_private_trust_for_session(session_id, comms, install)
-                        .await;
+                    Box::pin(
+                        self.cleanup_supervisor_private_trust_for_session(
+                            session_id, comms, install,
+                        ),
+                    )
+                    .await;
                 }
                 if let Err(rollback_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
@@ -9903,8 +9918,10 @@ impl MobActor {
                     .await;
             }
             if let Some((session_id, comms, install)) = supervisor_private_trust_install.as_ref() {
-                self.cleanup_supervisor_private_trust_for_session(session_id, comms, install)
-                    .await;
+                Box::pin(
+                    self.cleanup_supervisor_private_trust_for_session(session_id, comms, install),
+                )
+                .await;
             }
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
@@ -10060,9 +10077,11 @@ impl MobActor {
         // compensating rollback in `rollback_failed_spawn` expects both
         // `wired_spawn_targets` and `planned_wiring_targets` populated so
         // partial-wire failures can unwind.
-        let mut planned_wiring_targets = self
-            .spawn_wiring_targets(profile_name, agent_identity)
-            .await;
+        let mut planned_wiring_targets = if agent_identity.as_str().starts_with("__flow_") {
+            Vec::new()
+        } else {
+            Box::pin(self.spawn_wiring_targets(profile_name, agent_identity)).await
+        };
         if auto_wire_parent
             && let Some(parent_target) = self
                 .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), agent_identity)
@@ -10183,7 +10202,9 @@ impl MobActor {
             }
         }
 
-        if runtime_mode == crate::MobRuntimeMode::TurnDriven {
+        if runtime_mode == crate::MobRuntimeMode::TurnDriven
+            && !agent_identity.as_str().starts_with("__flow_")
+        {
             // Turn-driven mob members still need a persistent comms drain:
             // async peer requests/responses arrive between user turns (think
             // realtime audio operators calling `send_request` and waiting for
@@ -14230,8 +14251,7 @@ impl MobActor {
                 agent_identity = %agent_identity,
                 "MobActor::handle_respawn finalizing replacement spawn"
             );
-            let finalized = self
-                .finalize_spawn_from_pending(
+            let finalized = Box::pin(self.finalize_spawn_from_pending(
                     &snapshot.profile_name,
                     &agent_identity,
                     replacement_generation,
@@ -14250,7 +14270,7 @@ impl MobActor {
                     replacement_profile_override,
                     replacement_authorized_profile_material,
                     replacement_continuity_intent,
-                )
+                ))
                 .await
                 .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),

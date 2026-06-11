@@ -5123,12 +5123,28 @@ impl<'a> CompositionTlaCompiler<'a> {
             .collect()
     }
 
-    /// Returns TLA+ variable names for obligation tracking — one per handoff protocol.
+    fn obligation_symbol_suffix(
+        &self,
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    ) -> String {
+        format!(
+            "{}_{}",
+            tla_ident(&protocol.producer_instance),
+            tla_ident(&protocol.name)
+        )
+    }
+
+    fn obligation_var(&self, protocol: &meerkat_machine_schema::EffectHandoffProtocol) -> String {
+        format!("obligation_{}", self.obligation_symbol_suffix(protocol))
+    }
+
+    /// Returns TLA+ variable names for obligation tracking — one per
+    /// concrete producer/protocol pair.
     fn obligation_vars(&self) -> Vec<String> {
         self.schema
             .handoff_protocols
             .iter()
-            .map(|protocol| format!("obligation_{}", tla_ident(&protocol.name)))
+            .map(|protocol| self.obligation_var(protocol))
             .collect()
     }
 
@@ -5245,7 +5261,8 @@ impl<'a> CompositionTlaCompiler<'a> {
         invariant_names: &mut Vec<String>,
     ) -> std::result::Result<(), String> {
         for protocol in &self.schema.handoff_protocols {
-            let var = format!("obligation_{}", tla_ident(&protocol.name));
+            let suffix = self.obligation_symbol_suffix(protocol);
+            let var = self.obligation_var(protocol);
             let phase_var = self.phase_var(&protocol.producer_instance);
 
             // Find terminal phases for the producer machine.
@@ -5259,7 +5276,7 @@ impl<'a> CompositionTlaCompiler<'a> {
 
             // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
             if !terminal_phases.is_empty() {
-                let inv_name = format!("NoOpenObligationsOnTerminal_{}", tla_ident(&protocol.name));
+                let inv_name = format!("NoOpenObligationsOnTerminal_{}", suffix);
                 let terminal_disjuncts: Vec<String> = terminal_phases
                     .iter()
                     .map(|phase| format!("{} = {}", phase_var, tla_string(phase)))
@@ -5277,7 +5294,7 @@ impl<'a> CompositionTlaCompiler<'a> {
 
             // NoFeedbackWithoutObligation: feedback input observed => matching obligation exists
             if !protocol.allowed_feedback_inputs.is_empty() {
-                let inv_name = format!("NoFeedbackWithoutObligation_{}", tla_ident(&protocol.name));
+                let inv_name = format!("NoFeedbackWithoutObligation_{}", suffix);
                 let obligation_checks: Vec<String> = protocol
                     .allowed_feedback_inputs
                     .iter()
@@ -5322,8 +5339,8 @@ impl<'a> CompositionTlaCompiler<'a> {
     /// If any protocols have `liveness_annotation`, fairness comments are added.
     fn render_owner_actor_processes(&self, out: &mut String) -> std::result::Result<(), String> {
         for protocol in &self.schema.handoff_protocols {
-            let var = format!("obligation_{}", tla_ident(&protocol.name));
-            let action_name = format!("OwnerFeedback_{}", tla_ident(&protocol.name));
+            let var = self.obligation_var(protocol);
+            let action_name = format!("OwnerFeedback_{}", self.obligation_symbol_suffix(protocol));
 
             if protocol.allowed_feedback_inputs.is_empty() {
                 continue;
@@ -6765,7 +6782,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 if protocol.producer_instance.as_str() == instance_id
                     && protocol.effect_variant.as_str() == effect_variant.as_str()
                 {
-                    let var = format!("obligation_{}", tla_ident(&protocol.name));
+                    let var = self.obligation_var(protocol);
                     let mut record_fields: Vec<String> =
                         Vec::with_capacity(protocol.obligation_fields.len());
                     for field in &protocol.obligation_fields {
@@ -7454,6 +7471,24 @@ impl<'a> MachineTlaCompiler<'a> {
     fn render_mob_machine_native_helpers(&self, out: &mut String) {
         let prefix = |name: &str| self.scoped_helper_name(name);
         let local = |name: &str| self.local_binding_name(name);
+        // Row #181: compute the next monotone respawn generation for an
+        // identity. This mirrors the catalog helper: missing identity starts at
+        // generation 1, otherwise increment the machine-owned current value.
+        writeln!(
+            out,
+            "{}(arg_identity_runtime_generations, arg_agent_identity) ==",
+            prefix("mob_machine_next_respawn_generation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\in DOMAIN arg_identity_runtime_generations"
+        );
+        pushln!(
+            out,
+            "    THEN arg_identity_runtime_generations[arg_agent_identity] + 1"
+        );
+        pushln!(out, "    ELSE 1");
         // Row #351: reconcile-membership spawn/retire set helpers. The DSL
         // ReconcileMembership effect emits calls to these, but they had no TLA+
         // operator definitions, so TLC reported "Unknown operator" for

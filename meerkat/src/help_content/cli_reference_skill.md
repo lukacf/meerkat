@@ -62,7 +62,7 @@ rkat live open|status|close ...
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|login|remove|list|get ...
-rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run-flow|flow-status|pack|inspect|validate|deploy|web ...
+rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run|runs|status|logs|attach|run-flow|flow-status|pack|inspect|validate|deploy|web ...
 rkat skill add|remove|get|list|inspect ...
 rkat config get|set|patch ...
 rkat capabilities
@@ -247,8 +247,8 @@ rkat live close session <SESSION-ID>
 
 ## Mob
 
-Direct `rkat mob` is helper/artifact oriented. Lifecycle creation, wiring, and
-member management are done with agent `mob_*` tools or RPC `mob/*`.
+Direct `rkat mob` is helper/artifact/run-resource oriented. Lifecycle creation,
+wiring, and member management are done with agent `mob_*` tools or RPC `mob/*`.
 
 ```bash
 rkat mob spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]
@@ -257,6 +257,11 @@ rkat mob member-status <mob_id> <agent_identity> [--json]
 rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--initial-message <MSG>]
 rkat mob wait-kickoff <mob_id> [--member <agent_identity>...] [--timeout-ms N] [--json]
+rkat mob run <pack_or_mob_id> [--flow <flow_id>] [--param key=value ...] [--prompt <text>] [--detach] [--json] [--trust-policy permissive|strict]
+rkat mob runs <mob_id> [--flow <flow_id>] [--json]
+rkat mob status <mob_id> <run_id> [--json]
+rkat mob logs <mob_id> [--after-cursor N] [--limit N] [--json]
+rkat mob attach <mob_id> <run_id> [--json]
 rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>] [-s|--stream] [--no-stream]
 rkat mob flow-status <mob_id> <run_id>
 rkat mob pack <dir> -o <pack> [--sign <key> --signer-id <id>]

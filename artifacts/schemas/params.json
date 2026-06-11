@@ -7607,67 +7607,6 @@
     "title": "McpRemoveParams",
     "type": "object"
   },
-  "MobAdaptiveRetryLayerParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for `mob/adaptive_retry_layer`.",
-    "properties": {
-      "adaptive_run_id": {
-        "type": "string"
-      },
-      "layer_id": {
-        "type": "string"
-      },
-      "mob_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "mob_id",
-      "adaptive_run_id",
-      "layer_id"
-    ],
-    "title": "MobAdaptiveRetryLayerParams",
-    "type": "object"
-  },
-  "MobAdaptiveRunParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for adaptive read/cancel methods.",
-    "properties": {
-      "adaptive_run_id": {
-        "type": "string"
-      },
-      "mob_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "mob_id",
-      "adaptive_run_id"
-    ],
-    "title": "MobAdaptiveRunParams",
-    "type": "object"
-  },
-  "MobAdaptiveStartParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for `mob/adaptive_start`.",
-    "properties": {
-      "mob_id": {
-        "type": "string"
-      },
-      "objective": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "mob_id",
-      "objective"
-    ],
-    "title": "MobAdaptiveStartParams",
-    "type": "object"
-  },
   "MobAppendSystemContextParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,

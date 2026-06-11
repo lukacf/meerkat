@@ -58,7 +58,7 @@ the current binding with `rkat run --comms-listen-tcp ... --comms-binding-out <p
 
 | Surface | Mob role |
 | --- | --- |
-| CLI `rkat mob ...` | Helper and artifact commands: spawn/fork helper, status, flow execution, pack, deploy, web build. |
+| CLI `rkat mob ...` | Helper, artifact, typed callable run, and run-resource commands: `run`, `runs`, `status`, `logs`, `attach`, flow execution, pack, deploy, web build. |
 | JSON-RPC `mob/*` | Host control plane for mob lifecycle, members, flows, and profiles. |
 | REST | HTTP adapter for selected mob helper workflows. |
 | MCP `meerkat_mob_*` | Public MCP control plane. |
@@ -85,7 +85,7 @@ material for deployment through:
 rkat mob pack ./mob -o ./dist/mob.mobpack
 rkat mob inspect ./dist/mob.mobpack
 rkat mob validate ./dist/mob.mobpack
-rkat mob deploy ./dist/mob.mobpack "run this mob"
+rkat mob run ./dist/mob.mobpack --prompt "run this mob"
 rkat mob web build ./dist/mob.mobpack -o ./dist/web --wasm ./path/to/runtime_bg.wasm
 ```
 

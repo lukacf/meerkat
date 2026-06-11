@@ -302,6 +302,10 @@ rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --p
 rkat mob member-status team-mob lead-1 --json
 rkat mob force-cancel team-mob worker-1
 rkat mob respawn team-mob worker-1 --initial-message "restart"
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --json
+rkat mob runs team-mob --json
+rkat mob status team-mob <run_id> --json
+rkat mob attach team-mob <run_id> --json
 rkat mob run-flow team-mob --flow triage --stream
 ```
 
@@ -312,7 +316,7 @@ rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
   --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
-rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --trust-policy strict
 rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
 ```
 
@@ -345,7 +349,7 @@ mob_spawn(mob_id, specs_json) → result JSON  [async]
 mob_wire / mob_unwire / mob_wire_peer / mob_unwire_peer / mob_retire / mob_respawn  [async]
 mob_list_members / mob_member_send / mob_events(mob_id, after_cursor: string, limit: u32) / mob_status / mob_list
 mob_lifecycle(mob_id, action)  [async]
-mob_run_flow → run_id string  [async] / mob_flow_status / mob_cancel_flow  [async]
+mob_run_flow → run_id string  [async] / mob_flow_status / mob_run_result / mob_cancel_flow  [async]
 mob_member_subscribe [async] / mob_subscribe_events [async] → stream_id string / poll_subscription / close_subscription
 ```
 There is no `wire_cross_mob` export.

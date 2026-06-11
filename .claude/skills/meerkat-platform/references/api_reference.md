@@ -74,7 +74,7 @@ rkat auth realms|profiles|profile|profile-delete|bindings|test|status|login|logo
 # (Scheduling has no top-level CLI subcommand. Schedules are managed
 # through the agent tools `meerkat_schedule_*` from `rkat run`,
 # the RPC `schedule/*` methods, REST schedule endpoints, or SDK helpers.)
-rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run-flow|flow-status|pack|inspect|validate|deploy|web ...
+rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run|runs|status|logs|attach|run-flow|flow-status|pack|inspect|validate|deploy|web ...
 rkat config get|set|patch ...
 rkat capabilities
 rkat doctor
@@ -180,12 +180,17 @@ Primary CLI mob usage is tool-driven from `run`/`run --resume` prompts using `mo
 | `force-cancel <mob_id> <agent_identity>` | Force-cancel a member's in-flight turn |
 | `respawn <mob_id> <agent_identity> [--initial-message]` | Retire and respawn a member with the same profile |
 | `wait-kickoff <mob_id> [--member ...] [--timeout-ms] [--json]` | Wait for autonomous-host kickoff turns to complete |
-| `run-flow <mob_id> --flow <flow_id> [--params <json>] [-s\|--stream] [--no-stream]` | Start a flow run, block until terminal, print run id |
+| `run <pack_or_mob_id> [--flow] [--param] [--prompt] [--detach] [--json]` | Invoke a mobpack or installed mob as a typed callable run; `--prompt` binds `params.prompt` |
+| `runs <mob_id> [--flow] [--json]` | List persisted run resources for a mob |
+| `status <mob_id> <run_id> [--json]` | Read one run resource status |
+| `logs <mob_id> [--after-cursor] [--limit] [--json]` | Read mob event history for run diagnostics |
+| `attach <mob_id> <run_id> [--json]` | Wait for a detached run and print its typed output envelope |
+| `run-flow <mob_id> --flow <flow_id> [--params <json>] [-s\|--stream] [--no-stream]` | Legacy flow-run entrypoint; use `run` for callable mobpack-style invocation |
 | `flow-status <mob_id> <run_id>` | Print live or terminal `MobRun` JSON; status: `pending`/`running`/`completed`/`failed`/`canceled` |
 | `pack <dir> -o <pack> [--sign <key> --signer-id <id>]` | Pack a mob directory into a `.mobpack` archive |
 | `inspect <pack>` | Inspect a `.mobpack` archive |
 | `validate <pack> [--trust-policy permissive\|strict]` | Validate a `.mobpack` archive |
-| `deploy <pack> <prompt> [--model] [--max-total-tokens] [--max-duration] [--max-tool-calls] [--trust-policy] [--surface cli\|rpc]` | Deploy a `.mobpack` with overrides |
+| `deploy <pack> <prompt> [--model] [--max-total-tokens] [--max-duration] [--max-tool-calls] [--trust-policy] [--surface cli\|rpc]` | Validate/register/deploy a `.mobpack`; orchestrator-less packs warn that prompts are not delivered and flows are not started |
 | `web build <pack> -o <dir> [--trust-policy]` | Build a browser-deployable WASM bundle |
 
 Lifecycle verbs that used to live on the CLI (`create`, `spawn`, `retire`, `wire`, `unwire`, `turn`, `stop`, `resume`, `complete`, `events`, `destroy`) are reached through the agent tools (`mob_create`, `mob_spawn_member`, `mob_wire`, ...) or through the RPC `mob/*` methods listed below.
@@ -406,7 +411,7 @@ Waits and observation:
 
 Flows:
 
-- `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel`
+- `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/run_result`, `mob/flow_cancel`
 
 Profiles (when a profile store is present):
 
@@ -464,7 +469,7 @@ Mob tools (feature-gated, public MCP names — distinct from the agent-internal 
 - Membership: `meerkat_mob_spawn`, `meerkat_mob_spawn_many`, `meerkat_mob_retire`, `meerkat_mob_respawn`, `meerkat_mob_force_cancel`, `meerkat_mob_wait_kickoff`, `meerkat_mob_wait_ready`
 - Wiring: `meerkat_mob_wire`, `meerkat_mob_unwire`
 - Member interaction: `meerkat_mob_member_send`, `meerkat_mob_append_system_context`
-- Flows: `meerkat_mob_events`, `meerkat_mob_flows`, `meerkat_mob_flow_run`, `meerkat_mob_flow_status`, `meerkat_mob_flow_cancel`
+- Flows: `meerkat_mob_events`, `meerkat_mob_flows`, `meerkat_mob_flow_run`, `meerkat_mob_flow_status`, `meerkat_mob_run_result`, `meerkat_mob_flow_cancel`
 - Profiles: `meerkat_mob_profile_create`, `meerkat_mob_profile_get`, `meerkat_mob_profile_list`, `meerkat_mob_profile_update`, `meerkat_mob_profile_delete`
 - Event streams: `meerkat_mob_event_stream_open` / `meerkat_mob_event_stream_read` / `meerkat_mob_event_stream_close`
 
@@ -561,7 +566,7 @@ Mob methods:
 - `Mob.spawn(...)` / `Mob.retire(agent_identity)` / `Mob.respawn(agent_identity)`
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)`
 - `Mob.members()` / `Mob.member(agent_identity).send(content, handling_mode=...)`
-- `Mob.flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
+- `Mob.flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.run_result(run_id)` / `Mob.cancel_flow(run_id)`
 - `Mob.subscribe_member_events(agent_identity)` → `EventSubscription`
 - `Mob.subscribe_events()` → `EventSubscription`
 

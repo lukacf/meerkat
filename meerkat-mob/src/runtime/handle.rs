@@ -38,6 +38,22 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
+fn sanitize_flow_member_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "member".to_string()
+    } else {
+        out
+    }
+}
+
 /// Machine-decided spawn-member operator admission verdict, mirrored by tool
 /// surfaces. `Denied` maps to a tool `access_denied` error; `Allowed` proceeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2302,6 +2318,13 @@ impl MobHandle {
         command: MobMachineCommand,
     ) -> Result<MobMachineCommandResult, MobError> {
         match command {
+            MobMachineCommand::PreviewRunFlowAdmission => {
+                self.send_actor_command(|reply_tx| MobCommand::PreviewRunFlowAdmission {
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
+            }
             MobMachineCommand::RunFlow {
                 flow_id,
                 activation_params,
@@ -3772,6 +3795,9 @@ impl MobHandle {
         params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
+        self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
+            .await?;
+        self.ensure_flow_targets_provisioned(&flow_id).await?;
         match self
             .execute_machine_command(MobMachineCommand::RunFlow {
                 flow_id,
@@ -3785,6 +3811,41 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    async fn ensure_flow_targets_provisioned(&self, flow_id: &FlowId) -> Result<(), MobError> {
+        let Some(flow) = self.definition.flows.get(flow_id) else {
+            return Err(MobError::FlowNotFound(flow_id.clone()));
+        };
+        let mut required_roles = BTreeSet::new();
+        for step in flow.steps.values() {
+            required_roles.insert(step.role.clone());
+        }
+
+        for role in required_roles {
+            let has_runnable_target = self
+                .list_runnable_members()
+                .await
+                .into_iter()
+                .any(|entry| entry.role == role);
+            if has_runnable_target {
+                continue;
+            }
+            let identity = AgentIdentity::from(format!(
+                "__flow_{}_{}",
+                sanitize_flow_member_segment(role.as_str()),
+                sanitize_flow_member_segment(flow_id.as_str())
+            ));
+            if self.get_member(&identity).await?.is_some() {
+                continue;
+            }
+            self.spawn_spec(
+                SpawnMemberSpec::new(role, identity)
+                    .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Request cancellation of an in-flight flow run.

@@ -31,6 +31,7 @@ use std::sync::Arc;
 /// surface instead of each `MobHandle` method hand-sending actor commands.
 #[derive(CommandManifest)]
 pub(crate) enum MobMachineCommand {
+    PreviewRunFlowAdmission,
     RunFlow {
         flow_id: FlowId,
         activation_params: serde_json::Value,
@@ -309,12 +310,17 @@ impl MobMachineCommandVariant {
             | Self::LifecycleSnapshot
             | Self::LifecycleNotificationBurst
             | Self::DslT2Snapshot
+            | Self::PreviewRunFlowAdmission
             | Self::ListMembersMatching
             | Self::Wire
             | Self::WireMembersBatch
             | Self::Unwire => None,
             #[cfg(not(test))]
-            Self::ListMembersMatching | Self::Wire | Self::WireMembersBatch | Self::Unwire => None,
+            Self::PreviewRunFlowAdmission
+            | Self::ListMembersMatching
+            | Self::Wire
+            | Self::WireMembersBatch
+            | Self::Unwire => None,
             Self::RunFlow => Some(MobMachineCatalogInput::RunFlow),
             Self::CancelFlow => Some(MobMachineCatalogInput::CancelFlow),
             Self::FlowStatus => Some(MobMachineCatalogInput::FlowStatus),
@@ -358,6 +364,7 @@ impl MobMachineCommandVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobMachineShellMechanicReason {
     TestInspection,
+    AdmissionPreflight,
     FilteredRosterProjection,
     ProducerWiringBridge,
 }
@@ -882,6 +889,11 @@ const fn mob_machine_command_classification(
         | MobMachineCommandVariant::DslT2Snapshot => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::TestInspection,
+            )
+        }
+        MobMachineCommandVariant::PreviewRunFlowAdmission => {
+            MobMachineCommandClassification::ShellMechanic(
+                MobMachineShellMechanicReason::AdmissionPreflight,
             )
         }
         MobMachineCommandVariant::ListMembersMatching => {

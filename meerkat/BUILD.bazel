@@ -852,6 +852,7 @@ alias(
         "//meerkat-mcp-server:__pkg__",
         "//meerkat-mcp:__pkg__",
         "//meerkat-memory:__pkg__",
+        "//meerkat-mob-adaptive:__pkg__",
         "//meerkat-mob-mcp:__pkg__",
         "//meerkat-mob-pack:__pkg__",
         "//meerkat-mob:__pkg__",

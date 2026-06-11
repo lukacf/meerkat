@@ -388,6 +388,11 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
         schema: typed_schema::<MeerkatMobRunIdInput>,
     },
     PublicTool {
+        name: "meerkat_mob_run_result",
+        description: "Read the typed output envelope for a mob run.",
+        schema: typed_schema::<MeerkatMobRunIdInput>,
+    },
+    PublicTool {
         name: "meerkat_mob_flow_cancel",
         description: "Cancel a mob flow run.",
         schema: typed_schema::<MeerkatMobRunIdInput>,
@@ -485,6 +490,7 @@ const DISPATCH_TOOL_NAMES: &[&str] = &[
     "meerkat_mob_flows",
     "meerkat_mob_flow_run",
     "meerkat_mob_flow_status",
+    "meerkat_mob_run_result",
     "meerkat_mob_flow_cancel",
     "meerkat_mob_force_cancel",
     "meerkat_mob_wait_kickoff",
@@ -821,6 +827,19 @@ pub async fn handle_public_tools_call(
             serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
+        "meerkat_mob_run_result" => {
+            let input: MeerkatMobRunIdInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let run_id = parse_run_id(&input.run_id)?;
+            let run = state
+                .mob_flow_status(&mob_id, run_id)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            let run = meerkat_mob::MobRun::public_run_result_value(run.as_ref())
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            serde_json::to_value(meerkat_contracts::MobRunResult { run })
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
+        }
         "meerkat_mob_flow_cancel" => {
             let input: MeerkatMobRunIdInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
@@ -1128,10 +1147,14 @@ mod tests {
             table_names.contains("meerkat_mob_wait_ready"),
             "meerkat_mob_wait_ready must be routable, advertised, and dispatched"
         );
+        assert!(
+            table_names.contains("meerkat_mob_run_result"),
+            "meerkat_mob_run_result must be routable, advertised, and dispatched"
+        );
         assert_eq!(
             table_names.len(),
-            26,
-            "expected exactly 26 public tools across all surfaces"
+            27,
+            "expected exactly 27 public tools across all surfaces"
         );
     }
 

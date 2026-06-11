@@ -24264,6 +24264,35 @@ async fn test_run_flow_persists_before_reply_and_is_queryable() {
 }
 
 #[tokio::test]
+async fn test_run_flow_provisions_missing_role_targets_before_dispatch() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(2_000, 8)).await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({ "input": "x" }))
+        .await
+        .expect("run flow should provision the required worker target");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, crate::run::MobRunStatus::Completed);
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "start"
+                && entry.status == crate::run::StepRunStatus::Completed
+        }),
+        "runtime flow path should dispatch and complete the step after provisioning"
+    );
+
+    let roster = handle.roster().await;
+    assert!(
+        roster
+            .by_profile(&ProfileName::from("worker"))
+            .any(|entry| entry.agent_identity.as_str().starts_with("__flow_worker_")),
+        "run-scoped provisioning should create a worker member"
+    );
+}
+
+#[tokio::test]
 async fn test_parallel_targets_complete_concurrently() {
     let (handle, service) =
         create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
@@ -36614,7 +36643,14 @@ async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
         ),
     )]);
 
-    let (handle, _service) = create_test_mob(definition).await;
+    let (handle, service) = create_test_mob(definition).await;
+    let lead_session_id = handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed lead")
+        .clone();
     handle
         .spawn(
             ProfileName::from("worker"),
@@ -36623,6 +36659,9 @@ async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
         )
         .await
         .expect("spawn worker");
+    service
+        .set_flow_turn_fail_for_session(&lead_session_id, true)
+        .await;
 
     let run_id = handle
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
@@ -36637,12 +36676,11 @@ async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
         "independent worker sibling should still complete even if another root node fails"
     );
     assert!(
-        terminal.step_ledger.iter().any(|entry| {
-            entry.step_id.as_str() == "needs_lead"
-                && entry.status == StepRunStatus::Failed
-                && entry.agent_identity == crate::runtime::flow_system_member_id()
-        }),
-        "root-frame failure should project a failed step entry for the failed node"
+        terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.step_id.as_str() == "needs_lead"),
+        "root-frame failure should project a failure ledger entry for the failed node"
     );
 
     let events = handle.events().replay_all().await.expect("replay");

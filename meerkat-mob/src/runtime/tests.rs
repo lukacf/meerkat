@@ -32393,7 +32393,11 @@ async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let (handle, service) = create_test_mob(definition).await;
     let receipt = handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
         .await
         .expect("spawn worker");
     let bridge_session_id = receipt
@@ -32416,10 +32420,10 @@ async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
     );
 
     handle
-        .internal_turn(
-            AgentIdentity::from("w-1"),
-            ContentInput::from("come back online".to_string()),
-        )
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
         .await
         .expect("machine-authorized revival must rebuild the live session and dispatch the turn");
 
@@ -32486,7 +32490,11 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let (handle, service) = create_test_mob(definition).await;
     let receipt = handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
         .await
         .expect("spawn worker");
     let bridge_session_id = receipt
@@ -32502,10 +32510,10 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
     service.set_create_session_failure(&bridge_session_id).await;
 
     let error = handle
-        .internal_turn(
-            AgentIdentity::from("w-1"),
-            ContentInput::from("come back online".to_string()),
-        )
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
         .await
         .expect_err("failed revival must surface the typed terminal restore failure");
     match error {
@@ -32514,7 +32522,7 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
             session_id,
             reason,
         } => {
-            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(member_id, AgentIdentity::from("w-1"));
             assert_eq!(session_id, Some(bridge_session_id.clone()));
             assert!(
                 reason.contains("machine-authorized revival"),
@@ -32550,15 +32558,14 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
     service
         .clear_create_session_failure(&bridge_session_id)
         .await;
-    let error = handle
-        .internal_turn(
-            AgentIdentity::from("w-1"),
-            ContentInput::from("try again".to_string()),
-        )
-        .await
-        .expect_err(
-            "broken member must stay terminal; no machine re-authorization after failed revival",
-        );
+    // The typed terminal classification surfaces at handle acquisition:
+    // `member()` refuses to mint a capability handle for a Broken member.
+    let error = match handle.member(&AgentIdentity::from("w-1")).await {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "broken member must stay terminal; no machine re-authorization after failed revival"
+        ),
+    };
     assert!(
         matches!(error, MobError::MemberRestoreFailed { .. }),
         "second dispatch must fail typed: {error:?}"

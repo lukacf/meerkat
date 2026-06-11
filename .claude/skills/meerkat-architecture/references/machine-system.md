@@ -16,7 +16,13 @@ beyond the original seven machines, e.g. `ApprovalLifecycleMachine`,
 `meerkat-session`, not absorbed into `MeerkatMachine`).
 
 Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — one
-DSL source file per canonical machine.
+DSL source file per canonical machine, plus
+`session_persistence_version_authority.rs`: a catalog-generated *scoped*
+authority (generated into
+`meerkat-core/src/generated/session_persistence_version_authority.rs`) that
+enforces fail-closed acceptance of persisted session schema versions. It is
+registered for production-schema parity but intentionally not part of
+`canonical_machine_schemas()` — do not count it as a canonical machine.
 
 Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, remaining helper modules are projection/reducer support or shell mechanics; shell code routes semantic decisions through the host machine's DSL via handle traits or in-crate MobMachine authority access (see "Cross-crate DSL access" below).
 
@@ -102,6 +108,16 @@ Ratchets that must stay green:
 
 Do not add `machine! { ... }` or equivalent handwritten production machine bodies outside `meerkat-machine-schema/src/catalog/dsl/`. If production needs a new semantic field, transition, effect, or invariant, lift it into the catalog first, regenerate artifacts, run drift/parity checks, and then adapt bridge code.
 
+Governance gates are typed syn-AST/fact gates in `xtask`, not source-text scanners (the old shell-script scanners were deleted; the few remaining `scripts/*` gate entries are thin wrappers that exec xtask):
+
+- `xtask effect-authority` (`xtask/src/effect_authority.rs`) — effect realization must trace to machine authority.
+- `xtask ownership-ledger --check-drift` (`xtask/src/ownership_ledger.rs`) — semantic-fact ownership ledger with mechanically-resolved anchors; drift fails the gate.
+- `xtask bridge-classifier` (`xtask/src/bridge_classifier.rs`) — bridge wire types must not re-interpret `ResponseStatus`; terminality goes through `meerkat_core::interaction::classify_response_terminality` (Makefile entry: `bridge-no-responsestatus-gate`).
+- `xtask rmat-audit --strict` (`xtask/src/rmat_audit.rs`) — syn-AST read/write seam enforcement.
+- `xtask seam-inventory` (`xtask/src/seam_inventory.rs`) — every Local/External effect needs an explicit classification (`EffectTeardownClass` coherence lives here) and routed effects must resolve via the typed Route table.
+
+`make rmat-audit` runs effect-authority + ownership-ledger drift + strict RMAT; all gates run in `make ci`.
+
 ## Verification and parity passes
 
 Run these in order after any DSL edit:
@@ -150,7 +166,7 @@ Mapping an old phase-driven authority's input onto a parameterless DSL signal lo
 ## Concrete trace — user sends "Hello"
 
 1. **Surface** (CLI/RPC/REST): `rkat run "Hello"` → `SessionService::create_session()` → `AgentFactory::build_agent()`.
-2. **Runtime-backed surface**: calls `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings` (the 0.6.23 bundle of epoch-local state plus session-owned DSL handles).
+2. **Runtime-backed surface**: calls `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings` (the bundle of epoch-local state plus session-owned DSL handles).
 3. **Accept input**: `MeerkatMachine::accept_input_with_completion(session_id, Input::Prompt { content: "Hello" })` routes through dispatch → driver.
 4. **Driver** generates `input_id`, resolves policy, calls `self.dsl_apply(mm_dsl::MeerkatMachineInput::QueueAccepted { input_id })`.
 5. **`dsl_apply`** locks the per-session `Arc<Mutex<MeerkatMachineAuthority>>`, calls `authority.apply(input)` on the generated kernel.
@@ -202,6 +218,8 @@ Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`. Six c
 - `workgraph_attention_bundle` — WorkGraph item lifecycle ↔ goal attention binding coordination
 
 Compositions express effect-disposition rules: which effects emitted by one machine are consumed as inputs by another, which obligations must be realized before a terminal, and which protocol helpers get codegen'd.
+
+Handoff feedback bindings are TYPE-checked, not name-matched: `HandleBridgeFeedbackBinding` entries (meerkat-machine-schema/src/composition.rs) bind a handoff's feedback route to a concrete input variant, and composition-schema validation fails closed with `MissingHandoffFeedbackBinding` / `HandoffFeedbackBindingTypeMismatch` when a binding is absent or its parameter types do not line up with the target input.
 
 Generated protocol adapters land in each crate's `src/generated/` (e.g., `meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs`). These are not hand-edited; regenerate via `make machine-codegen` when the catalog changes.
 

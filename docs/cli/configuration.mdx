@@ -106,7 +106,6 @@ Self-hosted models are defined directly in realm config:
 transport = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
 api_style = "chat_completions"
-bearer_token_env = "LOCAL_LLM_TOKEN"
 
 [self_hosted.models.gemma-4-31b]
 server = "local"
@@ -136,7 +135,13 @@ For Gemma 4, prefer `chat_completions` unless you have verified a server-specifi
 
 `supports_thinking` and `supports_reasoning` describe the behavior you intend Meerkat to expose through that configured transport. Gemma 4 models themselves are reasoning-capable, but some servers expose those capabilities with provider-specific conventions.
 
-Use `bearer_token_env` instead of `bearer_token` whenever possible.
+Server entries carry connection facts only — the legacy `bearer_token` /
+`bearer_token_env` server fields are rejected at config parse. Credentials and
+the connection itself are owned by a realm binding for
+`provider = "self_hosted"` (`auth_method` of `none`, `api_key`, or
+`static_bearer`); a self-hosted server with no realm binding fails closed at
+run time. See [Self-hosting models](/guides/self-hosting-models) for the
+realm binding shape.
 
 ## Session storage layout
 
@@ -153,10 +158,10 @@ Important files:
 
 - `realm_manifest.json` (backend pinning)
 - `config.toml` (realm config)
+- `config_state.json` (config generation CAS state)
 - `sessions.sqlite3` (when backend is sqlite)
 - `sessions_jsonl/` (when backend is jsonl)
-- `mob_registry.json` (CLI mob registry)
-- `mob_registry.lock` (CLI mob registry lock)
+- `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
 
 `--realm-backend` is a creation hint. After first realm creation, backend selection is pinned by `realm_manifest.json`.
 This applies to both session storage and `rkat mob` command behavior in that realm.

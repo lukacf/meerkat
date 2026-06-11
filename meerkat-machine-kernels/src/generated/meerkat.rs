@@ -4309,6 +4309,7 @@ impl std::fmt::Display for PeerCorrelationId {
     }
 }
 pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::PeerEndpoint;
+pub type PeerId = meerkat_machine_schema::catalog::dsl::meerkat_machine::PeerId;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -12855,6 +12856,7 @@ pub mod signals {
     pub struct ClassifyExternalEnvelope {
         pub item_id: String,
         pub from_peer: String,
+        pub from_peer_id: PeerId,
         pub envelope_kind: PeerIngressEnvelopeClass,
         pub request_intent: String,
         pub request_intent_class: PeerIngressRequestClass,
@@ -13568,6 +13570,7 @@ pub mod effects {
         pub actionable: bool,
         pub kind: PeerIngressAdmittedKind,
         pub auth: PeerIngressAuthClass,
+        pub from_peer_id: Option<PeerId>,
         pub lifecycle_kind: Option<PeerIngressLifecycleClass>,
         pub lifecycle_peer: Option<String>,
         pub request_id: Option<String>,

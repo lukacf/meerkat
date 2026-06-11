@@ -6,6 +6,8 @@ icon: "magnifying-glass"
 
 # Dogma Audit: Terminal Truth Laundering (Rule 8 / Split Terminality)
 
+> **Postscript 2026-06-11:** point-in-time audit record (PR #756 head). Open/confirmed findings below were re-adjudicated and closed by the PR #759 campaign — see [`PR759-final-ledger.md`](PR759-final-ledger.md) (close-out: open set zero).
+
 **Audit target:** PR #756 head `worktree-third-dogma` @ `688f56442`
 **Date:** 2026-06-05
 **Dogma:** Rule 8 — *Terminality and Faults Are Explicit*; pattern *Split Terminality*.

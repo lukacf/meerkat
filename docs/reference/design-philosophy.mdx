@@ -89,7 +89,7 @@ Primitive strings and UUIDs should become semantic types at boundaries:
 ```rust
 pub struct SessionId(uuid::Uuid);
 pub struct AgentIdentity(String);
-pub struct BlobId(uuid::Uuid);
+pub struct BlobId(String);
 ```
 
 This keeps member identity, runtime binding identity, sessions, blobs, and

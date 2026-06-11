@@ -7,14 +7,14 @@ Load this reference when working on peer trust, inter-agent messaging, comms dra
 - **InprocRegistry** — process-global peer discovery
 - **CommsRuntime** — per-session, created by `AgentFactory::build_agent()` when `comms_name` is set
 - **Wiring** — bidirectional trust. Each peer has `TrustedPeerSpec`
-- **Unified trust state** — single `Arc<parking_lot::RwLock<TrustedPeers>>`
+- **Unified trust state** — single `Arc<parking_lot::RwLock<TrustStore>>`. `TrustStore` (meerkat-comms/src/trust.rs) is `PeerId`-keyed (`BTreeMap<PeerId, TrustEntry>`); duplicate `PeerId` inserts are rejected with a typed `DuplicatePeerId` error, so name-keyed trust folklore is structurally impossible
 - **Not all mob members are peers** — wiring rules control which members can communicate
 
 ## Peer classification
 
-Envelope classification (trusted-vs-untrusted, content-shape detection, handling mode inference) runs through MeerkatMachine DSL via the `PeerCommsHandle.classify_external_envelope` / `classify_plain_event` methods. The trait lives in `meerkat-core/src/handles.rs`; the runtime impl routes to the DSL's classification signals.
+Envelope classification (trusted-vs-untrusted, content-shape detection, handling mode inference) runs through MeerkatMachine DSL via the `PeerCommsHandle.classify_external_envelope` / `classify_plain_event` methods. The trait lives in `meerkat-core/src/handles.rs`; the runtime impl routes to the DSL's classification signals. `ClassifyExternalEnvelope` carries the typed `from_peer_id: PeerId` (not just a display name), and the machine echoes the canonical peer id back in the classification result — shell code reads `ingress_fact.canonical_peer_id` from the machine-owned result rather than re-deriving identity from envelope strings.
 
-Shell-side data types live in `meerkat-comms/src/peer_types.rs` (`PeerId`, `RawPeerKind`, `ContentShape`, `PeerIngressState`). These are pure data, not state machine authorities. Trust set (`trusted_peers: BTreeSet<PeerId>`) and per-peer phase (`PeerIngressState`) are shell mechanics on `ClassifiedInboxQueue` — concurrency plumbing, not lifecycle truth.
+Shell-side data types live in `meerkat-comms/src/peer_types.rs` (`PeerId`, `RawPeerKind`, `ContentShape`, `PeerIngressState`). These are pure data, not state machine authorities. The trust state on `ClassifiedInboxQueue` is the shared `Arc<RwLock<TrustStore>>`; per-peer phase (`PeerIngressState`) is shell mechanics — concurrency plumbing, not lifecycle truth.
 
 ## Comms drain lifecycle
 
@@ -24,14 +24,15 @@ Turn-boundary suppression is a local projection of that truth. Do not keep paral
 
 ## Session identity claims
 
-Process-global claim tables must be released on teardown/recovery (`release_session_claim`, `clear_all_session_claims`) if you manage runtimes manually. Dangling tasks can leak identity across in-process restarts.
+Session identity claims route through `SessionClaimHandle` (meerkat-core/src/handles.rs): `try_acquire(session_id)` atomically reserves the identity and returns an RAII `SessionClaim` whose `Drop` releases the slot (`release` is idempotent). Bare paths with no `MeerkatMachine` use the process-global `DefaultSessionClaimRegistry`. Dangling tasks holding claims can leak identity across in-process restarts — make sure teardown drops the claim.
 
 ## Key files
 
 - `meerkat-comms/src/runtime/comms_runtime.rs` — `CommsRuntime`
+- `meerkat-comms/src/trust.rs` — `TrustStore` (PeerId-keyed trust entries)
 - `meerkat-comms/src/peer_types.rs` — pure data types (PeerId, RawPeerKind, ContentShape, PeerIngressState)
-- `meerkat-comms/src/classify.rs` — envelope classification (calls `PeerCommsHandle` for lifecycle transitions)
-- `meerkat-comms/src/inbox.rs` — `ClassifiedInboxQueue`, trust set, shell-mechanics drain helpers
-- `meerkat-comms/src/registry/inproc.rs` — `InprocRegistry`
+- `meerkat-comms/src/classify.rs` — envelope classification (calls `PeerCommsHandle` for lifecycle transitions; consumes machine-echoed canonical peer id)
+- `meerkat-comms/src/inbox.rs` — `ClassifiedInboxQueue`, shared trust store handle, shell-mechanics drain helpers
+- `meerkat-comms/src/inproc.rs` — `InprocRegistry`
 - `meerkat-runtime/src/handles/peer_comms.rs`, `comms_drain.rs` — runtime impls of the DSL handle traits
-- `meerkat-core/src/handles.rs` — `PeerCommsHandle`, `CommsDrainHandle` trait definitions
+- `meerkat-core/src/handles.rs` — `PeerCommsHandle`, `CommsDrainHandle`, `SessionClaimHandle` trait definitions

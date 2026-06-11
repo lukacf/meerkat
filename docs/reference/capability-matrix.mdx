@@ -28,10 +28,15 @@ what works in common build profiles.
 | `start_turn` | Works | Works + snapshot saved | Works | Works + snapshot saved |
 | `interrupt` | Works | Works | Works | Works |
 | `read` (running session) | Works | Works | Works | Works |
-| `read` (archived) | `SESSION_NOT_FOUND` | Falls back to store | `SESSION_NOT_FOUND` | Falls back to store |
-| `list` | Live sessions only | Live + stored sessions | Live sessions only | Live + stored sessions |
-| `archive` | Removes from memory | Removes from memory, snapshot kept | Removes from memory | Removes + snapshot kept |
+| `read` (archived) | Final in-memory view | `SESSION_NOT_FOUND` | Final in-memory view | `SESSION_NOT_FOUND` |
+| `read_history` (archived) | `SESSION_PERSISTENCE_DISABLED` | Works (committed transcript) | `SESSION_PERSISTENCE_DISABLED` | Works (committed transcript) |
+| `list` | Live sessions only (archived hidden) | Live + stored sessions (archived hidden) | Live sessions only (archived hidden) | Live + stored sessions (archived hidden) |
+| `archive` | Retires live handle, keeps final in-memory view | Durable archive commit, then runtime retire | Retires live handle, keeps final in-memory view | Durable archive commit, then runtime retire |
 | Auto-compaction | No-op | No-op | Triggers at threshold | Triggers at threshold |
+
+Archive lifecycle truth is owned by the canonical `SessionDocumentMachine` for all
+profiles: the durable archived verdict commits first and the runtime handle is
+retired second, so a half-archived state is unrepresentable.
 
 ## Error codes
 
@@ -40,26 +45,30 @@ Two layers matter here:
 - **Session transport mapping**: how `SessionError` is projected by session-facing transports
 - **Canonical wire `ErrorCode` mapping**: the higher-level `meerkat-contracts` envelope model used across public protocol surfaces
 
-The table below is the current **session transport** mapping:
+The table below is the current **session transport** mapping (`SessionError::code()` is the stable string code; JSON-RPC numbers come from `session_error_to_rpc`):
 
-| `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
-|----------------|------|----------|------|-----|-----|
-| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 1 |
-| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 1 |
-| `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32003 | 501 | tool error | exit 0 |
-| `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32004 | 501 | tool error | exit 0 |
-| `NotRunning` | `SESSION_NOT_RUNNING` | -32005 | 409 | tool error | exit 1 |
-| `Store` | `SESSION_STORE_ERROR` | -32006 | 500 | tool error | exit 1 |
-| `Unsupported` | `SESSION_UNSUPPORTED` | -32007 | 501 | tool error | exit 1 |
-| `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
-| `FailedWithData` | `SESSION_ERROR` | -32603 | 500 | tool error | exit 1 |
+| `SessionError` | Code | JSON-RPC | MCP | CLI |
+|----------------|------|----------|-----|-----|
+| `NotFound` | `SESSION_NOT_FOUND` | -32001 | tool error | exit 1 |
+| `Busy` | `SESSION_BUSY` | -32002 | tool error | exit 1 |
+| `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32603 | tool error | exit 1 |
+| `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32603 | tool error | exit 1 |
+| `NotRunning` | `SESSION_NOT_RUNNING` | -32603 | tool error | exit 1 |
+| `Store` | `SESSION_STORE_ERROR` | -32603 | tool error | exit 1 |
+| `Unsupported` | `SESSION_UNSUPPORTED` | -32603 | tool error | exit 1 |
+| `Agent` | `AGENT_ERROR` | by cause (see below) | tool error | exit 1 (exit 2 on budget exhaustion) |
+| `FailedWithData` | `SESSION_ERROR` | -32603 | tool error | exit 1 |
+
+`Agent` errors map per typed cause to the canonical contracts codes: provider
+failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
+-32005, config errors -32602, everything else -32603.
 
 ### Transport error mapping summary
 
-- **JSON-RPC**: Custom numeric transport codes in the -32000..-32099 range.
-- **REST**: HTTP status codes (404, 409, 500, 501). Error body includes `{ "code": "...", "message": "..." }`.
+- **JSON-RPC**: `NotFound`/`Busy` keep dedicated codes (-32001/-32002); typed agent causes use the canonical `meerkat_contracts::ErrorCode::jsonrpc_code()` values; all other session variants collapse to -32603 with the message preserved.
+- **REST**: Endpoint-typed `ApiError` mapping (`NotFound` -> 404; `Busy` -> 400 on create/turn, 409 on interrupt conflicts; archived/unavailable history -> 400; agent/internal -> 500). Where canonical wire errors are emitted, `ErrorCode::http_status()` decides the status. Error body includes `{ "code": "...", "message": "..." }`.
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
-- **CLI**: `SessionError` transport projection is intentionally coarse: most failures collapse to exit 1, while persistence/compaction-disabled remain informational (exit 0). Error details are printed to stderr.
+- **CLI**: Exit codes are coarse: 0 success, 1 error, 2 graceful budget exhaustion. Error details are printed to stderr.
 
 ## Pick only what you need
 
@@ -124,7 +133,7 @@ example, `meerkat-schedule` owns the Schedule policy declaration,
 
 These fields are set in `meerkat-core/src/model_profile/**` and exposed via `ModelProfile`. They control:
 
-- **`view_image` tool visibility** -- currently hidden via `ToolScope` when `image_tool_results` is `false`.
+- **`view_image` tool visibility** -- hidden via the capability-base `ToolFilter` (`capability_base_filter_for_image_tool_results`) when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.
 - **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.
@@ -133,7 +142,7 @@ Image generation uses provider-owned image profiles rather than `ModelProfile` c
 
 ## Provider-native web search
 
-Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific tool config at build time and injects it as non-persisted `AgentConfig.provider_tool_defaults`, merged per-turn with explicit `provider_params` via RFC 7396 merge-patch.
+Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific tool defaults at build time as a typed, never-persisted `ProviderTag` (the `tool_defaults` half of `ProviderParamsCarrier`). Effective per-turn params are a typed field-wise merge: explicit `provider_params` win and tool defaults fill only the unset provider-native slots -- the old RFC 7396 raw-JSON merge-patch is retired.
 
 | Provider | Tool type | Config key | Default |
 |----------|-----------|------------|---------|
@@ -145,9 +154,9 @@ Web search is enabled by default for all catalog models with `supports_web_searc
 **Opt-out:**
 - Config-level: set the matching config key from the table above to `false`
 - CLI: `rkat run --no-web-search "..."`.
-- Per-request Anthropic/OpenAI: `provider_params: {"web_search": null}` (RFC 7396 null removal)
-- Per-request Gemini: `provider_params: {"google_search": null}` (RFC 7396 null removal)
-- Per-request boolean: `false` for the provider-native search key is treated as disable
+- Per-request Anthropic/OpenAI: `provider_params: {"provider_tag": {"provider": "anthropic", "web_search": false}}` (or `"provider": "open_ai"`)
+- Per-request Gemini: `provider_params: {"provider_tag": {"provider": "gemini", "google_search": false}}`
+- An explicit non-object value (`false` or `null`) in the typed search slot blocks the build-derived default and no search tool is emitted
 
 **Resume behavior:** Tool defaults are re-derived on every build (including resume) from current config and model profile. Config changes take effect immediately on resumed sessions. Explicit `provider_params` overrides are persisted in `SessionMetadata`.
 

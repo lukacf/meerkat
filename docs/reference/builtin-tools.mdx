@@ -718,25 +718,35 @@ See [Image generation](/guides/image-generation) for provider behavior, examples
 
 ## Comms tools
 
-Comms tools enable inter-agent communication. They require the `comms` Cargo feature (`dep:meerkat-comms`) and the factory-level `enable_comms` flag. Unlike other tool categories, comms tools are provided as a separate `CommsToolSurface` dispatcher (implementing `AgentToolDispatcher`) and composed via `ToolGateway`, NOT bundled into `CompositeDispatcher`.
+Comms tools enable inter-agent communication. They require the `comms` Cargo feature (`dep:meerkat-comms`) and the factory-level `enable_comms` flag. Unlike other tool categories, comms tools are provided as a separate `CommsToolSurface` dispatcher (implementing `AgentToolDispatcher`) and composed via `DynamicToolComposite`, NOT bundled into `CompositeDispatcher`.
 
-Comms tools are only shown to the agent when at least one peer is discoverable
-(controlled by `CommsToolSurface::peer_availability()`). The check passes when
-`TrustedPeers` has entries.
+Tool availability is reported per tool through the catalog
+(`comms_tool_unavailable_reason`): `send_message` and `peers` are advertised
+even before any peers are configured, while `send_request` and `send_response`
+require a runtime-bound command authority and are otherwise marked unavailable
+with the typed reason `RuntimeCommandAuthorityUnavailable`.
 
 Tool definitions (name, description, input schema) are dynamically loaded from `meerkat_comms::tools_list()`.
 
 <Accordion title="send_message">
-Send a collaboration message to a trusted peer.
+Send a fire-and-forget collaboration message to a trusted peer.
 
 **Default enabled:** Yes (when comms is active)
 
-<ParamField body="to" type="String" required>
-  Peer name to send to.
+<ParamField body="peer_id" type="String" required>
+  Canonical peer ID from the `peers` tool.
+</ParamField>
+
+<ParamField body="display_name" type="String">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField body="body" type="String" required>
   Message content.
+</ParamField>
+
+<ParamField body="blocks" type="Array">
+  Optional multimodal blocks: text entries or `image_ref` entries (`source: "current_turn"` with `index`, or `source: "blob"` with `blob_id` and `media_type`).
 </ParamField>
 
 <ParamField body="handling_mode" type="String" required>
@@ -744,27 +754,35 @@ Send a collaboration message to a trusted peer.
 </ParamField>
 
 ```json
-{ "status": "sent" }
+{ "status": "sent", "kind": "peer_message", "receipt": { ... } }
 ```
 
 **Source:** `meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="send_request">
-Send a structured request to a trusted peer. Use when you want explicit `intent + params` and a correlated response via `send_response`.
+Send a structured request to a trusted peer. Use when you want explicit `intent + params` and a correlated response via `send_response`. Requires a runtime-bound command authority.
 
-**Default enabled:** Yes (when comms is active)
+**Default enabled:** Yes (when comms is active and runtime command authority is attached)
 
-<ParamField body="to" type="String" required>
-  Peer name to send to.
+<ParamField body="peer_id" type="String" required>
+  Canonical peer ID from the `peers` tool.
+</ParamField>
+
+<ParamField body="display_name" type="String">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField body="intent" type="String" required>
-  Request intent/action identifier (e.g., `"review"`, `"delegate"`).
+  Typed request intent: `"checksum_token"` or `"supervisor.bridge"`. Unknown intents fail at the serde boundary.
 </ParamField>
 
-<ParamField body="params" type="any" default="null">
-  Request parameters.
+<ParamField body="params" type="Object" required>
+  Request parameters, validated against the selected intent.
+</ParamField>
+
+<ParamField body="blocks" type="Array">
+  Optional multimodal blocks (text and `image_ref` entries).
 </ParamField>
 
 <ParamField body="handling_mode" type="String" required>
@@ -776,19 +794,23 @@ Use `send_message` for normal agent collaboration. Use `send_request` only when 
 </Note>
 
 ```json
-{ "status": "sent" }
+{ "status": "sent", "kind": "peer_request", "receipt": { ... } }
 ```
 
 **Source:** `meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="send_response">
-Send a response to a previously received request from a trusted peer.
+Send a response to a previously received request from a trusted peer. Requires a runtime-bound command authority.
 
-**Default enabled:** Yes (when comms is active)
+**Default enabled:** Yes (when comms is active and runtime command authority is attached)
 
-<ParamField body="to" type="String" required>
-  Peer name to send to.
+<ParamField body="peer_id" type="String" required>
+  Canonical peer ID from the `peers` tool.
+</ParamField>
+
+<ParamField body="display_name" type="String">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField body="in_reply_to" type="String (UUID)" required>
@@ -799,21 +821,29 @@ Send a response to a previously received request from a trusted peer.
   Response status: `"accepted"`, `"completed"`, or `"failed"`.
 </ParamField>
 
-<ParamField body="result" type="any" default="null">
-  Response result data.
+<ParamField body="result" type="Object" default="null">
+  Typed response payload, validated against the original request contract.
+</ParamField>
+
+<ParamField body="blocks" type="Array">
+  Optional multimodal blocks (text and `image_ref` entries).
+</ParamField>
+
+<ParamField body="handling_mode" type="String">
+  Optional override for terminal responses: `"queue"` or `"steer"`. Forbidden on `"accepted"` progress responses.
 </ParamField>
 
 ```json
-{ "status": "sent" }
+{ "status": "sent", "kind": "peer_response", "receipt": { ... } }
 ```
 
 **Source:** `meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="peers">
-List all discoverable peers and their connection status.
+List all visible peers with connection info and optional metadata.
 
-Returns configured trusted peers (`TrustedPeers`), excluding the current agent ("self") by public key.
+Returns entries from the `TrustStore` (keyed by canonical `PeerId`), excluding the current agent ("self") by public key. Names are display labels and may not be unique — use `peer_id` for sends.
 
 **Default enabled:** Yes (when comms is active)
 
@@ -824,7 +854,7 @@ Returns configured trusted peers (`TrustedPeers`), excluding the current agent (
   "peers": [
     {
       "name": "agent-beta",
-      "peer_id": "<derived-peer-id>",
+      "peer_id": "0193a1b2-...",
       "address": "tcp://127.0.0.1:4200"
     }
   ]

@@ -36,6 +36,8 @@ The factory validates `bindings.session_id == session.id()` for `SessionOwned` b
 
 `generate_image` is a privileged built-in dispatch path, not an ordinary external tool. `AgentFactory` wires it only when the build has an image-generation machine, planner, executor, and blob store. The machine owns lifecycle semantics; provider crates own image target profiles and provider-specific parameters; the tool layer only normalizes the model-facing request, calls the planner/executor, commits blobs, and appends assistant image blocks after tool results to preserve provider tool-call adjacency.
 
+Image-target routing follows session identity: the planner resolves the provider from the typed `SessionModelRoutingStatus.session_provider` (meerkat-core/src/image_generation.rs); model-name inference (`infer_from_model`) was deleted from the planner path. References to the current turn's generated images travel as the typed `CurrentTurnImageRef` newtype (meerkat-core/src/agent.rs), not raw indices.
+
 Generated images must be surfaced through transcript history plus blob retrieval. SDKs should parse `AssistantBlock::Image` into typed image fields and fetch bytes through `blob/get`; do not inline generated image bytes into history.
 
 ## Tool Scoping

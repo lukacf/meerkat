@@ -54,7 +54,7 @@ Trust policy resolution:
 1. CLI `--trust-policy`
 2. `RKAT_TRUST_POLICY`
 3. config `trust.policy`
-4. default `permissive`
+4. default `strict` (fail closed; accepting unsigned or unknown-signer packs requires an explicit `permissive` opt-in)
 
 Strict mode rejects:
 
@@ -81,30 +81,24 @@ rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
 
 The web build compiles the **real meerkat agent stack** to wasm32 — same agent loop, same LLM providers (Anthropic, OpenAI, Gemini), same streaming as CLI/RPC/REST. Not a simulation.
 
-Prerequisites:
-
-```bash
-cargo install wasm-pack
-export PATH="$HOME/.cargo/bin:$PATH"
-```
+Prerequisites: a prebuilt wasm32 runtime artifact (`runtime_bg.wasm`) produced
+by the `meerkat-web-runtime` build pipeline (e.g. `wasm-pack build
+meerkat-web-runtime`). The CLI does not compile wasm32 itself and fails closed
+without the artifact — it never emits a placeholder bundle.
 
 Build:
 
 ```bash
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm ./path/to/runtime_bg.wasm
 ```
 
 Output includes:
 
-- `runtime.js` — wasm-bindgen JS bindings
-- `runtime_bg.wasm` — compiled meerkat agent stack (~1.5MB)
+- `runtime.js` — bundle loader module pointing at the wasm and mobpack assets
+- `runtime_bg.wasm` — the supplied compiled meerkat agent stack
 - `mobpack.bin` — the packed mob artifact
 - `manifest.web.toml` — derived web manifest
-
-Environment overrides:
-
-- `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary
-- `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit runtime crate directory for build
+- `index.html` — minimal host page
 
 ### How the WASM runtime works
 

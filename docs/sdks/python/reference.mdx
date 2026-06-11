@@ -36,8 +36,10 @@ Fields:
 - `turns: int`
 - `tool_calls: int`
 - `usage: Usage`
+- `terminal_cause_kind: str | None`
 - `session_ref: str | None`
 - `structured_output: Any | None`
+- `extraction_error: ExtractionError | None`
 - `schema_warnings: list[SchemaWarning] | None`
 - `skill_diagnostics: SkillRuntimeDiagnostics | None`
 
@@ -68,6 +70,7 @@ Returned by `client.read_session(session_id)`.
 - `model: str`
 - `provider: str`
 - `last_assistant_text: str | None`
+- `resolved_capabilities: ResolvedModelCapabilities | None`
 
 ### `SessionInfo`
 
@@ -75,13 +78,13 @@ Base shared metadata type for session identity/timestamps/state.
 
 ## Config API contract
 
-`get_config`, `set_config`, and `patch_config` return `ConfigEnvelope`:
+`get_config` returns `ConfigEnvelope`; `set_config` and `patch_config` return `ConfigWriteResult`:
 
 ```python
 from meerkat import ConfigEnvelope
 ```
 
-Fields:
+`ConfigEnvelope` fields:
 
 - `config: dict[str, Any]`
 - `generation: int`
@@ -89,6 +92,8 @@ Fields:
 - `instance_id: str | None`
 - `backend: str | None`
 - `resolved_paths: dict[str, str] | None`
+
+`ConfigWriteResult` carries the same fields plus `live_propagation: dict | None`.
 
 ## Models and schedules
 
@@ -184,7 +189,7 @@ Types:
 - synchronous constructor style (`session.stream(...)` returns stream object)
 - request is sent on `async with` entry
 - `events.result` is available after iteration
-- `BackgroundJobCompleted.terminal_status` carries background job completion semantics; `legacy_status` is only the optional wire `status` display mirror
+- `BackgroundJobCompleted.terminal_status` is the typed terminal status for background jobs (`job_id`, `display_name`, `terminal_status`, `detail`)
 
 ## Live channels
 

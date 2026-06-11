@@ -53,7 +53,7 @@ Surface binaries:
   └── meerkat-mcp-server    → rkat-mcp                    (MCP server)
 ```
 
-There are no separate public reduced-surface binaries in 0.6.23. Reduced-surface distributions are source builds of the same surface crates with a narrower Cargo feature set.
+There are no separate public reduced-surface binaries. Reduced-surface distributions are source builds of the same surface crates with a narrower Cargo feature set.
 
 ## Key Traits
 
@@ -61,7 +61,7 @@ There are no separate public reduced-surface binaries in 0.6.23. Reduced-surface
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
+| `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-llm-core; re-exported by the meerkat-client shim) |
 | `AgentToolDispatcher` | Tool routing and dispatch | `CompositeDispatcher` (meerkat-tools), `DynamicToolComposite` / `ToolGateway` (meerkat-core), `AgentMobToolSurface` (meerkat-mob-mcp), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Agent-loop-facing persistence adapter | `StoreAdapter<S>` (meerkat-store) |
 | `SessionStore` | Canonical session persistence contract for backend authors | `MemoryStore`, `JsonlStore`, `SqliteSessionStore` (meerkat-store) |
@@ -106,7 +106,7 @@ There are no separate public reduced-surface binaries in 0.6.23. Reduced-surface
 | `MemberLaunchMode` | Fresh / Resume / Fork (how to start a member) |
 | `ForkContext` | FullHistory (CoW) / LastMessages(n) (how much history to fork) |
 | `BudgetSplitPolicy` | Equal / Proportional / Remaining / Fixed(u64) |
-| `MobMemberSnapshot` | status, agent_runtime_id, fence_token, output_preview, error, tokens_used, is_final, peer_connectivity, kickoff |
+| `MobMemberSnapshot` | Public: status, output_preview, error, tokens_used, is_final, current_session_id, peer_connectivity, kickoff, external_member, resolved_capabilities. Binding atoms (agent_identity, agent_runtime_id, fence_token, current_bridge_session_id) are `pub(crate)` + `#[serde(skip)]` — bridge-internal, never app-facing |
 | `FrameSpec` / `FlowNodeSpec` / `RepeatUntilSpec` | Frame-based flow graphs and repeat-until loop nodes |
 | `MobDefinition.owner_bridge_session_id` / `MobDefinition.is_implicit` | Session-scoped mob ownership, access control, implicit cleanup |
 

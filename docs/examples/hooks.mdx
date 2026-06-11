@@ -281,10 +281,7 @@ Register a Rust closure directly -- no subprocess, no serialization overhead. On
                 } else {
                     None
                 };
-                Ok(RuntimeHookResponse {
-                    decision,
-                    ..Default::default()
-                })
+                Ok(RuntimeHookResponse { decision })
             })),
         );
     ```
@@ -301,11 +298,9 @@ Hooks receive typed projections of the request, response, tool call, and tool re
             "tool-audit",
             Arc::new(|invocation| Box::pin(async move {
                 let content = invocation.tool_result.as_ref()
-                    .map(|r| r.content.as_str()).unwrap_or("");
-                audit_tool_result(content).await;
-                Ok(RuntimeHookResponse {
-                    ..Default::default()
-                })
+                    .map(|r| r.text_projection()).unwrap_or_default();
+                audit_tool_result(&content).await;
+                Ok(RuntimeHookResponse::default())
             })),
         );
     ```
@@ -537,7 +532,7 @@ Hooks emit events into the session event stream. Subscribe to these to build das
 {"type": "hook_denied", "hook_id": "safety-gate", "point": "pre_tool_execution", "reason_code": "policy_violation", "message": "rm -rf not allowed"}
 
 // HookFailed -- emitted when a hook errors or times out
-{"type": "hook_failed", "hook_id": "audit-log", "point": "post_tool_execution", "error": "process exited with code 1"}
+{"type": "hook_failed", "hook_id": "audit-log", "point": "post_tool_execution", "reason": {"reason_code": "execution_failed", "message": "process exited with code 1"}}
 ```
 
 ## Next step

@@ -35,6 +35,10 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 29. **Live channels replaced the realtime attachment plane.** The `session/realtime_attachment_status`, `realtime/open_info`, `realtime/status`, and `realtime/capabilities` methods have been removed. Live channels use the caller-initiated `live/*` method family. `ModelCapabilities.realtime` remains the capability gate.
 30. **`meerkat-models` is a compatibility shim.** New architectural references should point at `meerkat-core/src/model_profile/...`. Provider crates (`meerkat-anthropic`/`meerkat-openai`/`meerkat-gemini`) own their model registration; do not put new model code in the legacy `meerkat-client` shim.
 31. **Web SDK auth model.** Browser-hosted flows use `authBinding` + `registerExternalAuthResolver` (resolves to typed `AuthCredential`s in the host page) — per-session `apiKey` fields were removed. New WASM-bridged auth wiring must go through the resolver path, not by re-introducing inline credentials.
+32. **Auth tokens commit acquire-first.** A persisted token without the AuthMachine lifecycle acquisition marker is dead data: `publish_token_lifecycle_acquired` (meerkat-core/src/auth/lifecycle.rs) is the durable proof-of-acquisition, and a failed save must roll the acquired lease back so no half-state survives. `TokenStore` (meerkat-core/src/auth/token_store.rs) is the vault contract — do not write token files around it.
+33. **Trust is PeerId-keyed.** `TrustStore` (meerkat-comms/src/trust.rs) keys entries on `PeerId` and rejects duplicates with a typed error. Recipient-side wiring trust is a MobMachine obligation (`pending_recipient_trust: Set<PeerId>`), not fire-and-forget shell work.
+34. **Member revival is machine-authorized.** Post-discard revival flows observe → classify → realize through MobMachine (`member_revival_pending`, `MemberLiveMaterializationClassified`, `ResolveMemberRevival*`). `Broken` is terminal — the `not_broken` guard refuses retry and `member()` returns typed `MobError::MemberRestoreFailed`. Do not add shell-side retry loops.
+35. **Image-gen routing follows session identity.** The planner resolves the image target from `SessionModelRoutingStatus.session_provider` (typed session provider identity); model-name inference (`infer_from_model`) was deleted from the planner path. Do not reintroduce provider-prefix sniffing in image routing.
 
 ## Gotchas to check on every non-trivial change
 
@@ -46,7 +50,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - **`FlowEngine::execute_step_with_all_guards()` is the only canonical step path**; frame-step outcomes route back through MobMachine DSL.
 - **Mob persistence is SQLite/WAL-backed.** Avoid lock-holding backends or split store state.
 - **Agent mob tools and archive cleanup must share the same hydrated `MobMcpState`**; parallel shadow states are architectural bugs.
-- **`input_terminal_outcomes` / `input_attempt_counts`**: future DSL structural upgrades pending; until then, shell owns these two InputState fields explicitly (annotated with doc comments).
+- **Input lifecycle facts are DSL-owned**: `input_phases`, `input_terminal_kind`, `input_attempt_counts`, `input_admission_seq`, etc. are authoritative in MeerkatMachine DSL. `InputStateSeed` (meerkat-runtime/src/input_state.rs) carries them alongside persisted `InputState` only at the store boundary; inside a running driver they are always read from the DSL, never from the seed.
 - **Generated protocol files in `src/generated/`**: never hand-edit. Regenerate via `make machine-codegen` after any DSL change.
 - **Drift check before commit**: `make machine-check-drift` must be clean; if it reports stale artifacts, `make machine-codegen` was forgotten.
 - **Schema/alphabet parity before commit**: `runtime_schema_parity`, `runtime_alphabet_parity`, and render-contract audits must stay green; they are the ratchet for #38/#39.
@@ -62,5 +66,6 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - If policy depends on dynamic identity, where is recomputation defined?
 - Did the change reduce ambiguity, or merely relocate it?
 
-Public doctrine summary: `docs/reference/machine-authority.mdx`.
-Historical internal doctrine archive: `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
+Canonical doctrine: `docs/architecture/meerkat-dogma.md` (+ commentary in `docs/architecture/meerkat-dogma-commentary.md`).
+Public machine-authority summary: `docs/reference/machine-authority.mdx`.
+Historical internal doctrine archive (legacy rules #1–#20): `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.

@@ -80,7 +80,8 @@ If startup fails with lineage/remap validation:
 3. Re-run identity migration tests:
 
 ```bash
-cargo test -p meerkat-core --test skill_identity_migrations
+cargo test -p meerkat-core --test source_identity_resolve_enforces_lifecycle
+cargo test -p meerkat-skills --test resolver_precedence
 ```
 
 4. Roll forward only after tests pass and resolver-boundary canonicalization is verified.

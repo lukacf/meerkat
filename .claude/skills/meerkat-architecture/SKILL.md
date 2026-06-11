@@ -91,28 +91,56 @@ When updating architecture docs or reviewing current code, do not stop at the
   staging, the session-side staged context must be rolled back by the same
   idempotency keys; otherwise the system has phantom or duplicate delivery.
 - Release/docs/SDK hardening: docs validation, version/schema freshness checks,
-  BuildBuddy/Web SDK recovery lanes, Windows asset routing fixes, and current
-  contract/package examples at `0.6.23`.
+  BuildBuddy/Web SDK recovery lanes, and Windows asset routing fixes.
+
+Since the PR #759 dogma campaign (and its follow-up lanes), additionally:
+
+- `MeerkatId` → `AgentIdentity` everywhere (wire field `meerkat_id` →
+  `agent_identity`); binding atoms (`agent_runtime_id`, `fence_token`,
+  bridge session ids) are bridge-internal, never app-facing.
+- Machine-authorized post-discard member revival (observe → classify →
+  realize; `Broken` is terminal and refuses retry) and MobMachine-owned
+  `pending_recipient_trust` wiring obligations; `TrustStore` is PeerId-keyed.
+- `SessionDocumentMachine` owns the archive lifecycle-terminal (the
+  archive mode-split and resurrection window are unrepresentable).
+- Auth acquire-first commits: the AuthMachine lifecycle marker is the durable
+  proof-of-acquisition (`publish_token_lifecycle_acquired`); `TokenStore` is
+  the vault contract.
+- Comms classification carries typed `from_peer_id` and machine-echoes the
+  canonical peer id; `CurrentTurnImageRef` newtype for turn image references.
+- Image-gen routing follows session identity
+  (`SessionModelRoutingStatus.session_provider`); planner-side
+  `infer_from_model` deleted.
+- Governance gates converted to typed syn-AST xtask gates (effect-authority,
+  bridge-classifier, ownership-ledger `--check-drift`, strict RMAT,
+  seam-inventory) — old shell-script scanners deleted.
+- Net legacy elimination: migration shims, JSON codecs for machine payloads
+  (`OpTerminalPayload` is a domain type), the comms-agent runtime, and the
+  `MemberState` mirror were deleted; fail-closed v2-only persisted session
+  versions are enforced by the generated
+  `SessionPersistenceVersionAuthority`.
 
 ## Runtime Dogma (first review lens)
 
-Public doctrine summary: `docs/reference/machine-authority.mdx`.
-Historical internal doctrine archive: `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
+Canonical doctrine: `docs/architecture/meerkat-dogma.md` (nine rules; mirrored
+into the `meerkat-dogma-inquisition` skill via
+`scripts/sync-meerkat-dogma-skill-docs.sh`, drift-gated). Commentary:
+`docs/architecture/meerkat-dogma-commentary.md`. Public summary:
+`docs/reference/machine-authority.mdx`. Historical archive (legacy rules
+#1–#20; the canonical doc carries the legacy-number mapping):
+`docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
 
-Short version:
+The nine canonical rules:
 
-1. One semantic fact, one owner.
-2. Machines own semantics.
-3. Shell owns mechanics, not meaning.
-4. One semantic condition, one terminal path.
-5. Typed truth, never string folklore.
-6. App-facing APIs expose domain handles (`job_id`, `AgentIdentity`, `AgentRuntimeId`, etc.), not raw infra IDs.
-7. Raw infra identity must be canonical.
-8. `Option<T>` must not hide ownership uncertainty.
-9. Inherit / disable / set are different facts (tri-state override types).
-10. Dynamic policy follows dynamic identity.
-11. Derived projections are rebuildable, never authoritative.
-12. Surfaces are skins, not authorities.
+1. Authority Is Singular.
+2. Generated Machines Own Canonical Change.
+3. Shells, Stores, and Projections Are Mechanical.
+4. Truth Is Typed, Identity Is Canonical (domain handles like `job_id` / `AgentIdentity`, not raw infra IDs; `Option<T>` must not hide ownership).
+5. Composability Is Feature-Owned.
+6. Surfaces Are Thin Over The Shared Runtime.
+7. Providers and Policy Stay Behind Their Owning Seams (tri-state inherit/disable/set; dynamic policy follows dynamic identity).
+8. Terminality and Faults Are Explicit.
+9. Contracts, Crates, and Generation Are Ratchets.
 
 ### Live audio/video adapter vocabulary (public noun)
 
@@ -194,6 +222,10 @@ When adding state or effects keyed on member identity, choose
 durable per-member configuration), `AgentRuntimeId` if it's
 per-binding (ops registry membership, adapter ownership for a running channel).
 
+Member lifecycle facts (kickoff phases, restore failures, revival obligations,
+`Broken` terminality) are MobMachine-owned and keyed on `AgentIdentity`;
+`MemberHandle::internal_turn` is the in-process member turn path.
+
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |
@@ -265,6 +297,8 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-mob/src/runtime/local_bridge.rs` — in-process MeerkatMachine bridge
 - `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
+- `xtask/src/{effect_authority,bridge_classifier,ownership_ledger,rmat_audit,seam_inventory}.rs` — typed governance gates
+- `docs/architecture/meerkat-dogma.md`, `docs/architecture/meerkat-dogma-commentary.md` — canonical dogma doctrine
 - `docs/reference/machine-authority.mdx` — public machine-authority summary
 - `docs/reference/build-and-ci.mdx` — public BuildBuddy/Cargo/CI guide
 - `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical internal doctrine archive

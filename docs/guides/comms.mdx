@@ -51,7 +51,7 @@ graph TD
         ROUTER["Router"]
         INBOX["Inbox"]
         KP["Keypair"]
-        TP["TrustedPeers"]
+        TP["TrustStore"]
     end
 
     DRAIN -->|"poll inbox"| INBOX
@@ -88,7 +88,7 @@ graph TD
 
 <Steps>
   <Step title="Enable comms feature">
-    Ensure the `comms` Cargo feature is compiled in (enabled by default in the CLI and facade crate).
+    Ensure the `comms` Cargo feature is compiled in (enabled by default in the CLI; opt-in on the `meerkat` facade crate).
   </Step>
   <Step title="Generate identity">
     Identity is auto-generated on first run. Keys are stored under the realm runtime root (workspace `.rkat/identity/` for the default CLI workspace realm, realm data dir for non-workspace realms).
@@ -128,19 +128,20 @@ The signable bytes are computed by serializing `(id, from, to, kind)` as CBOR, t
 
 ## Trust model
 
-Agents maintain a list of trusted peers in a `TrustedPeers` collection (`meerkat-comms/src/trust.rs`).
+Agents maintain trusted peers in a `TrustStore` (`meerkat-comms/src/trust.rs`), keyed by the canonical `PeerId` — a UUIDv5 derived from the peer's Ed25519 public key. `PeerName` is display-only metadata: duplicate names across entries are legal, while a duplicate `PeerId` is a hard error. Resolving a name to a `PeerId` (`TrustStore::resolve_name`) returns a typed `TrustResolveError::Ambiguous` when more than one entry shares the name — the store never guesses.
 
-<Accordion title="TrustedPeer structure and file format">
+<Accordion title="TrustEntry structure and file format">
 ```rust
-pub struct TrustedPeer {
-    pub name: String,     // Human-readable name (used by tools)
-    pub pubkey: PubKey,   // Ed25519 public key
-    pub addr: String,     // Address: "uds://...", "tcp://...", or "inproc://..."
-    pub meta: PeerMeta,   // Friendly metadata for peer discovery (description, labels)
+pub struct TrustEntry {
+    pub peer_id: PeerId,      // Canonical routing identity (the store key)
+    pub name: PeerName,       // Display-only slug; not unique across entries
+    pub pubkey: PubKey,       // Ed25519 public key
+    pub address: PeerAddress, // Typed address: "uds://...", "tcp://...", or "inproc://..."
+    pub meta: PeerMeta,       // Friendly metadata for peer discovery (description, labels)
 }
 ```
 
-Stored as JSON at `<runtime-root>/.rkat/trusted_peers.json`:
+Stored as JSON at `<runtime-root>/.rkat/trusted_peers.json` with the stable persisted row shape `{ name, pubkey, addr, meta }`; the `PeerId` is re-derived from the pubkey on load, and rows with invalid names, addresses, key material, or duplicate canonical identities are rejected fail-closed:
 
 ```json
 {
@@ -169,16 +170,16 @@ Incoming connections are validated in `handle_connection()` (`meerkat-comms/src/
     Read the envelope from the stream (CBOR, length-prefixed).
   </Step>
   <Step title="Verify signature">
-    Verify the Ed25519 signature (`envelope.verify()`).
-  </Step>
-  <Step title="Check trust">
-    Check the sender is in the trusted peers list (`trusted.is_trusted(&envelope.from)`).
+    Verify the Ed25519 signature (`envelope.verify()`) when peer auth is enabled (`require_peer_auth`).
   </Step>
   <Step title="Verify recipient">
     Verify the envelope is addressed to us (`envelope.to == keypair.public_key()`).
   </Step>
-  <Step title="Process or drop">
-    If all pass: send an ACK (for `Message` and `Request` kinds), then enqueue to inbox. If any check fails: silently drop.
+  <Step title="Admit through the inbox seam">
+    Pass the envelope to inbox admission (`inbox_sender.send_connection_ingress(...)`), where ingress classification checks the sender against the `TrustStore`. Untrusted senders are dropped with a typed admission reason (`untrusted_sender`).
+  </Step>
+  <Step title="ACK or reject">
+    If admitted: send an ACK (for `Message` and `Request` kinds). Any failed check returns a typed `IoTaskError` (invalid signature, misaddressed, inbox full, untrusted sender) so the listener records the rejection rather than silently dropping.
   </Step>
 </Steps>
 
@@ -204,9 +205,9 @@ All transports use a length-prefixed CBOR framing protocol implemented by `Trans
 **Inproc transport**: The `InprocRegistry` (`meerkat-comms/src/inproc.rs`) is a process-global registry segmented by namespace. Meerkat uses realm-scoped namespaces so inproc peers from different realms are isolated by default. Messages are delivered directly in-memory without serialization.
 
 - `InprocRegistry::global()` returns the singleton
-- `register_with_meta_in_namespace(namespace, name, pubkey, sender, meta)` adds an agent in a namespace
+- `register_with_meta_in_namespace(...)` adds an agent in a namespace
 - `unregister_in_namespace(namespace, pubkey)` removes an agent from a namespace
-- `send_with_signature_in_namespace(namespace, from_keypair, to_name, kind, sign)` delivers in-memory within that namespace
+- delivery within a namespace is internal to the registry (crate-private send paths keyed by pubkey)
 
 When `CommsRuntime` is created, it automatically registers itself in the active namespace. When dropped, it unregisters from that namespace.
 </Accordion>
@@ -217,9 +218,10 @@ When `CommsRuntime` is created, it automatically registers itself in the active 
 ```rust
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum MessageKind {
-    Message { body: String },
-    Request { intent: String, params: JsonValue },
-    Response { in_reply_to: Uuid, status: Status, result: JsonValue },
+    Message { body: String, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
+    Request { intent: String, params: JsonValue, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
+    Lifecycle { kind: PeerLifecycleKind, params: JsonValue },
+    Response { in_reply_to: Uuid, status: Status, result: JsonValue, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
     Ack { in_reply_to: Uuid },
 }
 
@@ -238,13 +240,14 @@ pub enum Status {
 |-------------|----------------------|---------------------|
 | `Message` | Yes (with timeout) | Yes |
 | `Request` | Yes (with timeout) | Yes |
+| `Lifecycle` | No | No |
 | `Response` | No | No |
 | `Ack` | No | No (would loop) |
 
 ACK timeout defaults to 30 seconds. If no ACK is received, the send fails with `SendError::PeerOffline`.
 
 <Accordion title="MessageIntent variants">
-The `MessageIntent` enum provides type-safe intent values for requests:
+The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) provides type-safe intent values for classifying incoming requests:
 
 | Variant | String | Description |
 |---------|--------|-------------|
@@ -255,9 +258,13 @@ The `MessageIntent` enum provides type-safe intent values for requests:
 | `Review` | `"review"` | Review something |
 | `Calculate` | `"calculate"` | Request computation |
 | `Query` | `"query"` | Request information |
+| `PeerAdded` | `"mob.peer_added"` | Peer added lifecycle event |
+| `PeerRetired` | `"mob.peer_retired"` | Peer retired lifecycle event |
 | `Custom(String)` | (any string) | User-defined |
 
 Standard strings are parsed into their enum variants; unknown strings become `Custom`.
+
+The LLM-facing `send_request` tool accepts a separate, closed intent vocabulary (`CommsPeerRequestIntent` in `meerkat-core`): `"checksum_token"` and `"supervisor.bridge"`. Unknown intents fail at the serde boundary.
 </Accordion>
 
 ## LLM-facing tools
@@ -267,41 +274,57 @@ Four tools are exposed to the LLM when comms is enabled.
 <Accordion title="send_message">
 Send a collaboration message to a peer.
 
-<ParamField path="to" type="string" required>
-  Peer name to send message to.
+<ParamField path="peer_id" type="string" required>
+  Canonical peer ID (from the `peers` tool) to send the message to.
+</ParamField>
+
+<ParamField path="display_name" type="string">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField path="body" type="string" required>
   Message content.
 </ParamField>
 
+<ParamField path="blocks" type="array">
+  Optional multimodal blocks: `{"type":"text","text":...}` or `{"type":"image_ref","source":"current_turn","index":0}` / `{"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}`.
+</ParamField>
+
 <ParamField path="handling_mode" type="string" required>
   Delivery mode. Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
 </ParamField>
 
-**Response**: `{"status": "sent", "kind": "peer_message"}`
+**Response**: `{"status": "sent", "kind": "peer_message", "receipt": {...}}`
 </Accordion>
 
 <Accordion title="send_request">
-Send a structured ask to a peer when you want explicit `intent + params` and a correlated response via `send_response`.
+Send a structured ask to a peer when you want explicit `intent + params` and a correlated response via `send_response`. Requires a runtime-bound command authority; without it the tool reports a typed `RuntimeCommandAuthorityUnavailable` reason.
 
-<ParamField path="to" type="string" required>
-  Peer name to send request to.
+<ParamField path="peer_id" type="string" required>
+  Canonical peer ID (from the `peers` tool) to send the request to.
+</ParamField>
+
+<ParamField path="display_name" type="string">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField path="intent" type="string" required>
-  Request intent/action (e.g., `"review"`, `"delegate"`).
+  Typed request intent: `"checksum_token"` or `"supervisor.bridge"`. Unknown intents are rejected at the serde boundary.
 </ParamField>
 
-<ParamField path="params" type="object">
-  Request parameters. Defaults to `null`.
+<ParamField path="params" type="object" required>
+  Request parameters, validated against the selected intent (e.g. `{"subject": "..."}` for `checksum_token`).
+</ParamField>
+
+<ParamField path="blocks" type="array">
+  Optional multimodal blocks (text and `image_ref` entries).
 </ParamField>
 
 <ParamField path="handling_mode" type="string" required>
   Delivery mode. Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
 </ParamField>
 
-**Response**: `{"status": "sent", "kind": "peer_request"}`
+**Response**: `{"status": "sent", "kind": "peer_request", "receipt": {...}}`
 
 <Note>
 Use `send_message` by default for ordinary collaboration. `send_request` is for structured ask/reply semantics only. It is not task tracking, a stronger delivery mode, or a reserved response channel.
@@ -309,10 +332,14 @@ Use `send_message` by default for ordinary collaboration. `send_request` is for 
 </Accordion>
 
 <Accordion title="send_response">
-Send a response to a previously received request.
+Send a response to a previously received request. Requires a runtime-bound command authority, like `send_request`.
 
-<ParamField path="to" type="string" required>
-  Peer name to send response to.
+<ParamField path="peer_id" type="string" required>
+  Canonical peer ID (from the `peers` tool) to send the response to.
+</ParamField>
+
+<ParamField path="display_name" type="string">
+  Optional display name, retained only for diagnostics.
 </ParamField>
 
 <ParamField path="in_reply_to" type="string" required>
@@ -324,14 +351,18 @@ Send a response to a previously received request.
 </ParamField>
 
 <ParamField path="result" type="object">
-  Response result data. Defaults to `null`.
+  Typed response payload, validated against the original request contract. Defaults to `null`.
+</ParamField>
+
+<ParamField path="blocks" type="array">
+  Optional multimodal blocks (text and `image_ref` entries).
 </ParamField>
 
 <ParamField path="handling_mode" type="string">
-  Optional delivery mode override. Use `"queue"` for normal delivery or `"steer"` when you need immediate steer processing on runtime-backed sessions.
+  Optional delivery mode override for terminal responses. Use `"queue"` for normal delivery or `"steer"` when you need immediate steer processing on runtime-backed sessions. Forbidden on `"accepted"` progress responses.
 </ParamField>
 
-**Response**: `{"status": "sent", "kind": "peer_response"}`
+**Response**: `{"status": "sent", "kind": "peer_response", "receipt": {...}}`
 
 <Note>
 The LLM-facing comms tools return lightweight tool receipts. Host-side `comms/send` returns richer typed receipts such as `peer_message_sent`, `peer_request_sent`, and `peer_response_sent`, with identifiers and ACK-related data for application code.
@@ -341,9 +372,10 @@ The LLM-facing comms tools return lightweight tool receipts. Host-side `comms/se
 <Accordion title="peers">
 List all discoverable peers and their addresses.
 
-This includes both configured trusted peers and in-process peers currently
-registered in `InprocRegistry`. Results are de-duplicated by name and exclude
-the current agent.
+Entries come from the `TrustStore` (plus runtime-resolved sources when a
+runtime command authority is attached). The current agent and private
+control-plane routes are excluded. Names are display labels and may not be
+unique — always use `peer_id` for sends.
 
 **Input**: Empty object `{}`
 
@@ -354,7 +386,7 @@ the current agent.
   "peers": [
     {
       "name": "review-agent",
-      "peer_id": "ed25519:...",
+      "peer_id": "018f6b2a-...",
       "address": "tcp://192.168.1.50:4200"
     }
   ]
@@ -364,20 +396,22 @@ the current agent.
 
 ### Tool availability
 
-Comms tools are conditionally available based on peer/trust configuration in the
-surface. `CommsToolSurface::peer_availability()` checks whether `TrustedPeers`
-has any configured peers (`TrustedPeers::has_peers()`). Tools are hidden when no
-peers are configured.
+Comms tool availability is reported per tool via the catalog
+(`comms_tool_unavailable_reason` in `meerkat-comms`). `send_message` and
+`peers` are advertised even before any peers are configured, so live providers
+can discover later wiring. `send_request` and `send_response` require a
+runtime-bound command authority; without one they are marked unavailable with
+the typed reason `RuntimeCommandAuthorityUnavailable`.
 
 ## Inbox
 
-The `Inbox` (`meerkat-comms/src/inbox.rs`) is a bounded MPSC channel (default capacity: 1024) with a `Notify` mechanism for waking waiting tasks.
+The `Inbox` (`meerkat-comms/src/inbox.rs`) is a bounded queue (default capacity: 1024) with a `Notify` mechanism for waking waiting tasks.
 
-- `InboxSender::send(item)` enqueues an item and calls `notify.notify_waiters()`
-- `Inbox::try_drain()` returns all currently available items without blocking
-- `Inbox::recv()` blocks until a message is available
+- `Inbox::new()` creates a raw transport-only inbox; runtime peer/event ingress uses the classified form with an installed machine handle
+- `InboxSender::send(item)` enqueues an item and returns a typed `AdmissionOutcome` (`Admitted` or `Dropped { reason }`) — inbox-full, closed-session, and untrusted-sender drops are explicit, never silent
+- the classified queue is drained by the runtime as the sole consumer
 
-When converting to `CommsMessage` for the agent loop, ACKs and messages from unknown peers are filtered out.
+ACKs and messages from untrusted peers are rejected at admission, so they never reach the agent loop.
 
 Queueing an inbox item and consuming it are separate truths:
 
@@ -401,7 +435,9 @@ event_address = "127.0.0.1:4201"  # Plain-text event listener (requires auth = "
 |-------|------|---------|-------------|
 | `mode` | `CommsRuntimeMode` | `Inproc` | Transport mode |
 | `address` | `Option<String>` | `None` | Listen address for signed agent-to-agent comms |
+| `advertise_address` | `Option<String>` | `None` | Address advertised to signed peers (for wildcard/NAT binds) |
 | `auth` | `CommsAuthMode` | `Open` | Auth mode: `"none"` (open) or `"ed25519"` |
+| `require_peer_auth` | `bool` | `true` | Whether peer traffic requires signatures and trusted-sender checks |
 | `event_address` | `Option<String>` | `None` | Plain-text event listener address (requires `auth = "none"`) |
 </Accordion>
 
@@ -413,12 +449,19 @@ pub struct CoreCommsConfig {
     pub enabled: bool,
     pub name: String,                        // Default: "meerkat"
     pub inproc_namespace: Option<String>,    // Realm-scoped namespace for inproc isolation
-    pub listen_uds: Option<PathBuf>,
-    pub listen_tcp: Option<SocketAddr>,
-    pub identity_dir: PathBuf,               // Default: "<runtime-root>/.rkat/identity"
-    pub trusted_peers_path: PathBuf,         // Default: "<runtime-root>/.rkat/trusted_peers.json"
+    pub listen_uds: Option<PathBuf>,         // Signed agent-to-agent listener (UDS)
+    pub listen_tcp: Option<SocketAddr>,      // Signed agent-to-agent listener (TCP)
+    pub advertise_address: Option<String>,   // Address advertised to signed peers
+    pub event_listen_tcp: Option<SocketAddr>, // Plain event listener (auth = Open only)
+    pub event_listen_uds: Option<PathBuf>,   // Plain event listener (Unix, auth = Open only)
+    pub identity_dir: PathBuf,               // Default: ".rkat/identity"
+    pub trusted_peers_path: PathBuf,         // Default: ".rkat/trusted_peers.json"
     pub ack_timeout_secs: u64,               // Default: 30
-    pub max_message_bytes: usize,            // Default: 1,048,576
+    pub max_message_bytes: u32,              // Default: 1,048,576
+    pub auth: CommsAuthMode,
+    pub require_peer_auth: bool,             // Default: true
+    pub allow_external_unauthenticated: bool, // Default: false (non-loopback plain listeners)
+    pub pairing_password: Option<String>,    // Runtime-only enrollment secret (never serialized)
 }
 ```
 
@@ -514,7 +557,7 @@ When another agent calls `peers()`, the output includes the metadata:
 {
   "peers": [{
     "name": "reviewer",
-    "peer_id": "ed25519:...",
+    "peer_id": "018f6b2a-...",
     "address": "inproc://reviewer",
     "description": "Reviews pull requests for style issues",
     "labels": {"lang": "rust", "team": "infra"}
@@ -545,7 +588,7 @@ rkat run --comms-name monitor --keep-alive --stdin lines "You are a monitoring a
     When comms messages or external events arrive, runtime ingress queues them and admits them as later turns. External events are queue-only runtime-backed inputs; they do not create a second direct execution loop.
   </Step>
   <Step title="Exit conditions">
-    The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error.
+    The agent exits when it receives a typed `mob.dismiss` lifecycle signal from its supervisor, its budget is exhausted, or it encounters a graceful error. A literal "DISMISS" string in a peer message body is ordinary content, not a control signal.
   </Step>
 </Steps>
 
@@ -555,11 +598,12 @@ rkat run --comms-name monitor --keep-alive --stdin lines "You are a monitoring a
 ```rust
 use meerkat::build_comms_runtime_from_config;
 
-let runtime = build_comms_runtime_from_config(&config, base_dir, "my-agent").await?;
+let runtime =
+    build_comms_runtime_from_config(&config, base_dir, "my-agent", peer_meta).await?;
 ```
 
 This function reads `config.comms.mode` and creates the appropriate runtime:
-- `Inproc` -- calls the scoped inproc constructor (`CommsRuntime::inproc_only_scoped`) with realm namespace when available
+- `Inproc` -- creates an inproc-only runtime (use `build_comms_runtime_from_config_scoped` to pass a realm namespace)
 - `Tcp` -- creates a full runtime with `CommsRuntime::new()` and starts TCP listeners
 - `Uds` -- creates a full runtime with `CommsRuntime::new()` and starts UDS listeners
 </Accordion>
@@ -569,10 +613,10 @@ This function reads `config.comms.mode` and creates the appropriate runtime:
 use meerkat::compose_tools_with_comms;
 
 let (tools_with_comms, usage_instructions) =
-    compose_tools_with_comms(base_tools, tool_usage_instructions, &runtime)?;
+    compose_tools_with_comms(base_tools, tool_usage_instructions, comms_material)?;
 ```
 
-This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send_message`, `send_request`, `send_response`, and `peers`.
+This composes the base tool dispatcher with a `CommsToolSurface` (built from `CommsToolMaterial`) via `DynamicToolComposite`, registering `send_message`, `send_request`, `send_response`, and `peers`.
 </Accordion>
 
 <Accordion title="Using AgentFactory">
@@ -596,34 +640,6 @@ let agent = factory.build_agent(build_config, &config).await?;
 The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `keep_alive` and `peer_meta` in `SessionMetadata`.
 </Accordion>
 
-<Accordion title="Using CommsAgent directly">
-For low-level control:
-
-```rust
-use meerkat_comms::agent::{CommsAgent, CommsManager, CommsManagerConfig};
-
-let config = CommsManagerConfig::with_keypair(keypair)
-    .trusted_peers(trusted_peers)
-    .comms_config(comms_config);
-let comms_manager = CommsManager::new(config)?;
-
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4-6")
-    .build(llm_client, tools, store)
-    .await?;
-
-let mut comms_agent = CommsAgent::new(agent, comms_manager);
-
-// Run with comms inbox draining
-let result = comms_agent
-    .run("Use send_message with handling_mode=queue to greet agent-b".to_string())
-    .await?;
-
-// Or run in stay-alive mode
-let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), None).await?;
-```
-</Accordion>
-
 <Accordion title="CommsBootstrap (nested runtime integration)">
 ```rust
 // Standalone
@@ -638,6 +654,7 @@ let bootstrap = CommsBootstrap::for_child_inproc(
         parent_pubkey: parent_pubkey_bytes,
         parent_addr: "inproc://parent".to_string(),
         comms_base_dir: base_dir,
+        inproc_namespace: None,
     },
 );
 let prepared = bootstrap.prepare().await?;
@@ -670,11 +687,12 @@ Incoming comms are persisted as typed `system_notice` blocks with `comms` payloa
 
 ## Typed peer lifecycle notices
 
-Some peer lifecycle notices are informational and should not trigger an LLM turn. Mob lifecycle routing is now typed at peer ingress instead of relying on `silent_comms_intents` folklore:
+Some peer lifecycle notices are informational and should not trigger an LLM turn. Mob lifecycle routing is typed at peer ingress (`PeerLifecycleKind`) instead of relying on `silent_comms_intents` folklore:
 
 - `mob.peer_added`
 - `mob.peer_retired`
 - `mob.peer_unwired`
+- `mob.dismiss` (supervisor-directed dismissal of a live executor)
 
 These are injected as lifecycle context, not ordinary actionable requests.
 
@@ -685,9 +703,9 @@ Kickoff anomalies are different:
 
 These are visible lifecycle notices because they tell the parent or wired peers that a helper's initial autonomous turn failed before it could reliably report for itself.
 
-Peer lifecycle notifications are compacted per inbox drain cycle into a single `[PEER UPDATE]` session entry. This compaction is presentation-only: the underlying comms request stream remains one event per peer change.
+Batched peer lifecycle updates are presentation-only: the underlying comms request stream remains one event per peer change.
 
-You can also control whether these peer lifecycle updates are inlined by peer-count threshold using `max_inline_peer_notifications`:
+You can control whether these peer lifecycle updates are inlined by peer-count threshold using `max_inline_peer_notifications`:
 
 - `None` (default): use runtime default (`50`)
 - `0`: never inline peer lifecycle updates
@@ -695,9 +713,7 @@ You can also control whether these peer lifecycle updates are inlined by peer-co
 - `>0`: inline only when current peer count is less than or equal to the threshold
 - `< -1`: invalid (rejected by mob definition validation; factory builds also reject)
 
-When suppressed above threshold, the agent receives a one-time notice and should use `peers()` on demand. If peer count later drops back below threshold, the next inline update includes a "resumed" notice.
-
-Inline summaries show up to 10 peer names per category (`connected` / `retired`), then append `(+N more)` to cap token usage.
+When inlining is suppressed, use `peers()` on demand to inspect the current roster.
 
 ## External event ingestion
 
@@ -736,14 +752,14 @@ Push events to a running session via HTTP. Auth is optional via `RKAT_WEBHOOK_SE
 # Without auth (localhost only)
 curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
-  -d '{"alert": "CPU spike", "host": "web-03"}'
+  -d '{"kind": "generic_json", "event_type": "alert", "payload": {"alert": "CPU spike", "host": "web-03"}}'
 
 # With webhook secret
 RKAT_WEBHOOK_SECRET=my-secret  # set on server
 curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
-  -d '{"alert": "deployment failed"}'
+  -d '{"kind": "generic_json", "event_type": "alert", "payload": {"alert": "deployment failed"}}'
 ```
 
 Returns `202 Accepted` with `{"queued": true}`. Runtime admission failures are returned as ordinary REST errors.
@@ -759,13 +775,14 @@ Queue a runtime-backed external event for a running session via JSON-RPC.
   "method": "session/external_event",
   "params": {
     "session_id": "sid_abc123",
-    "payload": {"alert": "build failed"},
-    "source": "rpc"
+    "kind": "generic_json",
+    "event_type": "ci_alert",
+    "payload": {"alert": "build failed"}
   }
 }
 ```
 
-The optional `source` field becomes the runtime external-event source. The method returns a runtime acceptance envelope on success.
+The typed envelope is flattened into params: `kind` (`generic_json`), `event_type`, `payload`, and optional `blocks`. The method returns a runtime acceptance envelope on success.
 
 ### TCP/UDS plain event listeners
 
@@ -800,14 +817,16 @@ When injecting events from application code, delivery and observation are separa
 **Delivery** — the service's `event_injector()` returns an `Arc<dyn EventInjector>`. Use `inject()` to push an external event into the session inbox:
 
 ```rust
-use meerkat_core::{EventInjector, PlainEventSource};
+use meerkat_core::{EventInjector, HandlingMode, PlainEventSource};
 
 let injector = service.event_injector(&session_id).await
     .expect("comms must be enabled");
 
 injector.inject(
-    "review PR #42".into(),
+    "review PR #42".into(),     // ContentInput
     PlainEventSource::Rpc,
+    HandlingMode::Queue,
+    None,                       // Option<RenderMetadata>
 )?;
 ```
 

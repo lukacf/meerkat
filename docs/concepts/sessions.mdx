@@ -16,7 +16,7 @@ Sessions are realm-scoped. A session is visible across surfaces only when they u
 | `read` | Return session state + usage |
 | `read_history` | Return committed transcript messages with optional pagination |
 | `list` | List sessions in the active realm |
-| `archive` | Remove the live runtime handle and hide the session from normal listing while preserving committed history for later reads |
+| `archive` | Commit the durable archived verdict, retire the live runtime handle, and hide the session from normal listing; committed history stays readable on persistent backends |
 
 ## Realm visibility rules
 
@@ -52,7 +52,7 @@ Public surfaces now expose full transcript history separately from lightweight m
 
 History responses return committed messages oldest-to-newest and support `offset` / `limit` pagination. They do not expose in-flight partial output.
 
-Archived sessions still keep their committed transcript history on the normal runtime-backed path. Archiving retires the live runtime handle, blocks further mutation, and can still leave committed state readable depending on the surface/service implementation. It is a lifecycle visibility change, not a history wipe.
+Archive ownership is uniform across profiles: the canonical `SessionDocumentMachine` owns the session's lifecycle-terminal fact, and archiving commits the durable archived verdict first, then retires the live runtime handle, so a half-archived "resurrection window" is unrepresentable. Archived sessions are hidden from listing and blocked from further mutation. On persistent backends the committed transcript stays readable through history reads; the in-memory ephemeral service keeps a final read-only state view but answers archived history reads with `SESSION_PERSISTENCE_DISABLED`. It is a lifecycle visibility change, not a history wipe.
 
 ## Persistence and backend pinning
 

@@ -16,7 +16,11 @@ committed with the repository:
 | `artifacts/schemas/rpc-methods.json` | `meerkat_contracts::rpc_method_catalog` | Canonical JSON-RPC method names, descriptions, parameter types, result types, and request lifecycle rules |
 | `artifacts/schemas/rest-openapi.json` | REST router/OpenAPI emission | Canonical HTTP paths, methods, summaries, and schema references |
 | `artifacts/schemas/wire-types.json` | `meerkat-contracts` schemas | Wire request/result/event types shared by protocol and SDK layers |
+| `artifacts/schemas/params.json` | `meerkat-contracts` schemas | Wire request/result parameter types shared by protocol and SDK layers |
+| `artifacts/schemas/events.json` | `meerkat-contracts` schemas | Wire event types shared by protocol and SDK layers |
 | `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Stable wire error strings, JSON-RPC codes, HTTP statuses, and CLI exits |
+| `artifacts/schemas/capabilities.json` | `meerkat-contracts` capability catalog | Capability IDs and status shapes |
+| `artifacts/schemas/models.json` | Model catalog emission | Models catalog wire shapes |
 | `artifacts/schemas/runtime-host.json` | Runtime host schema emission | Runtime host info, capability, and health projections |
 
 `rkat-rpc initialize` returns the compiled feature subset at runtime. The
@@ -46,7 +50,7 @@ approval methods enabled.
 | `meerkat_core::AgentBuilder` | `meerkat_core` | Low-level primitive builder used internally by the facade; standalone public construction is not a supported embedding API |
 | `Session` | `meerkat_core` | Conversation state container |
 | `SessionId` | `meerkat_core` | Unique session identifier (UUIDv7) |
-| `Message` | `meerkat_core` | Conversation message enum (`System`, `SystemNotice`, `User`, `Assistant`, `BlockAssistant`, `ToolResults`, with runtime notices carried through `SystemNotice`) |
+| `Message` | `meerkat_core` | Conversation message enum (`System`, `SystemNotice`, `User`, `BlockAssistant`, `ToolResults`, with runtime notices carried through `SystemNotice`) |
 | `ToolDef` | `meerkat_core` | Tool definition (name, description, JSON Schema) |
 | `ToolCall` | `meerkat_core` | Tool invocation request from the model |
 | `ToolCallView` | `meerkat_core` | Zero-allocation borrowed view of a tool call |
@@ -116,7 +120,7 @@ Mob runtime APIs live primarily in:
 | `MobSessionService` | Session-service bridge trait required by mob runtime |
 | `MobState` | Lifecycle state (`Creating`, `Running`, `Stopped`, `Completed`, `Destroyed`) |
 | `MobRun` | Persisted flow run aggregate |
-| `SpawnMemberSpec` | Batch spawn input contract (`profile_name`, `agent_identity`, `initial_message`, `runtime_mode`, `backend`) |
+| `SpawnMemberSpec` | Spawn input contract (`role_name`, `identity`, `initial_message`, `runtime_mode`, `backend`, `binding`, `labels`, launch mode) |
 
 ### `MobBuilder` methods
 
@@ -135,18 +139,16 @@ Mob runtime APIs live primarily in:
 
 | Method | Purpose |
 |------|---------|
-| `status()` | Current lifecycle state |
+| `status().await` | Current lifecycle state |
 | `roster().await` / `list_members().await` | Membership inspection |
-| `spawn(...).await` | Spawn member (returns `SpawnResult`) |
+| `spawn_spec(SpawnMemberSpec).await` | Spawn member (returns `SpawnResult`) |
 | `spawn_many(Vec<SpawnMemberSpec>).await` | Batch spawn members in parallel (results preserve input order) |
-| `spawn_with_backend(...).await` | Spawn member with explicit backend override |
-| `spawn_with_options(...).await` | Spawn member with runtime mode and backend overrides |
 | `retire(...).await` | Retire member |
 | `wire(...).await` / `unwire(...).await` | Peer graph mutation |
-| `member(...).send(...).await` / `internal_turn(...).await` | Turn dispatch |
+| `member(...).await?.send(...).await` / `member(...).await?.internal_turn(...).await` | Turn dispatch via `MemberHandle` |
 | `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |
 | `list_flows()` / `run_flow(...).await` / `flow_status(...).await` / `cancel_flow(...).await` | Flow runtime control |
-| `events().poll(...)` / `poll_events(...)` | Event stream access |
+| `events().subscribe().await` / `poll_events(...).await` | Event stream access |
 
 ### Rust example
 
@@ -281,12 +283,11 @@ See the [structured output guide](/guides/structured-output) for usage details.
 | Type | Purpose |
 |------|---------|
 | `HookPoint` | 8 extension points (`RunStarted` through `TurnBoundary`) |
-| `HookCapability` | `Observe`, `Guardrail`, `Rewrite` (retired compatibility label; no patch authority) |
+| `HookCapability` | `Observe`, `Guardrail` |
 | `HookExecutionMode` | `Foreground` (blocking) or `Background` (async) |
 | `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime) |
 | `HookRunOverrides` | Per-run hook customization (add entries, disable by ID) |
 | `HookDecision` | `Allow` or `Deny` with reason code |
-| `HookPatch` | Retired patch surface; no valid semantic mutation variants |
 
 See the [hooks guide](/guides/hooks) for usage details.
 
@@ -301,7 +302,7 @@ See the [hooks guide](/guides/hooks) for usage details.
 | `SkillScope` | `Builtin`, `Project`, `User` |
 | `SkillDescriptor` | Skill metadata (key, name, description, required capabilities, source name) |
 | `SkillDocument` | Loaded skill with body content |
-| `SkillError` | `NotFound`, `CapabilityUnavailable`, `Load`, `Parse`, `SourceUuidCollision`, `SourceUuidMutationWithoutLineage`, `MissingSkillRemaps`, `RemapWithoutLineage`, `UnknownSkillAlias`, `RemapCycle` |
+| `SkillError` | `NotFound`, `CapabilityUnavailable`, `Load`, `Parse`, `SourceUuidCollision`, `SourceUuidMutationWithoutLineage`, `MissingSkillRemaps`, `RemapWithoutLineage`, `UnknownSkillAlias`, `RemapCycle`, `DuplicateRemap`, `DuplicateAlias` |
 
 See the [skills guide](/guides/skills) for usage details.
 
@@ -313,7 +314,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `CapabilityStatus` | `Available`, `DisabledByPolicy`, `NotCompiled`, `NotSupportedByProtocol` |
 | `ErrorCode` | Stable error codes with projections to JSON-RPC, HTTP, and CLI exit codes |
 | `WireError` | Canonical error envelope (code, message, details, capability hint) |
-| `WireRunResult` | Canonical response (session_id, session_ref, text, turns, tool_calls, usage, structured_output, extraction_error, schema_warnings, skill_diagnostics) |
+| `WireRunResult` | Canonical response (session_id, session_ref, text, turns, tool_calls, usage, terminal_cause_kind, structured_output, extraction_error, schema_warnings, skill_diagnostics) |
 | `WireSessionInfo` | Session metadata |
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
@@ -336,6 +337,7 @@ Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI e
 | Error | Code string | JSON-RPC | HTTP | CLI |
 |-------|------------|----------|------|-----|
 | Session not found | `SESSION_NOT_FOUND` | -32001 | 404 | 10 |
+| Schedule not found | `SCHEDULE_NOT_FOUND` | -32023 | 404 | 43 |
 | Session busy | `SESSION_BUSY` | -32002 | 409 | 11 |
 | Session not running | `SESSION_NOT_RUNNING` | -32003 | 409 | 12 |
 | Provider error | `PROVIDER_ERROR` | -32010 | 502 | 20 |
@@ -347,6 +349,7 @@ Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI e
 | Request cancelled | `REQUEST_CANCELLED` | -32005 | 499 | 14 |
 | Skill not found | `SKILL_NOT_FOUND` | -32021 | 404 | 41 |
 | Skill resolution failed | `SKILL_RESOLUTION_FAILED` | -32022 | 422 | 42 |
+| Supervisor rotation incomplete | `SUPERVISOR_ROTATION_INCOMPLETE` | -32024 | 409 | 44 |
 | Invalid params | `INVALID_PARAMS` | -32602 | 400 | 2 |
 | Internal error | `INTERNAL_ERROR` | -32603 | 500 | 1 |
 
@@ -362,7 +365,7 @@ For session-service transport behavior specifically, see the [Capability matrix]
 
 All implement `AgentLlmClient` and normalize streaming responses to `LlmEvent` (text deltas, tool call deltas, usage updates, done).
 
-`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check if an error should be retried.
+`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `InvalidInputShape`, `InvalidConfig`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check if an error should be retried.
 
 ## Storage implementations
 

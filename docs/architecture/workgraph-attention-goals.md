@@ -99,7 +99,6 @@ struct WorkAttentionBinding {
     mode: WorkAttentionMode,
     status: WorkAttentionStatus,
     machine_state: WorkAttentionMachineState,
-    budget: Option<AttentionBudget>,
     delegated_authority: AttentionDelegatedAuthority,
     projection_policy: AttentionProjectionPolicy,
     created_at: DateTime<Utc>,
@@ -112,7 +111,7 @@ status, blockers, evidence, or terminal state.
 
 ```rust
 struct WorkItemRef {
-    realm_id: RealmId,
+    realm_id: String,
     namespace: WorkNamespace,
     item_id: WorkItemId,
 }
@@ -124,12 +123,12 @@ must use domain handles:
 
 ```rust
 enum WorkAttentionTarget {
-    Session(SessionId),
-    LoweredOwner(WorkOwnerKey),
+    Session { session_id: SessionId },
+    LoweredOwner { owner_key: WorkOwnerKey },
 }
 ```
 
-`Session(SessionId)` is valid in session/runtime surfaces. Lowered owner keys
+`Session { session_id }` is valid in session/runtime surfaces. Lowered owner keys
 are stored only after the owning feature has validated the source identity.
 `AgentIdentity` bindings are created through `meerkat-mob`, which validates the
 identity and lowers it to a WorkGraph owner key. Core Meerkat does not need an
@@ -267,6 +266,7 @@ struct AttentionContextProjection {
     binding_id: WorkAttentionBindingId,
     work_ref: WorkItemRef,
     mode: WorkAttentionMode,
+    binding_revision: u64,
     item_revision: u64,
     parent_refs: Vec<WorkItemRef>,
     parent_context: Vec<AttentionProjectionParentContext>,

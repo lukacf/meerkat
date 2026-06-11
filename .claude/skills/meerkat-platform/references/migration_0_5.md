@@ -1,5 +1,10 @@
 # Meerkat 0.4x -> 0.5 Migration Guide
 
+> **Historical guide.** This covers the 0.4x -> 0.5 contract break only. The
+> current release line is 0.6.x; consult the main SKILL.md and api_reference.md
+> for current contracts. Notable post-0.5 renames: `MeerkatId` ->
+> `AgentIdentity` (wire field `meerkat_id` -> `agent_identity`).
+
 This guide is the fastest way to realign older Meerkat integrations and mental models with the settled 0.5 contract.
 
 ## Big mental-model changes

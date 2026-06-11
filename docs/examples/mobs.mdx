@@ -91,7 +91,7 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
   </Tab>
   <Tab title="Rust">
     ```rust
-    let definition = MobDefinition::from_json(json!({
+    let definition: MobDefinition = serde_json::from_value(json!({
         "id": "release-triage",
         "profiles": {
             "lead": { "model": "claude-opus-4-8" },
@@ -353,7 +353,7 @@ member send responses.
   <Tab title="Rust">
     ```rust
     let run_id = handle.run_flow("triage".into(), json!({"severity": "high"})).await?;
-    let status = handle.flow_status(&run_id).await?;
+    let status = handle.flow_status(run_id).await?;
     ```
   </Tab>
 </Tabs>

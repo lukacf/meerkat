@@ -117,12 +117,14 @@ This keeps Rust aligned with the current runtime contract instead of implying ar
 - Messages are returned oldest-to-newest.
 - `offset` and `limit` apply from the start of the full transcript.
 - Active sessions do not expose in-flight partial output through history reads.
-- Archived sessions remain readable when the underlying service/backend supports archived snapshots.
+- Archived sessions remain readable on persistent backends; the ephemeral service rejects archived history reads with `SESSION_PERSISTENCE_DISABLED`.
 
 ### archive
 
-- Removes session from live runtime.
-- Persistent behavior depends on service/store implementation.
+- The canonical `SessionDocumentMachine` owns the `session_lifecycle_terminal` fact for ALL profiles; shells realize its verdict, they never decide it.
+- Realization order is fail-closed: durable document commit first, runtime retire second. `RuntimeState::Retired` is the runtime realization of the same verdict, so the resurrection window is unrepresentable.
+- Archived sessions are excluded from `list()` and rejected for further reads/turns (`SESSION_NOT_FOUND` on persistent services; the ephemeral service serves a final in-memory view).
+- Committed transcript history remains readable via `read_history` on persistent backends.
 
 ## Keep-alive contract
 
@@ -154,7 +156,7 @@ Where the surface supports omission vs explicit override, these are distinct fac
 - disable / false
 - set / concrete value
 
-When all three meanings matter, the wire/API must preserve that distinction. Typed optional fields and override masks are preferred over default-value folklore.
+When all three meanings matter, the wire/API must preserve that distinction. Typed optional fields and override masks are preferred over default-value folklore. Concretely: `SystemPromptOverride` (`Inherit` / `Set` / `Disable`) is the canonical wire+persisted carrier for the per-request system-prompt fact, and per-turn provider parameters travel as the typed `ProviderParamsOverride`, not a raw JSON bag.
 
 ## Realm contract
 

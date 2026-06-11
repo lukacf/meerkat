@@ -39,6 +39,24 @@ a rare exception, not a reviewer's local judgment call.
 Permanent read models, presentation shapes, and interop adapters are not
 mirrors. They are projections. They obey the projection rules.
 
+Deliberate is not valid. "By design" is a claim about intent, and intent does
+not justify retention. A legacy shape may be retained only under a functional
+retention category:
+
+- durable-format stability — a persisted format that must stay readable
+- wire-opaqueness — opaque pass-through bytes the system never interprets
+- external protocol — a wire shape owned by a protocol we do not control
+- divergence-free projection — a projection structurally incapable of
+  diverging from its owner
+- fail-closed rejection machinery — code whose job is to reject legacy
+  persisted or wire shapes with a typed error, together with its negative
+  tests; this is the policy-mandated disposal of legacy data, not retention
+  debt
+
+Pinning tests prove deliberateness, not validity. Pre-1.0 self-compatibility
+never justifies retention. A "by design" verdict without one of these
+categories is a violation wearing a label.
+
 ## The Dogma
 
 ### 1. Authority Is Singular
@@ -337,3 +355,34 @@ For every important behavior, answer:
   merely discover it?
 
 If any answer is "sort of", the design is wrong.
+
+## Legacy Rule Numbering
+
+Older audits, ledgers, and reviews cite the archived runtime doctrine
+(`docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`)
+by legacy rule number (#1–#20). This table is the authoritative mapping; do
+not re-derive it from memory. Rule 5 (Composability Is Feature-Owned) has no
+legacy counterpart.
+
+| Legacy | Legacy title | Canonical rule |
+| --- | --- | --- |
+| #1 | One semantic fact, one owner | 1 |
+| #2 | Machines own semantics | 2 |
+| #3 | Shell owns mechanics, not meaning | 3 |
+| #4 | One semantic condition, one canonical terminal path | 8 |
+| #5 | Typed truth, never folklore | 4 |
+| #6 | App-facing APIs expose domain handles | 4 |
+| #7 | Raw infrastructure identity must be canonical | 4 |
+| #8 | Optionality must not hide ownership uncertainty | 4 |
+| #9 | Override-first at the composition seam | 7 |
+| #10 | Inherit, disable, and set are different facts | 7 |
+| #11 | Profiles are real owners, or they are not | 1, 7 |
+| #12 | Dynamic policy must follow dynamic identity | 7 |
+| #13 | Derived projections are rebuildable, never authoritative | 3 |
+| #14 | Local fallback state must never leak | 3 |
+| #15 | Success means truthful completion | 8 |
+| #16 | Soft control and hard failure are different mechanisms | 8 |
+| #17 | Surfaces are skins, not authorities | 6 |
+| #18 | Runtime conforms to machines | 2 |
+| #19 | A feature must shrink ambiguity, not move it | 9 |
+| #20 | If we cannot say where a fact lives, the design is wrong | Final Test |

@@ -80,7 +80,7 @@ SDKs rather than the signed peer channel.
 
 ## Send a typed comms command
 
-`comms/send` is the typed host-side comms surface. Use it for local input, peer messages, peer lifecycle notifications, peer requests, and peer responses.
+`comms/send` is the typed host-side comms surface. Use it for local input, peer messages, peer lifecycle notifications, peer requests, and peer responses. The `to` field is the canonical peer ID (from `comms/peers`), not a display name.
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -92,7 +92,7 @@ SDKs rather than the signed peer channel.
       "params": {
         "session_id": "01936f8a-...",
         "kind": "peer_message",
-        "to": "agent-b",
+        "to": "0193a1b2-...",
         "body": "Build failed in CI. Please investigate.",
         "handling_mode": "queue"
       }
@@ -106,7 +106,7 @@ SDKs rather than the signed peer channel.
       -d '{
         "session_id": "01936f8a-...",
         "kind": "peer_message",
-        "to": "agent-b",
+        "to": "0193a1b2-...",
         "body": "Build failed in CI. Please investigate.",
         "handling_mode": "queue"
       }'
@@ -119,7 +119,7 @@ SDKs rather than the signed peer channel.
       "arguments": {
         "session_id": "01936f8a-...",
         "kind": "peer_message",
-        "to": "agent-b",
+        "to": "0193a1b2-...",
         "body": "Build failed in CI. Please investigate.",
         "handling_mode": "queue"
       }
@@ -128,12 +128,12 @@ SDKs rather than the signed peer channel.
   </Tab>
   <Tab title="Python">
     ```python
-    receipt = await session.send({
-        "kind": "peer_message",
-        "to": "agent-b",
-        "body": "Build failed in CI. Please investigate.",
-        "handling_mode": "queue",
-    })
+    receipt = await session.send(
+        kind="peer_message",
+        to="0193a1b2-...",
+        body="Build failed in CI. Please investigate.",
+        handling_mode="queue",
+    )
     print(receipt)
     ```
   </Tab>
@@ -141,7 +141,7 @@ SDKs rather than the signed peer channel.
     ```typescript
     const receipt = await session.send({
       kind: "peer_message",
-      to: "agent-b",
+      to: "0193a1b2-...",
       body: "Build failed in CI. Please investigate.",
       handling_mode: "queue",
     });

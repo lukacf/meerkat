@@ -86,7 +86,7 @@ rkat mob pack ./mob -o ./dist/mob.mobpack
 rkat mob inspect ./dist/mob.mobpack
 rkat mob validate ./dist/mob.mobpack
 rkat mob deploy ./dist/mob.mobpack "run this mob"
-rkat mob web build ./dist/mob.mobpack -o ./dist/web
+rkat mob web build ./dist/mob.mobpack -o ./dist/web --wasm ./path/to/runtime_bg.wasm
 ```
 
 ## Live Channels

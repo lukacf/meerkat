@@ -239,7 +239,7 @@ authority and session-scoped wiring are injected at build time.
 | CLI `run` / `run --resume` | `mob_*` tools in prompt-driven runs when mob tools are enabled | Primary CLI mob UX |
 | CLI `rkat mob ...` | helper/artifact commands | Secondary operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
-| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches are absent in 0.6.23 |
+| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches do not exist |
 | REST | session HTTP endpoints plus mob helpers | `/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff |
 | MCP | `meerkat_*` session tools plus `meerkat_mob_*` public tools, including `meerkat_mob_wait_ready` and profile CRUD | typed public mob control plane for host access |
 | Python SDK | `Mob` class via `create_mob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
@@ -337,18 +337,18 @@ The web build produces a real meerkat surface — same agent loop, providers, an
 
 **Not available in browser:** filesystem config loading (programmatic config instead), stdio MCP servers (no processes), MCP protocol client (rmcp depends on tokio/mio — types work but connections blocked), shell tool, file-based persistence.
 
-**WASM API (28 exports):**
-See `SKILL.md` WASM section for the full export list. Key mob-related exports:
+**WASM API:**
+See the meerkat-wasm skill (`references/api_surface.md`) for the authoritative export list. Key mob-related exports:
 ```
 mob_create(definition_json) → mob_id string  [async]
 mob_spawn(mob_id, specs_json) → result JSON  [async]
-mob_wire / mob_unwire / mob_retire / mob_respawn  [async]
-mob_list_members / mob_send_message / mob_events(mob_id, after_cursor: u32, limit: u32) / mob_status / mob_list
+mob_wire / mob_unwire / mob_wire_peer / mob_unwire_peer / mob_retire / mob_respawn  [async]
+mob_list_members / mob_member_send / mob_events(mob_id, after_cursor: string, limit: u32) / mob_status / mob_list
 mob_lifecycle(mob_id, action)  [async]
 mob_run_flow → run_id string  [async] / mob_flow_status / mob_cancel_flow  [async]
-wire_cross_mob(mob_id, a, b)  [async]
-mob_member_subscribe [async] / mob_subscribe_events [async] / poll_subscription / close_subscription
+mob_member_subscribe [async] / mob_subscribe_events [async] → stream_id string / poll_subscription / close_subscription
 ```
+There is no `wire_cross_mob` export.
 
 ### RPC
 

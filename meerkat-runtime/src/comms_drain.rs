@@ -202,6 +202,7 @@ pub fn spawn_comms_drain(
                         tracing::debug!(
                             session_id = %session_id,
                             class = ?candidate_class,
+                            from_peer_id = ?candidate.from_peer_id(),
                             lifecycle_peer = ?candidate.lifecycle_peer,
                             "comms_drain: consumed silent peer lifecycle notice"
                         );

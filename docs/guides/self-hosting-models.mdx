@@ -22,19 +22,22 @@ OpenAI-compatible endpoint.
 
 ## Model
 
-Every self-hosted setup has two pieces:
+Every self-hosted setup has three pieces:
 
 | Config section | Owns |
 |----------------|------|
-| `self_hosted.servers.<server_id>` | Transport, base URL, API style, and credentials for one serving endpoint |
+| `self_hosted.servers.<server_id>` | Transport, base URL, and API style for one serving endpoint |
 | `self_hosted.models.<alias>` | The Meerkat-facing model ID, display metadata, capabilities, and upstream `remote_model` |
+| `realm.<realm>.{backend,auth,binding}` | The credential binding for `provider = "self_hosted"` |
 
 The alias is the name users type. The `remote_model` is the model name returned
 or expected by the serving stack.
 
 <Note>
-Prefer `bearer_token_env` over `bearer_token` so secrets stay out of checked-in
-configuration.
+Server entries carry connection facts only. The legacy `bearer_token` /
+`bearer_token_env` server fields are rejected at config parse; credentials are
+owned by the realm auth profile selected through the binding. A self-hosted
+server with no realm binding fails closed at run time.
 </Note>
 
 ## Server Shape
@@ -47,13 +50,45 @@ OpenAI-compatible transport:
 transport = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
 api_style = "chat_completions"
-bearer_token_env = "LOCAL_LLM_TOKEN"
 ```
 
 `api_style = "chat_completions"` is the conservative default for Gemma 4 and
 other self-hosted tool-calling models. Use another API style only after the
 specific serving stack has been validated with Meerkat tools, structured output,
 and multimodal input.
+
+## Realm Binding
+
+Self-hosted credentials are realm-owned. Declare a backend, auth profile, and
+binding for `provider = "self_hosted"` in the same realm config, and make it
+the realm default (or select it per run with `--auth-binding`):
+
+```toml config.toml
+[realm.dev]
+default_binding = "local"
+
+[realm.dev.backend.local]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+
+[realm.dev.auth.local_auth]
+provider = "self_hosted"
+auth_method = "none"                       # or "api_key" / "static_bearer"
+source = { kind = "platform_default" }     # unused for auth_method = "none"
+
+[realm.dev.binding.local]
+backend_profile = "local"
+auth_profile = "local_auth"
+```
+
+For a server that requires a bearer token, use:
+
+```toml config.toml
+[realm.dev.auth.local_auth]
+provider = "self_hosted"
+auth_method = "static_bearer"
+source = { kind = "env", env = "LOCAL_LLM_TOKEN" }
+```
 
 ## Alias Shape
 
@@ -205,7 +240,15 @@ Use vLLM when you want a private server with more deployment control.
     transport = "openai_compatible"
     base_url = "http://my-gpu-box:8000"
     api_style = "chat_completions"
-    bearer_token_env = "VLLM_API_TOKEN"
+    ```
+
+    If the endpoint requires a token, point the realm auth profile at it:
+
+    ```toml config.toml
+    [realm.dev.auth.local_auth]
+    provider = "self_hosted"
+    auth_method = "static_bearer"
+    source = { kind = "env", env = "VLLM_API_TOKEN" }
     ```
   </Step>
   <Step title="Add remote aliases">
@@ -260,9 +303,12 @@ rkat run -m gemma-4-31b "Say hello in one sentence."
 The expected result:
 
 - `rkat models` shows a `self_hosted` provider group and the aliases you added.
-- `rkat doctor` reports the server as reachable.
+- `rkat doctor` resolves the realm binding and reports the server as reachable.
 - `rkat run -m ...` works without an explicit `--provider`.
 - The alias points at the exact upstream `remote_model` exposed by the server.
+
+If `rkat run` fails with "no canonical realm binding", add the
+[realm binding](#realm-binding) shown above.
 
 ## See Also
 

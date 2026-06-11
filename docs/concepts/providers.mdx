@@ -92,6 +92,10 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
     supports_thinking = true
     supports_reasoning = true
     ```
+
+    Running a self-hosted alias also requires a realm binding for
+    `provider = "self_hosted"` (credentials are realm-owned, not server-entry
+    fields). See [Self-hosting models](/guides/self-hosting-models).
   </Tab>
 </Tabs>
 
@@ -108,7 +112,7 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 The `RKAT_*` variants take precedence over provider-native names, so you can run Meerkat with dedicated keys separate from other tools.
 </Note>
 
-Self-hosted servers use the configured `bearer_token_env` or `bearer_token` on each server definition instead of the shared provider env vars above.
+Self-hosted servers do not use the shared provider env vars above. Server entries carry connection facts only; credentials are owned by a realm auth binding for `provider = "self_hosted"` (`auth_method` of `none`, `api_key`, or `static_bearer`). See [Self-hosting models](/guides/self-hosting-models) for the realm binding shape.
 
 ## Image generation providers
 

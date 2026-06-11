@@ -48,7 +48,8 @@ git_ref = "main"
 ref_type = "branch"    # "branch", "tag", or "commit"
 refresh_seconds = 300  # TTL for branch refs (tags/commits are immutable)
 depth = 1              # shallow clone depth
-# auth_token = "${GITHUB_TOKEN}"  # optional, env vars expanded
+# auth = { scheme = "token", token = "${GITHUB_TOKEN}" }    # optional HTTPS token; env vars expanded
+# auth = { scheme = "ssh-key", path = "~/.ssh/id_ed25519" } # or an SSH private key path
 ```
 
 ### HTTP sources
@@ -59,7 +60,7 @@ name = "remote"
 source_uuid = "22222222-2222-2222-2222-222222222222"
 type = "http"
 url = "https://skills.example.com/api"
-auth_token = "${SKILLS_API_KEY}"
+auth = { scheme = "bearer", token = "${SKILLS_API_KEY}" }  # or { scheme = "header", name = "...", value = "..." }
 refresh_seconds = 300
 timeout_seconds = 15
 ```
@@ -159,14 +160,16 @@ The renderer produces two output formats:
 
     ```xml
     <available_skills>
-      <skill id="00000000-0000-4b11-8111-000000000001/task-workflow">
+      <skill source_uuid="00000000-0000-4b11-8111-000000000001" skill_name="task-workflow">
         <description>How to use task_create/task_update/task_list for structured work tracking</description>
       </skill>
-      <skill id="00000000-0000-4b11-8111-000000000001/shell-patterns">
+      <skill source_uuid="00000000-0000-4b11-8111-000000000001" skill_name="shell-patterns">
         <description>Background job patterns with shell and job management tools</description>
       </skill>
     </available_skills>
     ```
+
+    Identity is emitted as the two typed attributes that map 1:1 to the `load_skill` tool contract -- never a single re-parseable slash id.
 
     When there are more than 12 skills, collection mode is used instead:
 
@@ -186,7 +189,7 @@ The renderer produces two output formats:
     Wraps the skill body in XML-style tags for per-turn injection:
 
     ```xml
-    <skill id="00000000-0000-4b11-8111-000000000001/shell-patterns">
+    <skill source_uuid="00000000-0000-4b11-8111-000000000001" skill_name="shell-patterns">
     # Shell Patterns
 
     When running background jobs...
@@ -348,7 +351,7 @@ Skill introspection lets you see all skills — including shadowed ones — with
 | REST | `GET /skills` | List skills |
 | MCP | `meerkat_skills` tool (`action: "list"` or `"inspect"`) | List skills or inspect one by typed `skill_key` |
 | Rust SDK | `SkillRuntime::list_all_with_provenance()` | Programmatic access |
-| Rust SDK | `SkillRuntime::load_from_source()` | Load a typed key from a specific source UUID |
+| Rust SDK | `SkillRuntime::load_from_source()` | Load a skill body by typed key (optional source-name filter) |
 
 ### Shadowing
 
@@ -401,12 +404,13 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await? {
         );
     }
 
-    // Load a specific skill's body (bypassing first-wins)
+    // Load a specific skill's body. The SkillKey already pins the source
+    // UUID; the optional second argument filters by repository *name*.
     let key = SkillKey::new(
         SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
         SkillName::parse("task-workflow")?,
     );
-    let doc = runtime.load_from_source(&key, Some("dc256086-0d2f-4f61-a307-320d4148107f")).await?;
+    let doc = runtime.load_from_source(&key, None).await?;
     println!("{}", doc.body);
 }
 ```

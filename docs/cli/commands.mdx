@@ -50,6 +50,7 @@ derived workspace identity and the default project-local state root.
 | `rkat <PROMPT>` | Run a task directly from the terminal |
 | `rkat run <PROMPT>` | Explicit form of the default prompt command |
 | `rkat run --resume[=<SESSION>] <PROMPT>` | Continue a saved session |
+| `rkat help <QUESTION>` | Ask how to use Meerkat (embedded platform skill) |
 | `rkat session ...` | Inspect, delete, or interrupt sessions |
 | `rkat realm ...` | Inspect or manage realms |
 | `rkat config ...` | Read or update CLI/runtime config |
@@ -218,7 +219,7 @@ tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
 - `last`
 - `~N`
 
-Omitting the value means `last`, so `rkat run --resume last "keep going"` and `rkat run --resume last "keep going"` are equivalent.
+Omitting the value means `last`, so `rkat run --resume "keep going"` and `rkat run --resume last "keep going"` are equivalent.
 
 Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 
@@ -231,7 +232,7 @@ rkat run --resume -m gemma-4-31b "Continue with the local model"
 ## session
 
 ```bash
-rkat session list [--limit <N>] [--label <KEY=VALUE>]
+rkat session list [--limit <N>] [--offset <N>] [--label <KEY=VALUE>]
 rkat session show <SESSION_ID>
 rkat session delete <SESSION_ID>
 rkat session interrupt <SESSION_ID>
@@ -242,18 +243,20 @@ This is the human/operator session surface. CLI-internal control-plane session A
 ## config
 
 ```bash
-rkat config get [--format toml|json]
-rkat config set <FILE>
-rkat config patch <JSON_OR_FILE>
+rkat config get [--format toml|json] [--with-generation]
+rkat config set [<FILE>] [--json <JSON> | --toml <TOML>] [--expected-generation <N>]
+rkat config patch [<FILE>] [--json <JSON>] [--expected-generation <N>]
 ```
+
+The positional argument is always a file path; inline payloads use `--json` (or `--toml` for `set`).
 
 Examples:
 
 ```bash
 rkat config get --format toml
 rkat config set ./.rkat/config.toml
-rkat config patch '{"agent":{"model":"gpt-5.5"}}'
-rkat config patch '{"self_hosted":{"servers":{"ollama":{"transport":"openai_compatible","base_url":"http://127.0.0.1:11434","api_style":"chat_completions"}}}}'
+rkat config patch --json '{"agent":{"model":"gpt-5.5"}}'
+rkat config patch --json '{"self_hosted":{"servers":{"ollama":{"transport":"openai_compatible","base_url":"http://127.0.0.1:11434","api_style":"chat_completions"}}}}'
 ```
 
 ## models
@@ -316,7 +319,7 @@ rkat mob pack <DIR> -o <OUT.mobpack> [--sign <KEY_FILE> --signer-id <ID>]
 rkat mob inspect <PACK.mobpack>
 rkat mob validate <PACK.mobpack>
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
-rkat mob web build <PACK.mobpack> -o <OUT_DIR>
+rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <RUNTIME_BG_WASM>
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
 rkat mob spawn-helper <MOB_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--json]
@@ -334,7 +337,7 @@ rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 rkat mob inspect dist/release-triage.mobpack
 rkat mob validate dist/release-triage.mobpack
 rkat mob deploy dist/release-triage.mobpack "triage the latest release regressions"
-rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web
+rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm runtime_bg.wasm
 ```
 
 ### Trust policy
@@ -344,15 +347,14 @@ rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web
 
 ### Web build prerequisites
 
+The CLI does not compile wasm32 itself. `--wasm` is required and must point at
+a `runtime_bg.wasm` artifact produced by the `meerkat-web-runtime` build
+pipeline:
+
 ```bash
 cargo install wasm-pack
-wasm-pack --version
+wasm-pack build meerkat-web-runtime
 ```
-
-Optional overrides:
-
-- `RKAT_WASM_PACK_BIN`
-- `RKAT_WEB_RUNTIME_CRATE_DIR`
 
 ## skill
 

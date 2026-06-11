@@ -73,10 +73,10 @@ rkat mob deploy ./dist/release-triage.mobpack \
 
 Trust policy resolution order:
 
-1. CLI flag: `--trust-policy strict`
-2. Environment variable: `RKAT_TRUST_POLICY=strict`
+1. CLI flag: `--trust-policy permissive`
+2. Environment variable: `RKAT_TRUST_POLICY=permissive`
 3. Config file: `trust.policy` field
-4. Default: `permissive`
+4. Default: `strict` (fail closed)
 
 ## Next step
 

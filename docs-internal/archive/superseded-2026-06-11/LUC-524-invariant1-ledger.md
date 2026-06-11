@@ -1,5 +1,7 @@
 # LUC-524 — Dogma Invariant 1 enforcement ledger
 
+> **Archived 2026-06-11.** This campaign executed: the REMAINING helper authorities listed below (`session_system_context_authority`, `session_realtime_transcript_authority`, `session_deferred_turn_authority`, `session_durable_config_authority`) no longer exist in the workspace — folded into SessionDocumentMachine/MeerkatMachine (see `docs-internal/dogma-audits/PR759-final-ledger.md`, follow-up item 1, commit `1a88a7d10`). Historical record only.
+
 **Invariant 1:** every lifecycle/admission/recovery/write semantic decision is
 either inside a canonical TLA-validated machine/composition, or a non-canonical
 generated **witness** that a canonical machine **fully revalidates** (receives

@@ -78,10 +78,10 @@ asyncio.run(main())
 ### Config APIs
 
 - `await client.get_config() -> ConfigEnvelope`
-- `await client.set_config(config, expected_generation=None) -> ConfigEnvelope`
-- `await client.patch_config(patch, expected_generation=None) -> ConfigEnvelope`
+- `await client.set_config(config, expected_generation=None) -> ConfigWriteResult`
+- `await client.patch_config(patch, expected_generation=None) -> ConfigWriteResult`
 
-All config APIs return a **config envelope** (`config`, `generation`, realm metadata), not a bare config object.
+All config APIs return an **envelope** (`config`, `generation`, realm metadata), not a bare config object; writes additionally carry `live_propagation`.
 
 ### Additional runtime surfaces
 

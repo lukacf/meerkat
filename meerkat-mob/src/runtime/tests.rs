@@ -1176,6 +1176,13 @@ struct MockSessionService {
     archive_fail_comms_names: RwLock<HashSet<String>>,
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
+    /// Sessions that were archived. Mirrors the real persistent-service
+    /// contract: `load_persisted_session` returns `None` for archived
+    /// sessions, so archive stays terminal (no revival from an archived
+    /// snapshot).
+    archived_session_ids: RwLock<HashSet<SessionId>>,
+    /// Sessions whose create_session (re-materialization) should fail.
+    create_fail_sessions: RwLock<HashSet<SessionId>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
     disable_interaction_event_injector: std::sync::atomic::AtomicBool,
@@ -1236,6 +1243,8 @@ impl MockSessionService {
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
+            archived_session_ids: RwLock::new(HashSet::new()),
+            create_fail_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
             disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
@@ -1438,6 +1447,18 @@ impl MockSessionService {
             .write()
             .await
             .insert(session_id.clone());
+    }
+
+    /// Make any (re-)materialization of `session_id` via create_session fail.
+    async fn set_create_session_failure(&self, session_id: &SessionId) {
+        self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    async fn clear_create_session_failure(&self, session_id: &SessionId) {
+        self.create_fail_sessions.write().await.remove(session_id);
     }
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
@@ -1696,6 +1717,13 @@ impl SessionService for MockSessionService {
             .and_then(|build| build.resume_session.clone())
             .unwrap_or_default();
         let session_id = session.id().clone();
+        if self.create_fail_sessions.read().await.contains(&session_id) {
+            self.create_session_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock create_session failure",
+            ))));
+        }
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
         // Extract comms_name from build options for mock runtime naming
@@ -2101,6 +2129,7 @@ impl SessionService for MockSessionService {
         if archive_delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(archive_delay_ms)).await;
         }
+        self.archived_session_ids.write().await.insert(id.clone());
         let mut sessions = self.sessions.write().await;
         if let Some(runtime) = sessions.remove(id) {
             self.session_comms_names.write().await.remove(id);
@@ -2464,6 +2493,11 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
+        // Mirror PersistentSessionService: archived sessions have no loadable
+        // durable snapshot (archive is terminal).
+        if self.archived_session_ids.read().await.contains(session_id) {
+            return Ok(None);
+        }
         Ok(self.persisted_session_clone(session_id).await)
     }
 
@@ -13021,10 +13055,12 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
         meerkat_core::types::UserMessage::text("Remember session continuity.".to_string()),
     ));
     service.replace_live_session(persisted).await;
-    service
-        .archive(&old_sid)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal: the real service returns no durable snapshot for
+    // archived sessions).
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
         .await
-        .expect("archive missing session");
+        .expect("discard live session");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -13099,10 +13135,11 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
         .bridge_session_id()
         .cloned()
         .expect("session-backed member");
-    service
-        .archive(&old_sid)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
         .await
-        .expect("archive missing session");
+        .expect("discard live session");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -13340,7 +13377,11 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
         .expect("session-backed")
         .clone();
     handle.stop().await.expect("stop");
-    inner.archive(&sid).await.expect("archive session");
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(inner.as_ref(), &sid)
+        .await
+        .expect("discard live session");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -13905,10 +13946,12 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .set_session_metadata(metadata.clone())
         .expect("metadata update");
     service.replace_live_session(persisted).await;
-    service
-        .archive(&old_sid)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal: the real service returns no durable snapshot for
+    // archived sessions).
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
         .await
-        .expect("archive missing session");
+        .expect("discard live session");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -13992,7 +14035,11 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
         .set_session_metadata(metadata)
         .expect("set metadata");
     service.replace_live_session(persisted).await;
-    service.archive(&old_sid).await.expect("archive session");
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
+        .await
+        .expect("discard live session");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -14051,7 +14098,12 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         .set_session_metadata(metadata)
         .expect("set metadata");
     service.replace_live_session(persisted).await;
-    service.archive(&session_id).await.expect("archive session");
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal: the real service returns no durable snapshot for
+    // archived sessions).
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard live session");
 
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service.clone())
@@ -14190,10 +14242,12 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
         meerkat_core::types::UserMessage::text("Persist this resume target.".to_string()),
     ));
     service.replace_live_session(persisted).await;
-    service
-        .archive(&session_id)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal: the real service returns no durable snapshot for
+    // archived sessions).
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
         .await
-        .expect("archive seeded session");
+        .expect("discard live session");
 
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service.clone())
@@ -31462,6 +31516,203 @@ async fn test_submit_work_marks_missing_bridge_session_broken_without_prior_stat
     assert_eq!(after.current_session_id, Some(bridge_session_id));
 }
 
+/// Task #37 regression: a fail-closed live-session discard (live runtime +
+/// comms gone, durable snapshot intact, member still Active in MobMachine)
+/// must not leave the member a zombie for direct dispatch. The next dispatch
+/// feeds the typed live-materialization observation to MobMachine, which
+/// authorizes a revival that rebuilds the live session through the existing
+/// resume materialization path; the admitted turn then succeeds.
+#[tokio::test]
+async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    // Model the #34 fail-closed discard: the live session (and with it the
+    // comms runtime) is dropped out from under MobMachine while the durable
+    // snapshot stays loadable and the member stays Active.
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "discard must remove the live materialization"
+    );
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-1"),
+            ContentInput::from("come back online".to_string()),
+        )
+        .await
+        .expect("machine-authorized revival must rebuild the live session and dispatch the turn");
+
+    // The live session was re-materialized under the SAME machine-owned
+    // binding and the admitted turn actually ran on it.
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "revival must rebuild the live session under the unchanged binding"
+    );
+    let turn_prompts = service.start_turn_prompts.read().await.clone();
+    assert!(
+        turn_prompts
+            .iter()
+            .any(|(session_id, prompt)| session_id == &bridge_session_id
+                && prompt.contains("come back online")),
+        "the dispatched turn must run on the revived bridge session: {turn_prompts:?}"
+    );
+
+    // MobMachine state: member stays Active, no restore failure, and the
+    // revival obligation is resolved (not dangling).
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    let lifecycle = machine_state.member_lifecycle_for_identity(&machine_identity);
+    assert_eq!(
+        lifecycle.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Active,
+        "revived member must remain machine-owned Active: {lifecycle:?}"
+    );
+    assert!(
+        !machine_state
+            .member_revival_pending
+            .contains(&machine_identity),
+        "successful revival must resolve the machine-owned revival obligation"
+    );
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status");
+    assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
+}
+
+/// Task #37 regression (failure path): when the machine-authorized revival
+/// itself fails terminally, the outcome is the typed `MemberRestoreFailed`
+/// and the machine-owned Broken classification — and the machine refuses any
+/// further revival authorization (no retry loop), even if a later attempt
+/// would have succeeded.
+#[tokio::test]
+async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    // The durable snapshot is present (revival is authorized), but the
+    // re-materialization fails.
+    service.set_create_session_failure(&bridge_session_id).await;
+
+    let error = handle
+        .internal_turn(
+            AgentIdentity::from("w-1"),
+            ContentInput::from("come back online".to_string()),
+        )
+        .await
+        .expect_err("failed revival must surface the typed terminal restore failure");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id.clone()));
+            assert!(
+                reason.contains("machine-authorized revival"),
+                "failure reason must carry the typed revival outcome: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+
+    // Machine state: terminal Broken, obligation resolved.
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    let lifecycle = machine_state.member_lifecycle_for_identity(&machine_identity);
+    assert_eq!(
+        lifecycle.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
+        "failed revival must resolve into the machine-owned Broken classification: {lifecycle:?}"
+    );
+    assert!(
+        !machine_state
+            .member_revival_pending
+            .contains(&machine_identity),
+        "failed revival must resolve the machine-owned revival obligation"
+    );
+
+    // No retry loop: even though a fresh materialization attempt would now
+    // succeed, the Broken classification refuses re-authorization and the
+    // next dispatch fails typed without touching the session service.
+    service
+        .clear_create_session_failure(&bridge_session_id)
+        .await;
+    let error = handle
+        .internal_turn(
+            AgentIdentity::from("w-1"),
+            ContentInput::from("try again".to_string()),
+        )
+        .await
+        .expect_err(
+            "broken member must stay terminal; no machine re-authorization after failed revival",
+        );
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "second dispatch must fail typed: {error:?}"
+    );
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "no shell retry may re-materialize a broken member's session"
+    );
+}
+
 #[tokio::test]
 async fn test_member_status_surface_exposes_current_session_id_for_diagnostics_only() {
     // `current_session_id` remains observable for status/continuity
@@ -33422,10 +33673,11 @@ async fn test_per_spawn_external_tools_are_not_restored_from_storage() {
     );
 
     handle.stop().await.expect("stop");
-    service
-        .archive(&old_session_id)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(service.as_ref(), &old_session_id)
         .await
-        .expect("archive session");
+        .expect("discard live session");
 
     let _resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -33939,14 +34191,15 @@ async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_re
         .resolve_bridge_session_id(&spawned.agent_identity)
         .await
         .expect("bridge session");
-    service
-        .archive(&session_id)
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
         .await
-        .expect("archive live session before resume reconciliation");
-    // Mirror real archive cleanup: archiving a session detaches its peer
+        .expect("discard live session before resume reconciliation");
+    // Mirror real teardown: dropping the live session detaches its peer
     // ingress and unregisters its runtime. The machine's transport-swap guard
     // rightly rejects re-attaching a different comms runtime to a stale
-    // pre-archive ingress, so the simulation must not leave one behind.
+    // pre-teardown ingress, so the simulation must not leave one behind.
     adapter.unregister_session(&session_id).await;
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
@@ -34420,7 +34673,11 @@ async fn test_restored_member_gets_external_tools() {
 
     // Stop and archive the session to simulate a stale state
     handle.stop().await.expect("stop");
-    service.archive(&old_sid).await.expect("archive session");
+    // Drop the live session while keeping the durable snapshot loadable
+    // (archive is terminal for durable snapshots).
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
+        .await
+        .expect("discard live session");
 
     // Resume with provider — restored member should get external tools
     let _resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
@@ -36509,6 +36766,7 @@ struct MobRuntimeParitySnapshotSummary {
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_restore_failures: BTreeMap<String, String>,
+    member_revival_pending: BTreeSet<String>,
     supervisor_authority_peer_id: Option<String>,
     supervisor_authority_signing_key: Option<String>,
     supervisor_authority_epoch: Option<u64>,
@@ -37299,6 +37557,7 @@ async fn mob_runtime_parity_snapshot_summary(
         member_peer_ids,
         member_peer_endpoints,
         member_restore_failures,
+        member_revival_pending,
         supervisor_authority_peer_id,
         supervisor_authority_signing_key,
         supervisor_authority_epoch,
@@ -37378,6 +37637,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), v))
                     .collect::<BTreeMap<_, _>>(),
+                snap.member_revival_pending
+                    .into_iter()
+                    .map(|id| format!("{id:?}"))
+                    .collect::<BTreeSet<_>>(),
                 snap.supervisor_authority_peer_id
                     .map(|peer_id| format!("{peer_id:?}")),
                 snap.supervisor_authority_signing_key
@@ -37500,6 +37763,7 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeSet::new(),
                 None,
                 None,
                 None,
@@ -37582,6 +37846,7 @@ async fn mob_runtime_parity_snapshot_summary(
         member_peer_ids,
         member_peer_endpoints,
         member_restore_failures,
+        member_revival_pending,
         supervisor_authority_peer_id,
         supervisor_authority_signing_key,
         supervisor_authority_epoch,
@@ -37711,6 +37976,9 @@ fn mob_runtime_parity_field_value(
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
+        )),
+        "member_revival_pending" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.member_revival_pending.clone(),
         )),
         "supervisor_authority_peer_id" => Some(
             snapshot

@@ -4455,6 +4455,413 @@ impl MobActor {
         Some(reason)
     }
 
+    /// Post-discard member-revival seam (#37).
+    ///
+    /// Design decision: revival is a machine-classified, dispatch-triggered
+    /// rebuild — not a discard-time machine fact. The fail-closed live-session
+    /// discard happens inside the session layer (`PersistentSessionService`),
+    /// which has no mob knowledge; pushing a "NeedsRevival" fact from there
+    /// into MobMachine would mirror the session-registry's live cache into
+    /// machine state and create a shadow-truth synchronization seam. Instead,
+    /// the shell feeds the raw observation ("the member's CURRENT machine-owned
+    /// bridge session has no live materialization; the durable snapshot is
+    /// present/missing") at the dispatch admission boundary, and MobMachine —
+    /// the single owner of member lifecycle truth — classifies it:
+    ///
+    /// - `ReviveAuthorized` (durable snapshot present): the machine records the
+    ///   `member_revival_pending` obligation and authorizes exactly one shell
+    ///   materialization attempt. The shell realizes it through the EXISTING
+    ///   resume materialization path (`build_resumed_agent_config` →
+    ///   `to_create_session_request` → `MobProvisioner::provision_member` with
+    ///   a machine-minted self-owned provision owner) — the same path mob
+    ///   resume-restore and spawn-with-resume use — then resolves the
+    ///   obligation with `ResolveMemberRevivalSucceeded`/`Failed`.
+    /// - `BrokenRecorded` (durable snapshot missing): the existing terminal
+    ///   Broken classification, surfaced as typed `MemberRestoreFailed`.
+    ///
+    /// Fail-closed, no loops: a failed revival resolves into the machine-owned
+    /// Broken classification, whose `not_broken` guard refuses any further
+    /// revival authorization; subsequent dispatches reject typed via
+    /// `ensure_member_not_broken` before any classification. There is no shell
+    /// retry — one machine authorization, one materialization attempt, one
+    /// typed terminal outcome.
+    async fn revive_member_live_materialization(
+        &mut self,
+        entry: &RosterEntry,
+        member_ref: &MemberRef,
+        bridge_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let agent_identity = entry.agent_identity.clone();
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+
+        // Raw observation only: the live runtime is gone; is the durable
+        // snapshot still materializable? The verdict belongs to MobMachine.
+        let stored_session = if self.session_service.supports_persistent_sessions() {
+            self.session_service
+                .load_persisted_session(bridge_session_id)
+                .await
+                .map_err(MobError::SessionError)?
+        } else {
+            None
+        };
+        let (observation, reason) = match stored_session.as_ref() {
+            Some(_) => (
+                mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
+                format!("live session materialization missing for '{bridge_session_id}'"),
+            ),
+            None => (
+                mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotMissing,
+                format!("missing bridge session snapshot for '{bridge_session_id}'"),
+            ),
+        };
+
+        let transition = self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::ClassifyMemberLiveMaterialization {
+                agent_identity: dsl_identity.clone(),
+                observation,
+                reason: reason.clone(),
+            },
+            "classify_member_live_materialization",
+        )?;
+        let (effect_observation, verdict) = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::MemberLiveMaterializationClassified {
+                    agent_identity: effect_identity,
+                    observation,
+                    verdict,
+                    ..
+                } if effect_identity == &dsl_identity => Some((*observation, *verdict)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted member live-materialization observation but emitted no revival verdict"
+                        .into(),
+                )
+            })?;
+        if effect_observation != observation {
+            return Err(MobError::Internal(format!(
+                "MobMachine member-revival drift: input={observation:?}, effect={effect_observation:?}"
+            )));
+        }
+
+        match verdict {
+            mob_dsl::MemberRevivalVerdictKind::BrokenRecorded => {
+                self.restore_diagnostics.write().await.insert(
+                    agent_identity.clone(),
+                    super::handle::RestoreFailureDiagnostic {
+                        bridge_session_id: Some(bridge_session_id.clone()),
+                        reason: reason.clone(),
+                    },
+                );
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    bridge_session_id = %bridge_session_id,
+                    reason = %reason,
+                    "member live materialization is unrecoverable; MobMachine recorded terminal restore failure"
+                );
+                Err(MobError::MemberRestoreFailed {
+                    member_id: agent_identity,
+                    session_id: Some(bridge_session_id.clone()),
+                    reason,
+                })
+            }
+            mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
+                let Some(stored_session) = stored_session else {
+                    return Err(MobError::Internal(
+                        "MobMachine authorized member revival without a durable snapshot observation"
+                            .into(),
+                    ));
+                };
+                match self
+                    .materialize_revived_member_session(
+                        entry,
+                        member_ref,
+                        bridge_session_id,
+                        stored_session,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        self.apply_dsl_signal(
+                            mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {
+                                agent_identity: dsl_identity,
+                            },
+                            "resolve_member_revival_succeeded",
+                        )?;
+                        self.restore_diagnostics
+                            .write()
+                            .await
+                            .remove(&agent_identity);
+                        tracing::info!(
+                            mob_id = %self.definition.id,
+                            agent_identity = %agent_identity,
+                            bridge_session_id = %bridge_session_id,
+                            "machine-authorized revival rebuilt the member's live session"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let failure_reason = format!(
+                            "machine-authorized revival of bridge session '{bridge_session_id}' failed: {error}"
+                        );
+                        self.apply_dsl_signal(
+                            mob_dsl::MobMachineSignal::ResolveMemberRevivalFailed {
+                                agent_identity: dsl_identity,
+                                reason: failure_reason.clone(),
+                            },
+                            "resolve_member_revival_failed",
+                        )?;
+                        self.restore_diagnostics.write().await.insert(
+                            agent_identity.clone(),
+                            super::handle::RestoreFailureDiagnostic {
+                                bridge_session_id: Some(bridge_session_id.clone()),
+                                reason: failure_reason.clone(),
+                            },
+                        );
+                        tracing::error!(
+                            mob_id = %self.definition.id,
+                            agent_identity = %agent_identity,
+                            bridge_session_id = %bridge_session_id,
+                            reason = %failure_reason,
+                            "machine-authorized revival failed terminally; member is broken"
+                        );
+                        Err(MobError::MemberRestoreFailed {
+                            member_id: agent_identity,
+                            session_id: Some(bridge_session_id.clone()),
+                            reason: failure_reason,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// Realize a machine-authorized member revival through the existing resume
+    /// materialization path (the same one mob resume-restore and
+    /// spawn-with-resume use): rebuild the live session from the durable
+    /// snapshot under the member's unchanged machine-owned identity, runtime
+    /// incarnation, and session binding, then re-project comms drain ownership
+    /// and the machine-owned topology restore plan onto the fresh runtime.
+    async fn materialize_revived_member_session(
+        &mut self,
+        entry: &RosterEntry,
+        member_ref: &MemberRef,
+        bridge_session_id: &SessionId,
+        stored_session: meerkat_core::session::Session,
+    ) -> Result<(), MobError> {
+        let agent_identity = entry.agent_identity.clone();
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+
+        // Resolve and machine-authorize the profile material exactly like the
+        // resume-restore reconciliation.
+        let profile = if let Some(p) = entry.effective_profile_override.clone() {
+            p
+        } else {
+            self.definition
+                .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
+                .await?
+        };
+        self.authorize_spawn_profile_material(
+            &agent_identity,
+            &entry.role,
+            &profile,
+            "revive_member_profile_authority",
+        )?;
+        let external_tools = self.external_tools_for_profile(&profile, None)?;
+        let mut config = build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
+            base: build::BuildAgentConfigParams {
+                mob_id: &self.definition.id,
+                profile_name: &entry.role,
+                agent_identity: &agent_identity,
+                profile: &profile,
+                definition: &self.definition,
+                external_tools,
+                context: None,
+                labels: Some(entry.labels.clone()),
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_authority_context: None,
+                inherited_tool_filter: None,
+                system_prompt_override: None,
+            },
+            expected_session_id: bridge_session_id,
+            resumed_session: stored_session,
+        })
+        .await?;
+        config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+        if let Some(ref client) = self.default_llm_client {
+            config.llm_client_override = Some(client.clone());
+        }
+
+        // The kickoff prompt is Defer + Discard in `to_create_session_request`:
+        // no turn runs during materialization — the machine-admitted dispatch
+        // turn follows once the live session exists again.
+        let prompt = ContentInput::from(self.fallback_spawn_prompt(&entry.role, &agent_identity));
+        let req = build::to_create_session_request(&config, prompt);
+        let peer_name = render_member_comms_name(
+            self.definition.id.as_str(),
+            entry.role.as_str(),
+            agent_identity.as_str(),
+        )?;
+
+        // Machine-minted self-owned provision owner for the unchanged binding
+        // (`RecoverMemberSessionBindingAlreadyCurrentRunning`): the same
+        // generated authority the resume-restore reconciliation uses.
+        let replacing = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let dsl_session_id = mob_dsl::SessionId::from_domain(bridge_session_id);
+        let owner_transition = self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::RecoverMemberSessionBinding {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                bridge_session_id: dsl_session_id.clone(),
+                replacing,
+            },
+            "revive_member_session_provision_owner",
+        )?;
+        let owner_authorized = owner_transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::SessionProvisionOperationOwnerAuthorized {
+                    agent_identity: effect_identity,
+                    session_id,
+                } if effect_identity == &dsl_identity && session_id == &dsl_session_id
+            )
+        });
+        if !owner_authorized {
+            return Err(MobError::Internal(format!(
+                "MobMachine produced no session provision operation owner for revived member '{agent_identity}'"
+            )));
+        }
+
+        // The fail-closed discard dropped the live session task but leaves the
+        // runtime adapter's session entry holding the DEAD comms runtime as
+        // mob-owned peer ingress. Release it through the typed DetachIngress
+        // seam (keep_alive=false + no runtime aborts the stale drain task and
+        // clears ownership) so the fresh comms runtime can attach after the
+        // re-materialization. The runtime session entry itself stays
+        // registered — it is id-based and valid again once the live session
+        // exists.
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = &self.runtime_adapter {
+            match adapter
+                .update_peer_ingress_context(bridge_session_id, false, None)
+                .await
+            {
+                Ok(_) => {}
+                // Absent or already-terminal runtime state proves no stale
+                // drain/ownership remains — the post-condition this wants.
+                Err(
+                    meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                    | meerkat_runtime::RuntimeDriverError::Destroyed
+                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+                ) => {}
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "failed to detach stale peer ingress for revived session '{bridge_session_id}': {error}"
+                    )));
+                }
+            }
+        }
+
+        let receipt = self
+            .provisioner
+            .provision_member(ProvisionMemberRequest {
+                create_session: req,
+                binding: crate::RuntimeBinding::Session,
+                peer_name,
+                owner_bridge_session_id: None,
+                ops_registry: None,
+                generated_self_owned_operation_owner: Some(bridge_session_id.clone()),
+            })
+            .await?;
+        let revived_session_id =
+            receipt
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "revival provisioned a non-session member for '{agent_identity}'"
+                    ))
+                })?;
+        if &revived_session_id != bridge_session_id {
+            return Err(MobError::Internal(format!(
+                "revival provisioned bridge session '{revived_session_id}' for machine binding '{bridge_session_id}'"
+            )));
+        }
+
+        // Re-project comms drain ownership onto the fresh comms runtime.
+        self.ensure_mob_comms_drain(&agent_identity, member_ref)
+            .await?;
+
+        // Re-fire the machine-owned topology restore plan onto the fresh comms
+        // runtime. Per-peer failures degrade typed through the generated
+        // `ResolveRespawnTopologyRestore` authority instead of destroying the
+        // revived member (#34 contract).
+        let plan = self.machine_restore_wiring_plan(&agent_identity)?;
+        let mut failed_restore_peer_ids: Vec<RespawnTopologyPeerId> = Vec::new();
+        for peer_identity in plan.local_peers {
+            if peer_identity == agent_identity {
+                continue;
+            }
+            let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
+            if let Err(error) = self
+                .handle_wire(
+                    agent_identity.clone(),
+                    super::handle::PeerTarget::Local(peer_agent_identity),
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    peer = %peer_identity,
+                    %error,
+                    "revival: failed to restore machine-owned local peer edge"
+                );
+                failed_restore_peer_ids.push(RespawnTopologyPeerId::from(peer_identity.as_str()));
+            }
+        }
+        for peer_spec in plan.external_peers {
+            let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
+            if let Err(error) = self
+                .handle_wire(
+                    agent_identity.clone(),
+                    super::handle::PeerTarget::External(peer_spec.clone()),
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    peer = %peer_spec.name,
+                    %error,
+                    "revival: failed to restore machine-owned external peer edge"
+                );
+                failed_restore_peer_ids.push(peer_id);
+            }
+        }
+        let resolution =
+            self.resolve_respawn_topology_restore_result(&agent_identity, failed_restore_peer_ids)?;
+        if resolution.result == mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed {
+            tracing::warn!(
+                agent_identity = %agent_identity,
+                failed_peer_ids = ?resolution.failed_peer_ids,
+                "revival completed with degraded machine-owned topology edges"
+            );
+        }
+        Ok(())
+    }
+
     fn active_machine_member_ids_for_profile(
         &self,
         profile_name: &ProfileName,
@@ -6898,6 +7305,7 @@ impl MobActor {
                         member_peer_ids: dsl.member_peer_ids.clone(),
                         member_peer_endpoints: dsl.member_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
+                        member_revival_pending: dsl.member_revival_pending.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
                         pending_session_ingress_detach_runtime_ids: dsl
@@ -16977,21 +17385,23 @@ impl MobActor {
                     );
                 }
                 Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                    let reason = self
-                        .record_missing_member_bridge_session(
-                            &entry.agent_identity,
-                            bridge_session_id,
-                            "dispatch_member_turn",
-                        )
-                        .await
-                        .unwrap_or_else(|| {
-                            format!("missing bridge session snapshot for '{bridge_session_id}'")
-                        });
-                    return Err(MobError::MemberRestoreFailed {
-                        member_id: entry.agent_identity.clone(),
-                        session_id: Some(bridge_session_id.clone()),
-                        reason,
-                    });
+                    // #37: the live materialization is gone while MobMachine
+                    // still owns the member as Active. Machine-authorized
+                    // revival rebuilds the live session from the durable
+                    // snapshot through the existing resume materialization
+                    // path; an unrecoverable or failed revival resolves into
+                    // the typed terminal `MemberRestoreFailed`.
+                    self.revive_member_live_materialization(
+                        entry,
+                        &machine_member_ref,
+                        bridge_session_id,
+                    )
+                    .await?;
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %bridge_session_id,
+                        "dispatch_member_turn_after_machine_admission revived live session"
+                    );
                 }
                 Err(error) => return Err(MobError::SessionError(error)),
             }

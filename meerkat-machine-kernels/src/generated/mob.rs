@@ -1495,7 +1495,109 @@ impl std::fmt::Display for MemberLifecycleKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    #[serde(rename = "DurableSnapshotPresent")]
+    DurableSnapshotPresent,
+    #[serde(rename = "DurableSnapshotMissing")]
+    DurableSnapshotMissing,
+}
+impl MemberLiveMaterializationObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DurableSnapshotPresent => "DurableSnapshotPresent",
+            Self::DurableSnapshotMissing => "DurableSnapshotMissing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberLiveMaterializationObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DurableSnapshotPresent" => Ok(Self::DurableSnapshotPresent),
+            "DurableSnapshotMissing" => Ok(Self::DurableSnapshotMissing),
+            other => Err(format!(
+                "invalid MemberLiveMaterializationObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberLiveMaterializationObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberLiveMaterializationObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    #[serde(rename = "ReviveAuthorized")]
+    ReviveAuthorized,
+    #[serde(rename = "BrokenRecorded")]
+    BrokenRecorded,
+}
+impl MemberRevivalVerdictKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReviveAuthorized => "ReviveAuthorized",
+            Self::BrokenRecorded => "BrokenRecorded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberRevivalVerdictKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ReviveAuthorized" => Ok(Self::ReviveAuthorized),
+            "BrokenRecorded" => Ok(Self::BrokenRecorded),
+            other => Err(format!("invalid MemberRevivalVerdictKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberRevivalVerdictKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberRevivalVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -4153,6 +4255,7 @@ pub struct State {
     pub member_kickoff_cancelled: std::collections::BTreeSet<AgentIdentity>,
     pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
@@ -5426,6 +5529,21 @@ pub mod signals {
         pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberLiveMaterialization {
+        pub agent_identity: AgentIdentity,
+        pub observation: MemberLiveMaterializationObservationKind,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalSucceeded {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalFailed {
+        pub agent_identity: AgentIdentity,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyCleanup {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyStorageFinalizing {}
@@ -5503,6 +5621,9 @@ pub enum Signal {
     RecoverSupervisorAuthority(signals::RecoverSupervisorAuthority),
     RecoverOwnerBridgeSession(signals::RecoverOwnerBridgeSession),
     RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
+    ClassifyMemberLiveMaterialization(signals::ClassifyMemberLiveMaterialization),
+    ResolveMemberRevivalSucceeded(signals::ResolveMemberRevivalSucceeded),
+    ResolveMemberRevivalFailed(signals::ResolveMemberRevivalFailed),
     AdmitDestroyCleanup(signals::AdmitDestroyCleanup),
     AdmitDestroyStorageFinalizing(signals::AdmitDestroyStorageFinalizing),
     MarkCompleted(signals::MarkCompleted),
@@ -5555,6 +5676,11 @@ impl Signal {
             Self::RecoverSupervisorAuthority(_) => SignalKind::RecoverSupervisorAuthority,
             Self::RecoverOwnerBridgeSession(_) => SignalKind::RecoverOwnerBridgeSession,
             Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
+            Self::ClassifyMemberLiveMaterialization(_) => {
+                SignalKind::ClassifyMemberLiveMaterialization
+            }
+            Self::ResolveMemberRevivalSucceeded(_) => SignalKind::ResolveMemberRevivalSucceeded,
+            Self::ResolveMemberRevivalFailed(_) => SignalKind::ResolveMemberRevivalFailed,
             Self::AdmitDestroyCleanup(_) => SignalKind::AdmitDestroyCleanup,
             Self::AdmitDestroyStorageFinalizing(_) => SignalKind::AdmitDestroyStorageFinalizing,
             Self::MarkCompleted(_) => SignalKind::MarkCompleted,
@@ -5606,6 +5732,9 @@ pub enum SignalKind {
     RecoverSupervisorAuthority,
     RecoverOwnerBridgeSession,
     RecoverMemberRestoreFailure,
+    ClassifyMemberLiveMaterialization,
+    ResolveMemberRevivalSucceeded,
+    ResolveMemberRevivalFailed,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
     MarkCompleted,
@@ -5864,6 +5993,13 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub result: RespawnTopologyRestoreResultKind,
         pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberLiveMaterializationClassified {
+        pub agent_identity: AgentIdentity,
+        pub observation: MemberLiveMaterializationObservationKind,
+        pub verdict: MemberRevivalVerdictKind,
+        pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnManyFailureClassified {
@@ -6189,6 +6325,7 @@ pub enum Effect {
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     OwnerBridgeSessionBound(effects::OwnerBridgeSessionBound),
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
+    MemberLiveMaterializationClassified(effects::MemberLiveMaterializationClassified),
     SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
     MemberWaitClassified(effects::MemberWaitClassified),
     FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
@@ -6284,6 +6421,7 @@ pub enum EffectKind {
     SpawnPolicyResolutionRecorded,
     OwnerBridgeSessionBound,
     RespawnTopologyRestoreResolved,
+    MemberLiveMaterializationClassified,
     SpawnManyFailureClassified,
     MemberWaitClassified,
     FlowDelegationEdgeAdmissionResolved,
@@ -6746,6 +6884,10 @@ pub enum TransitionId {
     ResolveRespawnTopologyRestoreCompleted,
     ResolveRespawnTopologyRestoreFailed,
     RecoverMemberRestoreFailureRunning,
+    ClassifyMemberLiveMaterializationRevivable,
+    ClassifyMemberLiveMaterializationTerminal,
+    ResolveMemberRevivalSucceededRunning,
+    ResolveMemberRevivalFailedRunning,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
     MarkCompleted,
@@ -7158,6 +7300,7 @@ pub fn initial_state() -> State {
         member_kickoff_cancelled: Default::default(),
         member_kickoff_error: Default::default(),
         member_restore_failures: Default::default(),
+        member_revival_pending: Default::default(),
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),
         external_peer_edges: Default::default(),

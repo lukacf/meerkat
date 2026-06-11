@@ -2194,6 +2194,14 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("MobFrameSeedDisposition", &["Seeded", "AlreadySeeded"]),
             NamedTypeBinding::string_enum(
+                "MemberLiveMaterializationObservationKind",
+                &["DurableSnapshotPresent", "DurableSnapshotMissing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberRevivalVerdictKind",
+                &["ReviveAuthorized", "BrokenRecorded"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
                     "ProfileNotFound",

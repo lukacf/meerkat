@@ -112,20 +112,37 @@ impl fmt::Display for StalenessPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionContract {
+    /// Documentation-only prose: names the canonical source a projection is
+    /// rebuilt from. Checked for non-emptiness, never resolved against code.
     pub rebuild_source: String,
+    /// Documentation-only prose: names the rebuild trigger. Checked for
+    /// non-emptiness, never resolved against code.
     pub rebuild_trigger: String,
+    /// Mechanically enforced: `DerivedProjection`/`CapabilityIndex` cells
+    /// must declare `Forbidden`.
     pub staleness_policy: StalenessPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateCellEntry {
+    /// Mechanically resolved: repo-relative file that must parse and declare
+    /// the `symbol` struct field.
     pub path: String,
+    /// Mechanically resolved: `TypeName.field_name`, checked against the
+    /// parsed file's struct declarations.
     pub symbol: String,
     pub subsystem: Subsystem,
     pub class: StateClass,
+    /// Anchor prose naming the canonical authority. Every `CamelCase` token
+    /// is mechanically resolved against the workspace type index (it must be
+    /// a live type/trait declaration or typed machine-catalog fact) and at
+    /// least one such token must be present; the surrounding lowercase prose
+    /// is documentation-only.
     pub canonical_anchor: String,
     pub projection: Option<ProjectionContract>,
     pub status: EntryStatus,
+    /// Documentation-only prose: describes the closure action taken or
+    /// required. Checked for non-emptiness, never resolved against code.
     pub closure_action: String,
 }
 
@@ -151,13 +168,32 @@ impl fmt::Display for BoundaryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticOperationEntry {
+    /// Mechanically resolved: must match a discovered boundary path.
     pub path: String,
+    /// Mechanically resolved: must match a discovered boundary symbol.
     pub symbol: String,
+    /// Mechanically resolved: must match the discovered boundary kind.
     pub boundary_kind: BoundaryKind,
+    /// Mechanically resolved: must name a type that owns a live discovered
+    /// boundary at `path` (per the boundary manifest, whose families are
+    /// proven live by `discover_boundaries`).
     pub owner_shell: String,
+    /// Mechanically resolved: each element must name a live named struct
+    /// field (`field` on `owner_shell`, or explicit `OwnerStruct.field`).
     pub writeset: Vec<String>,
+    /// Anchor prose naming the canonical authority. Every `CamelCase` token
+    /// is mechanically resolved against the workspace type index (it must be
+    /// a live type/trait declaration or typed machine-catalog fact) and at
+    /// least one such token must be present; the surrounding lowercase prose
+    /// is documentation-only.
     pub anchor: String,
+    /// Documentation-only prose: postcondition claims rendered into the
+    /// ledger document. Checked for presence/non-emptiness, never resolved
+    /// against code.
     pub required_postconditions: Vec<String>,
+    /// Documentation-only prose: invariant-preservation claims rendered into
+    /// the ledger document. Checked for presence/non-emptiness, never
+    /// resolved against code.
     pub preserved_invariants: Vec<String>,
     pub status: EntryStatus,
 }
@@ -166,9 +202,21 @@ pub struct SemanticOperationEntry {
 pub struct CouplingInvariantEntry {
     pub name: String,
     pub subsystem: Subsystem,
+    /// Documentation-only semantic store labels (mixed `Type.field` paths,
+    /// surface labels, and prose). Checked for presence/non-emptiness and
+    /// duplicates, never resolved against code.
     pub stores: Vec<String>,
+    /// Documentation-only prose: the invariant statement itself. Checked for
+    /// non-emptiness, never resolved against code.
     pub invariant: String,
+    /// Anchor prose naming the canonical authority. Every `CamelCase` token
+    /// is mechanically resolved against the workspace type index (it must be
+    /// a live type/trait declaration or typed machine-catalog fact) and at
+    /// least one such token must be present; the surrounding lowercase prose
+    /// is documentation-only.
     pub anchor: String,
+    /// Documentation-only prose: names the enforcement mechanism. Checked
+    /// for non-emptiness, never resolved against code.
     pub enforcement_mode: String,
     pub status: EntryStatus,
 }
@@ -204,8 +252,13 @@ pub struct CallbackBoundary {
     pub path_suffix: String,
     pub owner_type_name: Option<String>,
     pub method_name: String,
+    /// Mechanically resolved: must name a known manifest family.
     pub compensating_family: String,
+    /// Documentation-only prose justification. Checked for non-emptiness,
+    /// never resolved against code.
     pub why_manual: String,
+    /// Documentation-only prose sunset condition. Checked for non-emptiness,
+    /// never resolved against code.
     pub sunset_condition: String,
 }
 
@@ -417,6 +470,11 @@ pub fn collect_ownership_findings(
     registry: &OwnershipRegistry,
 ) -> Result<Vec<OwnershipFinding>> {
     let discovered = discover_boundaries(root, &registry.manifest)?;
+    // Workspace-wide declared-type index for anchor symbol resolution: every
+    // `CamelCase` token an anchor names must be a live type/trait declaration
+    // (or typed machine-catalog fact) somewhere in the workspace, so anchors
+    // are file/symbol facts rather than free prose.
+    let type_index = workspace_type_index(root)?;
     let mut findings = Vec::new();
 
     let mut seen_state_keys = BTreeSet::new();
@@ -686,12 +744,15 @@ pub fn collect_ownership_findings(
             ));
         }
 
-        // A Closed entry asserts a finished hand-off into a named owner shell.
-        // Resolve that owner_shell against the live boundary owners the
-        // manifest declares for this path; if the type-name no longer owns a
-        // live boundary here, the closure is stale and the finite-ownership
-        // ledger's authoritative/zero-findings claim must not stand.
-        if entry.status == EntryStatus::Closed && !entry.owner_shell.trim().is_empty() {
+        // Every entry asserts a named owner shell. Resolve that owner_shell
+        // against the live boundary owners the manifest declares for this
+        // path (the manifest families are proven live by
+        // `discover_boundaries`, which bails otherwise); if the type-name
+        // owns no live boundary here, the ownership claim is stale —
+        // regardless of status — and the finite-ownership ledger's
+        // authoritative/zero-findings claim must not stand. Emptiness is
+        // separately flagged as `OwnershipOperationOwnerMissing` above.
+        if !entry.owner_shell.trim().is_empty() {
             let owner_resolves = owner_shells_by_path
                 .get(&entry.path)
                 .is_some_and(|owners| owners.contains(&entry.owner_shell));
@@ -701,12 +762,21 @@ pub fn collect_ownership_findings(
                     &entry.path,
                     &entry.symbol,
                     format!(
-                        "closed semantic operation `{}` names owner_shell `{}` that owns no live discovered boundary at `{}`; the closure is stale",
+                        "semantic operation `{}` names owner_shell `{}` that owns no live discovered boundary at `{}`; the ownership claim is stale",
                         entry.symbol, entry.owner_shell, entry.path
                     ),
                 ));
             }
         }
+
+        push_anchor_symbol_findings(
+            &mut findings,
+            &type_index,
+            "OwnershipOperationAnchor",
+            &entry.path,
+            &entry.symbol,
+            &entry.anchor,
+        );
     }
 
     let mut parsed_files = BTreeMap::new();
@@ -727,6 +797,14 @@ pub fn collect_ownership_findings(
                 "state cell entry must declare a non-empty closure_action",
             ));
         }
+        push_anchor_symbol_findings(
+            &mut findings,
+            &type_index,
+            "OwnershipStateAnchor",
+            &state.path,
+            &state.symbol,
+            &state.canonical_anchor,
+        );
         let symbol = state.symbol.as_str();
         let Some((type_name, field_name)) = parse_struct_field_symbol(symbol) else {
             findings.push(error_finding(
@@ -874,6 +952,14 @@ pub fn collect_ownership_findings(
                 ),
             ));
         }
+        push_anchor_symbol_findings(
+            &mut findings,
+            &type_index,
+            "OwnershipInvariantAnchor",
+            format!("<{}>", invariant.subsystem),
+            &invariant.name,
+            &invariant.anchor,
+        );
     }
 
     let known_manifest_families = registry
@@ -1158,6 +1244,7 @@ fn render_markdown(report: &OwnershipReport) -> String {
     out.push_str("**Source**: `xtask ownership-ledger`\n\n");
     out.push_str("This document is generated from the typed ownership registry in `xtask`.\n");
     out.push_str("It is the authoritative inventory of semantic state, semantic-operation boundaries, and keyed-store invariants for the current closure program.\n\n");
+    out.push_str("Verification contract: paths, symbols, boundary kinds, owner shells, write-sets, and the `CamelCase` authority symbols named by anchors are mechanically resolved against parsed source by `xtask ownership-ledger`. Postconditions, preserved invariants, closure actions, store labels, enforcement modes, and the lowercase anchor prose are documentation-only claims — they are checked for presence, not verified against code.\n\n");
     out.push_str("## Summary\n\n");
     out.push_str("| Subsystem | State Cells | Semantic Operations | Coupling Invariants | Open State Cells | Open Operations | Open Invariants |\n");
     out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
@@ -1610,6 +1697,199 @@ fn parse_struct_field_symbol(symbol: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((type_name, field_name))
+}
+
+/// Symbol-like tokens an anchor names. Anchors are short prose strings whose
+/// `CamelCase` words are *claims about live declarations* (authority types,
+/// machines, projection structs, catalog facts); the lowercase remainder is
+/// documentation. A token is symbol-like when it starts with an ASCII
+/// uppercase letter and contains at least one lowercase letter (so
+/// `MeerkatMachine` and `RosterAuthority` are claims while acronym prose
+/// like `DSL` or `TLC` is not). This is data-format parsing of registry
+/// strings, not source scanning — resolution itself is against the parsed
+/// workspace type index.
+fn anchor_symbol_tokens(anchor: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for ch in anchor.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else {
+            push_symbol_like(&mut tokens, &current);
+            current.clear();
+        }
+    }
+    push_symbol_like(&mut tokens, &current);
+    tokens
+}
+
+fn push_symbol_like(tokens: &mut BTreeSet<String>, candidate: &str) {
+    let mut chars = candidate.chars();
+    let leading_upper = chars.next().is_some_and(|ch| ch.is_ascii_uppercase());
+    if leading_upper && candidate.chars().any(|ch| ch.is_ascii_lowercase()) {
+        tokens.insert(candidate.to_string());
+    }
+}
+
+/// Fail-closed anchor resolution: an anchor must name at least one
+/// symbol-like authority token, and every symbol-like token it names must
+/// resolve to a live type/trait declaration or typed machine-catalog fact
+/// in the workspace type index. A token that resolves to nothing is a stale
+/// authority claim and goes red instead of standing as unverified prose.
+fn push_anchor_symbol_findings(
+    findings: &mut Vec<OwnershipFinding>,
+    type_index: &BTreeSet<String>,
+    rule_prefix: &str,
+    path: impl Into<String>,
+    symbol: &str,
+    anchor: &str,
+) {
+    if anchor.trim().is_empty() {
+        // Emptiness is flagged by the dedicated *AnchorMissing rules.
+        return;
+    }
+    let path = path.into();
+    let tokens = anchor_symbol_tokens(anchor);
+    if tokens.is_empty() {
+        findings.push(error_finding(
+            format!("{rule_prefix}SymbolMissing"),
+            path,
+            symbol,
+            format!(
+                "anchor `{anchor}` names no resolvable authority symbol; anchors must name at least one live type"
+            ),
+        ));
+        return;
+    }
+    for token in tokens {
+        if !type_index.contains(&token) {
+            findings.push(error_finding(
+                format!("{rule_prefix}SymbolUnresolved"),
+                path.clone(),
+                format!("{symbol}::{token}"),
+                format!(
+                    "anchor `{anchor}` names `{token}`, which is not a live type/trait declaration in any workspace crate; the anchor claim is stale"
+                ),
+            ));
+        }
+    }
+}
+
+/// Workspace member directories from the root `Cargo.toml` manifest.
+fn workspace_member_dirs(root: &Path) -> Result<Vec<String>> {
+    let manifest_path = root.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let manifest: toml::Value =
+        toml::from_str(&contents).with_context(|| format!("parse {}", manifest_path.display()))?;
+    let members = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(|members| members.as_array())
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|member| member.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(members)
+}
+
+/// Names of every type-like declaration (struct / enum / trait / trait
+/// alias / type alias / union) across all workspace member crate sources,
+/// including items inside inline modules, plus the typed machine-catalog
+/// facts (canonical machine identities, alphabet variants, transition ids,
+/// and named-type domains) — anchors legitimately name those schema facts,
+/// which exist as catalog data rather than handwritten declarations.
+/// Fail-closed: a member file that cannot be read or parsed aborts the run
+/// instead of silently shrinking the resolution domain.
+fn workspace_type_index(root: &Path) -> Result<BTreeSet<String>> {
+    let mut index = BTreeSet::new();
+    for schema in meerkat_machine_schema::canonical_machine_schemas() {
+        index.insert(schema.machine.as_str().to_string());
+        for variants in [
+            &schema.state.phase.variants,
+            &schema.inputs.variants,
+            &schema.signals.variants,
+            &schema.effects.variants,
+        ] {
+            for variant in variants {
+                index.insert(variant.name.as_str().to_string());
+            }
+        }
+        for transition in &schema.transitions {
+            index.insert(transition.name.as_str().to_string());
+        }
+        for binding in &schema.named_types {
+            index.insert(binding.name.as_str().to_string());
+            if let meerkat_machine_schema::RustTypeAtom::StringEnum { variants } = &binding.rust {
+                for variant in variants {
+                    index.insert(variant.as_str().to_string());
+                }
+            }
+        }
+    }
+    for member in workspace_member_dirs(root)? {
+        let src = root.join(&member).join("src");
+        if !src.exists() {
+            continue;
+        }
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            let entries =
+                fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))?;
+            for entry in entries {
+                let path = entry
+                    .with_context(|| format!("read dir entry in {}", dir.display()))?
+                    .path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    let source = fs::read_to_string(&path)
+                        .with_context(|| format!("read {}", path.display()))?;
+                    let parsed = syn::parse_file(&source)
+                        .with_context(|| format!("parse {}", path.display()))?;
+                    collect_type_names(&parsed.items, &mut index);
+                }
+            }
+        }
+    }
+    Ok(index)
+}
+
+fn collect_type_names(items: &[Item], index: &mut BTreeSet<String>) {
+    for item in items {
+        match item {
+            Item::Struct(item_struct) => {
+                index.insert(item_struct.ident.to_string());
+            }
+            Item::Enum(item_enum) => {
+                index.insert(item_enum.ident.to_string());
+            }
+            Item::Trait(item_trait) => {
+                index.insert(item_trait.ident.to_string());
+            }
+            Item::TraitAlias(item_alias) => {
+                index.insert(item_alias.ident.to_string());
+            }
+            Item::Type(item_type) => {
+                index.insert(item_type.ident.to_string());
+            }
+            Item::Union(item_union) => {
+                index.insert(item_union.ident.to_string());
+            }
+            Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    collect_type_names(inner, index);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Build the struct→named-field index for one crate directory (recursing
@@ -2240,7 +2520,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.pending_obligations",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
-            "surface_completion handoff protocol obligation identity",
+            "SurfaceCompletionObligation handoff protocol obligation identity",
             Some(contract(
                 "generated SurfaceCompletionObligation tokens from authority effects",
                 "schedule-surface-completion spawn + pending-result consumption",
@@ -2254,7 +2534,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.pending_snapshot_alignment",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
-            "surface_snapshot_alignment handoff protocol obligation identity",
+            "SurfaceSnapshotAlignmentObligation handoff protocol obligation identity",
             Some(contract(
                 "generated SurfaceSnapshotAlignmentObligation token from authority effects",
                 "snapshot-alignment scheduling + alignment application",
@@ -2268,7 +2548,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.pending_tx",
             Subsystem::Mcp,
             StateClass::CapabilityHandle,
-            "surface handoff protocol async completion transport",
+            "ExternalToolSurfaceHandle handoff protocol async completion transport",
             None,
             EntryStatus::Closed,
             "background pending-result sender is an opaque transport capability with no independent semantic truth",
@@ -2278,7 +2558,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.pending_rx",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
-            "surface handoff protocol async completion transport",
+            "ExternalToolSurfaceHandle handoff protocol async completion transport",
             None,
             EntryStatus::Closed,
             "pending-result receiver queue is transport-only buffering for obligation completion delivery",
@@ -2322,7 +2602,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "MobActor.pending_spawns",
             Subsystem::Mob,
             StateClass::DerivedProjection,
-            "PendingSpawnLineage + MobOrchestratorAuthority.pending_spawn_count",
+            "PendingSpawnLineage + MobMachine pending_spawn_count tracking",
             Some(contract(
                 "staged spawn receipts + reply obligations + provision task handles",
                 "enqueue_spawn, spawn completion, respawn cancellation, lifecycle drain",
@@ -2336,7 +2616,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "PendingSpawnLineage.tasks",
             Subsystem::Mob,
             StateClass::CapabilityIndex,
-            "PendingSpawnLineage metadata + MobOrchestratorAuthority.pending_spawn_count",
+            "PendingSpawnLineage metadata + MobMachine pending_spawn_count tracking",
             Some(contract(
                 "machine-owned pending spawn set",
                 "spawn begin/complete/rollback transitions",
@@ -2466,7 +2746,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "RuntimeSessionEntry.attachment_slot",
                 "RuntimeSessionEntry.driver"
             ],
-            "MeerkatMachine attachment publication contract + RuntimeControl transitions",
+            "MeerkatMachine attachment publication contract + RuntimeControlPlane transitions",
             &[
                 "executor attachment is published only after driver attach succeeds, with stale attached-driver states repaired via detach/reattach before publication",
             ],
@@ -3070,7 +3350,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["MobActor.dsl_authority", "flow_streams", "run_store"],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &[
                 "flow run submission aligns with canonical orchestrator and lifecycle transition truth",
             ],
@@ -3083,7 +3363,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["MobActor.dsl_authority", "flow_streams", "run_store"],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &["streaming flow run submission aligns with canonical orchestrator/run-store truth"],
             &[
                 "streaming flow wrapper cannot fork lifecycle classification from canonical run state",
@@ -3100,7 +3380,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "MobActor.dsl_authority",
                 "run_store"
             ],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &["flow cancellation surface targets canonical in-flight run truth"],
             &["cancel surface cannot mark runs canceled outside canonical cleanup path"],
             EntryStatus::Closed,
@@ -3115,7 +3395,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "MobActor.pending_spawns",
                 "MobActor.runtime_adapter"
             ],
-            "MobLifecycleAuthority + RosterAuthority",
+            "MobMachine member lifecycle + RosterAuthority",
             &[
                 "stop command transitions lifecycle through canonical authority and drains pending spawn/runtime work",
             ],
@@ -3128,7 +3408,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["MobActor.dsl_authority", "MobActor.runtime_adapter"],
-            "MobLifecycleAuthority + RosterAuthority",
+            "MobMachine member lifecycle + RosterAuthority",
             &["resume command transitions lifecycle through canonical authority"],
             &["resume convenience surface cannot bypass canonical lifecycle guards"],
             EntryStatus::Closed,
@@ -3143,7 +3423,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "roster",
                 "MobActor.runtime_adapter"
             ],
-            "MobLifecycleAuthority + RosterAuthority",
+            "MobMachine member lifecycle + RosterAuthority",
             &[
                 "complete command transitions lifecycle and retirement semantics through canonical authority paths",
             ],
@@ -3163,7 +3443,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "MobActor.runtime_adapter",
                 "MobActor.pending_spawns"
             ],
-            "MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge",
+            "MobMachine member lifecycle + RosterAuthority + SessionBackend runtime bridge",
             &["reset command clears runtime/member state through canonical authority transitions"],
             &["reset convenience surface cannot preserve stale helper-owned member/runtime truth"],
             EntryStatus::Closed,
@@ -3179,7 +3459,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "MobActor.runtime_adapter",
                 "MobActor.pending_spawns"
             ],
-            "MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge",
+            "MobMachine member lifecycle + RosterAuthority + SessionBackend runtime bridge",
             &[
                 "destroy command terminalizes runtime/member state through canonical authority transitions",
             ],
@@ -3192,7 +3472,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["MobActor.spawn_policy"],
-            "MobSpawnPolicySurface",
+            "SpawnPolicyService spawn-policy surface",
             &["spawn-policy updates route through canonical actor command path"],
             &["spawn policy convenience surface cannot create side-owned auto-spawn semantics"],
             EntryStatus::Closed,
@@ -3208,7 +3488,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "MobActor.pending_spawns",
                 "run_store"
             ],
-            "MobLifecycleAuthority + SessionBackend runtime bridge",
+            "MobMachine member lifecycle + SessionBackend runtime bridge",
             &[
                 "shutdown command drains runtime/flow resources through canonical actor shutdown path",
             ],
@@ -3234,7 +3514,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["roster", "MobActor.pending_spawns"],
-            "MobMemberLifecycleAuthority",
+            "MobMachine member lifecycle + MobMemberLifecycleProjection",
             &["helper result class is machine-derived"],
             &["helper does not classify from snapshots"],
             EntryStatus::Closed,
@@ -3245,7 +3525,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["roster", "MobActor.pending_spawns"],
-            "MobMemberLifecycleAuthority",
+            "MobMachine member lifecycle + MobMemberLifecycleProjection",
             &["helper result class is machine-derived"],
             &["helper does not classify from snapshots"],
             EntryStatus::Closed,
@@ -3256,7 +3536,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["roster"],
-            "MobMemberLifecycleAuthority",
+            "MobMachine member lifecycle + MobMemberLifecycleProjection",
             &["wait helper observes canonical terminal truth only"],
             &["wait helper does not infer completion from side maps"],
             EntryStatus::Closed,
@@ -3267,7 +3547,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MobHandle",
             &["roster"],
-            "MobMemberLifecycleAuthority",
+            "MobMachine member lifecycle + MobMemberLifecycleProjection",
             &["wait helper observes canonical terminal truth only"],
             &["wait helper does not infer completion from side maps"],
             EntryStatus::Closed,
@@ -3293,7 +3573,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["pending_spawns", "roster"],
-            "PendingSpawnLineage + MobOrchestratorAuthority + RosterAuthority",
+            "PendingSpawnLineage + MobMachine orchestration + RosterAuthority",
             &[
                 "spawn admission allocates canonical pending-spawn lineage before async provisioning and rejects duplicate member identities against pending+committed roster truth",
             ],
@@ -3308,7 +3588,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["runtime_adapter", "roster"],
-            "MobLifecycleAuthority active-member gate + SessionBackend::interrupt_member runtime-adapter ownership contract + InputLifecycle cancellation semantics",
+            "MobMachine member-lifecycle active-member gate + SessionBackend::interrupt_member runtime-adapter ownership contract + InputLifecycle cancellation semantics",
             &[
                 "force-cancel command resolves target membership in roster and routes runtime-backed cancellation through MeerkatMachine when adapter registration exists",
             ],
@@ -3399,7 +3679,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "run_cancel_tokens",
                 "run_store",
             ],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &["run-flow command starts canonical run lifecycle and orchestrator accounting"],
             &[
                 "run-flow command cannot fabricate lifecycle/tracker truth outside canonical authorities",
@@ -3412,7 +3692,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["run_tasks", "run_cancel_tokens", "run_store"],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &["cancel-flow command updates canonical run lifecycle and orchestrator accounting"],
             &[
                 "cancel-flow command cannot classify run terminal state outside canonical authorities",
@@ -3425,7 +3705,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["run_tasks", "run_cancel_tokens", "flow_streams"],
-            "MobOrchestratorAuthority + MobLifecycleAuthority",
+            "MobMachine orchestration + member lifecycle authority",
             &["flow cleanup command closes run trackers and applies canonical completion inputs"],
             &[
                 "cleanup commands cannot complete run lifecycle outside canonical authority transitions",
@@ -3438,7 +3718,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["dsl_authority", "roster", "runtime_adapter"],
-            "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
+            "MobMachine member lifecycle + retire_all_members + PendingSpawnLineage",
             &[
                 "complete command cancels flow work, drains pending spawn lineage, retires canonical roster members, and only then publishes lifecycle completion",
             ],
@@ -3458,7 +3738,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "runtime_adapter",
                 "pending_spawns"
             ],
-            "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
+            "MobMachine member lifecycle + retire_all_members + PendingSpawnLineage",
             &[
                 "destroy command drains pending lineage, retires canonical members, and only then publishes lifecycle destroy semantics",
             ],
@@ -3476,7 +3756,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "runtime_adapter",
                 "pending_spawns"
             ],
-            "MobLifecycleAuthority + retire_all_members + PendingSpawnLineage",
+            "MobMachine member lifecycle + retire_all_members + PendingSpawnLineage",
             &[
                 "reset command drains pending lineage, retires canonical members, and only then returns lifecycle to the reset-prepared state",
             ],
@@ -3600,7 +3880,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
                 "RuntimeSessionEntry.driver",
             ],
             "live attachment publication is aligned with driver attachment/control transitions on stop/ensure paths",
-            "MeerkatMachine attachment publication contract + RuntimeControl transitions",
+            "MeerkatMachine attachment publication contract + RuntimeControlPlane transitions",
             "driver attachment semantics + ownership-ledger",
             EntryStatus::Closed,
         ),
@@ -3625,7 +3905,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
                 "RuntimeCommsBridge.runtime_input_projection",
             ],
             "runtime comms bridge consumes classified peer ingress truth, preserves rendered peer body and multimodal blocks, and routes ExternalEvent only from PeerInputClass::PlainEvent",
-            "MeerkatMachine peer-ingress classification + RuntimeCommsBridge projection contract",
+            "MeerkatMachine peer-ingress classification + PeerInputClass-routed comms-drain projection contract",
             "classified interaction routing + rendered_text/body projection + multimodal block preservation + ownership-ledger",
             EntryStatus::Closed,
         ),
@@ -3670,10 +3950,10 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             &[
                 "MobActor.pending_spawns",
                 "PendingSpawnLineage.tasks",
-                "MobOrchestratorAuthority.pending_spawn_count",
+                "MobMachine pending_spawn_count tracking",
             ],
             "pending spawn tables and orchestrator counts must describe the same spawn lineage",
-            "pending spawn lineage helpers + MobOrchestratorAuthority.pending_spawn_count",
+            "pending spawn lineage helpers + MobMachine pending_spawn_count tracking",
             "actor-side alignment enforcement + orchestrator authority + ownership-ledger",
             EntryStatus::Closed,
         ),

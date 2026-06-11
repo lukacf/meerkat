@@ -657,6 +657,12 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
     Ok(mismatches)
 }
 
+/// Deliberately text-level tombstone gate: these are retired
+/// authority-language names banned from *documentation prose*
+/// (`docs/` + spec READMEs — see `authority_language_paths`), where the
+/// stale word itself is the violation regardless of context. This is not a
+/// Rust-source structure check; structural source-shape governance lives in
+/// the syn-AST gates in this file and `rmat_audit`/`effect_authority`.
 pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let banned = ["schema.yaml", "PureHandKernel", "PureHand"];
@@ -1316,11 +1322,18 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
 
     for path in production_rust_source_paths(root)? {
         let rel = relative_slash_path(root, &path)?;
+        // Whole-file test fixtures (`.../tests.rs`) are out of scope for this
+        // production gate (path-name membership, not a source scan). Inline
+        // `#[cfg(test)]` items are dropped structurally by
+        // `parse_production_file` before the walk, which also closes the old
+        // line-counting hole where code *after* a closed inline test module
+        // was treated as test-only.
+        if rel.ends_with("/tests.rs") {
+            continue;
+        }
         let contents = fs::read_to_string(&path).with_context(|| {
             format!("read flow reducer transition candidate {}", path.display())
         })?;
-        let lines = contents.lines().collect::<Vec<_>>();
-        let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
 
         // The transition-call, reducer-`Input`-construction,
         // projection-field-write, and CAS store-write detections are
@@ -1347,22 +1360,10 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
             );
             visitor.visit_file(&parsed);
             for hit in visitor.hits {
-                let line_index = hit.line.saturating_sub(1);
-                if line_index >= lines.len()
-                    || test_only_lines.get(line_index).copied() == Some(true)
-                {
-                    continue;
-                }
                 let allowed = match &hit.kind {
                     FlowReducerHitKind::Transition { module }
                     | FlowReducerHitKind::Input { module } => {
-                        flow_reducer_direct_use_is_structurally_allowed(
-                            &rel,
-                            &lines,
-                            line_index,
-                            module,
-                            &hit.gate_token,
-                        )
+                        flow_reducer_direct_use_is_structurally_allowed(&rel, module, &hit)
                     }
                     FlowReducerHitKind::ProjectionWrite => false,
                     FlowReducerHitKind::CasStoreWrite => {
@@ -1526,19 +1527,44 @@ enum FlowReducerHitKind {
     CasStoreWrite,
 }
 
-/// One AST-detected banned flow-reducer use, carrying the structural-allow-list
-/// gate token plus the already-rendered message prefix (line/path appended by
-/// the caller so the report shape matches the prior text scanner exactly).
+/// One AST-detected banned flow-reducer use, carrying the already-rendered
+/// message prefix (line/path appended by the caller so the report shape
+/// matches the prior text scanner exactly) plus the structural allow-list
+/// context for the hit kind.
 struct FlowReducerHit {
     line: usize,
     kind: FlowReducerHitKind,
-    gate_token: String,
     message: String,
     /// Structural context for the CAS-write allow decision (K22(c)): the
     /// allow-list keys off AST facts captured at the hit (enclosing function,
     /// signature types, preceding callees, call-argument idents, enclosing
     /// match-arm patterns) instead of line-text windows.
     cas_allow: Option<CasWriteAllowContext>,
+    /// Structural context for the direct Transition/Input allow decision in
+    /// the `run.rs` reducer-owned wrappers — same AST-fact discipline as
+    /// `cas_allow`, never line-text windows.
+    direct_allow: Option<DirectUseAllowContext>,
+}
+
+/// AST-derived context for one direct reducer Transition/Input hit, used by
+/// `flow_reducer_direct_use_is_structurally_allowed`. Every field is
+/// resolved structurally (syn visitors) — never as raw-line substrings or
+/// compacted-signature text — so comments/strings cannot false-allow and a
+/// signature or `authority.require(..)` call split across lines is still
+/// classified correctly.
+#[derive(Default, Clone)]
+struct DirectUseAllowContext {
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to
+    /// an `authority.require(..)` call earlier (in source order) in the
+    /// enclosing function body.
+    preceding_authority_require_kinds: BTreeSet<String>,
+    /// Path-segment idents of the enclosing `impl` block's self type.
+    enclosing_impl_type_idents: BTreeSet<String>,
+    /// Path segments of the enclosing function's structural return type
+    /// (`-> flow_run::Input` yields `["flow_run", "Input"]`).
+    fn_return_type_segments: Vec<String>,
 }
 
 /// AST-derived context for one forbidden `cas_*` projection-write hit, used
@@ -1585,6 +1611,12 @@ struct FlowReducerFnContext {
     path_idents: BTreeSet<String>,
     commits_prepared_inputs: bool,
     prepares_machine_inputs: bool,
+    /// `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to an
+    /// `authority.require(..)` call seen so far (in source order) in this
+    /// function body — structural input to the direct-use allow-list.
+    authority_require_kinds: BTreeSet<String>,
+    /// Path segments of this function's structural return type, if any.
+    return_type_segments: Vec<String>,
     /// Indices into `hits` for CAS hits inside this function; whole-function
     /// facts are backfilled when the function walk completes.
     cas_hit_indices: Vec<usize>,
@@ -1673,6 +1705,9 @@ struct FlowReducerTransitionVisitor<'a> {
     fn_stack: Vec<FlowReducerFnContext>,
     /// Enclosing `match`-arm pattern paths (innermost last).
     arm_patterns: Vec<String>,
+    /// Path-segment idents of enclosing `impl` self types (innermost last)
+    /// for the structural direct-use allow-list.
+    impl_type_stack: Vec<BTreeSet<String>>,
 }
 
 impl<'a> FlowReducerTransitionVisitor<'a> {
@@ -1690,6 +1725,7 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             hits: Vec::new(),
             fn_stack: Vec::new(),
             arm_patterns: Vec::new(),
+            impl_type_stack: Vec::new(),
         }
     }
 
@@ -1699,9 +1735,14 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             idents: &mut signature_type_idents,
         }
         .visit_signature(sig);
+        let return_type_segments = match &sig.output {
+            syn::ReturnType::Type(_, ty) => structural_type_path_segments(ty),
+            syn::ReturnType::Default => Vec::new(),
+        };
         self.fn_stack.push(FlowReducerFnContext {
             name: sig.ident.to_string(),
             signature_type_idents,
+            return_type_segments,
             ..FlowReducerFnContext::default()
         });
     }
@@ -1784,6 +1825,22 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
         }
     }
 
+    /// Build the structural allow context for one direct Transition/Input
+    /// hit from the current visitor position.
+    fn direct_use_allow_context(&self) -> DirectUseAllowContext {
+        let fn_context = self.fn_stack.last();
+        DirectUseAllowContext {
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            preceding_authority_require_kinds: fn_context
+                .map(|context| context.authority_require_kinds.clone())
+                .unwrap_or_default(),
+            enclosing_impl_type_idents: self.impl_type_stack.last().cloned().unwrap_or_default(),
+            fn_return_type_segments: fn_context
+                .map(|context| context.return_type_segments.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Classify a callee path as a reducer `transition` call.
     ///
     /// Two shapes resolve: a module-qualified call `alias::transition(...)`
@@ -1831,49 +1888,41 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
     }
 
     fn push_transition(&mut self, span: proc_macro2::Span, module: String, display: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
         self.hits.push(FlowReducerHit {
             line: span.start().line,
-            kind: FlowReducerHitKind::Transition {
-                module: module.clone(),
-            },
-            // Gate token always contains `transition` so the run.rs
-            // typed-authority allow-list (`token.contains("transition")`) keeps
-            // accepting the wrapper; the allow-list keys on the resolved module.
-            gate_token: format!("{module}::transition("),
+            kind: FlowReducerHitKind::Transition { module },
             message: format!(
                 "direct live-flow reducer transition `{display}` is not MobMachine-command gated"
             ),
             cas_allow: None,
+            direct_allow,
         });
     }
 
     fn push_transition_alias(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
         self.hits.push(FlowReducerHit {
             line: span.start().line,
-            kind: FlowReducerHitKind::Transition {
-                module: module.clone(),
-            },
-            gate_token: format!("{module}::transition("),
+            kind: FlowReducerHitKind::Transition { module },
             message: format!(
                 "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated"
             ),
             cas_allow: None,
+            direct_allow,
         });
     }
 
     fn push_input(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
         self.hits.push(FlowReducerHit {
             line: span.start().line,
-            kind: FlowReducerHitKind::Input {
-                module: module.clone(),
-            },
-            // Gate token contains `Input::` so the run.rs `into_input` adapter
-            // allow-list (`token.contains("Input::")`) keeps accepting it.
-            gate_token: format!("{module}::Input::"),
+            kind: FlowReducerHitKind::Input { module },
             message: format!(
                 "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated"
             ),
             cas_allow: None,
+            direct_allow,
         });
     }
 
@@ -1919,11 +1968,11 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
         self.hits.push(FlowReducerHit {
             line: span.start().line,
             kind: FlowReducerHitKind::ProjectionWrite,
-            gate_token: token.clone(),
             message: format!(
                 "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
             ),
             cas_allow: None,
+            direct_allow: None,
         });
     }
 
@@ -1940,11 +1989,11 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
         self.hits.push(FlowReducerHit {
             line: span.start().line,
             kind: FlowReducerHitKind::CasStoreWrite,
-            gate_token: token.clone(),
             message: format!(
                 "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
             ),
             cas_allow: Some(cas_allow),
+            direct_allow: None,
         });
         if let Some(context) = self.fn_stack.last_mut() {
             context.cas_hit_indices.push(hit_index);
@@ -1969,6 +2018,17 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
         self.enter_fn(&node.sig);
         syn::visit::visit_impl_item_fn(self, node);
         self.exit_fn();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let mut idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut idents,
+        }
+        .visit_type(node.self_ty.as_ref());
+        self.impl_type_stack.push(idents);
+        syn::visit::visit_item_impl(self, node);
+        self.impl_type_stack.pop();
     }
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
@@ -2041,11 +2101,60 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
         }
         let method = node.method.to_string();
         self.record_callee(&method, node.args.iter());
+        // `authority.require(MobMachineFlowAuthorityKind::..)` is the
+        // structural authority fact the direct-use allow-list keys on:
+        // resolve the kind from the argument path AST, never from line text.
+        if method == "require"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("authority"))
+            && let Some(context) = self.fn_stack.last_mut()
+        {
+            for arg in &node.args {
+                collect_flow_authority_kind_pairs(arg, &mut context.authority_require_kinds);
+            }
+        }
         if self.cas_write_methods.contains(&method.as_str()) {
             let cas_allow = self.cas_allow_context(&method, node.args.iter());
             self.push_cas_store_write(node.method.span(), &method, cas_allow);
         }
         syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Collect rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs from
+/// every path inside the expression subtree.
+fn collect_flow_authority_kind_pairs(expr: &syn::Expr, kinds: &mut BTreeSet<String>) {
+    struct KindPairCollector<'a> {
+        kinds: &'a mut BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for KindPairCollector<'_> {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            let segments: Vec<String> = node.segments.iter().map(|s| s.ident.to_string()).collect();
+            for window in segments.windows(2) {
+                if window[0] == "MobMachineFlowAuthorityKind" {
+                    self.kinds
+                        .insert(format!("MobMachineFlowAuthorityKind::{}", window[1]));
+                }
+            }
+            syn::visit::visit_path(self, node);
+        }
+    }
+    KindPairCollector { kinds }.visit_expr(expr);
+}
+
+/// Path segments of a structural type, unwrapping references/parens/groups
+/// (`-> &flow_run::Input` yields `["flow_run", "Input"]`).
+fn structural_type_path_segments(ty: &syn::Type) -> Vec<String> {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        syn::Type::Reference(reference) => structural_type_path_segments(&reference.elem),
+        syn::Type::Paren(paren) => structural_type_path_segments(&paren.elem),
+        syn::Type::Group(group) => structural_type_path_segments(&group.elem),
+        _ => Vec::new(),
     }
 }
 
@@ -2459,28 +2568,32 @@ impl FlowReducerFamily {
     }
 }
 
-fn flow_reducer_test_only_lines(path: &str, lines: &[&str]) -> Vec<bool> {
-    if path.ends_with("/tests.rs") {
-        return vec![true; lines.len()];
-    }
-
-    let mut test_only = Vec::with_capacity(lines.len());
-    let mut in_test_module = false;
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 && lines[index - 1].trim() == "#[cfg(test)]" && line.contains("mod tests") {
-            in_test_module = true;
-        }
-        test_only.push(in_test_module);
-    }
-    test_only
-}
-
+/// Structural allow-list for direct reducer use in the `run.rs` reducer-owned
+/// wrappers (K22(b) shape).
+///
+/// The prior implementation located the enclosing function by scanning raw
+/// lines backwards for a compacted `fn`-prefixed line, re-derived the
+/// function name from that single line's text, and classified the allowance
+/// with `token.contains(..)` / `line.contains("authority.require(..")`
+/// windows — so a comment or string literal containing the require text
+/// could false-allow, and a signature wrapped across lines broke the name
+/// and return-type derivation.
+///
+/// This version keys entirely off the AST-derived [`DirectUseAllowContext`]
+/// captured at the hit: the enclosing function name, the structural
+/// `authority.require(MobMachineFlowAuthorityKind::..)` facts seen earlier
+/// in that body, the enclosing `impl` self type, and the structural return
+/// type. Two shapes are allowed, both only in `meerkat-mob/src/run.rs`:
+///
+/// 1. the reducer-owned apply wrapper — a `transition` use inside the
+///    family's `apply_mob_machine_<family>_command` function after that
+///    body structurally required the family's flow authority; and
+/// 2. the typed command adapter — a reducer `Input` construction inside
+///    `into_input` on the family's command type, returning `<module>::Input`.
 fn flow_reducer_direct_use_is_structurally_allowed(
     path: &str,
-    lines: &[&str],
-    line_index: usize,
     module: &str,
-    token: &str,
+    hit: &FlowReducerHit,
 ) -> bool {
     if path != "meerkat-mob/src/run.rs" {
         return false;
@@ -2488,28 +2601,29 @@ fn flow_reducer_direct_use_is_structurally_allowed(
     let Some(family) = FlowReducerFamily::from_module(module) else {
         return false;
     };
-
-    let Some(function_start) = nearest_function_start(lines, line_index) else {
+    let Some(context) = hit.direct_allow.as_ref() else {
         return false;
     };
-    let function_name = function_name_from_signature(lines[function_start]);
 
-    if function_name.as_deref() == Some(family.apply_function())
-        && token.contains("transition")
-        && lines[function_start..=line_index]
-            .iter()
-            .any(|line| line.contains(&format!("authority.require({}", family.authority_kind())))
-    {
-        return true;
+    match &hit.kind {
+        FlowReducerHitKind::Transition { .. } => {
+            context.enclosing_fn.as_deref() == Some(family.apply_function())
+                && context
+                    .preceding_authority_require_kinds
+                    .contains(family.authority_kind())
+        }
+        FlowReducerHitKind::Input { .. } => {
+            context.enclosing_fn.as_deref() == Some("into_input")
+                && context
+                    .enclosing_impl_type_idents
+                    .contains(family.command_type())
+                && context
+                    .fn_return_type_segments
+                    .windows(2)
+                    .any(|window| window[0] == family.module() && window[1] == "Input")
+        }
+        FlowReducerHitKind::ProjectionWrite | FlowReducerHitKind::CasStoreWrite => false,
     }
-
-    let function_signature = lines[function_start].split_whitespace().collect::<String>();
-    let expected_input_return = format!("->{}::Input", family.module());
-    function_name.as_deref() == Some("into_input")
-        && nearest_impl_start(lines, function_start)
-            .is_some_and(|impl_start| lines[impl_start].contains(family.command_type()))
-        && function_signature.contains(expected_input_return.as_str())
-        && token.contains("Input::")
 }
 
 fn flow_reducer_projection_commit_is_structurally_allowed(
@@ -2593,37 +2707,6 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
         "meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
         _ => false,
     }
-}
-
-fn nearest_function_start(lines: &[&str], line_index: usize) -> Option<usize> {
-    (0..=line_index).rev().find(|index| {
-        let compact = lines[*index].split_whitespace().collect::<String>();
-        compact.starts_with("fn")
-            || compact.starts_with("pubfn")
-            || compact.starts_with("pub(crate)fn")
-            || compact.starts_with("pub(super)fn")
-            || compact.starts_with("asyncfn")
-            || compact.starts_with("pubasyncfn")
-            || compact.starts_with("pub(crate)asyncfn")
-            || compact.starts_with("pub(super)asyncfn")
-    })
-}
-
-fn nearest_impl_start(lines: &[&str], line_index: usize) -> Option<usize> {
-    (0..=line_index).rev().find(|index| {
-        let compact = lines[*index].split_whitespace().collect::<String>();
-        compact.starts_with("impl")
-    })
-}
-
-fn function_name_from_signature(line: &str) -> Option<String> {
-    let compact = line.split_whitespace().collect::<String>();
-    let after_fn = compact.split_once("fn")?.1;
-    let name = after_fn
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect::<String>();
-    (!name.is_empty()).then_some(name)
 }
 
 pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<String>> {

@@ -347,7 +347,7 @@ case "${command}" in
   rmat-audit-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//:audit_effect_authority_test //xtask:rmat_audit_test //xtask:rmat_strict_test"
+    default_target="//xtask:effect_authority_test //xtask:rmat_audit_test //xtask:rmat_strict_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse

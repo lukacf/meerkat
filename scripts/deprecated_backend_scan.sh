@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# GOVERNANCE CLASSIFICATION: deliberately text-level tombstone gate.
+# The deprecated backend name must not reappear anywhere — code, comments,
+# docs, or strings — so raw text (not AST structure) is the contract being
+# enforced. Structural source-shape governance lives in the xtask syn-AST
+# gates (rmat-audit, effect-authority, machine-check-drift).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

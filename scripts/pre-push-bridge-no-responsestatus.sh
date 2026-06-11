@@ -6,4 +6,4 @@
 # pre-commit hook and Makefile keep a stable entry point.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-exec ./scripts/repo-cargo run -p xtask -- bridge-classifier
+exec ./scripts/repo-cargo xtask bridge-classifier

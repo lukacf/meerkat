@@ -66,6 +66,16 @@ import {
   type LiveWebrtcAnswerParams,
   type LiveWebrtcAnswerResult,
   type WireLiveAdapterObservation,
+  type MobAdaptiveCancelResult,
+  type MobAdaptiveEventsResult,
+  type MobAdaptiveLayersResult,
+  type MobAdaptiveResultResult,
+  type MobAdaptiveRetryLayerParams,
+  type MobAdaptiveRetryLayerResult,
+  type MobAdaptiveRunParams,
+  type MobAdaptiveStartParams,
+  type MobAdaptiveStartResult,
+  type MobAdaptiveStatusResult,
   type MobTurnStartParams,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRotateSupervisorResult,
@@ -2298,6 +2308,67 @@ export class MeerkatClient {
 
   async cancelMobFlow(mobId: string, runId: string): Promise<void> {
     await this.request("mob/flow_cancel", { mob_id: mobId, run_id: runId });
+  }
+
+  async startMobAdaptiveRun(mobId: string, objective: string): Promise<Record<string, unknown>> {
+    const params: MobAdaptiveStartParams = { mob_id: mobId, objective };
+    const result = (await this.request("mob/adaptive_start", params)) as MobAdaptiveStartResult;
+    return (result.run as Record<string, unknown>) ?? {};
+  }
+
+  async getMobAdaptiveStatus(mobId: string, adaptiveRunId: string): Promise<Record<string, unknown>> {
+    const params: MobAdaptiveRunParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+    };
+    const result = (await this.request("mob/adaptive_status", params)) as MobAdaptiveStatusResult;
+    return (result.run as Record<string, unknown>) ?? {};
+  }
+
+  async listMobAdaptiveLayers(mobId: string, adaptiveRunId: string): Promise<Record<string, unknown>[]> {
+    const params: MobAdaptiveRunParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+    };
+    const result = (await this.request("mob/adaptive_layers", params)) as MobAdaptiveLayersResult;
+    return (result.layers as Record<string, unknown>[]) ?? [];
+  }
+
+  async listMobAdaptiveEvents(mobId: string, adaptiveRunId: string): Promise<Record<string, unknown>[]> {
+    const params: MobAdaptiveRunParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+    };
+    const result = (await this.request("mob/adaptive_events", params)) as MobAdaptiveEventsResult;
+    return (result.events as Record<string, unknown>[]) ?? [];
+  }
+
+  async getMobAdaptiveResult(mobId: string, adaptiveRunId: string): Promise<Record<string, unknown>> {
+    const params: MobAdaptiveRunParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+    };
+    const result = (await this.request("mob/adaptive_result", params)) as MobAdaptiveResultResult;
+    return { ...result };
+  }
+
+  async cancelMobAdaptiveRun(mobId: string, adaptiveRunId: string): Promise<boolean> {
+    const params: MobAdaptiveRunParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+    };
+    const result = (await this.request("mob/adaptive_cancel", params)) as MobAdaptiveCancelResult;
+    return Boolean(result.canceled ?? false);
+  }
+
+  async retryMobAdaptiveLayer(mobId: string, adaptiveRunId: string, layerId: string): Promise<boolean> {
+    const params: MobAdaptiveRetryLayerParams = {
+      mob_id: mobId,
+      adaptive_run_id: adaptiveRunId,
+      layer_id: layerId,
+    };
+    const result = (await this.request("mob/adaptive_retry_layer", params)) as MobAdaptiveRetryLayerResult;
+    return Boolean(result.retry_started ?? false);
   }
 
   async subscribeMobEvents(mobId: string): Promise<EventSubscription<AttributedMobEvent>> {

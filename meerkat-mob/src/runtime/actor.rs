@@ -781,6 +781,18 @@ fn normalize_runtime_mode_for_binding(
     }
 }
 
+fn with_spawn_budget_limits(
+    mut req: meerkat_core::service::CreateSessionRequest,
+    limits: Option<meerkat_core::BudgetLimits>,
+) -> meerkat_core::service::CreateSessionRequest {
+    if let Some(limits) = limits {
+        req.build
+            .get_or_insert_with(meerkat_core::service::SessionBuildOptions::default)
+            .budget_limits = Some(limits);
+    }
+    req
+}
+
 pub(super) fn admit_bridge_session_for_spawn(
     req: &mut meerkat_core::service::CreateSessionRequest,
 ) -> SessionId {
@@ -8520,6 +8532,7 @@ impl MobActor {
             launch_mode,
             tool_access_policy: _tool_access_policy,
             budget_split_policy: _budget_split_policy,
+            budget_limits,
             auto_wire_parent,
             additional_instructions,
             shell_env,
@@ -8734,6 +8747,7 @@ impl MobActor {
                     });
                     let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let req = build::to_create_session_request(&config, prompt.clone());
+                    let req = with_spawn_budget_limits(req, budget_limits.clone());
                     let selected_binding = resolve_binding(
                         binding.clone(),
                         backend,
@@ -8897,6 +8911,7 @@ impl MobActor {
             };
             let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
             let req = build::to_create_session_request(&config, prompt.clone());
+            let req = with_spawn_budget_limits(req, budget_limits);
             let selected_binding = resolve_binding(
                 binding,
                 backend,
@@ -9422,6 +9437,7 @@ impl MobActor {
             launch_mode: _,
             tool_access_policy: _tool_access_policy,
             budget_split_policy: _budget_split_policy,
+            budget_limits,
             auto_wire_parent: _,
             additional_instructions,
             shell_env,
@@ -9508,6 +9524,7 @@ impl MobActor {
         });
         let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
         let req = build::to_create_session_request(&config, prompt.clone());
+        let req = with_spawn_budget_limits(req, budget_limits);
         let peer_name = render_member_comms_name(
             self.definition.id.as_str(),
             profile_name.as_str(),
@@ -13777,6 +13794,7 @@ impl MobActor {
             launch_mode: _,
             tool_access_policy: _tool_access_policy,
             budget_split_policy: _budget_split_policy,
+            budget_limits: replacement_budget_limits,
             auto_wire_parent: _,
             additional_instructions: replacement_additional_instructions,
             shell_env: replacement_shell_env,
@@ -13989,6 +14007,7 @@ impl MobActor {
             config.auth_binding = Some(cref.clone());
         }
         let req = build::to_create_session_request(&config, prompt.clone());
+        let req = with_spawn_budget_limits(req, replacement_budget_limits);
         let peer_name = render_member_comms_name(
             self.definition.id.as_str(),
             snapshot.profile_name.as_str(),

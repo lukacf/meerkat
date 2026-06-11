@@ -142,6 +142,13 @@ subset.
 | `mob/flow_run` | Mob | `MobFlowRunParams` | `MobFlowRunResult` | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | `MobFlowStatusParams` | `MobFlowStatusResult` | Get flow run status (mob feature) |
 | `mob/flow_cancel` | Mob | `MobFlowCancelParams` | `MobFlowCancelResult` | Cancel a flow run (mob feature) |
+| `mob/adaptive_start` | Mob | `MobAdaptiveStartParams` | `MobAdaptiveStartResult` | Start an AdaptiveRun on an adaptive mobpack control mob (mob feature) |
+| `mob/adaptive_status` | Mob | `MobAdaptiveRunParams` | `MobAdaptiveStatusResult` | Read AdaptiveRun status from kernel state (mob feature) |
+| `mob/adaptive_layers` | Mob | `MobAdaptiveRunParams` | `MobAdaptiveLayersResult` | List AdaptiveRun layer ledger entries (mob feature) |
+| `mob/adaptive_events` | Mob | `MobAdaptiveRunParams` | `MobAdaptiveEventsResult` | Read AdaptiveRun event projection entries (mob feature) |
+| `mob/adaptive_result` | Mob | `MobAdaptiveRunParams` | `MobAdaptiveResultResult` | Read the final AdaptiveRun result body (mob feature) |
+| `mob/adaptive_cancel` | Mob | `MobAdaptiveRunParams` | `MobAdaptiveCancelResult` | Request host cancellation for an active AdaptiveRun (mob feature) |
+| `mob/adaptive_retry_layer` | Mob | `MobAdaptiveRetryLayerParams` | `MobAdaptiveRetryLayerResult` | Request a retry for a failed AdaptiveRun layer (mob feature) |
 | `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn — returns existing entry if member already exists (mob feature) |
 | `mob/reconcile` | Mob | `MobReconcileParams` | `MobReconcileResult` | Declarative roster reconcile against a desired spec list (mob feature) |
 | `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |

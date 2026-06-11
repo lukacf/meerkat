@@ -8,6 +8,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{Duration, timeout};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn rkat_binary_path() -> Option<PathBuf> {
@@ -159,6 +160,19 @@ fn output_ok_or_err(output: std::process::Output, args: &[&str]) -> Result<Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn adaptive_result_json(stdout: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("adaptive\t"))
+        .ok_or("missing adaptive output line")?;
+    for field in line.split('\t').skip(1) {
+        if let Some(json) = field.strip_prefix("result_json=") {
+            return Ok(serde_json::from_str(json)?);
+        }
+    }
+    Err("adaptive output line missing result_json field".into())
+}
+
 fn signer_from_pack(pack_bytes: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
     let files = meerkat_mob_pack::targz::extract_targz_safe(pack_bytes)?;
     let sig = files
@@ -280,6 +294,90 @@ async fn write_flow_probe_mobpack_fixture(
           "role":"lead",
           "message":"Synthesize the prior outputs and include the literal token FLOW_MATRIX_23 in your answer.",
           "depends_on":["review"],
+          "timeout_ms":120000
+        }}
+      }}
+    }}
+  }},
+  "skills":{{}}
+}}"#,
+        model = smoke_model()
+    );
+    tokio::fs::write(mob_dir.join("definition.json"), definition).await?;
+    Ok(mob_dir)
+}
+
+async fn write_adaptive_finish_mobpack_fixture(
+    project_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mob_dir = project_dir.join("adaptive-finish-fixture");
+    tokio::fs::create_dir_all(mob_dir.join("adaptive")).await?;
+    tokio::fs::create_dir_all(mob_dir.join("schemas")).await?;
+
+    let policy = r"[limits]
+max_depth = 3
+max_total_decisions = 3
+max_repair_attempts = 2
+max_layer_failures = 2
+max_attempts_per_layer = 1
+max_members_per_layer = 4
+max_total_spawned_members = 8
+max_active_members = 4
+max_retained_layer_mobs = 1
+max_wall_clock_ms = 180000
+max_aggregate_tokens = 200000
+max_aggregate_tool_calls = 100
+";
+    let policy_digest = format!("sha256:{:x}", Sha256::digest(policy.as_bytes()));
+
+    tokio::fs::write(
+        mob_dir.join("manifest.toml"),
+        format!(
+            r#"[mobpack]
+name = "adaptive-smoke"
+version = "1.0.0"
+
+[adaptive]
+flowmaster_profile = "flowmaster"
+objective_class = "smoke"
+policy_digest = "{policy_digest}"
+"#
+        ),
+    )
+    .await?;
+    tokio::fs::write(mob_dir.join("adaptive").join("policies.toml"), policy).await?;
+    tokio::fs::write(
+        mob_dir.join("adaptive").join("flowmaster.prompt.md"),
+        "Return only typed Adaptive Flow JSON decisions.\n",
+    )
+    .await?;
+    tokio::fs::write(
+        mob_dir.join("adaptive").join("layer-decision.schema.json"),
+        r#"{"type":"object"}"#,
+    )
+    .await?;
+    tokio::fs::write(mob_dir.join("schemas").join("registry.json"), "{}").await?;
+
+    let definition = format!(
+        r#"{{
+  "id":"adaptive-smoke",
+  "profiles":{{
+    "flowmaster":{{
+      "model":"{model}",
+      "tools":{{"comms":true}},
+      "external_addressable":true,
+      "peer_description":"Adaptive FlowMaster planner"
+    }}
+  }},
+  "wiring":{{"auto_wire_orchestrator":false,"role_wiring":[]}},
+  "flows":{{
+    "plan":{{
+      "description":"Adaptive smoke planning turn",
+      "steps":{{
+        "plan":{{
+          "role":"flowmaster",
+          "message":"Return only valid JSON, with no markdown. Read this objective exactly: {{{{params.objective}}}}. The top-level JSON object must have decision set to finish, reason set to smoke complete followed by the objective nonce, and result set to an object whose only field is result. That nested result object must have nonce copied from the objective nonce and summary copied from the objective summary. Do not invent the nonce or summary.",
+          "collection_policy":{{"type":"any"}},
           "timeout_ms":120000
         }}
       }}
@@ -612,6 +710,97 @@ async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
     );
 
     Ok(())
+}
+
+async fn run_adaptive_finish_smoke(
+    prompt: &str,
+    expected_nonce: &str,
+    expected_summary: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let api_key = anthropic_api_key().ok_or("missing API key")?;
+    let tmp = TempDir::new()?;
+    let project_dir = tmp.path().join("project");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    let mob_dir = write_adaptive_finish_mobpack_fixture(&project_dir).await?;
+    let pack = project_dir.join("adaptive.mobpack");
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+
+    let pack_args = [
+        "mob".to_string(),
+        "pack".to_string(),
+        mob_dir.display().to_string(),
+        "-o".to_string(),
+        pack.display().to_string(),
+    ];
+    let pack_refs: Vec<&str> = pack_args.iter().map(String::as_str).collect();
+    let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, Some(&api_key)).await?;
+    let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
+
+    let deploy_args = [
+        "mob".to_string(),
+        "deploy".to_string(),
+        pack.display().to_string(),
+        prompt.to_string(),
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
+    ];
+    let deploy_refs: Vec<&str> = deploy_args.iter().map(String::as_str).collect();
+    let deploy_out = run_rkat(&rkat, &project_dir, &deploy_refs, Some(&api_key)).await?;
+    let deploy_stdout =
+        output_ok_or_err(deploy_out, &deploy_refs).map_err(std::io::Error::other)?;
+    assert!(
+        deploy_stdout.contains("deployed\tmob=adaptive-smoke\tsurface=cli"),
+        "adaptive deploy output missing deployment marker: {deploy_stdout}"
+    );
+    assert!(
+        deploy_stdout.contains("adaptive\tresult_digest=sha256:"),
+        "adaptive deploy output missing result digest: {deploy_stdout}"
+    );
+    let result = adaptive_result_json(&deploy_stdout)?;
+    assert_eq!(
+        result.get("nonce").and_then(Value::as_str),
+        Some(expected_nonce),
+        "adaptive result did not preserve prompt nonce: {deploy_stdout}"
+    );
+    assert_eq!(
+        result.get("summary").and_then(Value::as_str),
+        Some(expected_summary),
+        "adaptive result did not preserve prompt summary: {deploy_stdout}"
+    );
+    assert!(
+        deploy_stdout.contains("warning\tunsigned pack accepted in permissive mode"),
+        "permissive unsigned warning expected: {deploy_stdout}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_s88_adaptive_mobpack_finish_decision_live()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_adaptive_finish_smoke(
+        "Finish the adaptive smoke run. nonce=ADAPTIVE_SMOKE_ALPHA summary=prompt-alpha-ok.",
+        "ADAPTIVE_SMOKE_ALPHA",
+        "prompt-alpha-ok",
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_s88_adaptive_mobpack_context_finish_decision_live()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_adaptive_finish_smoke(
+        "Finish after considering this context: operator asked for a one-turn smoke proof. nonce=ADAPTIVE_SMOKE_BETA summary=context-beta-ok.",
+        "ADAPTIVE_SMOKE_BETA",
+        "context-beta-ok",
+    )
+    .await
 }
 
 #[tokio::test]

@@ -1153,6 +1153,7 @@ struct CreateSessionRecord {
     comms_name: Option<String>,
     peer_meta_labels: BTreeMap<String, String>,
     runtime_build_mode_session_owned: bool,
+    budget_limits: Option<meerkat_core::BudgetLimits>,
 }
 
 /// A mock session service that creates sessions with mock comms runtimes.
@@ -1875,6 +1876,10 @@ impl SessionService for MockSessionService {
                         meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
                     )
                 }),
+                budget_limits: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.budget_limits.clone()),
             });
 
         // Record the prompt for test inspection
@@ -4971,6 +4976,215 @@ fn authority_backed_empty_test_run(mob_id: &str, flow_id: &str) -> MobRun {
         serde_json::json!({}),
     )
     .expect("authority-backed empty flow run")
+}
+
+fn adaptive_test_limits() -> AdaptiveRunLimits {
+    AdaptiveRunLimits {
+        max_depth: 3,
+        max_total_decisions: 5,
+        max_repair_attempts: 2,
+        max_layer_failures: 2,
+        max_attempts_per_layer: 2,
+        max_members_per_layer: 4,
+        max_total_spawned_members: 8,
+        max_active_members: 4,
+        max_retained_layer_mobs: 1,
+        max_aggregate_tokens: 10_000,
+        max_aggregate_tool_calls: 100,
+        allowed_model_classes: BTreeSet::from(["standard".to_string()]),
+        allowed_tool_classes: BTreeSet::from(["readonly".to_string()]),
+        allowed_skill_identities: BTreeSet::from(["audit".to_string()]),
+        allowed_auth_binding_refs: BTreeSet::from(["default".to_string()]),
+        deadline_ms: 10_000,
+    }
+}
+
+fn adaptive_admission_request(layer_id: &str, member_count: u64) -> AdaptiveLayerAdmissionRequest {
+    AdaptiveLayerAdmissionRequest {
+        layer_id: layer_id.to_string(),
+        attempt: 1,
+        plan_digest: format!("sha256:{layer_id}-plan"),
+        child_mob_id: format!("adaptive-test-{layer_id}-a1"),
+        member_count,
+        token_reservation: 100,
+        tool_call_reservation: 3,
+        used_model_classes: BTreeSet::from(["standard".to_string()]),
+        used_tool_classes: BTreeSet::from(["readonly".to_string()]),
+        used_skill_identities: BTreeSet::from(["audit".to_string()]),
+        used_auth_binding_refs: BTreeSet::from(["default".to_string()]),
+        observed_at_ms: 100,
+    }
+}
+
+#[tokio::test]
+async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let capability = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-test-run".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize adaptive run");
+    assert_eq!(capability.adaptive_run_id(), "adaptive-test-run");
+
+    handle
+        .record_adaptive_planning_decision(&capability, AdaptivePlanningDecisionKind::RunLayer)
+        .await
+        .expect("record planning decision");
+    let admission = handle
+        .resolve_adaptive_layer_admission(&capability, adaptive_admission_request("layer-one", 2))
+        .await
+        .expect("resolve layer admission");
+    assert_eq!(admission, AdaptiveLayerAdmission::Allowed);
+
+    handle
+        .record_adaptive_layer_provisioned(
+            &capability,
+            AdaptiveLayerAttempt {
+                layer_id: "layer-one".to_string(),
+                attempt: 1,
+            },
+        )
+        .await
+        .expect("record provisioned");
+
+    let mut child_run = authority_backed_empty_test_run("adaptive-child", "layer-flow");
+    child_run.status = MobRunStatus::Completed;
+    handle
+        .record_adaptive_layer_run_started(
+            &capability,
+            AdaptiveLayerRunStart {
+                layer_id: "layer-one".to_string(),
+                attempt: 1,
+                child_run_id: child_run.run_id.clone(),
+            },
+        )
+        .await
+        .expect("record run started");
+    handle
+        .ingest_adaptive_layer_terminal(
+            &capability,
+            AdaptiveLayerAttempt {
+                layer_id: "layer-one".to_string(),
+                attempt: 1,
+            },
+            &child_run,
+        )
+        .await
+        .expect("ingest terminal child run");
+
+    let collecting = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("snapshot");
+    assert_eq!(collecting.total_decisions, 1);
+    assert_eq!(collecting.depth, 1);
+    assert_eq!(collecting.total_spawned_members, 2);
+    assert_eq!(collecting.active_members, 2);
+    assert_eq!(collecting.aggregate_token_reserved, 100);
+    assert_eq!(collecting.aggregate_tool_call_reserved, 3);
+    assert_eq!(
+        collecting.layers["layer-one"].plan_digest.as_deref(),
+        Some("sha256:layer-one-plan")
+    );
+    assert_eq!(
+        collecting.layers["layer-one"].child_mob_id.as_deref(),
+        Some("adaptive-test-layer-one-a1")
+    );
+    assert_eq!(
+        collecting.layers["layer-one"].phase,
+        AdaptiveLayerPhaseView::Collecting,
+        "terminal ingest must not skip result validation"
+    );
+
+    handle
+        .record_adaptive_layer_result_validated(
+            &capability,
+            AdaptiveLayerResultDigest {
+                layer_id: "layer-one".to_string(),
+                attempt: 1,
+                result_digest: "sha256:test-result".to_string(),
+            },
+        )
+        .await
+        .expect("record result");
+    handle
+        .record_adaptive_layer_mob_destroyed(
+            &capability,
+            AdaptiveLayerAttempt {
+                layer_id: "layer-one".to_string(),
+                attempt: 1,
+            },
+        )
+        .await
+        .expect("record layer mob destroyed");
+    handle
+        .resolve_adaptive_finish(&capability, "sha256:final-result")
+        .await
+        .expect("finish run");
+
+    let finished = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("finished snapshot");
+    assert_eq!(finished.phase, Some(AdaptiveRunPhaseView::Finished));
+    assert_eq!(
+        finished.stop_reason,
+        Some(AdaptiveStopReasonView::FinishDecision)
+    );
+    assert_eq!(
+        finished.layers["layer-one"].phase,
+        AdaptiveLayerPhaseView::Completed
+    );
+    assert_eq!(
+        finished.layers["layer-one"].result_digest.as_deref(),
+        Some("sha256:test-result")
+    );
+    assert_eq!(
+        finished.active_members, 0,
+        "cleanup observation must release active-member occupancy"
+    );
+}
+
+#[tokio::test]
+async fn adaptive_public_seam_returns_kernel_admission_denial_for_member_limit() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let capability = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-limit-run".to_string(),
+            limits: AdaptiveRunLimits {
+                max_members_per_layer: 1,
+                ..adaptive_test_limits()
+            },
+        })
+        .await
+        .expect("initialize adaptive run");
+
+    let admission = handle
+        .resolve_adaptive_layer_admission(&capability, adaptive_admission_request("too-wide", 2))
+        .await
+        .expect("resolve denied admission");
+    assert_eq!(admission, AdaptiveLayerAdmission::Denied);
+
+    let snapshot = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("snapshot");
+    assert_eq!(snapshot.depth, 0, "denied admission must not consume depth");
+    assert_eq!(
+        snapshot.total_spawned_members, 0,
+        "denied admission must not debit spawned members"
+    );
+    assert_eq!(
+        snapshot.repair_attempts, 1,
+        "kernel owns admission-rejection repair accounting"
+    );
+    assert!(
+        !snapshot.layers.contains_key("too-wide"),
+        "denied layer must not be recorded as admitted"
+    );
 }
 
 async fn seed_test_loop_in_mob_machine(
@@ -16634,6 +16848,38 @@ async fn test_spawn_create_session_request_sets_peer_meta_labels() {
         req.peer_meta_labels.get("meerkat_id").map(String::as_str),
         Some("w-1")
     );
+    assert!(
+        req.budget_limits.is_none(),
+        "ordinary spawns must not synthesize per-member budget caps"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_spec_budget_limits_reach_session_build_options() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let limits = meerkat_core::BudgetLimits::default()
+        .with_max_tokens(17)
+        .with_max_tool_calls(2)
+        .with_max_duration(meerkat_core::time_compat::Duration::from_secs(3));
+
+    handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "w-budget").with_budget_limits(limits.clone()))
+        .await
+        .expect("spawn");
+
+    let create_requests = service.recorded_create_requests().await;
+    assert_eq!(
+        create_requests.len(),
+        1,
+        "exactly one create_session expected"
+    );
+    let recorded_limits = create_requests[0]
+        .budget_limits
+        .as_ref()
+        .expect("spawn budget limits should be carried into SessionBuildOptions");
+    assert_eq!(recorded_limits.max_tokens, limits.max_tokens);
+    assert_eq!(recorded_limits.max_tool_calls, limits.max_tool_calls);
+    assert_eq!(recorded_limits.max_duration, limits.max_duration);
 }
 
 #[tokio::test]
@@ -39610,6 +39856,49 @@ fn mob_runtime_parity_field_value(
         | "member_kickoff_started"
         | "member_kickoff_failed"
         | "member_kickoff_cancelled" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        "adaptive_active_run" => Some(MobRuntimeParityExprValue::None),
+        "adaptive_run_phase"
+        | "adaptive_stop_reason"
+        | "adaptive_limit_max_depth"
+        | "adaptive_limit_max_total_decisions"
+        | "adaptive_limit_max_repair_attempts"
+        | "adaptive_limit_max_layer_failures"
+        | "adaptive_limit_max_attempts_per_layer"
+        | "adaptive_limit_max_members_per_layer"
+        | "adaptive_limit_max_total_spawned_members"
+        | "adaptive_limit_max_active_members"
+        | "adaptive_limit_max_retained_layer_mobs"
+        | "adaptive_limit_max_aggregate_tokens"
+        | "adaptive_limit_max_aggregate_tool_calls"
+        | "adaptive_limit_allowed_model_classes"
+        | "adaptive_limit_allowed_tool_classes"
+        | "adaptive_limit_allowed_skill_identities"
+        | "adaptive_limit_allowed_auth_binding_refs"
+        | "adaptive_deadline_ms"
+        | "adaptive_depth"
+        | "adaptive_total_decisions"
+        | "adaptive_repair_attempts"
+        | "adaptive_layer_failures"
+        | "adaptive_total_spawned_members"
+        | "adaptive_active_members"
+        | "adaptive_retained_layer_mobs"
+        | "adaptive_aggregate_token_reserved"
+        | "adaptive_aggregate_token_actual"
+        | "adaptive_aggregate_tool_call_reserved"
+        | "adaptive_aggregate_tool_call_actual"
+        | "adaptive_active_layer"
+        | "adaptive_layer_phase"
+        | "adaptive_layer_attempt"
+        | "adaptive_layer_member_count"
+        | "adaptive_layer_plan_digest"
+        | "adaptive_layer_child_mob_id"
+        | "adaptive_layer_token_reservation"
+        | "adaptive_layer_tool_call_reservation"
+        | "adaptive_layer_run_id"
+        | "adaptive_layer_result_digest"
+        | "adaptive_layer_fault"
+        | "adaptive_layer_disposition"
+        | "adaptive_missing_body_digest" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "run_status"
         | "run_ordered_steps"
         | "run_tracked_steps"

@@ -81,6 +81,33 @@ struct ManagedMob {
     storage_path: Option<PathBuf>,
 }
 
+#[derive(Clone)]
+pub struct AdaptivePackContext {
+    policy: meerkat_mob_adaptive::AdaptivePolicy,
+    schema_registry: meerkat_mob_adaptive::SchemaRegistry,
+    profile_templates: BTreeMap<ProfileName, meerkat_mob::Profile>,
+}
+
+impl AdaptivePackContext {
+    pub fn new(
+        policy: meerkat_mob_adaptive::AdaptivePolicy,
+        schema_registry: meerkat_mob_adaptive::SchemaRegistry,
+        profile_templates: BTreeMap<ProfileName, meerkat_mob::Profile>,
+    ) -> Self {
+        Self {
+            policy,
+            schema_registry,
+            profile_templates,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AdaptiveRunProjection {
+    run: meerkat_contracts::WireAdaptiveRun,
+    events: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MobMcpDestroyError {
     #[error("mob destroy incomplete: {}", destroy_report_summary(.report))]
@@ -242,6 +269,8 @@ pub struct MobMcpState {
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     persistent_storage_root: Option<PathBuf>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
+    adaptive_pack_contexts: RwLock<BTreeMap<MobId, AdaptivePackContext>>,
+    adaptive_runs: RwLock<BTreeMap<(MobId, String), AdaptiveRunProjection>>,
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
@@ -276,6 +305,8 @@ impl MobMcpState {
             external_tools_provider: None,
             persistent_storage_root: None,
             mobs: RwLock::new(BTreeMap::new()),
+            adaptive_pack_contexts: RwLock::new(BTreeMap::new()),
+            adaptive_runs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
             realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
@@ -745,6 +776,22 @@ impl MobMcpState {
                 storage_path: None,
             },
         );
+    }
+
+    /// Register adaptive pack context for an already-created control mob.
+    ///
+    /// `mob/create` only receives a `MobDefinition`; adaptive execution also
+    /// needs the mobpack-owned policy, schema registry, and inline profile
+    /// templates. Deploy surfaces seed that host-owned context here.
+    pub async fn mob_register_adaptive_pack_context(
+        &self,
+        mob_id: MobId,
+        context: AdaptivePackContext,
+    ) {
+        self.adaptive_pack_contexts
+            .write()
+            .await
+            .insert(mob_id, context);
     }
 
     /// Return known mob handles without asking each mob actor for live status.
@@ -1364,6 +1411,108 @@ impl MobMcpState {
 
     pub async fn mob_cancel_flow(&self, mob_id: &MobId, run_id: RunId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.cancel_flow(run_id).await
+    }
+
+    pub async fn mob_run_adaptive(
+        &self,
+        mob_id: &MobId,
+        objective: String,
+    ) -> Result<meerkat_contracts::WireAdaptiveRun, MobError> {
+        let control_mob = self.handle_for(mob_id).await?;
+        let context = self
+            .adaptive_pack_contexts
+            .read()
+            .await
+            .get(mob_id)
+            .cloned()
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "adaptive pack context unavailable for mob {mob_id}; deploy the mob from an adaptive mobpack before starting an AdaptiveRun"
+                ))
+            })?;
+        let adaptive_run_id = meerkat_mob_adaptive::AdaptiveRunId::new(mob_id.to_string())
+            .map_err(|err| MobError::Internal(err.to_string()))?;
+        let compile_context = meerkat_mob_adaptive::CompileContext {
+            adaptive_run_id: adaptive_run_id.clone(),
+            attempt: 1,
+            schema_registry: context.schema_registry,
+            profile_templates: context.profile_templates,
+            previous_layer_result: None,
+        };
+        let driver = meerkat_mob_adaptive::AdaptiveDriver::new(control_mob.clone());
+        let mut runtime = StateAdaptiveRuntime {
+            control_mob: control_mob.clone(),
+            session_service: Arc::clone(&self.session_service),
+            runtime_adapter: self.runtime_adapter.clone(),
+        };
+        let outcome = meerkat_mob_adaptive::run_adaptive_loop(
+            &driver,
+            &mut runtime,
+            meerkat_mob_adaptive::AdaptiveRunRequest {
+                adaptive_run_id: adaptive_run_id.clone(),
+                policy: context.policy,
+                compile_context,
+                objective,
+                started_at_ms: now_ms(),
+            },
+        )
+        .await
+        .map_err(|err| MobError::Internal(err.to_string()))?;
+        let snapshot = control_mob
+            .adaptive_run_snapshot_by_id(adaptive_run_id.as_str())
+            .await?;
+        let run = wire_adaptive_run_from_snapshot(mob_id, snapshot, &outcome);
+        let events = vec![serde_json::json!({
+            "type": "adaptive_run_completed",
+            "mob_id": mob_id.to_string(),
+            "adaptive_run_id": adaptive_run_id.as_str(),
+            "final_result_digest": outcome
+                .final_result_digest
+                .as_ref()
+                .map(meerkat_mob_adaptive::BodyDigest::as_str),
+        })];
+        self.adaptive_runs.write().await.insert(
+            (mob_id.clone(), adaptive_run_id.as_str().to_string()),
+            AdaptiveRunProjection {
+                run: run.clone(),
+                events,
+            },
+        );
+        Ok(run)
+    }
+
+    pub async fn mob_adaptive_projection(
+        &self,
+        mob_id: &MobId,
+        adaptive_run_id: &str,
+    ) -> Result<meerkat_contracts::WireAdaptiveRun, MobError> {
+        self.adaptive_runs
+            .read()
+            .await
+            .get(&(mob_id.clone(), adaptive_run_id.to_string()))
+            .map(|projection| projection.run.clone())
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "adaptive run projection not found: mob={mob_id} adaptive_run_id={adaptive_run_id}"
+                ))
+            })
+    }
+
+    pub async fn mob_adaptive_events(
+        &self,
+        mob_id: &MobId,
+        adaptive_run_id: &str,
+    ) -> Result<Vec<serde_json::Value>, MobError> {
+        self.adaptive_runs
+            .read()
+            .await
+            .get(&(mob_id.clone(), adaptive_run_id.to_string()))
+            .map(|projection| projection.events.clone())
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "adaptive run projection not found: mob={mob_id} adaptive_run_id={adaptive_run_id}"
+                ))
+            })
     }
 
     pub async fn mob_respawn(
@@ -2298,6 +2447,279 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 
     async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
         Vec::new()
+    }
+}
+
+struct StateAdaptiveRuntime {
+    control_mob: MobHandle,
+    session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+}
+
+#[async_trait]
+impl meerkat_mob_adaptive::AdaptiveDriverRuntime for StateAdaptiveRuntime {
+    type Layer = MobHandle;
+
+    fn now_ms(&mut self) -> u64 {
+        now_ms()
+    }
+
+    async fn run_planning_turn(
+        &mut self,
+        request: meerkat_mob_adaptive::PlanningTurnRequest,
+    ) -> Result<meerkat_mob_adaptive::LayerDecision, meerkat_mob_adaptive::AdaptiveError> {
+        let run_id = self
+            .control_mob
+            .run_flow(
+                FlowId::from("plan"),
+                serde_json::json!({
+                    "adaptive_run_id": request.adaptive_run_id.as_str(),
+                    "objective": request.objective,
+                    "previous_layer_result": request.previous_layer_result,
+                }),
+            )
+            .await?;
+        let run = await_flow_terminal(&self.control_mob, run_id.clone()).await?;
+        let decision = run
+            .root_step_outputs
+            .get(&meerkat_mob::StepId::from("plan"))
+            .or_else(|| {
+                if run.root_step_outputs.len() == 1 {
+                    run.root_step_outputs.values().next()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
+                    "adaptive planning run '{run_id}' produced no LayerDecision output; status={:?}; failures={:?}; steps={:?}",
+                    run.status, run.failure_ledger, run.step_ledger
+                ))
+            })?;
+        serde_json::from_value(decision.clone()).map_err(Into::into)
+    }
+
+    async fn provision_layer(
+        &mut self,
+        compiled: &meerkat_mob_adaptive::CompiledLayer,
+    ) -> Result<Self::Layer, meerkat_mob_adaptive::AdaptiveError> {
+        let mut builder = MobBuilder::from_mobpack(
+            compiled.definition.clone(),
+            BTreeMap::new(),
+            MobStorage::in_memory(),
+        )?
+        .with_session_service(Arc::clone(&self.session_service));
+        if let Some(adapter) = self.runtime_adapter.clone() {
+            builder = builder.with_runtime_adapter(adapter);
+        }
+        let handle = builder.create().await?;
+        let spawn_results = handle.spawn_many(compiled.spawn_specs.clone()).await?;
+        if let Some(failure) = spawn_results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+        {
+            return Err(meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
+                "adaptive layer spawn failed: {failure}"
+            )));
+        }
+        Ok(handle)
+    }
+
+    async fn start_layer_flow(
+        &mut self,
+        layer: &Self::Layer,
+        activation_params: BTreeMap<String, serde_json::Value>,
+    ) -> Result<RunId, meerkat_mob_adaptive::AdaptiveError> {
+        Ok(layer
+            .run_flow(
+                FlowId::from("layer-flow"),
+                serde_json::to_value(activation_params)?,
+            )
+            .await?)
+    }
+
+    async fn await_layer_terminal(
+        &mut self,
+        layer: &Self::Layer,
+        run_id: RunId,
+    ) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
+        await_flow_terminal(layer, run_id).await
+    }
+
+    async fn cleanup_layer(
+        &mut self,
+        _layer: Self::Layer,
+        _layer_id: &meerkat_mob_adaptive::LayerId,
+        _attempt: u64,
+    ) -> Result<meerkat_mob_adaptive::AdaptiveLayerCleanup, meerkat_mob_adaptive::AdaptiveError>
+    {
+        Ok(meerkat_mob_adaptive::AdaptiveLayerCleanup::Destroyed)
+    }
+}
+
+async fn await_flow_terminal(
+    mob: &MobHandle,
+    run_id: RunId,
+) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
+    loop {
+        if let Some(run) = mob.flow_status(run_id.clone()).await?
+            && meerkat_mob::run::mob_machine_run_status_is_terminal(&run_id, &run.status)?
+        {
+            return Ok(run);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn wire_adaptive_run_from_snapshot(
+    mob_id: &MobId,
+    snapshot: meerkat_mob::AdaptiveRunSnapshot,
+    outcome: &meerkat_mob_adaptive::AdaptiveRunOutcome,
+) -> meerkat_contracts::WireAdaptiveRun {
+    let mut layers = snapshot
+        .layers
+        .into_values()
+        .map(wire_adaptive_layer_from_snapshot)
+        .collect::<Vec<_>>();
+    layers.sort_by(|left, right| left.layer_id.cmp(&right.layer_id));
+    meerkat_contracts::WireAdaptiveRun {
+        adaptive_run_id: snapshot.adaptive_run_id,
+        mob_id: mob_id.to_string(),
+        phase: snapshot.phase.map(wire_adaptive_run_phase),
+        stop_reason: snapshot.stop_reason.map(wire_adaptive_stop_reason),
+        depth: snapshot.depth,
+        total_decisions: snapshot.total_decisions,
+        repair_attempts: snapshot.repair_attempts,
+        layer_failures: snapshot.layer_failures,
+        total_spawned_members: snapshot.total_spawned_members,
+        active_members: snapshot.active_members,
+        retained_layer_mobs: snapshot.retained_layer_mobs,
+        aggregate_token_reserved: snapshot.aggregate_token_reserved,
+        aggregate_token_actual: snapshot.aggregate_token_actual,
+        aggregate_tool_call_reserved: snapshot.aggregate_tool_call_reserved,
+        aggregate_tool_call_actual: snapshot.aggregate_tool_call_actual,
+        missing_body_digest: snapshot.missing_body_digest,
+        final_result_digest: outcome
+            .final_result_digest
+            .as_ref()
+            .map(|digest| digest.as_str().to_string()),
+        final_result: outcome.final_result.clone(),
+        layers,
+    }
+}
+
+fn wire_adaptive_layer_from_snapshot(
+    layer: meerkat_mob::AdaptiveLayerSnapshot,
+) -> meerkat_contracts::WireAdaptiveLayer {
+    meerkat_contracts::WireAdaptiveLayer {
+        layer_id: layer.layer_id,
+        phase: wire_adaptive_layer_phase(layer.phase),
+        attempt: layer.attempt,
+        child_run_id: layer.child_run_id.map(|run_id| run_id.to_string()),
+        result_digest: layer.result_digest,
+        plan_digest: layer.plan_digest,
+        child_mob_id: layer.child_mob_id,
+    }
+}
+
+fn wire_adaptive_run_phase(
+    phase: meerkat_mob::AdaptiveRunPhaseView,
+) -> meerkat_contracts::WireAdaptiveRunPhase {
+    match phase {
+        meerkat_mob::AdaptiveRunPhaseView::Active => {
+            meerkat_contracts::WireAdaptiveRunPhase::Active
+        }
+        meerkat_mob::AdaptiveRunPhaseView::CleanupRequired => {
+            meerkat_contracts::WireAdaptiveRunPhase::CleanupRequired
+        }
+        meerkat_mob::AdaptiveRunPhaseView::EvidenceMissing => {
+            meerkat_contracts::WireAdaptiveRunPhase::EvidenceMissing
+        }
+        meerkat_mob::AdaptiveRunPhaseView::Finished => {
+            meerkat_contracts::WireAdaptiveRunPhase::Finished
+        }
+        meerkat_mob::AdaptiveRunPhaseView::Failed => {
+            meerkat_contracts::WireAdaptiveRunPhase::Failed
+        }
+        meerkat_mob::AdaptiveRunPhaseView::Canceled => {
+            meerkat_contracts::WireAdaptiveRunPhase::Canceled
+        }
+    }
+}
+
+fn wire_adaptive_stop_reason(
+    reason: meerkat_mob::AdaptiveStopReasonView,
+) -> meerkat_contracts::WireAdaptiveStopReason {
+    match reason {
+        meerkat_mob::AdaptiveStopReasonView::FinishDecision => {
+            meerkat_contracts::WireAdaptiveStopReason::FinishDecision
+        }
+        meerkat_mob::AdaptiveStopReasonView::DepthLimit => {
+            meerkat_contracts::WireAdaptiveStopReason::DepthLimit
+        }
+        meerkat_mob::AdaptiveStopReasonView::PlanLimit => {
+            meerkat_contracts::WireAdaptiveStopReason::PlanLimit
+        }
+        meerkat_mob::AdaptiveStopReasonView::RepairLimit => {
+            meerkat_contracts::WireAdaptiveStopReason::RepairLimit
+        }
+        meerkat_mob::AdaptiveStopReasonView::FailureLimit => {
+            meerkat_contracts::WireAdaptiveStopReason::FailureLimit
+        }
+        meerkat_mob::AdaptiveStopReasonView::BudgetExhausted => {
+            meerkat_contracts::WireAdaptiveStopReason::BudgetExhausted
+        }
+        meerkat_mob::AdaptiveStopReasonView::DeadlineExceeded => {
+            meerkat_contracts::WireAdaptiveStopReason::DeadlineExceeded
+        }
+        meerkat_mob::AdaptiveStopReasonView::HostCancel => {
+            meerkat_contracts::WireAdaptiveStopReason::HostCancel
+        }
+    }
+}
+
+fn wire_adaptive_layer_phase(
+    phase: meerkat_mob::AdaptiveLayerPhaseView,
+) -> meerkat_contracts::WireAdaptiveLayerPhase {
+    match phase {
+        meerkat_mob::AdaptiveLayerPhaseView::Validating => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Validating
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Admitted => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Admitted
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Provisioning => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Provisioning
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Running => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Running
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Collecting => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Collecting
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Completed => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Completed
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::SetupFailed => {
+            meerkat_contracts::WireAdaptiveLayerPhase::SetupFailed
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::RunFailed => {
+            meerkat_contracts::WireAdaptiveLayerPhase::RunFailed
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::ResultInvalid => {
+            meerkat_contracts::WireAdaptiveLayerPhase::ResultInvalid
+        }
+        meerkat_mob::AdaptiveLayerPhaseView::Canceled => {
+            meerkat_contracts::WireAdaptiveLayerPhase::Canceled
+        }
     }
 }
 

@@ -3361,6 +3361,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-mob-adaptive"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "jsonschema",
+ "meerkat-core",
+ "meerkat-mob",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "meerkat-mob-mcp"
 version = "0.7.0"
 dependencies = [
@@ -3374,6 +3392,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mob",
+ "meerkat-mob-adaptive",
  "meerkat-runtime",
  "schemars 1.2.1",
  "serde",
@@ -4806,6 +4825,7 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-mob",
+ "meerkat-mob-adaptive",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
  "meerkat-models",
@@ -4819,6 +4839,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

@@ -113,22 +113,27 @@ pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
-pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
-    CurrentMobAdmission, ExternalMemberBindingMode, ExternalMemberForwardingHookRef,
-    ExternalMemberForwardingHooks, ExternalMemberForwardingStatus,
+    AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
+    AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
+    AdaptiveLayerResultDigest, AdaptiveLayerRetention, AdaptiveLayerRunStart,
+    AdaptiveLayerSetupFault, AdaptiveLayerSetupFaultObservation, AdaptiveLayerSnapshot,
+    AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
+    AdaptiveStopReasonView, CurrentMobAdmission, ExternalMemberBindingMode,
+    ExternalMemberForwardingHookRef, ExternalMemberForwardingHooks, ExternalMemberForwardingStatus,
     ExternalMemberObservationSnapshot, ExternalMemberOwnerRef, ExternalMemberReachability,
     ExternalMemberRebindStatus, ExternalPeerBindingSpec, HelperOptions, HelperResult,
-    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError, MobDestroyReport,
-    MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
-    MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
-    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
-    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
+    MobDestroyError, MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig,
+    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer,
+    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult,
+    SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport,
+    WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
+pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,

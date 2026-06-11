@@ -148,6 +148,49 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `desired_members`: `Set<AgentIdentity>`
 - `members_to_spawn`: `Set<AgentIdentity>`
 - `members_to_retire`: `Set<AgentIdentity>`
+- `adaptive_active_run`: `Option<AdaptiveRunId>`
+- `adaptive_run_phase`: `Map<AdaptiveRunId, AdaptiveRunPhase>`
+- `adaptive_stop_reason`: `Map<AdaptiveRunId, AdaptiveStopReason>`
+- `adaptive_limit_max_depth`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_total_decisions`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_repair_attempts`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_layer_failures`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_attempts_per_layer`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_members_per_layer`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_total_spawned_members`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_active_members`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_retained_layer_mobs`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_aggregate_tokens`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_max_aggregate_tool_calls`: `Map<AdaptiveRunId, u64>`
+- `adaptive_limit_allowed_model_classes`: `Map<AdaptiveRunId, Set<String>>`
+- `adaptive_limit_allowed_tool_classes`: `Map<AdaptiveRunId, Set<String>>`
+- `adaptive_limit_allowed_skill_identities`: `Map<AdaptiveRunId, Set<String>>`
+- `adaptive_limit_allowed_auth_binding_refs`: `Map<AdaptiveRunId, Set<String>>`
+- `adaptive_deadline_ms`: `Map<AdaptiveRunId, u64>`
+- `adaptive_depth`: `Map<AdaptiveRunId, u64>`
+- `adaptive_total_decisions`: `Map<AdaptiveRunId, u64>`
+- `adaptive_repair_attempts`: `Map<AdaptiveRunId, u64>`
+- `adaptive_layer_failures`: `Map<AdaptiveRunId, u64>`
+- `adaptive_total_spawned_members`: `Map<AdaptiveRunId, u64>`
+- `adaptive_active_members`: `Map<AdaptiveRunId, u64>`
+- `adaptive_retained_layer_mobs`: `Map<AdaptiveRunId, u64>`
+- `adaptive_aggregate_token_reserved`: `Map<AdaptiveRunId, u64>`
+- `adaptive_aggregate_token_actual`: `Map<AdaptiveRunId, u64>`
+- `adaptive_aggregate_tool_call_reserved`: `Map<AdaptiveRunId, u64>`
+- `adaptive_aggregate_tool_call_actual`: `Map<AdaptiveRunId, u64>`
+- `adaptive_active_layer`: `Map<AdaptiveRunId, AdaptiveLayerId>`
+- `adaptive_layer_phase`: `Map<AdaptiveLayerId, AdaptiveLayerPhase>`
+- `adaptive_layer_attempt`: `Map<AdaptiveLayerId, u64>`
+- `adaptive_layer_member_count`: `Map<AdaptiveLayerId, u64>`
+- `adaptive_layer_plan_digest`: `Map<AdaptiveLayerId, String>`
+- `adaptive_layer_child_mob_id`: `Map<AdaptiveLayerId, MobId>`
+- `adaptive_layer_token_reservation`: `Map<AdaptiveLayerId, u64>`
+- `adaptive_layer_tool_call_reservation`: `Map<AdaptiveLayerId, u64>`
+- `adaptive_layer_run_id`: `Map<AdaptiveLayerId, RunId>`
+- `adaptive_layer_result_digest`: `Map<AdaptiveLayerId, String>`
+- `adaptive_layer_fault`: `Map<AdaptiveLayerId, AdaptiveLayerSetupFaultKind>`
+- `adaptive_layer_disposition`: `Map<AdaptiveLayerId, AdaptiveLayerDispositionKind>`
+- `adaptive_missing_body_digest`: `Map<AdaptiveRunId, String>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -278,6 +321,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UpdateCoordinationWorkIntentStatus`(intent_id: WorkIntentId, expected_revision: u64, requested_status: MobCoordinationWorkIntentStatus, now_ms: u64)
 - `UpdateCoordinationResourceClaimStatus`(claim_id: ResourceClaimId, expected_revision: u64, requested_status: MobCoordinationResourceClaimStatus, now_ms: u64)
 - `ObserveCoordinationResourceClaimOverlap`(claim_id: ResourceClaimId, now_ms: u64, candidate_overlap_ids: Seq<ResourceClaimId>)
+- `InitializeAdaptiveRun`(adaptive_run_id: AdaptiveRunId, max_depth: u64, max_total_decisions: u64, max_repair_attempts: u64, max_layer_failures: u64, max_attempts_per_layer: u64, max_members_per_layer: u64, max_total_spawned_members: u64, max_active_members: u64, max_retained_layer_mobs: u64, max_aggregate_tokens: u64, max_aggregate_tool_calls: u64, allowed_model_classes: Set<String>, allowed_tool_classes: Set<String>, allowed_skill_identities: Set<String>, allowed_auth_binding_refs: Set<String>, deadline_ms: u64)
+- `RecordPlanningDecision`(adaptive_run_id: AdaptiveRunId, decision_kind: AdaptiveDecisionKind)
+- `RecordPlanRejected`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId)
+- `ResolveLayerAdmission`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, plan_digest: String, child_mob_id: MobId, member_count: u64, token_reservation: u64, tool_call_reservation: u64, used_model_classes: Set<String>, used_tool_classes: Set<String>, used_skill_identities: Set<String>, used_auth_binding_refs: Set<String>, observed_at_ms: u64)
+- `RecordLayerProvisioned`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
+- `RecordLayerRunStarted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId)
+- `IngestLayerTerminal`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, result_class: FlowRunPublicResultClassKind, actual_tokens: u64, actual_tool_calls: u64)
+- `RecordLayerSetupFault`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, fault: AdaptiveLayerSetupFaultKind, spawned_members: u64, requested_members: u64)
+- `RecordLayerResultValidated`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, result_digest: String)
+- `RecordLayerResultInvalid`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
+- `RecordLayerMobDestroyed`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
+- `RecordLayerMobRetained`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, disposition: AdaptiveLayerDispositionKind)
+- `RecordCleanupResolved`(adaptive_run_id: AdaptiveRunId)
+- `RecordBodyEvidenceMissing`(adaptive_run_id: AdaptiveRunId, missing_digest: String)
+- `ResolveAdaptiveFinish`(adaptive_run_id: AdaptiveRunId, final_result_digest: String)
+- `RequestAdaptiveCancel`(adaptive_run_id: AdaptiveRunId)
+- `RecordDeadlineObserved`(adaptive_run_id: AdaptiveRunId, observed_at_ms: u64)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -424,6 +484,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WorkIntentStatusChanged`(intent_id: WorkIntentId, status: MobCoordinationWorkIntentStatus, revision: u64, event_kind: MobCoordinationEventKind, sequence: u64)
 - `ResourceClaimStatusChanged`(claim_id: ResourceClaimId, status: MobCoordinationResourceClaimStatus, revision: u64, event_kind: MobCoordinationEventKind, sequence: u64)
 - `ResourceClaimOverlapObserved`(claim_id: ResourceClaimId, overlap_ids: Seq<ResourceClaimId>, event_kind: MobCoordinationEventKind, sequence: u64)
+- `AdaptiveRunInitialized`(adaptive_run_id: AdaptiveRunId)
+- `AdaptivePlanningDecisionRecorded`(adaptive_run_id: AdaptiveRunId, decision_kind: AdaptiveDecisionKind)
+- `AdaptivePlanRejected`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId)
+- `AdaptiveLayerAdmissionResolved`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, admission: AdaptiveLayerAdmissionKind)
+- `AdaptiveLayerProvisioned`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
+- `AdaptiveLayerRunStarted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId)
+- `AdaptiveLayerTerminalIngested`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_class: FlowRunPublicResultClassKind)
+- `AdaptiveLayerSetupFaultRecorded`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, fault: AdaptiveLayerSetupFaultKind)
+- `AdaptiveLayerResultValidated`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_digest: String)
+- `AdaptiveLayerResultInvalid`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId)
+- `AdaptiveLayerCleanupObserved`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, disposition: AdaptiveLayerDispositionKind)
+- `AdaptiveCleanupResolved`(adaptive_run_id: AdaptiveRunId)
+- `AdaptiveBodyEvidenceMissing`(adaptive_run_id: AdaptiveRunId, missing_digest: String)
+- `AdaptiveRunTerminalized`(adaptive_run_id: AdaptiveRunId, reason: AdaptiveStopReason)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -1185,6 +1259,221 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_create_capability_denies`
 - Emits: `CreateMobAdmissionResolved`
 - To: `Destroyed`
+
+### `InitializeAdaptiveRunRunningRunning`
+- From: `Running`
+- On: `InitializeAdaptiveRun`(adaptive_run_id, max_depth, max_total_decisions, max_repair_attempts, max_layer_failures, max_attempts_per_layer, max_members_per_layer, max_total_spawned_members, max_active_members, max_retained_layer_mobs, max_aggregate_tokens, max_aggregate_tool_calls, allowed_model_classes, allowed_tool_classes, allowed_skill_identities, allowed_auth_binding_refs, deadline_ms)
+- Guards:
+  - `no_active_adaptive_run`
+  - `limits_complete`
+- Emits: `AdaptiveRunInitialized`
+- To: `Running`
+
+### `RecordAdaptivePlanningDecisionActiveRunning`
+- From: `Running`
+- On: `RecordPlanningDecision`(adaptive_run_id, decision_kind)
+- Guards:
+  - `run_active`
+  - `decision_limit_available`
+- Emits: `AdaptivePlanningDecisionRecorded`
+- To: `Running`
+
+### `RecordAdaptivePlanningDecisionPlanLimitRunning`
+- From: `Running`
+- On: `RecordPlanningDecision`(adaptive_run_id, decision_kind)
+- Guards:
+  - `run_active`
+  - `decision_limit_exhausted`
+- Emits: `AdaptiveRunTerminalized`
+- To: `Running`
+
+### `RecordAdaptivePlanRejectedActiveRunning`
+- From: `Running`
+- On: `RecordPlanRejected`(adaptive_run_id, layer_id)
+- Guards:
+  - `run_active`
+  - `repair_limit_available`
+- Emits: `AdaptivePlanRejected`
+- To: `Running`
+
+### `RecordAdaptivePlanRejectedRepairLimitRunning`
+- From: `Running`
+- On: `RecordPlanRejected`(adaptive_run_id, layer_id)
+- Guards:
+  - `run_active`
+  - `repair_limit_exhausted`
+- Emits: `AdaptiveRunTerminalized`
+- To: `Running`
+
+### `ResolveAdaptiveLayerAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveLayerAdmission`(adaptive_run_id, layer_id, attempt, plan_digest, child_mob_id, member_count, token_reservation, tool_call_reservation, used_model_classes, used_tool_classes, used_skill_identities, used_auth_binding_refs, observed_at_ms)
+- Guards:
+  - `run_active`
+  - `deadline_available`
+  - `depth_available`
+  - `failure_limit_available`
+  - `member_count_available`
+  - `total_spawn_available`
+  - `active_member_capacity_available`
+  - `token_reservation_available`
+  - `tool_call_reservation_available`
+  - `model_classes_allowed`
+  - `tool_classes_allowed`
+  - `skill_identities_allowed`
+  - `auth_bindings_allowed`
+  - `no_active_layer`
+  - `layer_not_previously_admitted`
+- Emits: `AdaptiveLayerAdmissionResolved`
+- To: `Running`
+
+### `ResolveAdaptiveLayerAdmissionRejectedRunning`
+- From: `Running`
+- On: `ResolveLayerAdmission`(adaptive_run_id, layer_id, attempt, plan_digest, child_mob_id, member_count, token_reservation, tool_call_reservation, used_model_classes, used_tool_classes, used_skill_identities, used_auth_binding_refs, observed_at_ms)
+- Guards:
+  - `run_active`
+  - `limit_exceeded`
+- Emits: `AdaptiveLayerAdmissionResolved`
+- To: `Running`
+
+### `RecordAdaptiveLayerProvisionedRunning`
+- From: `Running`
+- On: `RecordLayerProvisioned`(adaptive_run_id, layer_id, attempt)
+- Guards:
+  - `layer_admitted`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerProvisioned`
+- To: `Running`
+
+### `RecordAdaptiveLayerRunStartedRunning`
+- From: `Running`
+- On: `RecordLayerRunStarted`(adaptive_run_id, layer_id, attempt, child_run_id)
+- Guards:
+  - `layer_provisioning`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerRunStarted`
+- To: `Running`
+
+### `IngestAdaptiveLayerTerminalSuccessRunning`
+- From: `Running`
+- On: `IngestLayerTerminal`(adaptive_run_id, layer_id, attempt, result_class, actual_tokens, actual_tool_calls)
+- Guards:
+  - `layer_running`
+  - `attempt_matches`
+  - `result_success`
+- Emits: `AdaptiveLayerTerminalIngested`
+- To: `Running`
+
+### `IngestAdaptiveLayerTerminalFailureRunning`
+- From: `Running`
+- On: `IngestLayerTerminal`(adaptive_run_id, layer_id, attempt, result_class, actual_tokens, actual_tool_calls)
+- Guards:
+  - `layer_running`
+  - `attempt_matches`
+  - `result_failure`
+- Emits: `AdaptiveLayerTerminalIngested`
+- To: `Running`
+
+### `RecordAdaptiveLayerSetupFaultRunning`
+- From: `Running`
+- On: `RecordLayerSetupFault`(adaptive_run_id, layer_id, attempt, fault, spawned_members, requested_members)
+- Guards:
+  - `layer_admitted_or_provisioning`
+  - `attempt_matches`
+  - `setup_counts_valid`
+- Emits: `AdaptiveLayerSetupFaultRecorded`
+- To: `Running`
+
+### `RecordAdaptiveLayerResultValidatedRunning`
+- From: `Running`
+- On: `RecordLayerResultValidated`(adaptive_run_id, layer_id, attempt, result_digest)
+- Guards:
+  - `layer_collecting`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerResultValidated`
+- To: `Running`
+
+### `RecordAdaptiveLayerResultInvalidRunning`
+- From: `Running`
+- On: `RecordLayerResultInvalid`(adaptive_run_id, layer_id, attempt)
+- Guards:
+  - `layer_collecting`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerResultInvalid`
+- To: `Running`
+
+### `RecordAdaptiveLayerMobDestroyedRunning`
+- From: `Running`
+- On: `RecordLayerMobDestroyed`(adaptive_run_id, layer_id, attempt)
+- Guards:
+  - `layer_terminal`
+  - `attempt_matches`
+  - `active_member_debit_present`
+- Emits: `AdaptiveLayerCleanupObserved`
+- To: `Running`
+
+### `RecordAdaptiveLayerMobRetainedRunning`
+- From: `Running`
+- On: `RecordLayerMobRetained`(adaptive_run_id, layer_id, attempt, disposition)
+- Guards:
+  - `layer_terminal`
+  - `attempt_matches`
+  - `retention_capacity_available`
+  - `active_member_debit_present`
+- Emits: `AdaptiveLayerCleanupObserved`
+- To: `Running`
+
+### `RecordAdaptiveLayerMobRetainedCleanupRequiredRunning`
+- From: `Running`
+- On: `RecordLayerMobRetained`(adaptive_run_id, layer_id, attempt, disposition)
+- Guards:
+  - `layer_terminal`
+  - `attempt_matches`
+  - `retention_capacity_exhausted`
+  - `active_member_debit_present`
+- Emits: `AdaptiveLayerCleanupObserved`
+- To: `Running`
+
+### `RecordAdaptiveCleanupResolvedRunning`
+- From: `Running`
+- On: `RecordCleanupResolved`(adaptive_run_id)
+- Guards:
+  - `cleanup_pause_active`
+- Emits: `AdaptiveCleanupResolved`
+- To: `Running`
+
+### `RecordAdaptiveBodyEvidenceMissingRunning`
+- From: `Running`
+- On: `RecordBodyEvidenceMissing`(adaptive_run_id, missing_digest)
+- Guards:
+  - `run_active`
+- Emits: `AdaptiveBodyEvidenceMissing`
+- To: `Running`
+
+### `ResolveAdaptiveFinishRunningRunning`
+- From: `Running`
+- On: `ResolveAdaptiveFinish`(adaptive_run_id, final_result_digest)
+- Guards:
+  - `run_active`
+- Emits: `AdaptiveRunTerminalized`
+- To: `Running`
+
+### `RequestAdaptiveCancelRunningRunning`
+- From: `Running`
+- On: `RequestAdaptiveCancel`(adaptive_run_id)
+- Guards:
+  - `run_active`
+- Emits: `AdaptiveRunTerminalized`
+- To: `Running`
+
+### `RecordAdaptiveDeadlineObservedExpiredRunning`
+- From: `Running`
+- On: `RecordDeadlineObserved`(adaptive_run_id, observed_at_ms)
+- Guards:
+  - `run_active`
+  - `deadline_expired`
+- Emits: `AdaptiveRunTerminalized`
+- To: `Running`
 
 ### `ResolveProfileMutationAdmissionAllowedRunning`
 - From: `Running`

@@ -28,16 +28,20 @@ pub enum ArchiveSection {
     Hooks,
     Mcp,
     Config,
+    Adaptive,
+    Schemas,
 }
 
 impl ArchiveSection {
     /// All archive sections, in stable order. Drives table-driven classification
     /// and routing so no string literal prefix appears at the call site.
-    pub const ALL: [ArchiveSection; 4] = [
+    pub const ALL: [ArchiveSection; 6] = [
         ArchiveSection::Skills,
         ArchiveSection::Hooks,
         ArchiveSection::Mcp,
         ArchiveSection::Config,
+        ArchiveSection::Adaptive,
+        ArchiveSection::Schemas,
     ];
 
     /// The canonical directory prefix (including the trailing slash) that
@@ -48,6 +52,8 @@ impl ArchiveSection {
             ArchiveSection::Hooks => "hooks/",
             ArchiveSection::Mcp => "mcp/",
             ArchiveSection::Config => "config/",
+            ArchiveSection::Adaptive => "adaptive/",
+            ArchiveSection::Schemas => "schemas/",
         }
     }
 

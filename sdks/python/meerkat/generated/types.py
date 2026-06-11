@@ -898,6 +898,128 @@ class MobFlowCancelResult:
 
 
 @dataclass
+class MobAdaptiveStartParams:
+    """Request payload for `mob/adaptive_start`."""
+    mob_id: str
+    objective: str
+
+
+@dataclass
+class MobAdaptiveStartResult:
+    """Response payload for `mob/adaptive_start`."""
+    run: dict[str, Any]
+
+
+@dataclass
+class MobAdaptiveRunParams:
+    """Request payload for adaptive read/cancel methods."""
+    adaptive_run_id: str
+    mob_id: str
+
+
+@dataclass
+class MobAdaptiveStatusResult:
+    """Response payload for `mob/adaptive_status`."""
+    run: dict[str, Any]
+
+
+@dataclass
+class MobAdaptiveLayersResult:
+    """Response payload for `mob/adaptive_layers`."""
+    adaptive_run_id: str
+    layers: list[dict[str, Any]]
+    mob_id: str
+
+
+@dataclass
+class MobAdaptiveEventsResult:
+    """Response payload for `mob/adaptive_events`."""
+    adaptive_run_id: str
+    events: list[Any]
+    mob_id: str
+
+
+@dataclass
+class MobAdaptiveResultResult:
+    """Response payload for `mob/adaptive_result`."""
+    adaptive_run_id: str
+    mob_id: str
+    result: Optional[Any] = None
+    result_digest: Optional[str] = None
+
+
+@dataclass
+class MobAdaptiveCancelResult:
+    """Response payload for `mob/adaptive_cancel`."""
+    canceled: bool
+
+
+@dataclass
+class MobAdaptiveRetryLayerParams:
+    """Request payload for `mob/adaptive_retry_layer`."""
+    adaptive_run_id: str
+    layer_id: str
+    mob_id: str
+
+
+@dataclass
+class MobAdaptiveRetryLayerResult:
+    """Response payload for `mob/adaptive_retry_layer`."""
+    retry_started: bool
+
+
+@dataclass
+class WireAdaptiveRun:
+    """Public projection of AdaptiveRun kernel state and host result metadata."""
+    active_members: int
+    adaptive_run_id: str
+    aggregate_token_actual: int
+    aggregate_token_reserved: int
+    aggregate_tool_call_actual: int
+    aggregate_tool_call_reserved: int
+    depth: int
+    layer_failures: int
+    mob_id: str
+    repair_attempts: int
+    retained_layer_mobs: int
+    total_decisions: int
+    total_spawned_members: int
+    final_result: Optional[Any] = None
+    final_result_digest: Optional[str] = None
+    layers: Optional[list[dict[str, Any]]] = None
+    missing_body_digest: Optional[str] = None
+    phase: Optional[Literal['active', 'cleanup_required', 'evidence_missing', 'finished', 'failed', 'canceled']] = None
+    stop_reason: Optional[Literal['finish_decision', 'depth_limit', 'plan_limit', 'repair_limit', 'failure_limit', 'budget_exhausted', 'deadline_exceeded', 'host_cancel']] = None
+
+
+@dataclass
+class WireAdaptiveRunPhase:
+    """Lifecycle phase of an AdaptiveRun on the wire."""
+
+
+@dataclass
+class WireAdaptiveStopReason:
+    """Terminal reason of an AdaptiveRun on the wire."""
+
+
+@dataclass
+class WireAdaptiveLayer:
+    """Public projection of one AdaptiveRun layer ledger entry."""
+    attempt: int
+    layer_id: str
+    phase: Literal['validating', 'admitted', 'provisioning', 'running', 'collecting', 'completed', 'setup_failed', 'run_failed', 'result_invalid', 'canceled']
+    child_mob_id: Optional[str] = None
+    child_run_id: Optional[str] = None
+    plan_digest: Optional[str] = None
+    result_digest: Optional[str] = None
+
+
+@dataclass
+class WireAdaptiveLayerPhase:
+    """Lifecycle phase of a layer inside an AdaptiveRun."""
+
+
+@dataclass
 class MobSpawnHelperParams:
     """Request payload for `mob/spawn_helper`."""
     mob_id: str

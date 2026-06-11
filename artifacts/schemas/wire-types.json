@@ -21857,6 +21857,621 @@
     "title": "McpLiveOperation",
     "type": "string"
   },
+  "MobAdaptiveCancelResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_cancel`.",
+    "properties": {
+      "canceled": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "canceled"
+    ],
+    "title": "MobAdaptiveCancelResult",
+    "type": "object"
+  },
+  "MobAdaptiveEventsResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_events`.",
+    "properties": {
+      "adaptive_run_id": {
+        "type": "string"
+      },
+      "events": {
+        "items": true,
+        "type": "array"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "adaptive_run_id",
+      "events"
+    ],
+    "title": "MobAdaptiveEventsResult",
+    "type": "object"
+  },
+  "MobAdaptiveLayersResult": {
+    "$defs": {
+      "WireAdaptiveLayer": {
+        "description": "Public projection of one AdaptiveRun layer ledger entry.",
+        "properties": {
+          "attempt": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "child_mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "child_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireAdaptiveLayerPhase"
+          },
+          "plan_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "layer_id",
+          "phase",
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveLayerPhase": {
+        "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+        "enum": [
+          "validating",
+          "admitted",
+          "provisioning",
+          "running",
+          "collecting",
+          "completed",
+          "setup_failed",
+          "run_failed",
+          "result_invalid",
+          "canceled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_layers`.",
+    "properties": {
+      "adaptive_run_id": {
+        "type": "string"
+      },
+      "layers": {
+        "items": {
+          "$ref": "#/$defs/WireAdaptiveLayer"
+        },
+        "type": "array"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "adaptive_run_id",
+      "layers"
+    ],
+    "title": "MobAdaptiveLayersResult",
+    "type": "object"
+  },
+  "MobAdaptiveResultResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_result`.",
+    "properties": {
+      "adaptive_run_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "result": true,
+      "result_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "mob_id",
+      "adaptive_run_id"
+    ],
+    "title": "MobAdaptiveResultResult",
+    "type": "object"
+  },
+  "MobAdaptiveRetryLayerResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_retry_layer`.",
+    "properties": {
+      "retry_started": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "retry_started"
+    ],
+    "title": "MobAdaptiveRetryLayerResult",
+    "type": "object"
+  },
+  "MobAdaptiveStartResult": {
+    "$defs": {
+      "WireAdaptiveLayer": {
+        "description": "Public projection of one AdaptiveRun layer ledger entry.",
+        "properties": {
+          "attempt": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "child_mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "child_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireAdaptiveLayerPhase"
+          },
+          "plan_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "layer_id",
+          "phase",
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveLayerPhase": {
+        "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+        "enum": [
+          "validating",
+          "admitted",
+          "provisioning",
+          "running",
+          "collecting",
+          "completed",
+          "setup_failed",
+          "run_failed",
+          "result_invalid",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveRun": {
+        "description": "Public projection of AdaptiveRun kernel state and host result metadata.",
+        "properties": {
+          "active_members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "adaptive_run_id": {
+            "type": "string"
+          },
+          "aggregate_token_actual": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_token_reserved": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_tool_call_actual": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_tool_call_reserved": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "depth": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "final_result": true,
+          "final_result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_failures": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "layers": {
+            "items": {
+              "$ref": "#/$defs/WireAdaptiveLayer"
+            },
+            "type": "array"
+          },
+          "missing_body_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireAdaptiveRunPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_attempts": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retained_layer_mobs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireAdaptiveStopReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_decisions": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_spawned_members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adaptive_run_id",
+          "mob_id",
+          "depth",
+          "total_decisions",
+          "repair_attempts",
+          "layer_failures",
+          "total_spawned_members",
+          "active_members",
+          "retained_layer_mobs",
+          "aggregate_token_reserved",
+          "aggregate_token_actual",
+          "aggregate_tool_call_reserved",
+          "aggregate_tool_call_actual"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveRunPhase": {
+        "description": "Lifecycle phase of an AdaptiveRun on the wire.",
+        "enum": [
+          "active",
+          "cleanup_required",
+          "evidence_missing",
+          "finished",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveStopReason": {
+        "description": "Terminal reason of an AdaptiveRun on the wire.",
+        "enum": [
+          "finish_decision",
+          "depth_limit",
+          "plan_limit",
+          "repair_limit",
+          "failure_limit",
+          "budget_exhausted",
+          "deadline_exceeded",
+          "host_cancel"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_start`.",
+    "properties": {
+      "run": {
+        "$ref": "#/$defs/WireAdaptiveRun"
+      }
+    },
+    "required": [
+      "run"
+    ],
+    "title": "MobAdaptiveStartResult",
+    "type": "object"
+  },
+  "MobAdaptiveStatusResult": {
+    "$defs": {
+      "WireAdaptiveLayer": {
+        "description": "Public projection of one AdaptiveRun layer ledger entry.",
+        "properties": {
+          "attempt": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "child_mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "child_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireAdaptiveLayerPhase"
+          },
+          "plan_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "layer_id",
+          "phase",
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveLayerPhase": {
+        "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+        "enum": [
+          "validating",
+          "admitted",
+          "provisioning",
+          "running",
+          "collecting",
+          "completed",
+          "setup_failed",
+          "run_failed",
+          "result_invalid",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveRun": {
+        "description": "Public projection of AdaptiveRun kernel state and host result metadata.",
+        "properties": {
+          "active_members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "adaptive_run_id": {
+            "type": "string"
+          },
+          "aggregate_token_actual": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_token_reserved": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_tool_call_actual": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "aggregate_tool_call_reserved": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "depth": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "final_result": true,
+          "final_result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_failures": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "layers": {
+            "items": {
+              "$ref": "#/$defs/WireAdaptiveLayer"
+            },
+            "type": "array"
+          },
+          "missing_body_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireAdaptiveRunPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_attempts": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retained_layer_mobs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireAdaptiveStopReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_decisions": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_spawned_members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adaptive_run_id",
+          "mob_id",
+          "depth",
+          "total_decisions",
+          "repair_attempts",
+          "layer_failures",
+          "total_spawned_members",
+          "active_members",
+          "retained_layer_mobs",
+          "aggregate_token_reserved",
+          "aggregate_token_actual",
+          "aggregate_tool_call_reserved",
+          "aggregate_tool_call_actual"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveRunPhase": {
+        "description": "Lifecycle phase of an AdaptiveRun on the wire.",
+        "enum": [
+          "active",
+          "cleanup_required",
+          "evidence_missing",
+          "finished",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveStopReason": {
+        "description": "Terminal reason of an AdaptiveRun on the wire.",
+        "enum": [
+          "finish_decision",
+          "depth_limit",
+          "plan_limit",
+          "repair_limit",
+          "failure_limit",
+          "budget_exhausted",
+          "deadline_exceeded",
+          "host_cancel"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/adaptive_status`.",
+    "properties": {
+      "run": {
+        "$ref": "#/$defs/WireAdaptiveRun"
+      }
+    },
+    "required": [
+      "run"
+    ],
+    "title": "MobAdaptiveStatusResult",
+    "type": "object"
+  },
   "MobAppendSystemContextResult": {
     "$defs": {
       "WireAppendSystemContextStatus": {
@@ -38450,6 +39065,333 @@
       }
     ],
     "title": "TranscriptRewriteSelection"
+  },
+  "WireAdaptiveLayer": {
+    "$defs": {
+      "WireAdaptiveLayerPhase": {
+        "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+        "enum": [
+          "validating",
+          "admitted",
+          "provisioning",
+          "running",
+          "collecting",
+          "completed",
+          "setup_failed",
+          "run_failed",
+          "result_invalid",
+          "canceled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public projection of one AdaptiveRun layer ledger entry.",
+    "properties": {
+      "attempt": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "child_mob_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "child_run_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "layer_id": {
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireAdaptiveLayerPhase"
+      },
+      "plan_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "result_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "layer_id",
+      "phase",
+      "attempt"
+    ],
+    "title": "WireAdaptiveLayer",
+    "type": "object"
+  },
+  "WireAdaptiveLayerPhase": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+    "enum": [
+      "validating",
+      "admitted",
+      "provisioning",
+      "running",
+      "collecting",
+      "completed",
+      "setup_failed",
+      "run_failed",
+      "result_invalid",
+      "canceled"
+    ],
+    "title": "WireAdaptiveLayerPhase",
+    "type": "string"
+  },
+  "WireAdaptiveRun": {
+    "$defs": {
+      "WireAdaptiveLayer": {
+        "description": "Public projection of one AdaptiveRun layer ledger entry.",
+        "properties": {
+          "attempt": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "child_mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "child_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireAdaptiveLayerPhase"
+          },
+          "plan_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "layer_id",
+          "phase",
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "WireAdaptiveLayerPhase": {
+        "description": "Lifecycle phase of a layer inside an AdaptiveRun.",
+        "enum": [
+          "validating",
+          "admitted",
+          "provisioning",
+          "running",
+          "collecting",
+          "completed",
+          "setup_failed",
+          "run_failed",
+          "result_invalid",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveRunPhase": {
+        "description": "Lifecycle phase of an AdaptiveRun on the wire.",
+        "enum": [
+          "active",
+          "cleanup_required",
+          "evidence_missing",
+          "finished",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      },
+      "WireAdaptiveStopReason": {
+        "description": "Terminal reason of an AdaptiveRun on the wire.",
+        "enum": [
+          "finish_decision",
+          "depth_limit",
+          "plan_limit",
+          "repair_limit",
+          "failure_limit",
+          "budget_exhausted",
+          "deadline_exceeded",
+          "host_cancel"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public projection of AdaptiveRun kernel state and host result metadata.",
+    "properties": {
+      "active_members": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "adaptive_run_id": {
+        "type": "string"
+      },
+      "aggregate_token_actual": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "aggregate_token_reserved": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "aggregate_tool_call_actual": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "aggregate_tool_call_reserved": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "depth": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "final_result": true,
+      "final_result_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "layer_failures": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "layers": {
+        "items": {
+          "$ref": "#/$defs/WireAdaptiveLayer"
+        },
+        "type": "array"
+      },
+      "missing_body_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "phase": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAdaptiveRunPhase"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "repair_attempts": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "retained_layer_mobs": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "stop_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAdaptiveStopReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "total_decisions": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "total_spawned_members": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "adaptive_run_id",
+      "mob_id",
+      "depth",
+      "total_decisions",
+      "repair_attempts",
+      "layer_failures",
+      "total_spawned_members",
+      "active_members",
+      "retained_layer_mobs",
+      "aggregate_token_reserved",
+      "aggregate_token_actual",
+      "aggregate_tool_call_reserved",
+      "aggregate_tool_call_actual"
+    ],
+    "title": "WireAdaptiveRun",
+    "type": "object"
+  },
+  "WireAdaptiveRunPhase": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Lifecycle phase of an AdaptiveRun on the wire.",
+    "enum": [
+      "active",
+      "cleanup_required",
+      "evidence_missing",
+      "finished",
+      "failed",
+      "canceled"
+    ],
+    "title": "WireAdaptiveRunPhase",
+    "type": "string"
+  },
+  "WireAdaptiveStopReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Terminal reason of an AdaptiveRun on the wire.",
+    "enum": [
+      "finish_decision",
+      "depth_limit",
+      "plan_limit",
+      "repair_limit",
+      "failure_limit",
+      "budget_exhausted",
+      "deadline_exceeded",
+      "host_cancel"
+    ],
+    "title": "WireAdaptiveStopReason",
+    "type": "string"
   },
   "WireAssistantBlock": {
     "$defs": {

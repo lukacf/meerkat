@@ -823,6 +823,138 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
     }
 }
 
+pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
+    let mut protocol_templates = comms_trust_bundle_composition()
+        .handoff_protocols
+        .into_iter()
+        .filter(|protocol| protocol.producer_instance == mi_id("mob"))
+        .collect::<Vec<_>>();
+    protocol_templates.push(
+        mob_destroy_session_ingress_bundle_composition()
+            .handoff_protocols
+            .into_iter()
+            .next()
+            .expect("mob destroy composition declares destroy-ingress protocol"),
+    );
+    let mut handoff_protocols = Vec::new();
+    for (producer, owner) in [
+        ("control_mob", "control_session_ingress_owner"),
+        ("layer_mob", "layer_session_ingress_owner"),
+    ] {
+        for template in &protocol_templates {
+            let mut protocol = template.clone();
+            protocol.producer_instance = mi_id(producer);
+            protocol.rust.module_path = format!(
+                "meerkat-mob/src/generated/protocol_adaptive_{producer}_{}.rs",
+                template.name.as_str()
+            )
+            .into();
+            if protocol.realizing_actor == act_id("mob_comms_trust_owner") {
+                protocol.realizing_actor = act_id("adaptive_mob_comms_trust_owner");
+            } else if protocol.realizing_actor == act_id("mob_destroy_session_ingress_owner") {
+                protocol.realizing_actor = act_id(owner);
+            }
+            for feedback in &mut protocol.allowed_feedback_inputs {
+                if feedback.machine_instance == mi_id("mob") {
+                    feedback.machine_instance = mi_id(producer);
+                }
+            }
+            handoff_protocols.push(protocol);
+        }
+    }
+
+    CompositionSchema {
+        name: comp_id("adaptive_mob_bundle"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("control_mob"),
+                machine_name: mach_id("MobMachine"),
+                actor: act_id("control_mob_authority"),
+            },
+            MachineInstance {
+                instance_id: mi_id("layer_mob"),
+                machine_name: mach_id("MobMachine"),
+                actor: act_id("layer_mob_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("control_mob_authority"),
+            machine_actor("layer_mob_authority"),
+            owner_actor("adaptive_mob_comms_trust_owner"),
+            owner_actor("control_session_ingress_owner"),
+            owner_actor("layer_session_ingress_owner"),
+        ],
+        handoff_protocols,
+        entry_inputs: vec![],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: Some(CompositionDriver {
+            name: driver_id("adaptive_mob_bundle_driver"),
+            rust: CompositionDriverRustBinding {
+                module_path: "meerkat-mob/src/generated/adaptive_mob_bundle.rs".into(),
+                driver_type: "AdaptiveMobBundleDriver".into(),
+                store_plan_type: "AdaptiveMobBundleStorePlan".into(),
+                work_type: "AdaptiveMobBundleWork".into(),
+                decision_type: "AdaptiveMobBundleDecision".into(),
+                required_imports: vec![],
+            },
+            watched_effects: vec![WatchedEffect {
+                producer_instance: mi_id("layer_mob"),
+                effect_variant: ev_id("FlowRunPublicResultClassified"),
+            }],
+            dispatch_routes: vec![DriverDispatchRoute {
+                name: route_id("layer_terminal_reaches_adaptive_kernel"),
+                target_instance: mi_id("control_mob"),
+                target_kind: RouteTargetKind::Input,
+                input_variant: RouteVariantId::Input(iv_id("IngestLayerTerminal")),
+            }],
+        }),
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "control_mob_destroying_session_ingress_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: mi_id("control_mob"),
+                    effect_variant: ev_id("RequestSessionIngressDetachForMobDestroy"),
+                    protocol_name: protocol_id("mob_destroying_session_ingress"),
+                },
+                statement: "control mob destroy keeps the canonical detach-before-destroy session ingress handoff explicit inside the adaptive bundle".into(),
+                references_machines: vec![mi_id("control_mob")],
+                references_actors: vec![
+                    act_id("control_mob_authority"),
+                    act_id("control_session_ingress_owner"),
+                ],
+            },
+            CompositionInvariant {
+                name: "layer_mob_destroying_session_ingress_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: mi_id("layer_mob"),
+                    effect_variant: ev_id("RequestSessionIngressDetachForMobDestroy"),
+                    protocol_name: protocol_id("mob_destroying_session_ingress"),
+                },
+                statement: "layer mob destroy keeps the canonical detach-before-destroy session ingress handoff explicit inside the adaptive bundle".into(),
+                references_machines: vec![mi_id("layer_mob")],
+                references_actors: vec![
+                    act_id("layer_mob_authority"),
+                    act_id("layer_session_ingress_owner"),
+                ],
+            },
+        ],
+        witnesses: vec![witness("layer_terminal_feedback", &[])],
+        deep_domain_cardinality: 3,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        // Adaptive bundles are dynamic: the driver provisions concrete
+        // sessions/layer mobs through runtime surfaces, so the composition
+        // declares the adaptive MobMachine handoff protocols and driver
+        // feedback path without claiming a closed set of session routes.
+        closed_world: false,
+    }
+}
+
 fn machine_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: act_id(name),

@@ -288,6 +288,72 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCreateMobAdmissionDeniedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `InitializeAdaptiveRunRunningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptivePlanningDecisionActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptivePlanningDecisionPlanLimitRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptivePlanRejectedActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptivePlanRejectedRepairLimitRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAdaptiveLayerAdmissionAllowedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAdaptiveLayerAdmissionRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerProvisionedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerRunStartedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `IngestAdaptiveLayerTerminalSuccessRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `IngestAdaptiveLayerTerminalFailureRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerSetupFaultRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerResultValidatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerResultInvalidRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerMobDestroyedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerMobRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerMobRetainedCleanupRequiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveCleanupResolvedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveBodyEvidenceMissingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAdaptiveFinishRunningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestAdaptiveCancelRunningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveDeadlineObservedExpiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveProfileMutationAdmissionAllowedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2359,6 +2425,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `ResourceClaimOverlapObserved`
   - anchors: `mob_coordination_board_authority`
+  - scenarios: (unclaimed)
+- `AdaptiveRunInitialized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptivePlanningDecisionRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptivePlanRejected`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerProvisioned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerRunStarted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerTerminalIngested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerSetupFaultRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerResultValidated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerResultInvalid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerCleanupObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveCleanupResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveBodyEvidenceMissing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveRunTerminalized`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
 ### Invariants

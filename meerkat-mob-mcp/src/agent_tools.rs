@@ -9,12 +9,12 @@
 //! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
+use meerkat_core::{AgentToolDispatcher, ToolUnavailableReason};
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
     SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
@@ -233,12 +233,17 @@ impl AgentMobToolSurface {
             &snapshot_context,
             meerkat_core::service::MobToolSnapshotContext::ParentOwned(_)
         );
-        let has_generated_authority = effective_authority
+        let authority_snapshot = effective_authority
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_generated_authority_context();
+            .clone();
+        let has_generated_authority = authority_snapshot.is_generated_authority_context();
         let tools = if has_generated_authority {
-            build_tool_defs_with_profile_support(has_profile_store, has_snapshot_provider)
+            build_tool_defs_with_profile_support(
+                has_profile_store,
+                has_snapshot_provider,
+                authority_snapshot.can_run_adaptive_packs(),
+            )
         } else {
             Arc::<[Arc<ToolDef>]>::from([])
         };
@@ -1458,6 +1463,10 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             TOOL_MOB_PROFILE_UPDATE => self.dispatch_mob_profile_update(call).await,
             TOOL_MOB_PROFILE_DELETE => self.dispatch_mob_profile_delete(call).await,
             TOOL_MOB_PROFILE_LIST_SOURCES => self.dispatch_mob_profile_list_sources(call).await,
+            name if is_adaptive_flow_tool_name(name) => Err(ToolError::unavailable(
+                name,
+                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+            )),
             _ => Err(ToolError::not_found(call.name)),
         }
     }
@@ -1522,12 +1531,13 @@ fn typed_schema<T: JsonSchema>() -> Value {
 
 #[cfg(test)]
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
-    build_tool_defs_with_profile_support(false, false)
+    build_tool_defs_with_profile_support(false, false, false)
 }
 
 fn build_tool_defs_with_profile_support(
     has_profile_store: bool,
     has_snapshot_provider: bool,
+    can_run_adaptive_packs: bool,
 ) -> Arc<[Arc<ToolDef>]> {
     let mut defs = vec![
         tool_def(
@@ -1827,7 +1837,26 @@ fn build_tool_defs_with_profile_support(
         ));
     }
 
+    if can_run_adaptive_packs {
+        defs.extend(
+            meerkat_mob_adaptive::adaptive_flow_tool_defs()
+                .into_iter()
+                .map(|tool| {
+                    Arc::new(tool.with_provenance(ToolProvenance {
+                        kind: ToolSourceKind::Mob,
+                        source_id: "mob-adaptive".into(),
+                    }))
+                }),
+        );
+    }
+
     defs.into()
+}
+
+fn is_adaptive_flow_tool_name(name: &str) -> bool {
+    meerkat_mob_adaptive::AdaptiveFlowTool::ALL
+        .iter()
+        .any(|tool| tool.name() == name)
 }
 
 // ─── Argument types ──────────────────────────────────────────────────────
@@ -3132,7 +3161,7 @@ mod tests {
     /// surface (15 tools) is exercised so every tool_def call is covered.
     #[test]
     fn agent_mob_tool_schemas_are_typed_not_handwritten() {
-        let defs = build_tool_defs_with_profile_support(true, true);
+        let defs = build_tool_defs_with_profile_support(true, true, false);
         for def in defs.iter() {
             assert!(
                 def.input_schema
@@ -4284,7 +4313,7 @@ mod tests {
 
     #[test]
     fn test_profile_tools_present_when_store_available() {
-        let defs = build_tool_defs_with_profile_support(true, false);
+        let defs = build_tool_defs_with_profile_support(true, false, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mob_profile_create"));
         assert!(names.contains(&"mob_profile_get"));
@@ -4297,7 +4326,7 @@ mod tests {
 
     #[test]
     fn test_profile_tools_absent_without_store() {
-        let defs = build_tool_defs_with_profile_support(false, false);
+        let defs = build_tool_defs_with_profile_support(false, false, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(!names.contains(&"mob_profile_create"));
         assert!(!names.contains(&"mob_profile_list_sources"));
@@ -4305,9 +4334,37 @@ mod tests {
 
     #[test]
     fn test_list_sources_tool_present_when_both_store_and_provider() {
-        let defs = build_tool_defs_with_profile_support(true, true);
+        let defs = build_tool_defs_with_profile_support(true, true, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mob_profile_list_sources"));
+    }
+
+    #[test]
+    fn test_adaptive_flow_tools_present_only_with_adaptive_authority() {
+        let without = build_tool_defs_with_profile_support(false, false, false);
+        let without_names: Vec<&str> = without.iter().map(|d| d.name.as_str()).collect();
+        assert!(!without_names.contains(&"adaptive_flow_start"));
+
+        let with = build_tool_defs_with_profile_support(false, false, true);
+        let with_names: Vec<&str> = with.iter().map(|d| d.name.as_str()).collect();
+        for tool in meerkat_mob_adaptive::AdaptiveFlowTool::ALL {
+            assert!(
+                with_names.contains(&tool.name()),
+                "missing adaptive tool {}",
+                tool.name()
+            );
+        }
+        let start = with
+            .iter()
+            .find(|tool| tool.name.as_str() == "adaptive_flow_start")
+            .expect("adaptive_flow_start");
+        assert_eq!(
+            start
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.source_id.as_str()),
+            Some("mob-adaptive")
+        );
     }
 
     #[tokio::test]

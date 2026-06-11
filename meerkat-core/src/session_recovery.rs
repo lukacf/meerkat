@@ -786,6 +786,7 @@ mod tests {
                         crate::service::OpaquePrincipalToken::new("persisted-authority"),
                         false,
                         false,
+                        false,
                         std::collections::BTreeSet::from(["mob-a".to_string()]),
                         std::collections::BTreeMap::new(),
                         None,

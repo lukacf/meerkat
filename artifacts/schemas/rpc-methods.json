@@ -596,6 +596,48 @@
       "result_type": "MobFlowCancelResult"
     },
     {
+      "description": "Start an AdaptiveRun on an adaptive mobpack control mob",
+      "name": "mob/adaptive_start",
+      "params_type": "MobAdaptiveStartParams",
+      "result_type": "MobAdaptiveStartResult"
+    },
+    {
+      "description": "Read AdaptiveRun status from kernel state",
+      "name": "mob/adaptive_status",
+      "params_type": "MobAdaptiveRunParams",
+      "result_type": "MobAdaptiveStatusResult"
+    },
+    {
+      "description": "List AdaptiveRun layer ledger entries",
+      "name": "mob/adaptive_layers",
+      "params_type": "MobAdaptiveRunParams",
+      "result_type": "MobAdaptiveLayersResult"
+    },
+    {
+      "description": "Read AdaptiveRun event projection entries",
+      "name": "mob/adaptive_events",
+      "params_type": "MobAdaptiveRunParams",
+      "result_type": "MobAdaptiveEventsResult"
+    },
+    {
+      "description": "Read the final AdaptiveRun result body",
+      "name": "mob/adaptive_result",
+      "params_type": "MobAdaptiveRunParams",
+      "result_type": "MobAdaptiveResultResult"
+    },
+    {
+      "description": "Request host cancellation for an active AdaptiveRun",
+      "name": "mob/adaptive_cancel",
+      "params_type": "MobAdaptiveRunParams",
+      "result_type": "MobAdaptiveCancelResult"
+    },
+    {
+      "description": "Request a retry for a failed AdaptiveRun layer",
+      "name": "mob/adaptive_retry_layer",
+      "params_type": "MobAdaptiveRetryLayerParams",
+      "result_type": "MobAdaptiveRetryLayerResult"
+    },
+    {
       "description": "Spawn a helper member and wait for completion",
       "name": "mob/spawn_helper",
       "params_type": "MobSpawnHelperParams",

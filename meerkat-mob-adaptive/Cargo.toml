@@ -1,0 +1,36 @@
+[package]
+name = "meerkat-mob-adaptive"
+description = "Adaptive Flow Mobpack typed artifacts, compiler, and driver mechanics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+meerkat-mob = { workspace = true }
+indexmap = { workspace = true }
+async-trait = { workspace = true }
+jsonschema = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = []
+schema = ["dep:schemars", "meerkat-core/schema"]
+
+[dev-dependencies]
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

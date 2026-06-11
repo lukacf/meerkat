@@ -479,6 +479,7 @@ fn canonical_composition_registry_contains_kernel_seam_and_schedule_perimeter_en
             "schedule_bundle",
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
+            "adaptive_mob_bundle",
             "auth_lease_bundle",
             "workgraph_attention_bundle",
         ]
@@ -704,6 +705,7 @@ fn kernel_seam_retains_coverage_metadata() {
             "schedule_bundle",
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
+            "adaptive_mob_bundle",
             "auth_lease_bundle",
             "workgraph_attention_bundle",
         ]

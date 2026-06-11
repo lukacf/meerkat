@@ -1748,6 +1748,34 @@ impl MethodRouter {
                 handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/adaptive_start" => {
+                handlers::mob::handle_adaptive_start(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_status" => {
+                handlers::mob::handle_adaptive_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_layers" => {
+                handlers::mob::handle_adaptive_layers(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_events" => {
+                handlers::mob::handle_adaptive_events(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_result" => {
+                handlers::mob::handle_adaptive_result(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_cancel" => {
+                handlers::mob::handle_adaptive_cancel(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adaptive_retry_layer" => {
+                handlers::mob::handle_adaptive_retry_layer(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/spawn_helper" => {
                 handlers::mob::handle_spawn_helper(id, params, &self.mob_state).await
             }

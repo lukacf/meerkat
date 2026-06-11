@@ -646,6 +646,98 @@ export interface MobFlowCancelResult {
   canceled: boolean;
 }
 
+export interface MobAdaptiveStartParams {
+  mob_id: string;
+  objective: string;
+}
+
+export interface MobAdaptiveStartResult {
+  run: Record<string, unknown>;
+}
+
+export interface MobAdaptiveRunParams {
+  adaptive_run_id: string;
+  mob_id: string;
+}
+
+export interface MobAdaptiveStatusResult {
+  run: Record<string, unknown>;
+}
+
+export interface MobAdaptiveLayersResult {
+  adaptive_run_id: string;
+  layers: Record<string, unknown>[];
+  mob_id: string;
+}
+
+export interface MobAdaptiveEventsResult {
+  adaptive_run_id: string;
+  events: unknown[];
+  mob_id: string;
+}
+
+export interface MobAdaptiveResultResult {
+  adaptive_run_id: string;
+  mob_id: string;
+  result?: unknown;
+  result_digest?: string;
+}
+
+export interface MobAdaptiveCancelResult {
+  canceled: boolean;
+}
+
+export interface MobAdaptiveRetryLayerParams {
+  adaptive_run_id: string;
+  layer_id: string;
+  mob_id: string;
+}
+
+export interface MobAdaptiveRetryLayerResult {
+  retry_started: boolean;
+}
+
+export interface WireAdaptiveRun {
+  active_members: number;
+  adaptive_run_id: string;
+  aggregate_token_actual: number;
+  aggregate_token_reserved: number;
+  aggregate_tool_call_actual: number;
+  aggregate_tool_call_reserved: number;
+  depth: number;
+  final_result?: unknown;
+  final_result_digest?: string;
+  layer_failures: number;
+  layers?: Record<string, unknown>[];
+  missing_body_digest?: string;
+  mob_id: string;
+  phase?: "active" | "cleanup_required" | "evidence_missing" | "finished" | "failed" | "canceled";
+  repair_attempts: number;
+  retained_layer_mobs: number;
+  stop_reason?: "finish_decision" | "depth_limit" | "plan_limit" | "repair_limit" | "failure_limit" | "budget_exhausted" | "deadline_exceeded" | "host_cancel";
+  total_decisions: number;
+  total_spawned_members: number;
+}
+
+export interface WireAdaptiveRunPhase {
+}
+
+export interface WireAdaptiveStopReason {
+}
+
+export interface WireAdaptiveLayer {
+  attempt: number;
+  child_mob_id?: string;
+  child_run_id?: string;
+  layer_id: string;
+  phase: "validating" | "admitted" | "provisioning" | "running" | "collecting" | "completed" | "setup_failed" | "run_failed" | "result_invalid" | "canceled";
+  plan_digest?: string;
+  result_digest?: string;
+}
+
+export interface WireAdaptiveLayerPhase {
+}
+
 export interface MobSpawnHelperParams {
   agent_identity?: string;
   backend?: WireMobBackendKind;

@@ -52,6 +52,7 @@ meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
+meerkat-mob-adaptive = { workspace = true, optional = true }
 meerkat-mob-pack = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-rpc = { workspace = true, optional = true, features = ["mob"] }
@@ -98,6 +99,7 @@ memory-store-session = ["meerkat/memory-store-session"]
 # Subsystems
 mob = [
     "dep:meerkat-mob",
+    "dep:meerkat-mob-adaptive",
     "dep:meerkat-mob-pack",
     "dep:meerkat-mob-mcp",
     "dep:meerkat-rpc",
@@ -115,6 +117,7 @@ parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-llm-core = { workspace = true }
 tokio-tungstenite = "0.28"

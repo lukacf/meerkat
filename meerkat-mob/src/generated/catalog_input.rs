@@ -118,6 +118,23 @@ pub enum MobMachineCatalogInput {
     UpdateCoordinationWorkIntentStatus,
     UpdateCoordinationResourceClaimStatus,
     ObserveCoordinationResourceClaimOverlap,
+    InitializeAdaptiveRun,
+    RecordPlanningDecision,
+    RecordPlanRejected,
+    ResolveLayerAdmission,
+    RecordLayerProvisioned,
+    RecordLayerRunStarted,
+    IngestLayerTerminal,
+    RecordLayerSetupFault,
+    RecordLayerResultValidated,
+    RecordLayerResultInvalid,
+    RecordLayerMobDestroyed,
+    RecordLayerMobRetained,
+    RecordCleanupResolved,
+    RecordBodyEvidenceMissing,
+    ResolveAdaptiveFinish,
+    RequestAdaptiveCancel,
+    RecordDeadlineObserved,
 }
 
 impl MobMachineCatalogInput {
@@ -236,6 +253,23 @@ impl MobMachineCatalogInput {
         Self::UpdateCoordinationWorkIntentStatus,
         Self::UpdateCoordinationResourceClaimStatus,
         Self::ObserveCoordinationResourceClaimOverlap,
+        Self::InitializeAdaptiveRun,
+        Self::RecordPlanningDecision,
+        Self::RecordPlanRejected,
+        Self::ResolveLayerAdmission,
+        Self::RecordLayerProvisioned,
+        Self::RecordLayerRunStarted,
+        Self::IngestLayerTerminal,
+        Self::RecordLayerSetupFault,
+        Self::RecordLayerResultValidated,
+        Self::RecordLayerResultInvalid,
+        Self::RecordLayerMobDestroyed,
+        Self::RecordLayerMobRetained,
+        Self::RecordCleanupResolved,
+        Self::RecordBodyEvidenceMissing,
+        Self::ResolveAdaptiveFinish,
+        Self::RequestAdaptiveCancel,
+        Self::RecordDeadlineObserved,
     ];
 
     #[must_use]
@@ -357,6 +391,23 @@ impl MobMachineCatalogInput {
             Self::UpdateCoordinationWorkIntentStatus => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UpdateCoordinationWorkIntentStatus,
             Self::UpdateCoordinationResourceClaimStatus => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UpdateCoordinationResourceClaimStatus,
             Self::ObserveCoordinationResourceClaimOverlap => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ObserveCoordinationResourceClaimOverlap,
+            Self::InitializeAdaptiveRun => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::InitializeAdaptiveRun,
+            Self::RecordPlanningDecision => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordPlanningDecision,
+            Self::RecordPlanRejected => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordPlanRejected,
+            Self::ResolveLayerAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveLayerAdmission,
+            Self::RecordLayerProvisioned => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerProvisioned,
+            Self::RecordLayerRunStarted => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerRunStarted,
+            Self::IngestLayerTerminal => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::IngestLayerTerminal,
+            Self::RecordLayerSetupFault => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerSetupFault,
+            Self::RecordLayerResultValidated => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerResultValidated,
+            Self::RecordLayerResultInvalid => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerResultInvalid,
+            Self::RecordLayerMobDestroyed => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerMobDestroyed,
+            Self::RecordLayerMobRetained => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordLayerMobRetained,
+            Self::RecordCleanupResolved => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordCleanupResolved,
+            Self::RecordBodyEvidenceMissing => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordBodyEvidenceMissing,
+            Self::ResolveAdaptiveFinish => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveAdaptiveFinish,
+            Self::RequestAdaptiveCancel => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RequestAdaptiveCancel,
+            Self::RecordDeadlineObserved => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordDeadlineObserved,
         }
     }
 
@@ -489,6 +540,23 @@ impl MobMachineCatalogInput {
             Self::ObserveCoordinationResourceClaimOverlap => {
                 "ObserveCoordinationResourceClaimOverlap"
             }
+            Self::InitializeAdaptiveRun => "InitializeAdaptiveRun",
+            Self::RecordPlanningDecision => "RecordPlanningDecision",
+            Self::RecordPlanRejected => "RecordPlanRejected",
+            Self::ResolveLayerAdmission => "ResolveLayerAdmission",
+            Self::RecordLayerProvisioned => "RecordLayerProvisioned",
+            Self::RecordLayerRunStarted => "RecordLayerRunStarted",
+            Self::IngestLayerTerminal => "IngestLayerTerminal",
+            Self::RecordLayerSetupFault => "RecordLayerSetupFault",
+            Self::RecordLayerResultValidated => "RecordLayerResultValidated",
+            Self::RecordLayerResultInvalid => "RecordLayerResultInvalid",
+            Self::RecordLayerMobDestroyed => "RecordLayerMobDestroyed",
+            Self::RecordLayerMobRetained => "RecordLayerMobRetained",
+            Self::RecordCleanupResolved => "RecordCleanupResolved",
+            Self::RecordBodyEvidenceMissing => "RecordBodyEvidenceMissing",
+            Self::ResolveAdaptiveFinish => "ResolveAdaptiveFinish",
+            Self::RequestAdaptiveCancel => "RequestAdaptiveCancel",
+            Self::RecordDeadlineObserved => "RecordDeadlineObserved",
         }
     }
 }

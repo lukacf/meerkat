@@ -21,6 +21,7 @@ meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat = { workspace = true, default-features = false }
 meerkat-mob = { workspace = true }
+meerkat-mob-adaptive = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-client = { workspace = true }
 async-trait = { workspace = true }

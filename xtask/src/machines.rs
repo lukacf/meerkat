@@ -3406,19 +3406,13 @@ impl CanonicalRegistry {
                 .validate()
                 .with_context(|| format!("validate composition {}", composition.name))?;
 
-            let machine_refs = composition
-                .machines
-                .iter()
-                .map(|instance| {
-                    by_name
-                        .get(instance.machine_name.as_str())
-                        .copied()
-                        .ok_or_else(|| {
-                            anyhow!("unknown machine in composition: {}", instance.machine_name)
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?;
+            for instance in &composition.machines {
+                if !by_name.contains_key(instance.machine_name.as_str()) {
+                    bail!("unknown machine in composition: {}", instance.machine_name);
+                }
+            }
 
+            let machine_refs = self.machines.iter().collect::<Vec<_>>();
             composition
                 .validate_against(&machine_refs)
                 .with_context(|| format!("cross-validate composition {}", composition.name))?;

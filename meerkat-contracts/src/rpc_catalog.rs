@@ -725,6 +725,48 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobFlowCancelResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/adaptive_start",
+                "Start an AdaptiveRun on an adaptive mobpack control mob",
+                "MobAdaptiveStartParams",
+                "MobAdaptiveStartResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_status",
+                "Read AdaptiveRun status from kernel state",
+                "MobAdaptiveRunParams",
+                "MobAdaptiveStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_layers",
+                "List AdaptiveRun layer ledger entries",
+                "MobAdaptiveRunParams",
+                "MobAdaptiveLayersResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_events",
+                "Read AdaptiveRun event projection entries",
+                "MobAdaptiveRunParams",
+                "MobAdaptiveEventsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_result",
+                "Read the final AdaptiveRun result body",
+                "MobAdaptiveRunParams",
+                "MobAdaptiveResultResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_cancel",
+                "Request host cancellation for an active AdaptiveRun",
+                "MobAdaptiveRunParams",
+                "MobAdaptiveCancelResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adaptive_retry_layer",
+                "Request a retry for a failed AdaptiveRun layer",
+                "MobAdaptiveRetryLayerParams",
+                "MobAdaptiveRetryLayerResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/spawn_helper",
                 "Spawn a helper member and wait for completion",
                 "MobSpawnHelperParams",

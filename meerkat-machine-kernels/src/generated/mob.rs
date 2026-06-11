@@ -13,6 +13,506 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_mob_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveDecisionKind {
+    #[default]
+    #[serde(rename = "RunLayer")]
+    RunLayer,
+    #[serde(rename = "Finish")]
+    Finish,
+}
+impl AdaptiveDecisionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunLayer => "RunLayer",
+            Self::Finish => "Finish",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveDecisionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunLayer" => Ok(Self::RunLayer),
+            "Finish" => Ok(Self::Finish),
+            other => Err(format!("invalid AdaptiveDecisionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveDecisionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveDecisionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveLayerAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Allowed")]
+    Allowed,
+}
+impl AdaptiveLayerAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Allowed => "Allowed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveLayerAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Allowed" => Ok(Self::Allowed),
+            other => Err(format!(
+                "invalid AdaptiveLayerAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveLayerAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveLayerAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveLayerDispositionKind {
+    #[default]
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+    #[serde(rename = "Retained")]
+    Retained,
+    #[serde(rename = "RetainedAsEvidence")]
+    RetainedAsEvidence,
+}
+impl AdaptiveLayerDispositionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Destroyed => "Destroyed",
+            Self::Retained => "Retained",
+            Self::RetainedAsEvidence => "RetainedAsEvidence",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveLayerDispositionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Destroyed" => Ok(Self::Destroyed),
+            "Retained" => Ok(Self::Retained),
+            "RetainedAsEvidence" => Ok(Self::RetainedAsEvidence),
+            other => Err(format!(
+                "invalid AdaptiveLayerDispositionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveLayerDispositionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveLayerDispositionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveLayerId(pub String);
+impl From<String> for AdaptiveLayerId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for AdaptiveLayerId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for AdaptiveLayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveLayerPhase {
+    #[default]
+    #[serde(rename = "Validating")]
+    Validating,
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "Provisioning")]
+    Provisioning,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Collecting")]
+    Collecting,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "SetupFailed")]
+    SetupFailed,
+    #[serde(rename = "RunFailed")]
+    RunFailed,
+    #[serde(rename = "ResultInvalid")]
+    ResultInvalid,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl AdaptiveLayerPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Validating => "Validating",
+            Self::Admitted => "Admitted",
+            Self::Provisioning => "Provisioning",
+            Self::Running => "Running",
+            Self::Collecting => "Collecting",
+            Self::Completed => "Completed",
+            Self::SetupFailed => "SetupFailed",
+            Self::RunFailed => "RunFailed",
+            Self::ResultInvalid => "ResultInvalid",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveLayerPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Validating" => Ok(Self::Validating),
+            "Admitted" => Ok(Self::Admitted),
+            "Provisioning" => Ok(Self::Provisioning),
+            "Running" => Ok(Self::Running),
+            "Collecting" => Ok(Self::Collecting),
+            "Completed" => Ok(Self::Completed),
+            "SetupFailed" => Ok(Self::SetupFailed),
+            "RunFailed" => Ok(Self::RunFailed),
+            "ResultInvalid" => Ok(Self::ResultInvalid),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid AdaptiveLayerPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveLayerPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveLayerPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveLayerSetupFaultKind {
+    #[default]
+    #[serde(rename = "MobCreateFailed")]
+    MobCreateFailed,
+    #[serde(rename = "SpawnFailed")]
+    SpawnFailed,
+    #[serde(rename = "WiringFailed")]
+    WiringFailed,
+    #[serde(rename = "CanceledDuringSetup")]
+    CanceledDuringSetup,
+    #[serde(rename = "Interrupted")]
+    Interrupted,
+}
+impl AdaptiveLayerSetupFaultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobCreateFailed => "MobCreateFailed",
+            Self::SpawnFailed => "SpawnFailed",
+            Self::WiringFailed => "WiringFailed",
+            Self::CanceledDuringSetup => "CanceledDuringSetup",
+            Self::Interrupted => "Interrupted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveLayerSetupFaultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobCreateFailed" => Ok(Self::MobCreateFailed),
+            "SpawnFailed" => Ok(Self::SpawnFailed),
+            "WiringFailed" => Ok(Self::WiringFailed),
+            "CanceledDuringSetup" => Ok(Self::CanceledDuringSetup),
+            "Interrupted" => Ok(Self::Interrupted),
+            other => Err(format!(
+                "invalid AdaptiveLayerSetupFaultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveLayerSetupFaultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveLayerSetupFaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveRunId(pub String);
+impl From<String> for AdaptiveRunId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for AdaptiveRunId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for AdaptiveRunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveRunPhase {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "CleanupRequired")]
+    CleanupRequired,
+    #[serde(rename = "EvidenceMissing")]
+    EvidenceMissing,
+    #[serde(rename = "Finished")]
+    Finished,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl AdaptiveRunPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::CleanupRequired => "CleanupRequired",
+            Self::EvidenceMissing => "EvidenceMissing",
+            Self::Finished => "Finished",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveRunPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "CleanupRequired" => Ok(Self::CleanupRequired),
+            "EvidenceMissing" => Ok(Self::EvidenceMissing),
+            "Finished" => Ok(Self::Finished),
+            "Failed" => Ok(Self::Failed),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid AdaptiveRunPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveRunPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveRunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdaptiveStopReason {
+    #[default]
+    #[serde(rename = "FinishDecision")]
+    FinishDecision,
+    #[serde(rename = "DepthLimit")]
+    DepthLimit,
+    #[serde(rename = "PlanLimit")]
+    PlanLimit,
+    #[serde(rename = "RepairLimit")]
+    RepairLimit,
+    #[serde(rename = "FailureLimit")]
+    FailureLimit,
+    #[serde(rename = "BudgetExhausted")]
+    BudgetExhausted,
+    #[serde(rename = "DeadlineExceeded")]
+    DeadlineExceeded,
+    #[serde(rename = "HostCancel")]
+    HostCancel,
+}
+impl AdaptiveStopReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FinishDecision => "FinishDecision",
+            Self::DepthLimit => "DepthLimit",
+            Self::PlanLimit => "PlanLimit",
+            Self::RepairLimit => "RepairLimit",
+            Self::FailureLimit => "FailureLimit",
+            Self::BudgetExhausted => "BudgetExhausted",
+            Self::DeadlineExceeded => "DeadlineExceeded",
+            Self::HostCancel => "HostCancel",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdaptiveStopReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FinishDecision" => Ok(Self::FinishDecision),
+            "DepthLimit" => Ok(Self::DepthLimit),
+            "PlanLimit" => Ok(Self::PlanLimit),
+            "RepairLimit" => Ok(Self::RepairLimit),
+            "FailureLimit" => Ok(Self::FailureLimit),
+            "BudgetExhausted" => Ok(Self::BudgetExhausted),
+            "DeadlineExceeded" => Ok(Self::DeadlineExceeded),
+            "HostCancel" => Ok(Self::HostCancel),
+            other => Err(format!("invalid AdaptiveStopReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdaptiveStopReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdaptiveStopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -4328,6 +4828,55 @@ pub struct State {
     pub desired_members: std::collections::BTreeSet<AgentIdentity>,
     pub members_to_spawn: std::collections::BTreeSet<AgentIdentity>,
     pub members_to_retire: std::collections::BTreeSet<AgentIdentity>,
+    pub adaptive_active_run: Option<AdaptiveRunId>,
+    pub adaptive_run_phase: std::collections::BTreeMap<AdaptiveRunId, AdaptiveRunPhase>,
+    pub adaptive_stop_reason: std::collections::BTreeMap<AdaptiveRunId, AdaptiveStopReason>,
+    pub adaptive_limit_max_depth: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_total_decisions: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_repair_attempts: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_layer_failures: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_attempts_per_layer: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_members_per_layer: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_total_spawned_members: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_active_members: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_retained_layer_mobs: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_aggregate_tokens: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_max_aggregate_tool_calls: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_limit_allowed_model_classes:
+        std::collections::BTreeMap<AdaptiveRunId, std::collections::BTreeSet<String>>,
+    pub adaptive_limit_allowed_tool_classes:
+        std::collections::BTreeMap<AdaptiveRunId, std::collections::BTreeSet<String>>,
+    pub adaptive_limit_allowed_skill_identities:
+        std::collections::BTreeMap<AdaptiveRunId, std::collections::BTreeSet<String>>,
+    pub adaptive_limit_allowed_auth_binding_refs:
+        std::collections::BTreeMap<AdaptiveRunId, std::collections::BTreeSet<String>>,
+    pub adaptive_deadline_ms: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_depth: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_total_decisions: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_repair_attempts: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_layer_failures: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_total_spawned_members: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_active_members: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_retained_layer_mobs: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_aggregate_token_reserved: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_aggregate_token_actual: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_aggregate_tool_call_reserved: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_aggregate_tool_call_actual: std::collections::BTreeMap<AdaptiveRunId, u64>,
+    pub adaptive_active_layer: std::collections::BTreeMap<AdaptiveRunId, AdaptiveLayerId>,
+    pub adaptive_layer_phase: std::collections::BTreeMap<AdaptiveLayerId, AdaptiveLayerPhase>,
+    pub adaptive_layer_attempt: std::collections::BTreeMap<AdaptiveLayerId, u64>,
+    pub adaptive_layer_member_count: std::collections::BTreeMap<AdaptiveLayerId, u64>,
+    pub adaptive_layer_plan_digest: std::collections::BTreeMap<AdaptiveLayerId, String>,
+    pub adaptive_layer_child_mob_id: std::collections::BTreeMap<AdaptiveLayerId, MobId>,
+    pub adaptive_layer_token_reservation: std::collections::BTreeMap<AdaptiveLayerId, u64>,
+    pub adaptive_layer_tool_call_reservation: std::collections::BTreeMap<AdaptiveLayerId, u64>,
+    pub adaptive_layer_run_id: std::collections::BTreeMap<AdaptiveLayerId, RunId>,
+    pub adaptive_layer_result_digest: std::collections::BTreeMap<AdaptiveLayerId, String>,
+    pub adaptive_layer_fault:
+        std::collections::BTreeMap<AdaptiveLayerId, AdaptiveLayerSetupFaultKind>,
+    pub adaptive_layer_disposition:
+        std::collections::BTreeMap<AdaptiveLayerId, AdaptiveLayerDispositionKind>,
+    pub adaptive_missing_body_digest: std::collections::BTreeMap<AdaptiveRunId, String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -4996,6 +5545,132 @@ pub mod inputs {
         pub now_ms: u64,
         pub candidate_overlap_ids: Vec<ResourceClaimId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InitializeAdaptiveRun {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub max_depth: u64,
+        pub max_total_decisions: u64,
+        pub max_repair_attempts: u64,
+        pub max_layer_failures: u64,
+        pub max_attempts_per_layer: u64,
+        pub max_members_per_layer: u64,
+        pub max_total_spawned_members: u64,
+        pub max_active_members: u64,
+        pub max_retained_layer_mobs: u64,
+        pub max_aggregate_tokens: u64,
+        pub max_aggregate_tool_calls: u64,
+        pub allowed_model_classes: std::collections::BTreeSet<String>,
+        pub allowed_tool_classes: std::collections::BTreeSet<String>,
+        pub allowed_skill_identities: std::collections::BTreeSet<String>,
+        pub allowed_auth_binding_refs: std::collections::BTreeSet<String>,
+        pub deadline_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordPlanningDecision {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub decision_kind: AdaptiveDecisionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordPlanRejected {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLayerAdmission {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub plan_digest: String,
+        pub child_mob_id: MobId,
+        pub member_count: u64,
+        pub token_reservation: u64,
+        pub tool_call_reservation: u64,
+        pub used_model_classes: std::collections::BTreeSet<String>,
+        pub used_tool_classes: std::collections::BTreeSet<String>,
+        pub used_skill_identities: std::collections::BTreeSet<String>,
+        pub used_auth_binding_refs: std::collections::BTreeSet<String>,
+        pub observed_at_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerProvisioned {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerRunStarted {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub child_run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IngestLayerTerminal {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub result_class: FlowRunPublicResultClassKind,
+        pub actual_tokens: u64,
+        pub actual_tool_calls: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerSetupFault {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub fault: AdaptiveLayerSetupFaultKind,
+        pub spawned_members: u64,
+        pub requested_members: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerResultValidated {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub result_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerResultInvalid {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerMobDestroyed {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerMobRetained {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub disposition: AdaptiveLayerDispositionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordCleanupResolved {
+        pub adaptive_run_id: AdaptiveRunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordBodyEvidenceMissing {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub missing_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdaptiveFinish {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub final_result_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestAdaptiveCancel {
+        pub adaptive_run_id: AdaptiveRunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordDeadlineObserved {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub observed_at_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5118,6 +5793,23 @@ pub enum Input {
     UpdateCoordinationWorkIntentStatus(inputs::UpdateCoordinationWorkIntentStatus),
     UpdateCoordinationResourceClaimStatus(inputs::UpdateCoordinationResourceClaimStatus),
     ObserveCoordinationResourceClaimOverlap(inputs::ObserveCoordinationResourceClaimOverlap),
+    InitializeAdaptiveRun(inputs::InitializeAdaptiveRun),
+    RecordPlanningDecision(inputs::RecordPlanningDecision),
+    RecordPlanRejected(inputs::RecordPlanRejected),
+    ResolveLayerAdmission(inputs::ResolveLayerAdmission),
+    RecordLayerProvisioned(inputs::RecordLayerProvisioned),
+    RecordLayerRunStarted(inputs::RecordLayerRunStarted),
+    IngestLayerTerminal(inputs::IngestLayerTerminal),
+    RecordLayerSetupFault(inputs::RecordLayerSetupFault),
+    RecordLayerResultValidated(inputs::RecordLayerResultValidated),
+    RecordLayerResultInvalid(inputs::RecordLayerResultInvalid),
+    RecordLayerMobDestroyed(inputs::RecordLayerMobDestroyed),
+    RecordLayerMobRetained(inputs::RecordLayerMobRetained),
+    RecordCleanupResolved(inputs::RecordCleanupResolved),
+    RecordBodyEvidenceMissing(inputs::RecordBodyEvidenceMissing),
+    ResolveAdaptiveFinish(inputs::ResolveAdaptiveFinish),
+    RequestAdaptiveCancel(inputs::RequestAdaptiveCancel),
+    RecordDeadlineObserved(inputs::RecordDeadlineObserved),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -5276,6 +5968,23 @@ impl Input {
             Self::ObserveCoordinationResourceClaimOverlap(_) => {
                 InputKind::ObserveCoordinationResourceClaimOverlap
             }
+            Self::InitializeAdaptiveRun(_) => InputKind::InitializeAdaptiveRun,
+            Self::RecordPlanningDecision(_) => InputKind::RecordPlanningDecision,
+            Self::RecordPlanRejected(_) => InputKind::RecordPlanRejected,
+            Self::ResolveLayerAdmission(_) => InputKind::ResolveLayerAdmission,
+            Self::RecordLayerProvisioned(_) => InputKind::RecordLayerProvisioned,
+            Self::RecordLayerRunStarted(_) => InputKind::RecordLayerRunStarted,
+            Self::IngestLayerTerminal(_) => InputKind::IngestLayerTerminal,
+            Self::RecordLayerSetupFault(_) => InputKind::RecordLayerSetupFault,
+            Self::RecordLayerResultValidated(_) => InputKind::RecordLayerResultValidated,
+            Self::RecordLayerResultInvalid(_) => InputKind::RecordLayerResultInvalid,
+            Self::RecordLayerMobDestroyed(_) => InputKind::RecordLayerMobDestroyed,
+            Self::RecordLayerMobRetained(_) => InputKind::RecordLayerMobRetained,
+            Self::RecordCleanupResolved(_) => InputKind::RecordCleanupResolved,
+            Self::RecordBodyEvidenceMissing(_) => InputKind::RecordBodyEvidenceMissing,
+            Self::ResolveAdaptiveFinish(_) => InputKind::ResolveAdaptiveFinish,
+            Self::RequestAdaptiveCancel(_) => InputKind::RequestAdaptiveCancel,
+            Self::RecordDeadlineObserved(_) => InputKind::RecordDeadlineObserved,
         }
     }
 }
@@ -5395,6 +6104,23 @@ pub enum InputKind {
     UpdateCoordinationWorkIntentStatus,
     UpdateCoordinationResourceClaimStatus,
     ObserveCoordinationResourceClaimOverlap,
+    InitializeAdaptiveRun,
+    RecordPlanningDecision,
+    RecordPlanRejected,
+    ResolveLayerAdmission,
+    RecordLayerProvisioned,
+    RecordLayerRunStarted,
+    IngestLayerTerminal,
+    RecordLayerSetupFault,
+    RecordLayerResultValidated,
+    RecordLayerResultInvalid,
+    RecordLayerMobDestroyed,
+    RecordLayerMobRetained,
+    RecordCleanupResolved,
+    RecordBodyEvidenceMissing,
+    ResolveAdaptiveFinish,
+    RequestAdaptiveCancel,
+    RecordDeadlineObserved,
 }
 
 pub mod signals {
@@ -6297,6 +7023,82 @@ pub mod effects {
         pub event_kind: MobCoordinationEventKind,
         pub sequence: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveRunInitialized {
+        pub adaptive_run_id: AdaptiveRunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptivePlanningDecisionRecorded {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub decision_kind: AdaptiveDecisionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptivePlanRejected {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerAdmissionResolved {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub admission: AdaptiveLayerAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerProvisioned {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerRunStarted {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+        pub child_run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerTerminalIngested {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub result_class: FlowRunPublicResultClassKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerSetupFaultRecorded {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub fault: AdaptiveLayerSetupFaultKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerResultValidated {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub result_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerResultInvalid {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerCleanupObserved {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub disposition: AdaptiveLayerDispositionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveCleanupResolved {
+        pub adaptive_run_id: AdaptiveRunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveBodyEvidenceMissing {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub missing_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveRunTerminalized {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub reason: AdaptiveStopReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6394,6 +7196,20 @@ pub enum Effect {
     WorkIntentStatusChanged(effects::WorkIntentStatusChanged),
     ResourceClaimStatusChanged(effects::ResourceClaimStatusChanged),
     ResourceClaimOverlapObserved(effects::ResourceClaimOverlapObserved),
+    AdaptiveRunInitialized(effects::AdaptiveRunInitialized),
+    AdaptivePlanningDecisionRecorded(effects::AdaptivePlanningDecisionRecorded),
+    AdaptivePlanRejected(effects::AdaptivePlanRejected),
+    AdaptiveLayerAdmissionResolved(effects::AdaptiveLayerAdmissionResolved),
+    AdaptiveLayerProvisioned(effects::AdaptiveLayerProvisioned),
+    AdaptiveLayerRunStarted(effects::AdaptiveLayerRunStarted),
+    AdaptiveLayerTerminalIngested(effects::AdaptiveLayerTerminalIngested),
+    AdaptiveLayerSetupFaultRecorded(effects::AdaptiveLayerSetupFaultRecorded),
+    AdaptiveLayerResultValidated(effects::AdaptiveLayerResultValidated),
+    AdaptiveLayerResultInvalid(effects::AdaptiveLayerResultInvalid),
+    AdaptiveLayerCleanupObserved(effects::AdaptiveLayerCleanupObserved),
+    AdaptiveCleanupResolved(effects::AdaptiveCleanupResolved),
+    AdaptiveBodyEvidenceMissing(effects::AdaptiveBodyEvidenceMissing),
+    AdaptiveRunTerminalized(effects::AdaptiveRunTerminalized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -6490,6 +7306,20 @@ pub enum EffectKind {
     WorkIntentStatusChanged,
     ResourceClaimStatusChanged,
     ResourceClaimOverlapObserved,
+    AdaptiveRunInitialized,
+    AdaptivePlanningDecisionRecorded,
+    AdaptivePlanRejected,
+    AdaptiveLayerAdmissionResolved,
+    AdaptiveLayerProvisioned,
+    AdaptiveLayerRunStarted,
+    AdaptiveLayerTerminalIngested,
+    AdaptiveLayerSetupFaultRecorded,
+    AdaptiveLayerResultValidated,
+    AdaptiveLayerResultInvalid,
+    AdaptiveLayerCleanupObserved,
+    AdaptiveCleanupResolved,
+    AdaptiveBodyEvidenceMissing,
+    AdaptiveRunTerminalized,
 }
 
 #[allow(non_camel_case_types)]
@@ -6581,6 +7411,28 @@ pub enum TransitionId {
     ResolveCreateMobAdmissionDeniedStopped,
     ResolveCreateMobAdmissionDeniedCompleted,
     ResolveCreateMobAdmissionDeniedDestroyed,
+    InitializeAdaptiveRunRunningRunning,
+    RecordAdaptivePlanningDecisionActiveRunning,
+    RecordAdaptivePlanningDecisionPlanLimitRunning,
+    RecordAdaptivePlanRejectedActiveRunning,
+    RecordAdaptivePlanRejectedRepairLimitRunning,
+    ResolveAdaptiveLayerAdmissionAllowedRunning,
+    ResolveAdaptiveLayerAdmissionRejectedRunning,
+    RecordAdaptiveLayerProvisionedRunning,
+    RecordAdaptiveLayerRunStartedRunning,
+    IngestAdaptiveLayerTerminalSuccessRunning,
+    IngestAdaptiveLayerTerminalFailureRunning,
+    RecordAdaptiveLayerSetupFaultRunning,
+    RecordAdaptiveLayerResultValidatedRunning,
+    RecordAdaptiveLayerResultInvalidRunning,
+    RecordAdaptiveLayerMobDestroyedRunning,
+    RecordAdaptiveLayerMobRetainedRunning,
+    RecordAdaptiveLayerMobRetainedCleanupRequiredRunning,
+    RecordAdaptiveCleanupResolvedRunning,
+    RecordAdaptiveBodyEvidenceMissingRunning,
+    ResolveAdaptiveFinishRunningRunning,
+    RequestAdaptiveCancelRunningRunning,
+    RecordAdaptiveDeadlineObservedExpiredRunning,
     ResolveProfileMutationAdmissionAllowedRunning,
     ResolveProfileMutationAdmissionAllowedStopped,
     ResolveProfileMutationAdmissionAllowedCompleted,
@@ -7392,5 +8244,48 @@ pub fn initial_state() -> State {
         desired_members: Default::default(),
         members_to_spawn: Default::default(),
         members_to_retire: Default::default(),
+        adaptive_active_run: None,
+        adaptive_run_phase: Default::default(),
+        adaptive_stop_reason: Default::default(),
+        adaptive_limit_max_depth: Default::default(),
+        adaptive_limit_max_total_decisions: Default::default(),
+        adaptive_limit_max_repair_attempts: Default::default(),
+        adaptive_limit_max_layer_failures: Default::default(),
+        adaptive_limit_max_attempts_per_layer: Default::default(),
+        adaptive_limit_max_members_per_layer: Default::default(),
+        adaptive_limit_max_total_spawned_members: Default::default(),
+        adaptive_limit_max_active_members: Default::default(),
+        adaptive_limit_max_retained_layer_mobs: Default::default(),
+        adaptive_limit_max_aggregate_tokens: Default::default(),
+        adaptive_limit_max_aggregate_tool_calls: Default::default(),
+        adaptive_limit_allowed_model_classes: Default::default(),
+        adaptive_limit_allowed_tool_classes: Default::default(),
+        adaptive_limit_allowed_skill_identities: Default::default(),
+        adaptive_limit_allowed_auth_binding_refs: Default::default(),
+        adaptive_deadline_ms: Default::default(),
+        adaptive_depth: Default::default(),
+        adaptive_total_decisions: Default::default(),
+        adaptive_repair_attempts: Default::default(),
+        adaptive_layer_failures: Default::default(),
+        adaptive_total_spawned_members: Default::default(),
+        adaptive_active_members: Default::default(),
+        adaptive_retained_layer_mobs: Default::default(),
+        adaptive_aggregate_token_reserved: Default::default(),
+        adaptive_aggregate_token_actual: Default::default(),
+        adaptive_aggregate_tool_call_reserved: Default::default(),
+        adaptive_aggregate_tool_call_actual: Default::default(),
+        adaptive_active_layer: Default::default(),
+        adaptive_layer_phase: Default::default(),
+        adaptive_layer_attempt: Default::default(),
+        adaptive_layer_member_count: Default::default(),
+        adaptive_layer_plan_digest: Default::default(),
+        adaptive_layer_child_mob_id: Default::default(),
+        adaptive_layer_token_reservation: Default::default(),
+        adaptive_layer_tool_call_reservation: Default::default(),
+        adaptive_layer_run_id: Default::default(),
+        adaptive_layer_result_digest: Default::default(),
+        adaptive_layer_fault: Default::default(),
+        adaptive_layer_disposition: Default::default(),
+        adaptive_missing_body_digest: Default::default(),
     }
 }

@@ -474,6 +474,8 @@ pub struct MobToolAuthorityContext {
     can_create_mobs: bool,
     #[serde(default)]
     can_mutate_profiles: bool,
+    #[serde(default)]
+    can_run_adaptive_packs: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     managed_mob_scope: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -487,6 +489,13 @@ pub struct MobToolAuthorityContext {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct MobToolAuthorityContextSeal {
     generated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MobToolAuthorityCapabilities {
+    can_create_mobs: bool,
+    can_mutate_profiles: bool,
+    can_run_adaptive_packs: bool,
 }
 
 impl MobToolAuthorityContextSeal {
@@ -508,8 +517,7 @@ impl MobToolAuthorityContext {
     )]
     fn from_generated_parts(
         principal_token: OpaquePrincipalToken,
-        can_create_mobs: bool,
-        can_mutate_profiles: bool,
+        capabilities: MobToolAuthorityCapabilities,
         managed_mob_scope: BTreeSet<String>,
         spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
         caller_provenance: Option<MobToolCallerProvenance>,
@@ -521,8 +529,9 @@ impl MobToolAuthorityContext {
         Ok(Self {
             generated_authority_seal: MobToolAuthorityContextSeal::generated(),
             principal_token,
-            can_create_mobs,
-            can_mutate_profiles,
+            can_create_mobs: capabilities.can_create_mobs,
+            can_mutate_profiles: capabilities.can_mutate_profiles,
+            can_run_adaptive_packs: capabilities.can_run_adaptive_packs,
             managed_mob_scope,
             spawn_profile_scope,
             caller_provenance,
@@ -536,6 +545,7 @@ impl MobToolAuthorityContext {
         principal_token: OpaquePrincipalToken,
         can_create_mobs: bool,
         can_mutate_profiles: bool,
+        can_run_adaptive_packs: bool,
         managed_mob_scope: BTreeSet<String>,
         spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
         caller_provenance: Option<MobToolCallerProvenance>,
@@ -543,8 +553,11 @@ impl MobToolAuthorityContext {
     ) -> Self {
         Self::from_generated_parts(
             principal_token,
-            can_create_mobs,
-            can_mutate_profiles,
+            MobToolAuthorityCapabilities {
+                can_create_mobs,
+                can_mutate_profiles,
+                can_run_adaptive_packs,
+            },
             managed_mob_scope,
             spawn_profile_scope,
             caller_provenance,
@@ -576,6 +589,10 @@ impl MobToolAuthorityContext {
 
     pub fn can_mutate_profiles(&self) -> bool {
         self.is_generated_authority_context() && self.can_mutate_profiles
+    }
+
+    pub fn can_run_adaptive_packs(&self) -> bool {
+        self.is_generated_authority_context() && self.can_run_adaptive_packs
     }
 
     pub fn managed_mob_scope(&self) -> &BTreeSet<String> {
@@ -663,6 +680,7 @@ pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
     principal_token: OpaquePrincipalToken,
     can_create_mobs: bool,
     can_mutate_profiles: bool,
+    can_run_adaptive_packs: bool,
     managed_mob_scope: BTreeSet<String>,
     spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
     caller_provenance: Option<MobToolCallerProvenance>,
@@ -678,8 +696,11 @@ pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
     }
     MobToolAuthorityContext::from_generated_parts(
         principal_token,
-        can_create_mobs,
-        can_mutate_profiles,
+        MobToolAuthorityCapabilities {
+            can_create_mobs,
+            can_mutate_profiles,
+            can_run_adaptive_packs,
+        },
         managed_mob_scope,
         spawn_profile_scope,
         caller_provenance,
@@ -2023,6 +2044,7 @@ mod tests {
             OpaquePrincipalToken::new("generated-test"),
             false,
             false,
+            false,
             BTreeSet::new(),
             BTreeMap::from([(
                 "mob-1".to_string(),
@@ -2044,6 +2066,7 @@ mod tests {
             OpaquePrincipalToken::new("generated-test"),
             true,
             true,
+            false,
             BTreeSet::from(["mob-1".to_string()]),
             BTreeMap::from([(
                 "mob-1".to_string(),
@@ -2071,6 +2094,7 @@ mod tests {
             OpaquePrincipalToken::new("generated-test"),
             true,
             true,
+            false,
             BTreeSet::from(["mob-1".to_string()]),
             BTreeMap::new(),
             None,

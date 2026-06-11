@@ -853,10 +853,13 @@ impl CompositionSchema {
         }
 
         // Validate handoff protocols (structural checks only — no schema cross-ref here).
-        let _protocol_names = unique_names(
-            self.handoff_protocols.iter().map(|p| p.name.as_str()),
-            "handoff protocol",
-        )?;
+        let protocol_keys = self
+            .handoff_protocols
+            .iter()
+            .map(|p| format!("{}::{}::{}", p.name, p.producer_instance, p.effect_variant))
+            .collect::<Vec<_>>();
+        let _protocol_keys =
+            unique_names(protocol_keys.iter().map(AsRef::as_ref), "handoff protocol")?;
         for protocol in &self.handoff_protocols {
             let _ = unique_names(
                 protocol.correlation_fields.iter().map(AsRef::as_ref),

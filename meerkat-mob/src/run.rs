@@ -459,6 +459,23 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
             | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
             | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
+            | mob_dsl::MobMachineInput::InitializeAdaptiveRun { .. }
+            | mob_dsl::MobMachineInput::RecordPlanningDecision { .. }
+            | mob_dsl::MobMachineInput::RecordPlanRejected { .. }
+            | mob_dsl::MobMachineInput::ResolveLayerAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordLayerProvisioned { .. }
+            | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
+            | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
+            | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobRetained { .. }
+            | mob_dsl::MobMachineInput::RecordCleanupResolved { .. }
+            | mob_dsl::MobMachineInput::RecordBodyEvidenceMissing { .. }
+            | mob_dsl::MobMachineInput::ResolveAdaptiveFinish { .. }
+            | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
+            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. }
     };
 }
 
@@ -1625,7 +1642,24 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
             | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
             | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
-            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. } => {
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
+            | mob_dsl::MobMachineInput::InitializeAdaptiveRun { .. }
+            | mob_dsl::MobMachineInput::RecordPlanningDecision { .. }
+            | mob_dsl::MobMachineInput::RecordPlanRejected { .. }
+            | mob_dsl::MobMachineInput::ResolveLayerAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordLayerProvisioned { .. }
+            | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
+            | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
+            | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobRetained { .. }
+            | mob_dsl::MobMachineInput::RecordCleanupResolved { .. }
+            | mob_dsl::MobMachineInput::RecordBodyEvidenceMissing { .. }
+            | mob_dsl::MobMachineInput::ResolveAdaptiveFinish { .. }
+            | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
+            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));

@@ -56,6 +56,10 @@ pub enum PackValidationError {
     },
     #[error("mobpack deploy policy is invalid: {0}")]
     DeployPolicy(#[from] DeployPolicyError),
+    #[error("adaptive mobpack file `{path}` is missing")]
+    MissingAdaptiveFile { path: String },
+    #[error("adaptive mobpack file `{path}` is invalid: {reason}")]
+    InvalidAdaptiveFile { path: String, reason: String },
 }
 
 impl From<std::io::Error> for PackValidationError {

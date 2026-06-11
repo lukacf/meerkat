@@ -9,6 +9,7 @@ use crate::vocabulary::{
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -120,6 +121,7 @@ pub(crate) fn validate_extracted_pack_files(
     ensure_no_trust_section(files)?;
     let manifest = parse_manifest(files)?;
     validate_manifest_identity(&manifest)?;
+    validate_adaptive_files(&manifest, files)?;
     let definition = parse_definition(files)?;
     reject_realm_refs(&definition)?;
     validate_skill_paths(&definition, files)?;
@@ -127,6 +129,81 @@ pub(crate) fn validate_extracted_pack_files(
         manifest,
         definition,
     })
+}
+
+fn validate_adaptive_files(
+    manifest: &MobpackManifest,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), PackValidationError> {
+    let Some(adaptive) = &manifest.adaptive else {
+        return Ok(());
+    };
+    let policy_bytes = require_adaptive_file(files, "adaptive/policies.toml")?;
+    let observed_policy_digest = format!("sha256:{}", hex::encode(Sha256::digest(policy_bytes)));
+    if adaptive.policy_digest != observed_policy_digest {
+        return Err(PackValidationError::InvalidAdaptiveFile {
+            path: "adaptive/policies.toml".to_string(),
+            reason: format!(
+                "policy_digest mismatch: manifest has `{}`, observed `{observed_policy_digest}`",
+                adaptive.policy_digest
+            ),
+        });
+    }
+    require_adaptive_file(files, "adaptive/flowmaster.prompt.md")?;
+    require_adaptive_file(files, "adaptive/layer-decision.schema.json")?;
+    let registry_bytes = require_adaptive_file(files, "schemas/registry.json")?;
+    let registry: serde_json::Value = serde_json::from_slice(registry_bytes).map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: "schemas/registry.json".to_string(),
+            reason: err.to_string(),
+        }
+    })?;
+    let Some(registry_obj) = registry.as_object() else {
+        return Err(PackValidationError::InvalidAdaptiveFile {
+            path: "schemas/registry.json".to_string(),
+            reason: "must be a JSON object mapping schema names to bundled files".to_string(),
+        });
+    };
+    for schema_name in &adaptive.required_schemas {
+        let Some(schema_file) = registry_obj
+            .get(schema_name)
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Err(PackValidationError::InvalidAdaptiveFile {
+                path: "schemas/registry.json".to_string(),
+                reason: format!("required schema `{schema_name}` is not registered"),
+            });
+        };
+        validate_relative_adaptive_schema_path(schema_file)?;
+        require_adaptive_file(files, schema_file)?;
+    }
+    Ok(())
+}
+
+fn require_adaptive_file<'a>(
+    files: &'a BTreeMap<String, Vec<u8>>,
+    path: &str,
+) -> Result<&'a [u8], PackValidationError> {
+    files
+        .get(path)
+        .map(Vec::as_slice)
+        .ok_or_else(|| PackValidationError::MissingAdaptiveFile {
+            path: path.to_string(),
+        })
+}
+
+fn validate_relative_adaptive_schema_path(path: &str) -> Result<(), PackValidationError> {
+    if !path.starts_with("schemas/")
+        || path.contains("..")
+        || path.contains('\\')
+        || path.ends_with('/')
+    {
+        return Err(PackValidationError::InvalidAdaptiveFile {
+            path: "schemas/registry.json".to_string(),
+            reason: format!("schema path `{path}` must stay under schemas/"),
+        });
+    }
+    Ok(())
 }
 
 fn parse_manifest(
@@ -505,6 +582,62 @@ mod tests {
                 if skill_name == "review"
                     && path == "./skills/review.md"
                     && reason.contains("canonical archive path")
+        ));
+    }
+
+    #[test]
+    fn test_adaptive_manifest_requires_typed_payload_files_and_policy_digest() {
+        let temp = fixture_mob_dir();
+        let policy = b"[limits]\nmax_depth = 1\n";
+        let policy_digest = format!("sha256:{}", hex::encode(Sha256::digest(policy)));
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            format!(
+                "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[adaptive]\nflowmaster_profile = \"flowmaster\"\nobjective_class = \"audit\"\npolicy_digest = \"{policy_digest}\"\nrequired_schemas = [\"finding-set\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("adaptive")).unwrap();
+        std::fs::create_dir_all(temp.path().join("schemas")).unwrap();
+        std::fs::write(temp.path().join("adaptive/policies.toml"), policy).unwrap();
+        std::fs::write(temp.path().join("adaptive/flowmaster.prompt.md"), "Plan").unwrap();
+        std::fs::write(
+            temp.path().join("adaptive/layer-decision.schema.json"),
+            br#"{"type":"object"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("schemas/registry.json"),
+            br#"{"finding-set":"schemas/finding-set.schema.json"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("schemas/finding-set.schema.json"),
+            br#"{"type":"object"}"#,
+        )
+        .unwrap();
+
+        pack_directory(temp.path(), None).expect("complete adaptive payload validates");
+
+        std::fs::write(
+            temp.path().join("adaptive/policies.toml"),
+            b"[limits]\nmax_depth = 2\n",
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidAdaptiveFile { path, reason }
+                if path == "adaptive/policies.toml" && reason.contains("policy_digest mismatch")
+        ));
+
+        std::fs::write(temp.path().join("adaptive/policies.toml"), policy).unwrap();
+        std::fs::remove_file(temp.path().join("adaptive/layer-decision.schema.json")).unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::MissingAdaptiveFile { path }
+                if path == "adaptive/layer-decision.schema.json"
         ));
     }
 

@@ -258,6 +258,34 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
+  async startAdaptiveRun(objective: string): Promise<Record<string, unknown>> {
+    return this.client.startMobAdaptiveRun(this.mobId, objective);
+  }
+
+  async adaptiveStatus(adaptiveRunId: string): Promise<Record<string, unknown>> {
+    return this.client.getMobAdaptiveStatus(this.mobId, adaptiveRunId);
+  }
+
+  async adaptiveLayers(adaptiveRunId: string): Promise<Record<string, unknown>[]> {
+    return this.client.listMobAdaptiveLayers(this.mobId, adaptiveRunId);
+  }
+
+  async adaptiveEvents(adaptiveRunId: string): Promise<Record<string, unknown>[]> {
+    return this.client.listMobAdaptiveEvents(this.mobId, adaptiveRunId);
+  }
+
+  async adaptiveResult(adaptiveRunId: string): Promise<Record<string, unknown>> {
+    return this.client.getMobAdaptiveResult(this.mobId, adaptiveRunId);
+  }
+
+  async cancelAdaptiveRun(adaptiveRunId: string): Promise<boolean> {
+    return this.client.cancelMobAdaptiveRun(this.mobId, adaptiveRunId);
+  }
+
+  async retryAdaptiveLayer(adaptiveRunId: string, layerId: string): Promise<boolean> {
+    return this.client.retryMobAdaptiveLayer(this.mobId, adaptiveRunId, layerId);
+  }
+
   async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
     return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
   }

@@ -104,8 +104,10 @@ enum SessionCommand {
     },
     HotSwapLlmIdentity {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
-        identity: SessionLlmIdentity,
-        request_policy: meerkat_core::SessionLlmRequestPolicy,
+        // Boxed: identity + request policy are large inline values (typed
+        // provider-params carrier); keep command variants size-balanced.
+        identity: Box<SessionLlmIdentity>,
+        request_policy: Box<meerkat_core::SessionLlmRequestPolicy>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -119,7 +121,8 @@ enum SessionCommand {
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     SetToolVisibilityState {
-        state: Option<meerkat_core::SessionToolVisibilityState>,
+        // Boxed: the visibility state carries full ToolName-keyed catalogs.
+        state: Option<Box<meerkat_core::SessionToolVisibilityState>>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     SyncSystemContextState {
@@ -127,7 +130,8 @@ enum SessionCommand {
     },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     SyncSessionFromDurableSnapshot {
-        session: meerkat_core::Session,
+        // Boxed: a full Session is by far the largest payload on this channel.
+        session: Box<meerkat_core::Session>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     /// Export the full session (messages + metadata) for persistence.
@@ -1176,7 +1180,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::SetToolVisibilityState { state, reply_tx })
+            .send(SessionCommand::SetToolVisibilityState {
+                state: state.map(Box::new),
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -1834,7 +1841,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx })
+            .send(SessionCommand::SyncSessionFromDurableSnapshot {
+                session: Box::new(session),
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -2822,8 +2832,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .command_tx
             .send(SessionCommand::HotSwapLlmIdentity {
                 client,
-                identity,
-                request_policy,
+                identity: Box::new(identity),
+                request_policy: Box::new(request_policy),
                 reply_tx,
             })
             .await
@@ -3543,9 +3553,10 @@ async fn session_task<A: SessionAgent>(
                 request_policy,
                 reply_tx,
             } => {
-                let result = agent.hot_swap_llm_identity(client, identity.clone(), request_policy);
+                let result =
+                    agent.hot_swap_llm_identity(client, (*identity).clone(), *request_policy);
                 if result.is_ok() {
-                    control.llm_identity_tx.send_replace(identity);
+                    control.llm_identity_tx.send_replace(*identity);
                 }
                 let _ = reply_tx.send(result);
                 continue;
@@ -3565,7 +3576,7 @@ async fn session_task<A: SessionAgent>(
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::SetToolVisibilityState { state, reply_tx } => {
-                let _ = reply_tx.send(agent.set_tool_visibility_state(state));
+                let _ = reply_tx.send(agent.set_tool_visibility_state(state.map(|state| *state)));
                 continue;
             }
             SessionCommand::SyncSystemContextState { reply_tx } => {
@@ -3583,7 +3594,7 @@ async fn session_task<A: SessionAgent>(
                     });
                 let result = match durable_deferred_turn_state {
                     Ok(durable_deferred_turn_state) => {
-                        let result = agent.sync_session_from_durable_snapshot(session);
+                        let result = agent.sync_session_from_durable_snapshot(*session);
                         if result.is_ok()
                             && let Some(durable_deferred_turn_state) = durable_deferred_turn_state
                         {

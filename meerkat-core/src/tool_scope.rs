@@ -1053,7 +1053,7 @@ mod generated_visibility_test_owner {
             )?;
             self.apply_for_apply(
                 input(
-                    "SyncVisibilityRevisions",
+                    "ReplaceVisibilityState",
                     [
                         (
                             "capability_base_filter",
@@ -1105,7 +1105,7 @@ mod generated_visibility_test_owner {
                         ),
                     ],
                 ),
-                "SyncVisibilityRevisions",
+                "ReplaceVisibilityState",
             )?;
             Ok(())
         }
@@ -3223,7 +3223,7 @@ mod tests {
             .expect_err("local replacement must reject empty deferred-tool authority");
 
         assert!(
-            err.to_string().contains("SyncVisibilityRevisions"),
+            err.to_string().contains("ReplaceVisibilityState"),
             "generated visibility authority should reject the missing deferred authority: {err}"
         );
         assert!(
@@ -3264,7 +3264,7 @@ mod tests {
             .expect_err("local replacement must reject forged deferred-tool authority");
 
         assert!(
-            err.to_string().contains("SyncVisibilityRevisions"),
+            err.to_string().contains("ReplaceVisibilityState"),
             "generated visibility authority should reject the mismatched deferred authority: {err}"
         );
         assert!(
@@ -3496,7 +3496,7 @@ mod tests {
             .expect_err("generated visibility authority must reject empty inherited witnesses");
 
         assert!(
-            err.to_string().contains("SyncVisibilityRevisions"),
+            err.to_string().contains("ReplaceVisibilityState"),
             "generated visibility authority should reject empty inherited witness: {err}"
         );
         assert!(

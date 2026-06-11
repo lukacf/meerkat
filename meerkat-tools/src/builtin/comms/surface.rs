@@ -142,7 +142,7 @@ impl AgentToolDispatcher for CommsToolSurface {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
+    use meerkat_comms::{CommsConfig, Keypair};
     use meerkat_core::ToolUnavailableReason;
 
     fn make_keypair() -> Keypair {
@@ -151,17 +151,9 @@ mod tests {
 
     fn make_tool_context() -> (Arc<Router>, TrustedPeersView) {
         let keypair = make_keypair();
-        let peer_keypair = make_keypair();
-        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "test-peer".to_string(),
-            pubkey: peer_keypair.public_key(),
-            addr: "tcp://127.0.0.1:4200".to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
@@ -206,16 +198,9 @@ mod tests {
 
     #[test]
     fn test_comms_callability_true_with_trusted_peers() {
-        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "trusted".to_string(),
-            pubkey: make_keypair().public_key(),
-            addr: "inproc://trusted".to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::new(
             make_keypair(),
-            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
@@ -235,7 +220,6 @@ mod tests {
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::new(
             make_keypair(),
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,

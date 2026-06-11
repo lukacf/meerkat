@@ -10,11 +10,10 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::{CommsConfig, Keypair, TrustedPeers};
+use crate::{CommsConfig, Keypair};
 use crate::{Router, TrustedPeersView};
 use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
@@ -24,8 +23,8 @@ use meerkat_core::BlobId;
 use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
+    CommsCommand, InputStreamMode, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource,
+    PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
@@ -636,14 +635,14 @@ fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
     })
 }
 
-/// Validate a canonical [`PeerId`] against the runtime-facing trust set.
+/// Validate a canonical [`PeerId`] against the runtime-facing trust store.
 fn ensure_peer_id_is_trusted(ctx: &ToolContext, peer_id: &PeerId) -> Result<(), String> {
-    let peers = ctx.trusted_peers.snapshot();
-    match peers.find_by_peer_id(peer_id) {
-        Some(_) => Ok(()),
-        None => Err(format!(
+    if ctx.trusted_peers.contains(peer_id) {
+        Ok(())
+    } else {
+        Err(format!(
             "peer_not_found_or_not_trusted: peer '{peer_id}' is not found or not trusted",
-        )),
+        ))
     }
 }
 
@@ -692,69 +691,22 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 
 fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
-    let peers = ctx.trusted_peers.snapshot();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
-    let peer_id_counts: HashMap<PeerId, usize> = peers
-        .iter()
-        .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
-        .fold(HashMap::new(), |mut counts, peer| {
-            *counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
-            counts
-        });
-    peers
-        .iter()
-        .filter(|p| p.pubkey != self_pubkey)
-        .filter_map(|p| {
-            if p.pubkey.is_zero() {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    "skipping zero-pubkey trusted peer in MCP peer directory"
-                );
-                return None;
-            }
-            let peer_id = p.pubkey.to_peer_id();
-            if peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    peer_id = %peer_id,
-                    "skipping duplicate trusted peer id in MCP peer directory"
-                );
-                return None;
-            }
-            let name = match PeerName::new(p.name.clone()) {
-                Ok(name) => name,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        error = %err,
-                        "skipping trusted peer with invalid name in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            let address = match PeerAddress::parse(&p.addr) {
-                Ok(address) => address,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        address = %p.addr,
-                        error = %err,
-                        "skipping trusted peer with invalid address in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            Some(PeerDirectoryEntry {
-                name,
-                peer_id,
-                address,
-                source: PeerDirectorySource::Trusted,
-                sendable_kinds: sendable_kinds.clone(),
-                capabilities: PeerCapabilitySet::default(),
-                meta: p.meta.clone(),
-            })
+    // The trust store is PeerId-keyed and every entry is validated typed
+    // material — duplicate identities, zero pubkeys, and invalid names or
+    // addresses are structurally impossible here.
+    ctx.trusted_peers
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.pubkey != self_pubkey)
+        .map(|entry| PeerDirectoryEntry {
+            name: entry.name,
+            peer_id: entry.peer_id,
+            address: entry.address,
+            source: PeerDirectorySource::Trusted,
+            sendable_kinds: sendable_kinds.clone(),
+            capabilities: PeerCapabilitySet::default(),
+            meta: entry.meta,
         })
         .collect()
 }
@@ -780,7 +732,7 @@ fn peer_sendability_tool_name(kind: PeerSendability) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{CommsRuntime, PubKey, TrustedPeer};
+    use crate::{CommsRuntime, PubKey};
     use meerkat_contracts::wire::supervisor_bridge::{
         BridgeAck, BridgeCommand, BridgePeerSpec, BridgeReply, BridgeSupervisorPayload,
         supervisor_bridge_current_protocol_version,
@@ -1815,53 +1767,6 @@ mod tests {
         assert!(peer["meta"].is_object());
     }
 
-    #[test]
-    fn test_runtime_less_peer_directory_skips_duplicate_canonical_peer_ids() {
-        let sender_keypair = Keypair::generate();
-        let peer_keypair = Keypair::generate();
-        let peer_pubkey = peer_keypair.public_key();
-        let peer_id = peer_pubkey.to_peer_id();
-        let trusted_peers = TrustedPeers::from_peers(vec![
-            TrustedPeer {
-                name: "runtime-less-primary".to_string(),
-                pubkey: peer_pubkey,
-                addr: "inproc://runtime-less-primary".to_string(),
-                meta: crate::PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: "runtime-less-shadow".to_string(),
-                pubkey: peer_pubkey,
-                addr: "inproc://runtime-less-shadow".to_string(),
-                meta: crate::PeerMeta::default(),
-            },
-        ]);
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::new(
-            sender_keypair,
-            trusted_peers,
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
-        let trusted_peers = router.trusted_peers_view();
-        let ctx = ToolContext {
-            router,
-            trusted_peers,
-            runtime: None,
-        };
-
-        assert!(
-            ensure_peer_id_is_trusted(&ctx, &peer_id).is_err(),
-            "duplicate canonical trust is not send-resolvable"
-        );
-
-        let peers = runtime_less_peer_directory(&ctx);
-        assert!(
-            peers.iter().all(|peer| peer.peer_id != peer_id),
-            "runtime-less peer directory must not advertise duplicate canonical ids: {peers:?}"
-        );
-    }
-
     #[tokio::test]
     async fn test_send_message_fails_when_recipient_is_not_trusted() {
         let sender_keypair = Keypair::generate();
@@ -1870,7 +1775,6 @@ mod tests {
         let (_, router_inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             sender_keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             router_inbox_sender,
             true,
@@ -1907,7 +1811,6 @@ mod tests {
         let (_, inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
@@ -1946,7 +1849,6 @@ mod tests {
         let (_, inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,

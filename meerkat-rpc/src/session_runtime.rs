@@ -4120,23 +4120,18 @@ impl SessionRuntime {
     /// Phase 4 R1: thin RPC shim — delegates to
     /// `LiveOrchestrator::propagate_config_to_live_channels`.
     ///
-    /// `prior_global_model` is retained on the signature for handler
-    /// compatibility but the orchestrator no longer consults it. The
-    /// hot-swap rule is now: skip when the session's current model
+    /// The hot-swap rule is: skip when the session's current model
     /// already equals the new global; otherwise propagate. See
     /// `should_apply_global_model_hot_swap` for the rationale (s72
     /// regression fix: a session that pinned a model at `session/create`
     /// against a different global must still re-resolve when the global
     /// is patched, so the next `live/open` precheck enforces B19 against
     /// the new resolution).
-    pub async fn propagate_config_to_live_channels(
-        &self,
-        prior_global_model: Option<&str>,
-    ) -> LiveConfigPropagationReport {
+    pub async fn propagate_config_to_live_channels(&self) -> LiveConfigPropagationReport {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
         self.live_orchestrator(&snapshot, cleanup)
-            .propagate_config_to_live_channels(prior_global_model)
+            .propagate_config_to_live_channels()
             .await
     }
 
@@ -5441,7 +5436,7 @@ impl SessionRuntime {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: runtime_prompt.clone(),
-                system_prompt: build_config.system_prompt.to_persisted_option(),
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -5884,7 +5879,7 @@ impl SessionRuntime {
             let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                system_prompt: build_config.system_prompt.to_persisted_option(),
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -6111,8 +6106,7 @@ impl SessionRuntime {
         let model = create_request.model.clone();
         let mut build_config = AgentBuildConfig::new(model);
         build_config.apply_session_build_options(&build);
-        build_config.system_prompt =
-            meerkat::SystemPromptOverride::from_wire_option(create_request.system_prompt.clone());
+        build_config.system_prompt = create_request.system_prompt.clone();
         build_config.max_tokens = create_request.max_tokens;
 
         // Stage as pending and re-enter the materialization path.
@@ -9627,7 +9621,7 @@ mod tests {
         CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text("service-created session".to_string()),
-            system_prompt: build_config.system_prompt.to_persisted_option(),
+            system_prompt: build_config.system_prompt.clone(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             initial_turn,
@@ -10776,13 +10770,12 @@ mod tests {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
-                    body: "done".to_string(),
+                    content: "done".into(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
                         "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
-                    blocks: None,
                     handling_mode: None,
                 }),
             )
@@ -10903,13 +10896,12 @@ mod tests {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
-                    body: "done".to_string(),
+                    content: "done".into(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
                         "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
-                    blocks: None,
                     handling_mode: None,
                 }),
             )
@@ -11084,13 +11076,12 @@ mod tests {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
-                    body: "done".to_string(),
+                    content: "done".into(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
                         "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
-                    blocks: None,
                     handling_mode: None,
                 }),
             )
@@ -11212,13 +11203,12 @@ mod tests {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
-                    body: "done".to_string(),
+                    content: "done".into(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
                         "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
-                    blocks: None,
                     handling_mode: None,
                 }),
             )
@@ -12526,8 +12516,6 @@ mod tests {
                     if server == "local" { 11434 } else { 22434 }
                 ),
                 api_style: meerkat_core::SelfHostedApiStyle::ChatCompletions,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -13824,7 +13812,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
-                system_prompt: build_config.system_prompt.to_persisted_option(),
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -13872,7 +13860,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
-                system_prompt: build_config.system_prompt.to_persisted_option(),
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -14739,9 +14727,8 @@ mod tests {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 phase: meerkat_runtime::ResponseProgressPhase::InProgress,
             }),
-            body: "working".to_string(),
+            content: "working".to_string().into(),
             payload: Some(serde_json::json!({"progress": "working"})),
-            blocks: None,
             handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
         });
 
@@ -17454,7 +17441,7 @@ mod tests {
         let create_req = CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: build_config.system_prompt.to_persisted_option(),
+            system_prompt: build_config.system_prompt.clone(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -17535,7 +17522,7 @@ mod tests {
         let create_req = CreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: build_config.system_prompt.to_persisted_option(),
+            system_prompt: build_config.system_prompt.clone(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -22095,7 +22082,7 @@ mod tests {
         // (bound vs. resolved), not the global hot-swap path. Pass None
         // so the global-hot-swap loop short-circuits and the model-swap
         // close branch runs against the identity we just set.
-        let _propagation_report = runtime.propagate_config_to_live_channels(None).await;
+        let _propagation_report = runtime.propagate_config_to_live_channels().await;
 
         // R11 assertion: NO Refresh command was dispatched on the
         // model-swap path. The channel was closed instead.
@@ -22256,7 +22243,7 @@ mod tests {
 
         // G5 (P1): see sibling test for rationale. None preserves the
         // pre-G5 behavior the R11 sibling assertion needs.
-        let _propagation_report = runtime.propagate_config_to_live_channels(None).await;
+        let _propagation_report = runtime.propagate_config_to_live_channels().await;
 
         // CC2: precheck must succeed (gpt-realtime-2 is realtime + OpenAI),
         // so the no-swap branch must dispatch exactly one Refresh and leave

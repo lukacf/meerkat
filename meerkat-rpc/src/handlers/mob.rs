@@ -22,16 +22,14 @@ use meerkat_contracts::{
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
     SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
     SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
-    WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome,
-    WireMobRuntimeMode,
+    WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
-    AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobError, MobId,
-    MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult,
-    ToolConfig,
+    AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobError, MobId, MobMemberStatus,
+    MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult, ToolConfig,
 };
 use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
 use std::collections::BTreeMap;
@@ -51,7 +49,6 @@ fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse
             rotated_peer_count,
             rollback_succeeded,
             pending_authority_recorded,
-            pending_authority_process_local,
             rollback_error,
             ..
         } => {
@@ -65,19 +62,14 @@ fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse
                 rotated_peer_count: *rotated_peer_count,
                 rollback_succeeded: *rollback_succeeded,
                 pending_authority_recorded: *pending_authority_recorded,
-                pending_authority_process_local: *pending_authority_process_local,
                 rollback_error: rollback_error.clone(),
                 retry_authority: if *pending_authority_recorded {
                     SupervisorRotationRetryAuthority::PendingRotation
-                } else if *pending_authority_process_local {
-                    SupervisorRotationRetryAuthority::ProcessLocalPendingRotation
                 } else {
                     SupervisorRotationRetryAuthority::PreRotation
                 },
                 retry_scope: if *pending_authority_recorded {
                     SupervisorRotationRetryScope::Durable
-                } else if *pending_authority_process_local {
-                    SupervisorRotationRetryScope::SameProcess
                 } else {
                     SupervisorRotationRetryScope::PreRotation
                 },
@@ -243,7 +235,7 @@ fn runtime_binding_from_wire(
                 peer_id: resolved.peer_id.to_string(),
                 address,
                 bootstrap_token,
-                pubkey: Some(resolved.pubkey),
+                pubkey: resolved.pubkey,
             })
         }
     }
@@ -264,10 +256,6 @@ fn member_list_entry_wire(
         runtime_mode: match entry.runtime_mode {
             MobRuntimeMode::AutonomousHost => WireMobRuntimeMode::AutonomousHost,
             MobRuntimeMode::TurnDriven => WireMobRuntimeMode::TurnDriven,
-        },
-        state: match entry.state {
-            MemberState::Active => WireMemberState::Active,
-            MemberState::Retiring => WireMemberState::Retiring,
         },
         wired_to: entry
             .wired_to
@@ -2318,9 +2306,12 @@ pub async fn handle_list_members_matching(
             .filter
             .role
             .map(|r| meerkat_mob::ProfileName::from(r.as_str())),
-        state: params.filter.state.map(|s| match s {
-            meerkat_contracts::WireMemberState::Active => meerkat_mob::MemberState::Active,
-            meerkat_contracts::WireMemberState::Retiring => meerkat_mob::MemberState::Retiring,
+        status: params.filter.status.map(|s| match s {
+            meerkat_contracts::WireMobMemberStatus::Active => MobMemberStatus::Active,
+            meerkat_contracts::WireMobMemberStatus::Retiring => MobMemberStatus::Retiring,
+            meerkat_contracts::WireMobMemberStatus::Broken => MobMemberStatus::Broken,
+            meerkat_contracts::WireMobMemberStatus::Completed => MobMemberStatus::Completed,
+            meerkat_contracts::WireMobMemberStatus::Unknown => MobMemberStatus::Unknown,
         }),
     };
     let entries = match handle.list_members_matching(filter).await {
@@ -2605,7 +2596,6 @@ mod tests {
                 rotated_peer_count: 1,
                 rollback_succeeded: false,
                 pending_authority_recorded: true,
-                pending_authority_process_local: false,
                 rollback_error: Some("rollback failed".to_string()),
                 reason: "remote peer rejected rotation".to_string(),
             },

@@ -154,7 +154,7 @@ pub use config::{
     HookRunOverrides, HookRuntimeKind, HooksConfig, HttpRuntimeConfig, LimitsConfig, ModelDefaults,
     PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
-    StorageConfig, StoreConfig, ToolsConfig,
+    StorageConfig, StoreConfig, SystemPromptOverride, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{

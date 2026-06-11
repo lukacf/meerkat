@@ -256,7 +256,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::dsl::MeerkatMachineMutator::apply(
             &mut *guard,
-            super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
+            super::dsl::MeerkatMachineInput::ReplaceVisibilityState {
                 capability_base_filter: super::dsl::ToolFilter::from(
                     &visibility_state.capability_base_filter,
                 ),
@@ -276,7 +276,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             },
         )
         .map_err(|err| ToolScopeApplyError::Owner {
-            message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
+            message: super::dsl_authority::map_error(err, "ReplaceVisibilityState"),
         })?;
         mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(())

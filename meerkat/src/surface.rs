@@ -24,9 +24,9 @@ pub use meerkat_core::{
 };
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,
-    PublishOutcome, RequestAdmissionError, RequestAlreadyExists, RequestAsyncAction,
-    RequestContext, RequestTerminal, RequestTerminalResolution, RequestTransitionError,
-    SurfaceRequestExecution, SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
+    PublishOutcome, RequestAdmissionError, RequestAsyncAction, RequestContext, RequestTerminal,
+    RequestTerminalResolution, RequestTransitionError, SurfaceRequestExecution,
+    SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
     SurfaceRequestTerminalPolicy, noop_request_action, prepare_surface_session, request_action,
 };
 #[cfg(all(feature = "session-store", feature = "comms"))]
@@ -598,14 +598,14 @@ pub async fn emit_mcp_lifecycle_events(
 
     #[derive(Default)]
     struct McpSeqState {
-        seq_by_source: HashMap<String, u64>,
-        source_order: VecDeque<String>,
+        seq_by_source: HashMap<meerkat_core::EventSourceIdentity, u64>,
+        source_order: VecDeque<meerkat_core::EventSourceIdentity>,
     }
 
     static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<McpSeqState>> = OnceLock::new();
 
     for action in actions {
-        let source_id = source.legacy_source_id();
+        let source_id = source.clone();
         let mut payload = action.to_tool_config_changed_payload();
         payload.applied_at_turn = Some(turn_number);
         let target = payload.target.clone();

@@ -4,9 +4,7 @@
 //! command/result surface plus the durable diagnostic snapshot shapes that
 //! remain useful for inspection and follow-up work.
 
-use crate::ids::{
-    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, RunId, WorkRef, WorkSpec,
-};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, FlowId, RunId, WorkRef, WorkSpec};
 use crate::roster::{Roster, RosterEntry};
 use crate::run::MobRun;
 #[cfg(test)]
@@ -71,10 +69,10 @@ pub(crate) enum MobMachineCommand {
         filter: Box<crate::runtime::MemberFilter>,
     },
     Retire {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     Respawn {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
         initial_message: Option<meerkat_core::types::ContentInput>,
     },
     RetireAll,
@@ -107,10 +105,10 @@ pub(crate) enum MobMachineCommand {
     ListMembersIncludingRetiring,
     ListAllMembers,
     MemberStatus {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     SubscribeAgentEvents {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     SubscribeAllAgentEvents,
     SubscribeMobEvents {
@@ -126,7 +124,7 @@ pub(crate) enum MobMachineCommand {
         authority_context: meerkat_core::service::MobToolAuthorityContext,
     },
     GetMember {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     #[cfg(test)]
     FlowTrackerCounts,
@@ -146,7 +144,7 @@ pub(crate) enum MobMachineCommand {
     },
     Shutdown,
     ForceCancel {
-        agent_identity: MeerkatId,
+        agent_identity: AgentIdentity,
     },
     /// Wire a local member to a peer target. D-track-b (#14) lands the
     /// producer-wiring handler that authorizes and applies this command;
@@ -154,7 +152,7 @@ pub(crate) enum MobMachineCommand {
     /// the command surface so the public `MobHandle::wire` method stays
     /// on the one top-level machine-command seam.
     Wire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: crate::runtime::PeerTarget,
     },
     /// Materialize many local-member wiring edges through one actor command.
@@ -168,7 +166,7 @@ pub(crate) enum MobMachineCommand {
     },
     /// Unwire a local member from a peer target. Mirror of `Wire`.
     Unwire {
-        local: MeerkatId,
+        local: AgentIdentity,
         target: crate::runtime::PeerTarget,
     },
 }
@@ -222,7 +220,7 @@ pub(crate) enum MobMachineCommandResult {
     #[allow(dead_code)]
     Bool(bool),
     EventStream(meerkat_core::EventStream),
-    AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
+    AllAgentEventStreams(Vec<(AgentIdentity, meerkat_core::EventStream)>),
     MobEventRouter(crate::runtime::MobEventRouterHandle),
     MobEvents(Vec<crate::event::MobEvent>),
     GetMember(Option<RosterEntry>),

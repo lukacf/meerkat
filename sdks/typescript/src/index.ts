@@ -364,7 +364,6 @@ export type {
   WireAuthBindingRef,
   WireMemberLaunchMode,
   WireMemberRef,
-  WireMemberState,
   WireMobBackendKind,
   WireMobMemberStatus,
   WireMobProfile,

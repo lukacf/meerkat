@@ -972,7 +972,20 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
         }
         "tool_execution_completed" | "ToolExecutionCompleted" => {
             let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let result = event.get("result").and_then(|v| v.as_str()).unwrap_or("");
+            let result = event
+                .get("content")
+                .and_then(|v| v.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| {
+                            (b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                                .then(|| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
             let is_error = event
                 .get("is_error")
                 .and_then(|v| v.as_bool())
@@ -981,7 +994,7 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
                 .get("duration_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let lines = format_tool_completion(name, result, is_error, duration_ms);
+            let lines = format_tool_completion(name, &result, is_error, duration_ms);
             target.push_section(lines);
         }
         "run_completed" | "RunCompleted" => {

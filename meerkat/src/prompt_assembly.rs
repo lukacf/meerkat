@@ -362,24 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_override_wire_round_trip_and_persistence() {
-        // Parse-at-boundary: the wire Option<String> maps to typed Set/Inherit.
-        assert_eq!(
-            SystemPromptOverride::from_wire_option(Some("p".to_string())),
-            SystemPromptOverride::Set("p".to_string())
-        );
-        assert_eq!(
-            SystemPromptOverride::from_wire_option(None),
-            SystemPromptOverride::Inherit
-        );
-        // Persistence projection back to the Option<String> build-state field.
-        assert_eq!(set("p").to_persisted_option(), Some("p".to_string()));
-        assert_eq!(SystemPromptOverride::Inherit.to_persisted_option(), None);
-        assert_eq!(SystemPromptOverride::Disable.to_persisted_option(), None);
-        // Explicitness drives whether the prompt must be (re)assembled.
+    fn test_prompt_override_explicitness() {
+        // Explicitness drives whether the prompt must be (re)assembled. The
+        // tri-state wire/persisted representation (string/null/disable-action)
+        // is the type's canonical serde, pinned in `meerkat_core::config`.
         assert!(!SystemPromptOverride::Inherit.is_explicit());
         assert!(set("p").is_explicit());
         assert!(SystemPromptOverride::Disable.is_explicit());
+        assert_eq!(set("p").as_set_prompt(), Some("p"));
+        assert_eq!(SystemPromptOverride::Inherit.as_set_prompt(), None);
+        assert_eq!(SystemPromptOverride::Disable.as_set_prompt(), None);
     }
 
     // --- Precedence level 2: config file override ---

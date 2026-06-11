@@ -676,11 +676,11 @@ Return exactly:
         ]),
     };
 
-    FlowSpec {
-        description: Some("fanout + sibling + review loop smoke".to_string()),
+    FlowSpec::new(
+        Some("fanout + sibling + review loop smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_dual_loops_join_flow() -> FlowSpec {
@@ -754,11 +754,11 @@ Return exactly:
         ]),
     };
 
-    FlowSpec {
-        description: Some("dual sibling loops with downstream join smoke".to_string()),
+    FlowSpec::new(
+        Some("dual sibling loops with downstream join smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_branch_then_review_loop_flow() -> FlowSpec {
@@ -844,11 +844,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("branch winner feeding a two-pass review loop".to_string()),
+    FlowSpec::new(
+        Some("branch winner feeding a two-pass review loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_parallel_body_siblings_join_flow() -> FlowSpec {
@@ -940,11 +940,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("parallel loop-body siblings with per-iteration join".to_string()),
+    FlowSpec::new(
+        Some("parallel loop-body siblings with per-iteration join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_nested_outer_inner_loop_flow() -> FlowSpec {
@@ -1043,11 +1043,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("nested outer/inner loop smoke".to_string()),
+    FlowSpec::new(
+        Some("nested outer/inner loop smoke".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_fanin_after_parallel_loops_flow() -> FlowSpec {
@@ -1157,11 +1157,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("parallel loops feeding a fan-in aggregate".to_string()),
+    FlowSpec::new(
+        Some("parallel loops feeding a fan-in aggregate".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_conditional_skip_inside_body_loop_flow() -> FlowSpec {
@@ -1245,11 +1245,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("conditional skip behavior inside a body loop".to_string()),
+    FlowSpec::new(
+        Some("conditional skip behavior inside a body loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_three_way_branch_loop_audit_flow() -> FlowSpec {
@@ -1367,11 +1367,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three-way branch feeding a review loop and analyst audit".to_string()),
+    FlowSpec::new(
+        Some("three-way branch feeding a review loop and analyst audit".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_sequential_loop_chain_flow() -> FlowSpec {
@@ -1471,11 +1471,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("one loop feeding a bridge that feeds a second loop".to_string()),
+    FlowSpec::new(
+        Some("one loop feeding a bridge that feeds a second loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_three_sibling_loops_join_flow() -> FlowSpec {
@@ -1595,11 +1595,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three sibling loops converging in a downstream join".to_string()),
+    FlowSpec::new(
+        Some("three sibling loops converging in a downstream join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_outer_branch_inner_loop_flow() -> FlowSpec {
@@ -1723,11 +1723,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("root branch feeding an outer loop that hosts an inner loop".to_string()),
+    FlowSpec::new(
+        Some("root branch feeding an outer loop that hosts an inner loop".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_maximal_matrix_flow() -> FlowSpec {
@@ -1923,7 +1923,7 @@ Return exactly this JSON object and nothing else:
             "branch + fanout + nested loop + fanin + parallel sibling maximal smoke".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2049,7 +2049,7 @@ Return exactly this JSON object and nothing else:
             "branch + sibling note + persisted two-iteration review loop".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2147,11 +2147,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("two persisted loops feeding a fan-in aggregate".to_string()),
+    FlowSpec::new(
+        Some("two persisted loops feeding a fan-in aggregate".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_sequential_loop_chain_flow() -> FlowSpec {
@@ -2244,11 +2244,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("sequential chain of two persisted loops".to_string()),
+    FlowSpec::new(
+        Some("sequential chain of two persisted loops".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_three_sibling_loops_join_flow() -> FlowSpec {
@@ -2359,11 +2359,11 @@ Return exactly this JSON object and nothing else:
         ]),
     };
 
-    FlowSpec {
-        description: Some("three sibling persisted loops with downstream join".to_string()),
+    FlowSpec::new(
+        Some("three sibling persisted loops with downstream join".to_string()),
         steps,
-        root: Some(root),
-    }
+        Some(root),
+    )
 }
 
 fn build_persisted_branch_dual_loops_audit_flow() -> FlowSpec {
@@ -2511,7 +2511,7 @@ Return exactly this JSON object and nothing else:
             "branch-gated sibling persisted loops feeding an analyst fanout".to_string(),
         ),
         steps,
-        root: Some(root),
+        root,
     }
 }
 
@@ -2732,7 +2732,7 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
             peer_id,
             address,
             bootstrap_token: Some(bootstrap_token.into()),
-            pubkey: Some(pubkey),
+            pubkey,
         },
         adapter,
         session_id,
@@ -2893,11 +2893,11 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let trusted = target.runtime.trusted_peers_shared();
     assert!(
         trusted
-            .peers()
+            .entries()
             .iter()
-            .any(|peer| peer.addr == supervisor_advertised_address),
+            .any(|peer| peer.address.to_string() == supervisor_advertised_address),
         "target runtime must install the advertised supervisor bridge as sendable trust; trusted={:?}",
-        trusted.peers()
+        trusted.entries()
     );
 
     handle

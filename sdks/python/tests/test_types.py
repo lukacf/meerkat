@@ -556,7 +556,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         MobSpawnReceiptWire as GeneratedMobSpawnReceiptWire,
         MobSubmitWorkParams as GeneratedMobSubmitWorkParams,
         WireMemberRef as GeneratedWireMemberRef,
-        WireMemberState as GeneratedWireMemberState,
         WireMobMemberStatus as GeneratedWireMobMemberStatus,
         WireMobRuntimeMode as GeneratedWireMobRuntimeMode,
     )
@@ -566,7 +565,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         "autonomous_host",
         "turn_driven",
     )
-    assert get_args(GeneratedWireMemberState) == ("active", "retiring")
     assert get_args(GeneratedWireMobMemberStatus) == (
         "active",
         "retiring",
@@ -584,7 +582,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
     member_hints = get_type_hints(GeneratedMobMemberListEntryWire)
     assert member_hints["member_ref"] is GeneratedWireMemberRef
     assert member_hints["runtime_mode"] == GeneratedWireMobRuntimeMode
-    assert member_hints["state"] == GeneratedWireMemberState
     assert member_hints["status"] == GeneratedWireMobMemberStatus
 
     member_ref = _make_member_ref("mob-1", "worker-1")
@@ -593,7 +590,6 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
         member_ref=member_ref,
         role="worker",
         runtime_mode="turn_driven",
-        state="active",
         status="active",
         is_final=False,
     )
@@ -1647,7 +1643,6 @@ def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
                 "type": "session",
                 "session_id": "00000000-0000-4000-8000-000000000001",
             },
-            "source_id": "session:not-a-uuid",
             "payload": {"type": "text_delta", "delta": "hi"},
         }
     )
@@ -1655,7 +1650,6 @@ def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
     assert event.source is not None
     assert event.source.type == "session"
     assert event.source.session_id == "00000000-0000-4000-8000-000000000001"
-    assert event.source_id == "session:not-a-uuid"
 
 
 def test_parse_event_envelope_does_not_classify_legacy_session_string():
@@ -1666,8 +1660,9 @@ def test_parse_event_envelope_does_not_classify_legacy_session_string():
         }
     )
 
+    # The legacy envelope-level string key no longer exists on the typed
+    # envelope and never classifies a typed source.
     assert event.source is None
-    assert event.source_id == "session:00000000-0000-4000-8000-000000000001"
 
 
 def test_parse_tool_config_changed():
@@ -1676,7 +1671,6 @@ def test_parse_tool_config_changed():
         "payload": {
             "operation": "remove",
             "target": "filesystem",
-            "status": "staged",
             "status_info": {
                 "kind": "boundary_applied",
                 "base_changed": True,
@@ -1691,7 +1685,6 @@ def test_parse_tool_config_changed():
     assert isinstance(event, ToolConfigChanged)
     assert event.payload.operation == "remove"
     assert event.payload.target == "filesystem"
-    assert event.payload.status == "staged"
     assert isinstance(event.payload.status_info, BoundaryAppliedToolConfigChangeStatus)
     assert event.payload.status_info.base_changed is True
     assert event.payload.status_info.visible_changed is False
@@ -2086,7 +2079,6 @@ def test_parse_tool_execution_completed():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": [
             {"type": "text", "text": "found it"},
             {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
@@ -2124,7 +2116,6 @@ def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": "not blocks",
         "is_error": False,
         "duration_ms": 42,
@@ -2140,13 +2131,13 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
     })
     malformed = parse_event({
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
         "is_error": "false",
     })
     assert isinstance(missing, ToolExecutionCompleted)
@@ -3861,15 +3852,12 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
 @pytest.mark.asyncio
 async def test_client_live_refresh_returns_typed_result():
     """R4-5 (P3): `live_refresh` must return a typed
-    :class:`LiveRefreshResult` carrying both the typed ``status``
-    discriminator and the legacy ``refresh_enqueued`` boolean.
+    :class:`LiveRefreshResult` carrying the typed ``status`` discriminator.
 
     The wire payload mirrors the server-side `handle_live_refresh` Ok arm:
-    ``{"status": "queued", "refresh_enqueued": true}`` (from
-    `LiveRefreshResult::queued()`). Both fields must round-trip into the
-    typed dataclass at the SDK boundary so callers can route on
-    the generated ``status`` without dropping back-compat with
-    R7-era clients that pattern-match on ``refresh_enqueued``.
+    ``{"status": "queued"}`` (from `LiveRefreshResult::queued()`). The
+    typed dataclass round-trips at the SDK boundary so callers route on
+    the generated ``status``.
     """
     from meerkat.generated.types import LiveRefreshResult
 
@@ -3881,7 +3869,7 @@ async def test_client_live_refresh_returns_typed_result():
         captured.append((method, params))
         # Mirror exactly what `handle_live_refresh` ships on the wire after
         # host queue acceptance.
-        return {"status": "queued", "refresh_enqueued": True}
+        return {"status": "queued"}
 
     client._request = fake_request  # type: ignore[method-assign]
 
@@ -3889,18 +3877,15 @@ async def test_client_live_refresh_returns_typed_result():
 
     assert captured == [("live/refresh", {"channel_id": "live_channel_42"})]
     assert isinstance(result, LiveRefreshResult)
-    # New typed routing surface.
+    # Typed routing surface.
     assert result.status == "queued"
-    # Back-compat field for R7-era clients.
-    assert result.refresh_enqueued is True
 
 
 @pytest.mark.asyncio
 async def test_client_live_refresh_rejects_missing_or_unknown_generated_status():
     malformed_responses = [
         {"refresh_enqueued": True},
-        {"status": "queued"},
-        {"status": "applied_sync", "refresh_enqueued": True},
+        {"status": "applied_sync"},
     ]
 
     for response in malformed_responses:
@@ -3926,7 +3911,7 @@ async def test_client_live_close_returns_typed_result():
 
     async def fake_request(method, params):
         captured.append((method, params))
-        return {"status": "closed", "closed": True}
+        return {"status": "closed"}
 
     client._request = fake_request  # type: ignore[method-assign]
 
@@ -3935,15 +3920,13 @@ async def test_client_live_close_returns_typed_result():
     assert captured == [("live/close", {"channel_id": "live_channel_44"})]
     assert isinstance(result, LiveCloseResult)
     assert result.status == "closed"
-    assert result.closed is True
 
 
 @pytest.mark.asyncio
 async def test_client_live_close_rejects_missing_or_unknown_generated_status():
     malformed_responses = [
         {"closed": True},
-        {"status": "closed"},
-        {"status": "already_closed", "closed": True},
+        {"status": "already_closed"},
     ]
 
     for response in malformed_responses:

@@ -112,38 +112,6 @@ impl McpServerIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct McpAuthTarget {
-    pub server_name: String,
-    pub server_url: String,
-}
-
-impl McpAuthTarget {
-    pub fn new(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        Self {
-            server_name: server_name.into(),
-            server_url: server_url.into(),
-        }
-    }
-
-    /// The typed canonical identity for this target's server config. All
-    /// realm-key derivation flows through this typed identity.
-    pub fn identity(&self) -> McpServerIdentity {
-        McpServerIdentity::from_server_config(self.server_name.clone(), self.server_url.clone())
-    }
-
-    pub fn token_key(&self) -> Result<TokenKey, McpOAuthError> {
-        self.identity().token_key()
-    }
-
-    /// The per-binding `AuthMachine` lease key for this MCP server. Delegates to
-    /// the typed [`McpServerIdentity`] so the lease key and the token key share
-    /// one identity derivation.
-    pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
-        self.identity().lease_key()
-    }
-}
-
 fn slug_component(raw: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
@@ -275,7 +243,7 @@ impl McpOAuthAuthority {
 
     pub async fn stored_bearer_token(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
         let key = target.token_key()?;
         let Some(tokens) = self
@@ -298,24 +266,24 @@ impl McpOAuthAuthority {
 
     pub async fn require_stored_bearer_token(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
     ) -> Result<String, McpOAuthError> {
         self.stored_bearer_token(target)
             .await?
             .ok_or_else(|| McpOAuthError::MissingStoredToken {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
             })
     }
 
     pub async fn interactive_login(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
         let binding = bind_loopback_callback(CALLBACK_PATH)
             .await
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?;
         let redirect_uri = binding.redirect_url.clone();
@@ -382,14 +350,14 @@ impl McpOAuthAuthority {
     /// before they are saved. Fail closed on any transition / marker error.
     fn publish_login_tokens_via_lease(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<PersistedTokens, McpOAuthError> {
         let lease_key = target.lease_key()?;
         let lifecycle_err =
             |error: meerkat_core::handles::DslTransitionError| McpOAuthError::AuthLifecycle {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             };
         // The handle is shared across servers; clear any prior lease state for
@@ -403,14 +371,14 @@ impl McpOAuthAuthority {
             .map_err(lifecycle_err)?;
         meerkat_core::mark_tokens_lifecycle_published_for_transition(key, tokens, &transition)
             .map_err(|error| McpOAuthError::AuthLifecycle {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })
     }
 
     async fn refresh_if_needed(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         key: &TokenKey,
         tokens: PersistedTokens,
         metadata: StoredMcpOAuthMetadata,
@@ -429,7 +397,7 @@ impl McpOAuthAuthority {
         let now_secs = epoch_secs(Utc::now());
         let lifecycle_err =
             |error: meerkat_core::handles::DslTransitionError| McpOAuthError::AuthLifecycle {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             };
         // The handle is shared across calls and servers; reset this key's prior
@@ -458,7 +426,7 @@ impl McpOAuthAuthority {
             CredentialUseDisposition::RefreshRequired => {
                 let Some(refresh_token) = tokens.refresh_token.clone() else {
                     return Err(McpOAuthError::ReauthRequired {
-                        server_name: target.server_name.clone(),
+                        server_name: target.server_name().to_string(),
                     });
                 };
                 let endpoints = OAuthEndpoints {
@@ -516,22 +484,22 @@ impl McpOAuthAuthority {
             | CredentialUseDisposition::ReauthRequired
             | CredentialUseDisposition::LeaseAbsent
             | CredentialUseDisposition::AlreadyRefreshing => Err(McpOAuthError::ReauthRequired {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
             }),
         }
     }
 
     async fn discover(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         www_authenticate: Option<&str>,
         _redirect_uri: &str,
     ) -> Result<StoredMcpOAuthDiscovery, McpOAuthError> {
-        require_https_or_loopback(target, &target.server_url, "MCP protected resource")?;
+        require_https_or_loopback(target, target.server_url(), "MCP protected resource")?;
         let resource_metadata_url = match www_authenticate.and_then(resource_metadata_from_header) {
-            Some(value) => absolutize_url(&target.server_url, &value).map_err(|error| {
+            Some(value) => absolutize_url(target.server_url(), &value).map_err(|error| {
                 McpOAuthError::DiscoveryFailed {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                     reason: error,
                 }
             })?,
@@ -546,26 +514,27 @@ impl McpOAuthAuthority {
             .send()
             .await
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .error_for_status()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .json()
             .await
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!("decode protected resource metadata: {error}"),
             })?;
-        if resource.resource != target.server_url {
+        if resource.resource != target.server_url() {
             return Err(McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!(
                     "protected resource metadata resource '{}' does not match MCP server '{}'",
-                    resource.resource, target.server_url
+                    resource.resource,
+                    target.server_url()
                 ),
             });
         }
@@ -574,7 +543,7 @@ impl McpOAuthAuthority {
             .first()
             .cloned()
             .ok_or_else(|| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: "protected resource metadata has no authorization_servers".to_string(),
             })?;
         require_https_or_loopback(target, &auth_server, "authorization server issuer")?;
@@ -585,23 +554,23 @@ impl McpOAuthAuthority {
             .send()
             .await
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .error_for_status()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .json()
             .await
             .map_err(|error| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!("decode authorization server metadata: {error}"),
             })?;
         if auth.issuer != auth_server {
             return Err(McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!(
                     "authorization server metadata issuer '{}' does not match discovered issuer '{}'",
                     auth.issuer, auth_server
@@ -612,26 +581,26 @@ impl McpOAuthAuthority {
             auth.registration_endpoint
                 .clone()
                 .ok_or_else(|| McpOAuthError::DiscoveryFailed {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                     reason: "authorization server metadata has no registration_endpoint"
                         .to_string(),
                 })?;
         let authorization_endpoint =
             absolutize_url(&authorization_metadata_url, &auth.authorization_endpoint).map_err(
                 |reason| McpOAuthError::DiscoveryFailed {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                     reason,
                 },
             )?;
         let token_endpoint = absolutize_url(&authorization_metadata_url, &auth.token_endpoint)
             .map_err(|reason| McpOAuthError::DiscoveryFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason,
             })?;
         let registration_endpoint =
             absolutize_url(&authorization_metadata_url, &registration_endpoint).map_err(
                 |reason| McpOAuthError::DiscoveryFailed {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                     reason,
                 },
             )?;
@@ -652,9 +621,9 @@ impl McpOAuthAuthority {
 
     async fn discover_resource_metadata_url_by_well_known(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
     ) -> Result<String, McpOAuthError> {
-        for candidate in protected_resource_well_known_candidates(&target.server_url)? {
+        for candidate in protected_resource_well_known_candidates(target.server_url())? {
             let response = self.http.get(&candidate).send().await;
             if let Ok(response) = response
                 && response.status().is_success()
@@ -663,14 +632,14 @@ impl McpOAuthAuthority {
             }
         }
         Err(McpOAuthError::DiscoveryFailed {
-            server_name: target.server_name.clone(),
+            server_name: target.server_name().to_string(),
             reason: "no oauth-protected-resource metadata found".to_string(),
         })
     }
 
     async fn register_client(
         &self,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         discovery: &StoredMcpOAuthDiscovery,
         redirect_uri: &str,
     ) -> Result<StoredMcpOAuthClient, McpOAuthError> {
@@ -688,31 +657,31 @@ impl McpOAuthAuthority {
             .send()
             .await
             .map_err(|error| McpOAuthError::RegistrationFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .error_for_status()
             .map_err(|error| McpOAuthError::RegistrationFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
             .json()
             .await
             .map_err(|error| McpOAuthError::RegistrationFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!("decode: {error}"),
             })?;
         let token_endpoint_auth_method =
             wire.token_endpoint_auth_method
                 .ok_or_else(|| McpOAuthError::RegistrationFailed {
-                    server_name: target.server_name.clone(),
+                    server_name: target.server_name().to_string(),
                     reason:
                         "token_endpoint_auth_method missing; public PKCE clients require explicit 'none'"
                             .to_string(),
                 })?;
         if token_endpoint_auth_method != "none" {
             return Err(McpOAuthError::RegistrationFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!(
                     "unsupported token_endpoint_auth_method '{token_endpoint_auth_method}'"
                 ),
@@ -728,16 +697,16 @@ impl McpOAuthAuthority {
 }
 
 fn stored_metadata_for_target(
-    target: &McpAuthTarget,
+    target: &McpServerIdentity,
     tokens: &PersistedTokens,
 ) -> Result<StoredMcpOAuthMetadata, McpOAuthError> {
     let metadata: StoredMcpOAuthMetadata = serde_json::from_value(tokens.metadata.clone())
         .map_err(|_| McpOAuthError::MissingStoredMetadata {
-            server_name: target.server_name.clone(),
+            server_name: target.server_name().to_string(),
         })?;
-    if metadata.server_name != target.server_name || metadata.server_url != target.server_url {
+    if metadata.server_name != target.server_name() || metadata.server_url != target.server_url() {
         return Err(McpOAuthError::ReauthRequired {
-            server_name: target.server_name.clone(),
+            server_name: target.server_name().to_string(),
         });
     }
     Ok(metadata)
@@ -747,14 +716,14 @@ fn persisted_tokens_from_result(
     result: &OAuthTokenResult,
     discovery: &StoredMcpOAuthDiscovery,
     client: &StoredMcpOAuthClient,
-    target: &McpAuthTarget,
+    target: &McpServerIdentity,
     now: DateTime<Utc>,
 ) -> Result<PersistedTokens, McpOAuthError> {
     let expires_at =
         result
             .expires_at_from(now)
             .map_err(|error| McpOAuthError::TokenExchangeFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?;
     let scopes = result
@@ -763,8 +732,8 @@ fn persisted_tokens_from_result(
         .map(|scope| scope.split_whitespace().map(str::to_string).collect())
         .unwrap_or_else(|| discovery.scopes.clone());
     let metadata = StoredMcpOAuthMetadata {
-        server_name: target.server_name.clone(),
-        server_url: target.server_url.clone(),
+        server_name: target.server_name().to_string(),
+        server_url: target.server_url().to_string(),
         discovery: discovery.clone(),
         client: client.clone(),
     };
@@ -776,35 +745,35 @@ fn persisted_tokens_from_result(
         expires_at,
         last_refresh: Some(now),
         scopes,
-        account_id: Some(target.server_name.clone()),
+        account_id: Some(target.server_name().to_string()),
         metadata: serde_json::to_value(metadata).map_err(|error| {
             McpOAuthError::TokenExchangeFailed {
-                server_name: target.server_name.clone(),
+                server_name: target.server_name().to_string(),
                 reason: format!("failed to serialize token metadata: {error}"),
             }
         })?,
     })
 }
 
-fn map_oauth_exchange_error(target: &McpAuthTarget, error: OAuthError) -> McpOAuthError {
+fn map_oauth_exchange_error(target: &McpServerIdentity, error: OAuthError) -> McpOAuthError {
     McpOAuthError::TokenExchangeFailed {
-        server_name: target.server_name.clone(),
+        server_name: target.server_name().to_string(),
         reason: error.to_string(),
     }
 }
 
-fn map_refresh_error(target: &McpAuthTarget, error: OAuthError) -> McpOAuthError {
+fn map_refresh_error(target: &McpServerIdentity, error: OAuthError) -> McpOAuthError {
     // Route the OAuth error through the canonical boundary-observation
     // classifier the AuthMachine + lease lifecycle already consume, then ask
     // the typed observation whether reauth is required. One owner of the
     // reauth-vs-retry decision instead of a substring match on the raw body.
     if oauth_refresh_observation(&error).requires_reauth() {
         return McpOAuthError::ReauthRequired {
-            server_name: target.server_name.clone(),
+            server_name: target.server_name().to_string(),
         };
     }
     McpOAuthError::RefreshFailed {
-        server_name: target.server_name.clone(),
+        server_name: target.server_name().to_string(),
         reason: error.to_string(),
     }
 }
@@ -902,19 +871,19 @@ fn authorization_server_metadata_url(server: &str) -> Result<String, McpOAuthErr
 }
 
 fn require_https_or_loopback(
-    target: &McpAuthTarget,
+    target: &McpServerIdentity,
     value: &str,
     label: &str,
 ) -> Result<(), McpOAuthError> {
     let url = reqwest::Url::parse(value).map_err(|error| McpOAuthError::DiscoveryFailed {
-        server_name: target.server_name.clone(),
+        server_name: target.server_name().to_string(),
         reason: format!("invalid {label}: {error}"),
     })?;
     if url.scheme() == "https" || is_loopback_url(&url) {
         return Ok(());
     }
     Err(McpOAuthError::DiscoveryFailed {
-        server_name: target.server_name.clone(),
+        server_name: target.server_name().to_string(),
         reason: format!("{label} must use https"),
     })
 }
@@ -1217,14 +1186,16 @@ mod tests {
     }
 
     #[test]
-    fn target_key_is_typed_and_stable() {
-        let a = McpAuthTarget::new("glean", "https://king-be.glean.com/mcp/default")
-            .token_key()
-            .unwrap();
-        let b = McpAuthTarget::new("glean", "https://king-be.glean.com/mcp/default")
-            .token_key()
-            .unwrap();
-        let c = McpAuthTarget::new("glean", "https://other.example/mcp/default")
+    fn server_identity_key_is_typed_and_stable() {
+        let a =
+            McpServerIdentity::from_server_config("glean", "https://king-be.glean.com/mcp/default")
+                .token_key()
+                .unwrap();
+        let b =
+            McpServerIdentity::from_server_config("glean", "https://king-be.glean.com/mcp/default")
+                .token_key()
+                .unwrap();
+        let c = McpServerIdentity::from_server_config("glean", "https://other.example/mcp/default")
             .token_key()
             .unwrap();
         assert_eq!(a, b);
@@ -1248,9 +1219,6 @@ mod tests {
             lease_key.binding.as_str(),
             "token key and lease key must share one typed identity binding"
         );
-        // The target delegates to the same typed identity.
-        let target = McpAuthTarget::new("glean", "https://king-be.glean.com/mcp/default");
-        assert_eq!(target.token_key().unwrap(), token_key);
         // Distinct server URL yields a distinct identity binding.
         let other =
             McpServerIdentity::from_server_config("glean", "https://other.example/mcp/default");
@@ -1270,7 +1238,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
             .interactive_login(&target, None)
@@ -1301,7 +1269,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
             .interactive_login(&target, None)
@@ -1358,7 +1326,7 @@ mod tests {
     async fn assert_login_fails_closed(
         state: Arc<TestState>,
         store: Arc<EphemeralTokenStore>,
-        target: &McpAuthTarget,
+        target: &McpServerIdentity,
         result: Result<String, McpOAuthError>,
         expected_reason: &str,
     ) {
@@ -1388,7 +1356,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         let token = authority
             .interactive_login(
                 &target,
@@ -1455,7 +1423,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let token = authority
             .interactive_login(&target, None)
@@ -1481,7 +1449,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
             .interactive_login(&target, None)
@@ -1514,8 +1482,8 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let original = McpAuthTarget::new("glean", format!("{base}/mcp"));
-        let other = McpAuthTarget::new("glean", format!("{base}/other-mcp"));
+        let original = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        let other = McpServerIdentity::from_server_config("glean", format!("{base}/other-mcp"));
 
         authority
             .interactive_login(&original, None)
@@ -1547,7 +1515,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1573,7 +1541,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1599,7 +1567,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1625,7 +1593,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1646,7 +1614,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", "http://mcp.example.test/mcp");
+        let target = McpServerIdentity::from_server_config("glean", "http://mcp.example.test/mcp");
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1672,7 +1640,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1698,7 +1666,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1714,7 +1682,7 @@ mod tests {
 
     #[test]
     fn oauth_metadata_urls_must_be_https_unless_loopback() {
-        let target = McpAuthTarget::new("glean", "https://mcp.example.test/mcp");
+        let target = McpServerIdentity::from_server_config("glean", "https://mcp.example.test/mcp");
 
         require_https_or_loopback(
             &target,
@@ -1745,7 +1713,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1761,7 +1729,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1777,7 +1745,7 @@ mod tests {
         let browser = recording_browser(Arc::clone(&state));
         let authority =
             McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 
@@ -1799,7 +1767,7 @@ mod tests {
             Duration::from_millis(10),
             test_auth_lease(),
         );
-        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
 

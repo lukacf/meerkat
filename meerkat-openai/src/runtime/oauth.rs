@@ -30,19 +30,15 @@ use meerkat_auth_core::oauth_flow::{
     oauth_provider_endpoints,
 };
 
-// ---------------------------------------------------------------------
-// Constants (verified against codex-rs/login/src/{auth/manager,server}.rs)
-// ---------------------------------------------------------------------
-
+/// The canonical ChatGPT OAuth provider declaration, owned by auth-core.
+///
 /// The single owner of the ChatGPT OAuth `client_id`, authorize/token
 /// endpoints, scopes, and typed backend kind is the auth-core declaration for
-/// [`OAuthProviderIdentity::OpenAiChatGpt`]. This runtime reads those facts
-/// from there (`chatgpt_declaration()` / `chatgpt_endpoints()`) instead of
-/// redeclaring the literals (dogma row #123).
-pub const CHATGPT_ISSUER: &str = "https://auth.openai.com";
-pub const CHATGPT_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
-
-/// The canonical ChatGPT OAuth provider declaration, owned by auth-core.
+/// [`OAuthProviderIdentity::OpenAiChatGpt`] (verified against
+/// codex-rs/login/src/{auth/manager,server}.rs). This runtime reads those
+/// facts from here instead of redeclaring the literals (dogma row #123). If a
+/// revoke/logout flow ever lands, its endpoint belongs on the auth-core
+/// declaration like its siblings, not as a runtime-local constant.
 pub fn chatgpt_declaration() -> OAuthProviderDeclaration {
     oauth_provider_declaration(OAuthProviderIdentity::OpenAiChatGpt)
 }
@@ -355,11 +351,9 @@ mod tests {
 
     #[test]
     fn chatgpt_constants_match_codex_source() {
-        // The provider facts are sourced from the single auth-core declaration;
-        // the runtime owns only the OpenAI-specific issuer/revoke endpoints.
+        // The provider facts are sourced from the single auth-core declaration.
         let declaration = chatgpt_declaration();
         assert_eq!(declaration.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
-        assert_eq!(CHATGPT_ISSUER, "https://auth.openai.com");
         assert_eq!(
             declaration.authorize_endpoint,
             "https://auth.openai.com/oauth/authorize"
@@ -368,7 +362,6 @@ mod tests {
             declaration.token_endpoint,
             "https://auth.openai.com/oauth/token"
         );
-        assert_eq!(CHATGPT_REVOKE_URL, "https://auth.openai.com/oauth/revoke");
         assert!(
             declaration
                 .extra_authorize_params

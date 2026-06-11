@@ -1441,7 +1441,6 @@ export class MeerkatClient {
               )
             : undefined,
         runtimeMode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
-        state: member.state != null ? String(member.state) : undefined,
         wiredTo: Array.isArray(member.wired_to)
           ? member.wired_to.map((peer) => String(peer))
           : undefined,
@@ -2366,7 +2365,6 @@ export class MeerkatClient {
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
     const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
     const source = MeerkatClient.parseEventSourceIdentity(raw.source);
-    const sourceId = MeerkatClient.parseOptionalString(raw.source_id ?? raw.sourceId);
     const seq = MeerkatClient.parseOptionalNumber(raw.seq);
     const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
     const payloadRaw = raw.payload;
@@ -2376,7 +2374,6 @@ export class MeerkatClient {
     return {
       ...(eventId != null ? { eventId } : {}),
       ...(source != null ? { source } : {}),
-      ...(sourceId != null ? { sourceId } : {}),
       ...(seq != null ? { seq } : {}),
       ...(timestampMs != null ? { timestampMs } : {}),
       ...(payload ? { payload } : {}),
@@ -2788,15 +2785,14 @@ export class MeerkatClient {
    * `model_id` and `provider_id` match the channel's currently-open
    * identity and rejects swaps with a typed adapter-level error.
    *
-   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying both the
-   * generated-authority `status` discriminator (today: `"queued"`) and the
-   * legacy `refresh_enqueued: true` back-compat boolean. This SDK build
-   * accepts the generated status set it was built with and rejects missing or
-   * unknown status values until regenerated for a newer contract. The host
-   * queue acceptance happens before this result is projected; the adapter
-   * pump applies the `session.update` asynchronously, and the realtime stream
-   * is the source of truth for the actual outcome (failures surface as
-   * `WireLiveAdapterObservation::Error`).
+   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying the
+   * generated-authority `status` discriminator (today: `"queued"`). This SDK
+   * build accepts the generated status set it was built with and rejects
+   * missing or unknown status values until regenerated for a newer contract.
+   * The host queue acceptance happens before this result is projected; the
+   * adapter pump applies the `session.update` asynchronously, and the
+   * realtime stream is the source of truth for the actual outcome (failures
+   * surface as `WireLiveAdapterObservation::Error`).
    */
   async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
     const result = await this.request(
@@ -3235,11 +3231,6 @@ export class MeerkatClient {
   private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {
     const context = "Invalid live/refresh response";
     const record = MeerkatClient.requireRecord(raw, "result", context);
-    const refreshEnqueued = MeerkatClient.requireBooleanField(
-      record,
-      "refresh_enqueued",
-      context,
-    );
     const status = MeerkatClient.requireStringField(record, "status", context);
     if (status !== "queued") {
       throw new MeerkatError(
@@ -3248,7 +3239,6 @@ export class MeerkatClient {
       );
     }
     return {
-      refresh_enqueued: refreshEnqueued,
       status,
     };
   }
@@ -3256,7 +3246,6 @@ export class MeerkatClient {
   private static parseLiveCloseResult(raw: unknown): LiveCloseResult {
     const context = "Invalid live/close response";
     const record = MeerkatClient.requireRecord(raw, "result", context);
-    const closed = MeerkatClient.requireBooleanField(record, "closed", context);
     const status = MeerkatClient.requireStringField(record, "status", context);
     if (status !== "closed") {
       throw new MeerkatError(
@@ -3265,7 +3254,6 @@ export class MeerkatClient {
       );
     }
     return {
-      closed,
       status,
     };
   }

@@ -296,14 +296,11 @@ pub enum AgentError {
     },
     #[error("Storage error: {0}")]
     StoreError(String),
-    #[error("Tool error: {0}")]
-    ToolError(String),
     /// A tool failure carrying the typed [`ToolError`] cause.
     ///
-    /// Unlike [`AgentError::ToolError`] (which flattens to a `String` and
-    /// erases the cause), this variant preserves the typed cause so the
-    /// `access_denied` vs `not_found` vs `invalid_arguments` distinction
-    /// survives to [`ToolError::error_code`] and the wire surface.
+    /// The typed cause is preserved so the `access_denied` vs `not_found`
+    /// vs `invalid_arguments` distinction survives to
+    /// [`ToolError::error_code`] and the wire surface.
     #[error("Tool error: {error}")]
     Tool { error: ToolError },
     #[error("MCP error: {0}")]
@@ -770,8 +767,8 @@ mod tests {
     #[test]
     fn tool_variant_preserves_access_denied_error_code() {
         // Row 12: a hidden-tool denial must terminalize carrying the typed
-        // ToolError so `access_denied` survives to error_code() (NOT flattened
-        // into an opaque string via AgentError::ToolError(String)).
+        // ToolError so `access_denied` survives to error_code() (not flattened
+        // into an opaque string).
         let err = AgentError::tool(ToolError::access_denied("secret_tool"));
         match &err {
             AgentError::Tool { error } => {
@@ -809,15 +806,6 @@ mod tests {
             other => panic!("expected AgentError::Tool, got: {other}"),
         }
         assert_eq!(err.tool_error_code(), Some("invalid_arguments"));
-    }
-
-    #[test]
-    fn flattened_tool_error_string_has_no_typed_code() {
-        // Guard: the OLD behavior (flattening into AgentError::ToolError(String))
-        // loses the typed code. tool_error_code() must return None for it, which
-        // is exactly the dogma gap rows 12/57 close by switching to Tool { error }.
-        let flattened = AgentError::ToolError(ToolError::access_denied("x").to_string());
-        assert_eq!(flattened.tool_error_code(), None);
     }
 
     #[test]

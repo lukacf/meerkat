@@ -10,7 +10,7 @@ use meerkat_machine_schema::{
     DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectEmit, EffectHandoffProtocol, Expr,
     FeedbackFieldSource, HelperSchema, MachineSchema, ProtocolGenerationMode, RustTypeAtom,
     TransitionSchema, TriggerMatch, TypeRef, Update, VariantSchema, canonical_composition_schemas,
-    canonical_machine_schemas, catalog::dsl, compat_composition_schemas,
+    canonical_machine_schemas, catalog::dsl,
 };
 
 use crate::public_contracts::repo_root;
@@ -19,8 +19,7 @@ use crate::public_contracts::repo_root;
 /// for each declared `EffectHandoffProtocol`, plus the terminal surface mapping.
 pub fn run_protocol_codegen() -> Result<()> {
     let root = repo_root()?;
-    let mut compositions = canonical_composition_schemas();
-    compositions.extend(compat_composition_schemas());
+    let compositions = canonical_composition_schemas();
     let machines = canonical_machine_schemas();
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();
@@ -5680,7 +5679,6 @@ const STA_LOCAL_ENUMS: &[&str] = &[
     "StartTurnDispatchAuthorization",
     "RuntimeKeepAliveRequest",
     "RuntimeKeepAlivePersistenceDecision",
-    "TurnHandlingMode",
 ];
 const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
 const STA_EXTERNAL_ENUM_PATH: &str =
@@ -5753,7 +5751,6 @@ fn sta_default_variant(name: &str) -> Result<&'static str> {
         "StartTurnDispatchAuthorization" => Ok("Authorized"),
         "RuntimeKeepAliveRequest" => Ok("Preserve"),
         "RuntimeKeepAlivePersistenceDecision" => Ok("PreserveExisting"),
-        "TurnHandlingMode" => Ok("Queue"),
         other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
     }
 }

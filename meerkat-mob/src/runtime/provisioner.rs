@@ -1029,12 +1029,7 @@ impl SessionBackend {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: prompt.text_content(),
-            blocks: if prompt.has_images() {
-                Some(prompt.into_blocks())
-            } else {
-                None
-            },
+            content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
             turn_metadata: Some(turn_metadata),
         })
@@ -1448,7 +1443,7 @@ mod tests {
             "mob/worker/member-1",
             &peer_id_str,
             "tcp://example.invalid/member-1",
-            Some(pubkey),
+            pubkey,
         )
         .expect("external peer spec should validate");
 
@@ -1459,48 +1454,11 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[test]
-    fn validated_external_peer_spec_rejects_missing_pubkey() {
-        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]).to_string();
-
-        let err = MultiBackendProvisioner::validated_external_peer_spec(
-            "mob/worker/member-1",
-            &peer_id,
-            "tcp://example.invalid/member-1",
-            None,
-        )
-        .expect_err("external peer specs must carry non-zero signing pubkeys");
-
-        assert!(
-            err.to_string().contains("pubkey") && err.to_string().contains("required"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    #[test]
-    fn peer_only_spec_from_parts_rejects_unregistered_peer_without_pubkey() {
-        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[8u8; 32]).to_string();
-
-        let err = MultiBackendProvisioner::peer_only_spec_from_parts(
-            &peer_id,
-            "tcp://example.invalid/member-1",
-            None,
-        )
-        .expect_err("peer-only trust must not fall back to a zero-pubkey descriptor");
-
-        assert!(
-            err.to_string().contains("pubkey") && err.to_string().contains("required"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    #[test]
     fn session_owned_eager_member_create_gets_runtime_execution_kind_stamp() {
         let mut req = meerkat_core::service::CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -2575,10 +2533,10 @@ struct ExternalBindingTarget {
     peer_id: String,
     address: String,
     bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
-    /// Ed25519 signing pubkey of the external process. When present,
-    /// propagated into the supervisor's trust store so inbound
-    /// signed-envelope replies admit past ingress `is_trusted` gating.
-    pubkey: Option<[u8; 32]>,
+    /// Ed25519 signing pubkey of the external process. Propagated into the
+    /// supervisor's trust store so inbound signed-envelope replies admit past
+    /// ingress `is_trusted` gating.
+    pubkey: [u8; 32],
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -2589,7 +2547,7 @@ struct ProvisionerBindingPersistence {
 }
 
 #[cfg(feature = "runtime-adapter")]
-type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, Option<[u8; 32]>);
+type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, [u8; 32]);
 
 #[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
@@ -2642,17 +2600,12 @@ impl MultiBackendProvisioner {
     fn peer_only_spec_from_parts(
         peer_id: &str,
         address: &str,
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let peer_name = address
             .strip_prefix("inproc://")
             .map(|value| value.split('?').next().unwrap_or(value).to_string())
             .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
-        let pubkey = pubkey.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "invalid peer-only spec for '{peer_name}': pubkey is required"
-            ))
-        })?;
         let result = TrustedPeerDescriptor::unsigned_with_pubkey(
             peer_name,
             peer_id.to_string(),
@@ -2666,13 +2619,8 @@ impl MultiBackendProvisioner {
         peer_name: &str,
         peer_id: &str,
         address: &str,
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        let pubkey = pubkey.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "invalid external peer spec for '{peer_name}': pubkey is required"
-            ))
-        })?;
         let result = TrustedPeerDescriptor::unsigned_with_pubkey(
             peer_name.to_string(),
             peer_id.to_string(),

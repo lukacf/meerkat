@@ -566,7 +566,6 @@ without leaking bridge-internal fields."""
     member_ref: WireMemberRef
     role: str
     runtime_mode: WireMobRuntimeMode
-    state: WireMemberState
     status: WireMobMemberStatus
     error: Optional[str] = None
     labels: Optional[dict[str, str]] = None
@@ -2539,10 +2538,8 @@ realtime adapter today)."""
 # value and fail closed for values outside the generated contract they were
 # built with.
 #
-# Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
-# place this typed status alongside the back-compat `refresh_enqueued`
-# boolean as ordinary sibling fields, which keeps SDK codegen on the
-# simple-struct path.
+# Serializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps
+# SDK codegen on the simple-struct path.
 LiveRefreshStatus = Literal['queued']
 
 @dataclass
@@ -2550,14 +2547,11 @@ class LiveRefreshResult:
     """Response payload for `live/refresh`.
 
 R4-5 (P3): replaces the previous untyped `{"refresh_enqueued": true}`
-JSON blob. The boolean `refresh_enqueued` field is preserved for back-
-compat (legacy clients that pattern-match on it stay on the green path)
-alongside the typed `status` discriminator. New code should route on
+JSON blob with the typed `status` discriminator. Clients route on
 `status`.
 
 See [`LiveRefreshStatus`] for the variant set and the contract on
 asynchronous adapter-pump application."""
-    refresh_enqueued: bool
     status: Literal['queued']
 
 
@@ -2572,9 +2566,7 @@ LiveCloseStatus = Literal['closed']
 class LiveCloseResult:
     """Response payload for `live/close`.
 
-The boolean `closed` field is preserved for back-compat alongside the typed
-`status` discriminator. New code should route on `status`."""
-    closed: bool
+Clients route on the typed `status` discriminator."""
     status: Literal['closed']
 
 
@@ -2589,9 +2581,7 @@ LiveSendInputStatus = Literal['sent']
 class LiveSendInputResult:
     """Response payload for `live/send_input`.
 
-The boolean `sent` field is preserved for back-compat alongside the typed
-`status` discriminator. New code should route on `status`."""
-    sent: bool
+Clients route on the typed `status` discriminator."""
     status: Literal['sent']
 
 
@@ -2606,9 +2596,7 @@ LiveCommitInputStatus = Literal['committed']
 class LiveCommitInputResult:
     """Response payload for `live/commit_input`.
 
-The boolean `committed` field is preserved for back-compat alongside the
-typed `status` discriminator. New code should route on `status`."""
-    committed: bool
+Clients route on the typed `status` discriminator."""
     status: Literal['committed']
 
 
@@ -2623,9 +2611,7 @@ LiveInterruptStatus = Literal['interrupted']
 class LiveInterruptResult:
     """Response payload for `live/interrupt`.
 
-The boolean `interrupted` field is preserved for back-compat alongside the
-typed `status` discriminator. New code should route on `status`."""
-    interrupted: bool
+Clients route on the typed `status` discriminator."""
     status: Literal['interrupted']
 
 
@@ -2640,10 +2626,8 @@ LiveTruncateStatus = Literal['truncated']
 class LiveTruncateResult:
     """Response payload for `live/truncate`.
 
-The boolean `truncated` field is preserved for back-compat alongside the
-typed `status` discriminator. New code should route on `status`."""
+Clients route on the typed `status` discriminator."""
     status: Literal['truncated']
-    truncated: bool
 
 
 # A typed, identity-bearing realtime transcript event consumed by the session.
@@ -3592,8 +3576,8 @@ WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyPropor
 # Pre-resolved tool filter inherited by a spawned mob member.
 WireToolFilter = Literal['All'] | dict[str, list[str]]
 
-# Roster member lifecycle state for `MobMemberFilterWire`.
-WireMemberState = Literal['active', 'retiring']
+# Mob RPC helper wire type for WireMemberState.
+WireMemberState = Any
 
 # Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.
 WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unknown']

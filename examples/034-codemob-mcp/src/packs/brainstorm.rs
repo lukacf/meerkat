@@ -122,11 +122,7 @@ impl Pack for BrainstormPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some("Multi-perspective brainstorm".into()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("Multi-perspective brainstorm".into()), steps, None),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

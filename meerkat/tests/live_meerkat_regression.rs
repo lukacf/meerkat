@@ -305,7 +305,6 @@ mod image_generation_substrate {
             None,
             None,
             None,
-            true,
         )
         .expect("builtin dispatcher should construct");
         dispatcher.register_image_generation_tool(
@@ -446,7 +445,7 @@ mod image_generation_substrate {
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "make an image".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
@@ -535,7 +534,7 @@ mod scenario_22_session_service_lifecycle {
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
                 prompt: "I am EphBot. Remember this name.".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
 

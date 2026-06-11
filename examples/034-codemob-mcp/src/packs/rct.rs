@@ -174,13 +174,9 @@ impl Pack for RctPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some(
+            FlowSpec::new(Some(
                     "RCT: plan → implement → parallel gate review → aggregate".into(),
-                ),
-                steps,
-                root: None,
-            },
+                ), steps, None),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

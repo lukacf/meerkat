@@ -2349,8 +2349,8 @@ mod tests {
         }
     }
 
-    fn sync_visibility_revisions_input(filter_witnesses: KernelValue) -> KernelInput {
-        sync_visibility_revisions_input_with_filters(
+    fn replace_visibility_state_input(filter_witnesses: KernelValue) -> KernelInput {
+        replace_visibility_state_input_with_filters(
             tool_filter_all(),
             tool_filter_allow(&["secret"]),
             tool_filter_allow(&["secret"]),
@@ -2358,14 +2358,14 @@ mod tests {
         )
     }
 
-    fn sync_visibility_revisions_input_with_filters(
+    fn replace_visibility_state_input_with_filters(
         capability_base_filter: KernelValue,
         active_filter: KernelValue,
         staged_filter: KernelValue,
         filter_witnesses: KernelValue,
     ) -> KernelInput {
         KernelInput {
-            variant: input_id("SyncVisibilityRevisions"),
+            variant: input_id("ReplaceVisibilityState"),
             fields: BTreeMap::from([
                 (field_id("capability_base_filter"), capability_base_filter),
                 (field_id("inherited_base_filter"), tool_filter_all()),
@@ -3424,7 +3424,7 @@ mod tests {
         let refusal = kernel
             .transition(
                 &registered_state,
-                &sync_visibility_revisions_input(KernelValue::Map(BTreeMap::new())),
+                &replace_visibility_state_input(KernelValue::Map(BTreeMap::new())),
             )
             .expect_err("missing filter witness must reject visibility replacement");
         assert!(
@@ -3435,7 +3435,7 @@ mod tests {
         let accepted = kernel
             .transition(
                 &registered_state,
-                &sync_visibility_revisions_input(KernelValue::Map(BTreeMap::from([(
+                &replace_visibility_state_input(KernelValue::Map(BTreeMap::from([(
                     KernelValue::String("secret".to_string()),
                     visibility_witness("callback:test"),
                 )]))),
@@ -3443,7 +3443,7 @@ mod tests {
             .expect("filter witness should satisfy generated visibility replacement authority");
         assert_eq!(
             accepted.transition,
-            transition_id("SyncVisibilityRevisionsIdle")
+            transition_id("ReplaceVisibilityStateIdle")
         );
     }
 

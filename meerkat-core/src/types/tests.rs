@@ -269,17 +269,17 @@ fn comms_notice_kind_wire_tags_match_legacy_strings() {
 }
 
 #[test]
-fn comms_notice_kind_accepts_legacy_peer_prefixed_aliases() {
-    // Other surfaces historically emitted `peer_`-prefixed kinds; they must
-    // still deserialize into the canonical typed vocabulary (back-read).
-    let aliases = [
-        ("peer_request", CommsNoticeKind::Request),
-        ("peer_response_progress", CommsNoticeKind::ResponseProgress),
-        ("peer_response_terminal", CommsNoticeKind::ResponseTerminal),
-    ];
-    for (alias, expected) in aliases {
-        let parsed: CommsNoticeKind = serde_json::from_value(json!(alias)).unwrap();
-        assert_eq!(parsed, expected);
+fn comms_notice_kind_peer_prefixed_tags_are_not_canonical_variants() {
+    // The retired `peer_`-prefixed wire tags are no longer folded into the
+    // canonical typed vocabulary; they degrade to the explicit `Other`
+    // capture like any other unrecognized tag.
+    for tag in [
+        "peer_request",
+        "peer_response_progress",
+        "peer_response_terminal",
+    ] {
+        let parsed: CommsNoticeKind = serde_json::from_value(json!(tag)).unwrap();
+        assert_eq!(parsed, CommsNoticeKind::Other(tag.to_string()));
     }
 }
 
@@ -322,25 +322,6 @@ fn comms_block_round_trips_through_wire_with_typed_peer_id() {
 
     let parsed: SystemNoticeBlock = serde_json::from_value(value).unwrap();
     assert_eq!(parsed, block);
-
-    // A legacy transcript carrying `peer_request` deserializes into the same
-    // typed Request variant.
-    let legacy: SystemNoticeBlock = serde_json::from_value(json!({
-        "type": "comms",
-        "kind": "peer_request",
-        "direction": "incoming",
-        "peer": { "id": peer_id.as_str(), "display_name": "Analyst" },
-        "request_id": "request-9",
-        "intent": "checksum"
-    }))
-    .unwrap();
-    assert!(matches!(
-        legacy,
-        SystemNoticeBlock::Comms {
-            kind: CommsNoticeKind::Request,
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -384,6 +365,33 @@ fn test_tool_result_serialization() {
     let json = serde_json::to_string(&error_result).unwrap();
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
     assert!(parsed.is_error);
+}
+
+#[test]
+fn content_blocks_text_only_serializes_as_plain_string() {
+    // TRIPWIRE (KEEP_FUNCTIONAL): `content_blocks_serde` keeps its
+    // string-accepting deserialize arm ONLY because the serializer still emits
+    // text-only content as a plain JSON string (round-trip symmetry). If this
+    // test trips because serialization moved to always-array, the
+    // string-accepting deserialize arm has become a legacy fold and must be
+    // deleted along with this test.
+    let tool_result = ToolResult::new("tc_1".to_string(), "just text".to_string(), false);
+    let value = serde_json::to_value(&tool_result).unwrap();
+    assert!(
+        value["content"].is_string(),
+        "text-only ToolResult content must serialize as a plain JSON string, got: {}",
+        value["content"]
+    );
+    assert_eq!(value["content"], json!("just text"));
+
+    let user = UserMessage::text("hello");
+    let value = serde_json::to_value(&user).unwrap();
+    assert!(
+        value["content"].is_string(),
+        "text-only UserMessage content must serialize as a plain JSON string, got: {}",
+        value["content"]
+    );
+    assert_eq!(value["content"], json!("hello"));
 }
 
 #[test]

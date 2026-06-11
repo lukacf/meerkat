@@ -1,6 +1,6 @@
 //! Error types for mob operations.
 
-use crate::ids::{AgentRuntimeId, FenceToken, FlowId, LoopId, MeerkatId, ProfileName, WorkRef};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, FlowId, LoopId, ProfileName, WorkRef};
 use crate::runtime::MobState;
 use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
@@ -63,24 +63,16 @@ pub enum MobError {
     ProfileNotFound(ProfileName),
 
     /// The requested mob member does not exist in the roster.
-    ///
-    /// Renamed from `MeerkatNotFound` by DELETE_ME finding A2 + B8 as
-    /// part of the 0.6 identity-first cascade. The inner type remains
-    /// [`MeerkatId`] until the full A5 DSL-schema migration flips it to
-    /// [`AgentIdentity`](crate::ids::AgentIdentity); the rename lands
-    /// first so public error matching doesn't leak the legacy term.
     #[error("mob member not found: {0}")]
-    MemberNotFound(MeerkatId),
+    MemberNotFound(AgentIdentity),
 
     /// A mob member with the given ID already exists.
-    ///
-    /// Renamed from `MeerkatAlreadyExists` by DELETE_ME finding A2 + B8.
     #[error("mob member already exists: {0}")]
-    MemberAlreadyExists(MeerkatId),
+    MemberAlreadyExists(AgentIdentity),
 
     /// The mob member's profile does not allow external turns.
     #[error("mob member is not externally addressable: {0}")]
-    NotExternallyAddressable(MeerkatId),
+    NotExternallyAddressable(AgentIdentity),
 
     /// The requested lifecycle state transition is invalid.
     #[error("invalid state transition: {from} -> {to}")]
@@ -94,7 +86,7 @@ pub enum MobError {
     /// complete, so local supervisor authority stayed at the pre-rotation
     /// epoch.
     #[error(
-        "supervisor rotation incomplete: failed after {rotated_peer_count} remote peer(s) accepted attempted epoch {attempted_epoch}; local authority remains at epoch {previous_epoch}; rollback_succeeded={rollback_succeeded}; pending_authority_recorded={pending_authority_recorded}; pending_authority_process_local={pending_authority_process_local}; failure: {reason}"
+        "supervisor rotation incomplete: failed after {rotated_peer_count} remote peer(s) accepted attempted epoch {attempted_epoch}; local authority remains at epoch {previous_epoch}; rollback_succeeded={rollback_succeeded}; pending_authority_recorded={pending_authority_recorded}; failure: {reason}"
     )]
     SupervisorRotationIncomplete {
         previous_epoch: u64,
@@ -103,10 +95,6 @@ pub enum MobError {
         rotated_peer_count: usize,
         rollback_succeeded: bool,
         pending_authority_recorded: bool,
-        /// Compatibility diagnostic retained for existing wire consumers.
-        /// Generated supervisor authority no longer uses local-only retry
-        /// records, so production constructors keep this false.
-        pending_authority_process_local: bool,
         rollback_error: Option<String>,
         reason: String,
     },
@@ -124,18 +112,22 @@ pub enum MobError {
         format_member_restore_target(.session_id.as_ref())
     )]
     MemberRestoreFailed {
-        member_id: MeerkatId,
+        member_id: AgentIdentity,
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
     },
 
     /// Waiting for kickoff completion timed out.
     #[error("kickoff wait timed out")]
-    KickoffWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+    KickoffWaitTimedOut {
+        pending_member_ids: Vec<AgentIdentity>,
+    },
 
     /// Waiting for startup readiness timed out.
     #[error("member ready wait timed out")]
-    ReadyWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+    ReadyWaitTimedOut {
+        pending_member_ids: Vec<AgentIdentity>,
+    },
 
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
@@ -223,7 +215,7 @@ pub enum MobError {
     /// A member is missing a required runtime capability for the requested operation.
     #[error("mob member {member_id} missing required capability {capability}: {context}")]
     MissingMemberCapability {
-        member_id: MeerkatId,
+        member_id: AgentIdentity,
         capability: MobMemberCapability,
         context: &'static str,
     },
@@ -438,9 +430,9 @@ mod tests {
     /// 0.6 identity-first cascade cannot regress into legacy wording.
     #[test]
     fn member_not_found_and_already_exists_use_identity_first_display() {
-        let not_found = MobError::MemberNotFound(MeerkatId::from("singer"));
-        let already = MobError::MemberAlreadyExists(MeerkatId::from("singer"));
-        let not_addressable = MobError::NotExternallyAddressable(MeerkatId::from("singer"));
+        let not_found = MobError::MemberNotFound(AgentIdentity::from("singer"));
+        let already = MobError::MemberAlreadyExists(AgentIdentity::from("singer"));
+        let not_addressable = MobError::NotExternallyAddressable(AgentIdentity::from("singer"));
 
         let msg_nf = format!("{not_found}");
         let msg_ae = format!("{already}");
@@ -522,9 +514,9 @@ mod tests {
         // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
             MobError::ProfileNotFound(ProfileName::from("p")),
-            MobError::MemberNotFound(MeerkatId::from("m")),
-            MobError::MemberAlreadyExists(MeerkatId::from("m")),
-            MobError::NotExternallyAddressable(MeerkatId::from("m")),
+            MobError::MemberNotFound(AgentIdentity::from("m")),
+            MobError::MemberAlreadyExists(AgentIdentity::from("m")),
+            MobError::NotExternallyAddressable(AgentIdentity::from("m")),
             MobError::InvalidTransition {
                 from: MobState::Creating,
                 to: MobState::Running,
@@ -537,7 +529,6 @@ mod tests {
                 rotated_peer_count: 1,
                 rollback_succeeded: false,
                 pending_authority_recorded: true,
-                pending_authority_process_local: false,
                 rollback_error: Some("rollback failed".to_string()),
                 reason: "remote failed".to_string(),
             },
@@ -546,12 +537,12 @@ mod tests {
                 reason: "bind required".to_string(),
             },
             MobError::MemberRestoreFailed {
-                member_id: MeerkatId::from("m"),
+                member_id: AgentIdentity::from("m"),
                 session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
             },
             MobError::KickoffWaitTimedOut {
-                pending_member_ids: vec![MeerkatId::from("m")],
+                pending_member_ids: vec![AgentIdentity::from("m")],
             },
             MobError::DefinitionError(vec![]),
             MobError::FlowNotFound(FlowId::from("f")),
@@ -623,7 +614,7 @@ mod tests {
         let missing = [
             MobError::MobNotFound(MobId::from("mob")),
             MobError::ProfileNotFound(ProfileName::from("p")),
-            MobError::MemberNotFound(MeerkatId::from("m")),
+            MobError::MemberNotFound(AgentIdentity::from("m")),
             MobError::FlowNotFound(FlowId::from("f")),
             MobError::RunNotFound(RunId::new()),
             MobError::WorkNotFound(WorkRef::new()),
@@ -645,7 +636,7 @@ mod tests {
     fn failure_class_maps_non_missing_variants() {
         let cases = [
             (
-                MobError::MemberAlreadyExists(MeerkatId::from("m")),
+                MobError::MemberAlreadyExists(AgentIdentity::from("m")),
                 MobFailureClass::TargetBusy,
             ),
             (

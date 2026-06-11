@@ -71,25 +71,22 @@ pub struct NewMobEvent {
     pub(crate) kind: MobEventKind,
 }
 
-/// Backend-neutral reference to a mob member.
+/// Backend-neutral transport reference to a mob member.
 ///
-/// Legacy bridge-level identity retained for internal dispatch. Not part of
-/// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
-/// for all public surfaces.
-///
-/// Finding A7: this enum was previously `#[doc(hidden)] pub` with only
-/// `pub(crate)` constructors, making it reachable in the crate's public
-/// namespace but effectively useless externally. Making it `pub(crate)` both
-/// enforces that (no external reachability) and matches the reality that no
-/// public `MobHandle` method uses it as a parameter or return type.
+/// Identity (`AgentIdentity`, machine-owned bindings) and transport
+/// reachability (session binding / backend peer address + pubkey) are
+/// distinct facts. The bridge needs this `pub(crate)` transport carrier to
+/// dispatch commands to a member's runtime; it is excluded from the public
+/// wire contract — public surfaces use [`AgentIdentity`] and
+/// [`AgentRuntimeId`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
-        /// Compatibility carrier for the canonical bridge session ID.
+        /// Canonical bridge session ID.
         session_id: SessionId,
     },
-    /// Backend-provided identity and address (future external form).
+    /// Backend-provided identity and address (external form).
     BackendPeer {
         /// Backend-unique peer id.
         peer_id: String,
@@ -97,15 +94,14 @@ pub(crate) enum MemberRef {
         address: String,
         /// Ed25519 signing pubkey bytes for the backend peer. This is the
         /// trust subject for comms admission; `peer_id` must derive from it.
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
         /// Optional bootstrap proof for re-establishing supervisor control.
         /// Not serialized on the wire (intentionally elided from `Serialize`
         /// below); kept in memory as a redacting newtype so it does not leak
         /// through `Debug` or `tracing` fields.
         bootstrap_token: Option<BridgeBootstrapToken>,
         /// Optional bridge session binding when this member is bridged to a
-        /// local session. Serialized additively as both `session_id` and
-        /// `bridge_session_id` for compatibility.
+        /// local session.
         session_id: Option<SessionId>,
     },
 }
@@ -130,9 +126,8 @@ impl Serialize for MemberRef {
     {
         match self {
             Self::Session { session_id } => {
-                let mut map = serializer.serialize_map(Some(3))?;
+                let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("kind", "session")?;
-                map.serialize_entry("session_id", session_id)?;
                 map.serialize_entry("bridge_session_id", session_id)?;
                 map.end()
             }
@@ -147,11 +142,8 @@ impl Serialize for MemberRef {
                 map.serialize_entry("kind", "backend_peer")?;
                 map.serialize_entry("peer_id", peer_id)?;
                 map.serialize_entry("address", address)?;
-                if let Some(pubkey) = pubkey {
-                    map.serialize_entry("pubkey", pubkey)?;
-                }
+                map.serialize_entry("pubkey", pubkey)?;
                 if let Some(session_id) = session_id {
-                    map.serialize_entry("session_id", session_id)?;
                     map.serialize_entry("bridge_session_id", session_id)?;
                 }
                 map.end()
@@ -161,29 +153,17 @@ impl Serialize for MemberRef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum MemberRefWire {
-    Canonical(MemberRefCanonical),
-}
-
-#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum MemberRefCanonical {
+enum MemberRefDe {
     Session {
-        #[serde(default)]
-        session_id: Option<SessionId>,
-        #[serde(default)]
-        bridge_session_id: Option<SessionId>,
+        bridge_session_id: SessionId,
     },
     BackendPeer {
         peer_id: String,
         address: String,
-        #[serde(default)]
-        pubkey: Option<[u8; 32]>,
+        pubkey: [u8; 32],
         #[serde(default)]
         bootstrap_token: Option<BridgeBootstrapToken>,
-        #[serde(default)]
-        session_id: Option<SessionId>,
         #[serde(default)]
         bridge_session_id: Option<SessionId>,
     },
@@ -194,39 +174,32 @@ impl<'de> Deserialize<'de> for MemberRef {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = MemberRefWire::deserialize(deserializer)?;
-        Ok(match wire {
-            MemberRefWire::Canonical(MemberRefCanonical::Session {
-                session_id,
-                bridge_session_id,
-            }) => Self::Session {
-                session_id: bridge_session_id.or(session_id).ok_or_else(|| {
-                    serde::de::Error::custom(
-                        "session member_ref requires bridge_session_id or session_id",
-                    )
-                })?,
+        Ok(match MemberRefDe::deserialize(deserializer)? {
+            MemberRefDe::Session { bridge_session_id } => Self::Session {
+                session_id: bridge_session_id,
             },
-            MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
+            MemberRefDe::BackendPeer {
                 peer_id,
                 address,
                 pubkey,
                 bootstrap_token,
-                session_id,
                 bridge_session_id,
-            }) => Self::BackendPeer {
+            } => Self::BackendPeer {
                 peer_id,
                 address,
                 pubkey,
                 bootstrap_token,
-                session_id: bridge_session_id.or(session_id),
+                session_id: bridge_session_id,
             },
         })
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-// v7: `FlowFailed` carries the required typed `cause: FlowFailureClass`.
-const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 7;
+// v8: `MemberRef` carries the single canonical `bridge_session_id` wire key
+// (legacy dual `session_id` spelling removed), `BackendPeer.pubkey` and
+// `MemberSpawnedEvent.runtime_mode` are required.
+const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Error {
@@ -306,7 +279,7 @@ pub enum MobEventKind {
     ///
     /// Replaces `MeerkatSpawned` in the public contract. Carries
     /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
-    /// [`AgentRuntimeId`] instead of [`MeerkatId`] / [`MemberRef`].
+    /// [`AgentRuntimeId`] instead of [`AgentIdentity`] / [`MemberRef`].
     ///
     /// Unlike the other `Member*` variants which use inline struct fields,
     /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
@@ -553,16 +526,6 @@ pub struct MemberSpawnedEvent {
     /// Profile name used to spawn.
     pub role: ProfileName,
     /// Runtime mode for this spawned member.
-    ///
-    /// `#[serde(default)]` is load-bearing and intentional: pre-0.6 persisted
-    /// events predate the `runtime_mode` field entirely. The default
-    /// [`MobRuntimeMode::AutonomousHost`] matches pre-field semantics (the
-    /// only mode that existed then), so replay on legacy data coerces to
-    /// the historically correct value. Finding B7 (DELETE_ME) flagged this
-    /// as "silent semantic coercion"; the coercion is deliberate and the
-    /// regression test `mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host`
-    /// pins it so a future schema change cannot silently flip the default.
-    #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -933,7 +896,14 @@ mod tests {
         let parsed = serde_json::from_value::<MemberRef>(json!({
             "session_id": sid,
         }));
+        assert!(parsed.is_err());
 
+        // The legacy dual-key spelling is rejected too: `session_id` is not
+        // an accepted fallback for the canonical `bridge_session_id`.
+        let parsed = serde_json::from_value::<MemberRef>(json!({
+            "kind": "session",
+            "session_id": sid,
+        }));
         assert!(parsed.is_err());
     }
 
@@ -947,7 +917,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first,
-            r#"{"kind":"session","session_id":"00000000-0000-0000-0000-000000000000","bridge_session_id":"00000000-0000-0000-0000-000000000000"}"#
+            r#"{"kind":"session","bridge_session_id":"00000000-0000-0000-0000-000000000000"}"#
         );
     }
 
@@ -968,7 +938,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
-            pubkey: Some([9u8; 32]),
+            pubkey: [9u8; 32],
             bootstrap_token: None,
             session_id: Some(SessionId::from_uuid(Uuid::nil())),
         };
@@ -988,7 +958,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
-            pubkey: None,
+            pubkey: [9u8; 32],
             bootstrap_token: Some("secret-bootstrap-proof".into()),
             session_id: None,
         };
@@ -1163,8 +1133,8 @@ mod tests {
     }
 
     #[test]
-    fn test_member_spawned_defaults_runtime_mode() {
-        let event: MobEvent = serde_json::from_value(json!({
+    fn test_member_spawned_rejects_missing_runtime_mode() {
+        let result = serde_json::from_value::<MobEvent>(json!({
             "cursor": 1,
             "timestamp": "2026-02-19T00:00:00Z",
             "mob_id": "test-mob",
@@ -1179,14 +1149,11 @@ mod tests {
                 },
                 "role": "worker"
             },
-        }))
-        .expect("member_spawned without runtime_mode should parse");
-        match event.kind {
-            MobEventKind::MemberSpawned(member_spawned) => {
-                assert_eq!(member_spawned.runtime_mode, MobRuntimeMode::AutonomousHost);
-            }
-            other => panic!("expected MemberSpawned, got {other:?}"),
-        }
+        }));
+        assert!(
+            result.is_err(),
+            "member_spawned without runtime_mode must be rejected"
+        );
     }
 
     #[test]
@@ -1231,47 +1198,6 @@ mod tests {
             assert!(new_generation > previous_generation);
         } else {
             panic!("expected MemberReset");
-        }
-    }
-
-    #[test]
-    fn mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host() {
-        // Finding B7 (DELETE_ME): MemberSpawnedEvent.runtime_mode carries
-        // `#[serde(default)]` so pre-0.6 persisted events without the field
-        // deserialize to MobRuntimeMode::AutonomousHost. That matches the
-        // pre-field semantics (AutonomousHost was the only mode that
-        // existed). Lock this coercion in so a future schema change cannot
-        // silently flip the default to TurnDriven and corrupt replay of
-        // legacy data.
-        // MobEventKind uses `#[serde(tag = "type", rename_all = "snake_case")]`
-        // so MemberSpawned lands as `{"type": "member_spawned", ...}` with the
-        // wrapped MemberSpawnedEvent's fields at the same level.
-        let legacy_json = serde_json::json!({
-            "type": "member_spawned",
-            "agent_identity": "legacy-worker",
-            "generation": 0,
-            "fence_token": 0,
-            "agent_runtime_id": {
-                "identity": "legacy-worker",
-                "generation": 0
-            },
-            "role": "worker",
-            // runtime_mode intentionally omitted — the whole point of this
-            // regression is "missing field" replay.
-            "labels": {}
-        });
-        let parsed: MobEventKind =
-            serde_json::from_value(legacy_json).expect("legacy event must deserialize");
-        match parsed {
-            MobEventKind::MemberSpawned(event) => {
-                assert_eq!(
-                    event.runtime_mode,
-                    MobRuntimeMode::AutonomousHost,
-                    "legacy MemberSpawnedEvent without runtime_mode must coerce to AutonomousHost",
-                );
-                assert_eq!(event.agent_identity, AgentIdentity::from("legacy-worker"));
-            }
-            other => panic!("expected MemberSpawned, got {other:?}"),
         }
     }
 }

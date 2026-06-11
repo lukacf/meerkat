@@ -20,6 +20,7 @@ use meerkat_core::{
     BudgetLimits, Config, ContentInput, HookRunOverrides, OutputSchema, PeerCorrelationId,
     PeerMeta, Provider, PublicTurnToolOverlay,
     comms::{PeerId, PeerName},
+    config::SystemPromptOverride,
     connection::{BindingId, ProfileId, RealmId},
     lifecycle::run_primitive::CoreRenderable,
 };
@@ -32,8 +33,11 @@ use super::runtime::PeerResponseTerminalStatusWire;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestCreateSessionRequest {
     pub prompt: ContentInput,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    /// Typed per-request system-prompt policy: omit/`null` to inherit, a
+    /// string to set an explicit prompt, or `{"action": "disable"}` to
+    /// suppress every prompt source.
+    #[serde(default, skip_serializing_if = "SystemPromptOverride::is_inherit")]
+    pub system_prompt: SystemPromptOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -326,6 +330,35 @@ mod tests {
         }))
         .expect("create-session body parses");
         assert_eq!(parsed.enable_web_search, Some(true));
+    }
+
+    #[test]
+    fn create_session_request_system_prompt_tri_state() {
+        // The REST create contract carries the typed tri-state policy: string
+        // sets, omission inherits, and the explicit disable object survives
+        // parse (no lossy Disable→Inherit collapse at this boundary).
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "system_prompt": "You are terse.",
+        }))
+        .expect("string system_prompt parses");
+        assert_eq!(
+            parsed.system_prompt,
+            SystemPromptOverride::Set("You are terse.".to_string())
+        );
+
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+        }))
+        .expect("omitted system_prompt parses");
+        assert!(parsed.system_prompt.is_inherit());
+
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "system_prompt": {"action": "disable"},
+        }))
+        .expect("disable system_prompt parses");
+        assert_eq!(parsed.system_prompt, SystemPromptOverride::Disable);
     }
 
     #[test]

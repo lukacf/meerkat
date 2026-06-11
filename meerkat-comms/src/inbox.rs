@@ -11,11 +11,11 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 
 use crate::classify::{IngressClassificationContext, PeerCommsHandleSlot, PreparedIngressItem};
 use crate::peer_types::PeerIngressState;
-use crate::trust::TrustedPeers;
+use crate::trust::TrustStore;
 use crate::types::{Envelope, InboxItem};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
@@ -143,16 +143,16 @@ struct ClassifiedInboxQueue {
     closed: bool,
     entries: VecDeque<ClassifiedInboxEntry>,
     auth_required: bool,
-    /// Shared canonical trust set, owned by the comms `Router`.
+    /// Shared canonical trust store, owned by the comms `Router`.
     ///
     /// The inbox does NOT mirror trust into a local cache — it consults the
-    /// router's single source of truth. The same `Arc<RwLock<TrustedPeers>>`
+    /// router's single source of truth. The same `Arc<RwLock<TrustStore>>`
     /// is used at the classify stage (`IngressClassificationContext`) and
     /// at the admission stage under this queue's `Mutex`. Admission re-reads
-    /// the trust set atomically with the enqueue so a revoke between
+    /// the trust store atomically with the enqueue so a revoke between
     /// classification (T0) and admission (T2) cannot admit an envelope
     /// that was no longer trusted at T2 — see C-H3.
-    trusted_peers: Arc<RwLock<TrustedPeers>>,
+    trusted_peers: Arc<RwLock<TrustStore>>,
     peer_comms_handle: PeerCommsHandleSlot,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
@@ -163,7 +163,7 @@ impl ClassifiedInboxQueue {
     fn new(
         capacity: usize,
         auth_required: bool,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        trusted_peers: Arc<RwLock<TrustStore>>,
         peer_comms_handle: PeerCommsHandleSlot,
     ) -> Self {
         Self {
@@ -258,9 +258,10 @@ impl ClassifiedInboxQueue {
         // concurrent `router.{add,remove}_trusted_peer` serializes with
         // this check — classification's stale view is ignored.
         let trusted = match &prepared.item {
-            InboxItem::External { envelope } => {
-                self.trusted_peers.read().is_trusted(&envelope.from)
-            }
+            InboxItem::External { envelope } => self
+                .trusted_peers
+                .read()
+                .contains(&envelope.from.to_peer_id()),
             InboxItem::PlainEvent { .. } => false,
         };
         let had_queued_work = !self.entries.is_empty();
@@ -447,7 +448,6 @@ impl ClassifiedInboxQueue {
 
 /// The receiving end of the inbox, held by the agent loop.
 pub struct Inbox {
-    rx: mpsc::Receiver<InboxItem>,
     /// Notifier to wake waiting tasks when messages arrive.
     notify: Arc<Notify>,
     /// Classified entries queue (parallel to raw channel).
@@ -461,10 +461,6 @@ pub struct Inbox {
 /// The sending end of the inbox, cloned to IO tasks.
 #[derive(Clone)]
 pub struct InboxSender {
-    // Kept to hold the raw channel open for legacy receivers; raw semantic
-    // sends fail closed unless a classified machine context is installed.
-    #[allow(dead_code)]
-    tx: mpsc::Sender<InboxItem>,
     /// Notifier to wake waiting tasks when messages arrive.
     notify: Arc<Notify>,
     /// Classification context (None for non-classified path).
@@ -480,28 +476,20 @@ pub struct InboxSender {
 impl Inbox {
     /// Create a raw transport-only inbox, returning both the inbox and a sender.
     ///
-    /// Raw inboxes do not own Meerkat peer/event admission authority. Sending
-    /// semantic `InboxItem`s through the public sender fails closed; runtime
-    /// peer/event ingress must use [`Self::new_classified`] with an installed
-    /// machine handle.
+    /// Raw inboxes do not own Meerkat peer/event admission authority and have
+    /// no delivery queue: sending semantic `InboxItem`s through the public
+    /// sender fails closed. Runtime peer/event ingress must use
+    /// [`Self::new_classified`] with an installed machine handle.
     pub fn new() -> (Self, InboxSender) {
-        Self::new_with_capacity(DEFAULT_INBOX_CAPACITY)
-    }
-
-    /// Create a raw transport-only inbox with a bounded capacity.
-    pub fn new_with_capacity(capacity: usize) -> (Self, InboxSender) {
-        let (tx, rx) = mpsc::channel(capacity);
         let notify = Arc::new(Notify::new());
         (
             Inbox {
-                rx,
                 notify: notify.clone(),
                 classified_queue: None,
                 actionable_notify: None,
                 dropped_count: None,
             },
             InboxSender {
-                tx,
                 notify,
                 classification_context: None,
                 classified_queue: None,
@@ -513,11 +501,8 @@ impl Inbox {
 
     /// Create a new inbox with ingress classification support.
     ///
-    /// The classified path uses its own owned queue.
-    /// `send_classified()` enqueues only on that classified queue.
-    /// The raw `tx`/`rx` are kept for structural compatibility with `InboxSender::send()`
-    /// but are not written to on the classified path (0.4.10 vestige; can be removed
-    /// once `tx`/`rx` are made `Option` in a minor release).
+    /// The classified queue is the sole delivery path; `send_classified()`
+    /// enqueues only on that queue.
     pub(crate) fn new_classified(
         context: Arc<IngressClassificationContext>,
     ) -> (Self, InboxSender) {
@@ -536,7 +521,6 @@ impl Inbox {
         context: Arc<IngressClassificationContext>,
         capacity: usize,
     ) -> (Self, InboxSender) {
-        let (tx, rx) = mpsc::channel(capacity);
         let notify = Arc::new(Notify::new());
         let actionable_notify = Arc::new(Notify::new());
         let queue = ClassifiedInboxQueue::new(
@@ -549,14 +533,12 @@ impl Inbox {
         let classified_queue = Arc::new(Mutex::new(queue));
         (
             Inbox {
-                rx,
                 notify: notify.clone(),
                 classified_queue: Some(classified_queue.clone()),
                 actionable_notify: Some(actionable_notify.clone()),
                 dropped_count: Some(dropped_count.clone()),
             },
             InboxSender {
-                tx,
                 notify,
                 classification_context: Some(context),
                 classified_queue: Some(classified_queue),
@@ -572,20 +554,6 @@ impl Inbox {
     /// interrupt-based wait patterns.
     pub fn notify(&self) -> Arc<Notify> {
         self.notify.clone()
-    }
-
-    /// Receive the next item from the inbox, blocking until one is available.
-    pub async fn recv(&mut self) -> Option<InboxItem> {
-        self.rx.recv().await
-    }
-
-    /// Try to drain all currently available items without blocking.
-    pub fn try_drain(&mut self) -> Vec<InboxItem> {
-        let mut items = Vec::new();
-        while let Ok(item) = self.rx.try_recv() {
-            items.push(item);
-        }
-        items
     }
 
     /// Try to drain all classified entries without blocking.
@@ -643,18 +611,22 @@ impl Inbox {
         })
     }
 
-    /// Test-only: ask the queue's shared trust set whether `pubkey` is
+    /// Test-only: ask the queue's shared trust store whether `pubkey` is
     /// currently trusted. The queue does not own a local copy — this
-    /// reads from the same `Arc<RwLock<TrustedPeers>>` that the router
+    /// reads from the same `Arc<RwLock<TrustStore>>` that the router
     /// mutates and that the classifier consults.
     #[cfg(test)]
     pub(crate) fn peer_authority_trusts_peer_for_test(
         &self,
         pubkey: &crate::identity::PubKey,
     ) -> Option<bool> {
-        self.classified_queue
-            .as_ref()
-            .map(|queue| queue.lock().trusted_peers.read().is_trusted(pubkey))
+        self.classified_queue.as_ref().map(|queue| {
+            queue
+                .lock()
+                .trusted_peers
+                .read()
+                .contains(&pubkey.to_peer_id())
+        })
     }
 }
 
@@ -1054,25 +1026,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_raw_inbox_send_does_not_enqueue_semantic_item() {
-        let (mut inbox, sender) = Inbox::new();
-
-        let outcome = sender.send(InboxItem::External {
-            envelope: make_test_envelope(),
-        });
-
-        assert_eq!(
-            outcome,
-            AdmissionOutcome::Dropped {
-                reason: DropReason::ClassificationRejected
-            }
-        );
-        assert!(inbox.try_drain().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_raw_inbox_try_drain_stays_empty_after_rejected_sends() {
-        let (mut inbox, sender) = Inbox::new();
+    async fn test_raw_inbox_repeated_sends_fail_closed() {
+        let (_inbox, sender) = Inbox::new();
 
         // Raw inboxes cannot classify semantic peer ingress without machine authority.
         for i in 0..3 {
@@ -1085,11 +1040,6 @@ mod tests {
                 }
             );
         }
-
-        tokio::task::yield_now().await;
-
-        let items = inbox.try_drain();
-        assert!(items.is_empty());
     }
 
     #[test]
@@ -1200,11 +1150,11 @@ mod tests {
     // === Classified inbox tests ===
 
     use crate::classify::{IngressClassificationContext, test_support};
-    use crate::trust::{TrustedPeer, TrustedPeers};
+    use crate::trust::{TrustEntry, TrustStore};
     use std::sync::atomic::AtomicUsize;
 
     fn make_classification_context(
-        trusted: TrustedPeers,
+        trusted: TrustStore,
         require_auth: bool,
     ) -> Arc<IngressClassificationContext> {
         make_classification_context_with_machine(
@@ -1215,14 +1165,14 @@ mod tests {
     }
 
     fn make_classification_context_without_machine(
-        trusted: TrustedPeers,
+        trusted: TrustStore,
         require_auth: bool,
     ) -> Arc<IngressClassificationContext> {
         make_classification_context_with_machine(trusted, require_auth, None)
     }
 
     fn make_classification_context_with_machine(
-        trusted: TrustedPeers,
+        trusted: TrustStore,
         require_auth: bool,
         peer_comms_handle: Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>>,
     ) -> Arc<IngressClassificationContext> {
@@ -1246,13 +1196,19 @@ mod tests {
         )
     }
 
-    fn make_trusted(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers::from_peers(vec![TrustedPeer {
-            name: name.to_string(),
-            pubkey: *pubkey,
-            addr: "inproc://test".to_string(),
-            meta: crate::PeerMeta::default(),
-        }])
+    fn make_trusted(name: &str, pubkey: &PubKey) -> TrustStore {
+        let mut store = TrustStore::new();
+        store
+            .insert(TrustEntry {
+                peer_id: pubkey.to_peer_id(),
+                name: meerkat_core::comms::PeerName::new(name).expect("valid peer name"),
+                pubkey: *pubkey,
+                address: meerkat_core::comms::PeerAddress::parse("inproc://test")
+                    .expect("valid peer address"),
+                meta: crate::PeerMeta::default(),
+            })
+            .expect("trusted test peer should insert");
+        store
     }
 
     struct RejectingPeerCommsHandle {
@@ -1422,7 +1378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classified_inbox_no_actionable_notify_for_plain_event() {
-        let ctx = make_classification_context(TrustedPeers::new(), false);
+        let ctx = make_classification_context(TrustStore::new(), false);
         let (inbox, sender) = Inbox::new_classified(ctx);
         let actionable = inbox.classified_actionable_notify().unwrap();
 
@@ -1494,33 +1450,6 @@ mod tests {
             entries[0].class,
             meerkat_core::PeerInputClass::ActionableMessage
         );
-    }
-
-    #[tokio::test]
-    async fn test_classified_send_does_not_populate_raw_channel() {
-        // Classified send only enqueues on the classified channel.
-        // No raw double-enqueue; drain_classified_inbox_interactions() is the sole consumer.
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (mut inbox, sender) = Inbox::new_classified(ctx);
-
-        sender
-            .send_classified(InboxItem::External {
-                envelope: make_test_envelope(),
-            })
-            .into_result()
-            .unwrap();
-
-        // Raw channel should be empty
-        let raw = inbox.try_drain();
-        assert_eq!(
-            raw.len(),
-            0,
-            "classified send should not double-enqueue to raw channel"
-        );
-        // Classified channel should have the item
-        let classified = inbox.try_drain_classified();
-        assert_eq!(classified.len(), 1);
     }
 
     #[tokio::test]
@@ -1730,7 +1659,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classified_snapshot_trust_observation_is_diagnostic_only() {
-        let ctx = make_classification_context(TrustedPeers::new(), false);
+        let ctx = make_classification_context(TrustStore::new(), false);
         let (mut inbox, sender) = Inbox::new_classified(ctx);
 
         sender
@@ -1787,7 +1716,7 @@ mod tests {
         // Untrusted sender + require_peer_auth: drop is typed, logged, and
         // counted. No more `Ok(())` masquerading as delivery.
         let untrusted_pubkey = PubKey::new([9u8; 32]);
-        let ctx = make_classification_context(TrustedPeers::new(), true);
+        let ctx = make_classification_context(TrustStore::new(), true);
         let (inbox, sender) = Inbox::new_classified(ctx);
 
         let mut envelope = make_test_envelope();
@@ -1854,9 +1783,8 @@ mod tests {
     #[tokio::test]
     async fn test_classified_full_queue_returns_typed_drop_reason() {
         // InboxFull drops surface as typed `Dropped { InboxFull }` with the
-        // counter bumped. We build a classified queue at capacity 1 by using
-        // `new_with_capacity` plus then falling through to the classified
-        // path with trusted sender: admit the first, reject the second.
+        // counter bumped. Build a classified queue at capacity 1 directly:
+        // admit the first envelope, reject the second.
         let sender_pubkey = PubKey::new([1u8; 32]);
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         // `new_classified` uses DEFAULT_INBOX_CAPACITY; to exercise full we
@@ -1867,9 +1795,7 @@ mod tests {
         let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx),
             classified_queue: Some(classified_queue),
@@ -1904,9 +1830,7 @@ mod tests {
         let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx),
             classified_queue: Some(classified_queue.clone()),
@@ -1956,9 +1880,7 @@ mod tests {
         let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx.clone()),
             classified_queue: Some(classified_queue.clone()),
@@ -1987,7 +1909,7 @@ mod tests {
             "send_wait should be parked on capacity before the revoke"
         );
 
-        *ctx.trusted_peers.write() = TrustedPeers::new();
+        *ctx.trusted_peers.write() = TrustStore::new();
         assert!(classified_queue.lock().pop_front().is_some());
 
         assert_eq!(
@@ -2014,9 +1936,7 @@ mod tests {
         let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx),
             classified_queue: Some(classified_queue.clone()),
@@ -2083,9 +2003,7 @@ mod tests {
         let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx),
             classified_queue: Some(classified_queue.clone()),
@@ -2149,9 +2067,7 @@ mod tests {
         let queue = make_classified_queue(CAPACITY, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
-        let (tx, _rx) = mpsc::channel::<InboxItem>(CAPACITY);
         let sender = InboxSender {
-            tx,
             notify,
             classification_context: Some(ctx),
             classified_queue: Some(classified_queue.clone()),
@@ -2218,7 +2134,7 @@ mod tests {
         // auth exemption from a local compatibility path.
         let receiver = crate::identity::Keypair::generate();
         let sender = crate::identity::Keypair::generate();
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = Inbox::new();
 
         let mut envelope = Envelope {
             id: Uuid::new_v4(),
@@ -2241,8 +2157,5 @@ mod tests {
                 reason: DropReason::ClassificationRejected
             }
         );
-
-        let items = inbox.try_drain();
-        assert!(items.is_empty(), "raw ingress must fail closed");
     }
 }

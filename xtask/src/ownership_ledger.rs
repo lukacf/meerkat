@@ -2150,7 +2150,6 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                     "retire_all",
                     "wire",
                     "unwire",
-                    "internal_turn",
                     "run_flow",
                     "run_flow_with_stream",
                     "cancel_flow",
@@ -2170,6 +2169,15 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            },
+            PublicInherentBoundary {
+                family_name: "mob-member-handle".into(),
+                path_suffix: "meerkat-mob/src/runtime/handle.rs".into(),
+                type_name: "MemberHandle".into(),
+                method_names: vec!["internal_turn"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
             },
         ],
         enum_dispatch: vec![EnumDispatchBoundary {
@@ -3335,11 +3343,11 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "meerkat-mob/src/runtime/handle.rs",
             "internal_turn",
             BoundaryKind::PublicInherent,
-            "MobHandle",
-            &["MobActor.runtime_adapter", "roster"],
+            "MemberHandle",
+            &["MobActor.runtime_adapter", "mob"],
             "SessionBackend runtime bridge + InputLifecycle truth",
             &[
-                "internal-turn wrapper submits work only through canonical member runtime bridge path",
+                "internal-turn member surface submits work only through canonical member runtime bridge path",
             ],
             &["internal-turn convenience surface cannot invent session routing truth"],
             EntryStatus::Closed,

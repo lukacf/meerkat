@@ -1127,25 +1127,10 @@ impl RealmConnectionSet {
         F: Fn(&str) -> Option<String>,
     {
         let spec = env_default_spec(provider, env_lookup);
-        Self::synthesize_default_from_spec(provider, None, spec)
+        Self::synthesize_default_from_spec(provider, spec)
     }
 
-    /// Synthesize a default realm with an inline secret instead of an env
-    /// lookup. Used when callers have already read the api key from a
-    /// config file (legacy credential-map path).
-    pub fn synthesize_inline_default(provider: Provider, secret: String) -> Self {
-        Self::synthesize_default_from_spec(
-            provider,
-            Some(secret),
-            env_default_spec(provider, |_| None),
-        )
-    }
-
-    fn synthesize_default_from_spec(
-        provider: Provider,
-        inline_secret: Option<String>,
-        spec: EnvDefaultSpec,
-    ) -> Self {
+    fn synthesize_default_from_spec(provider: Provider, spec: EnvDefaultSpec) -> Self {
         let backend = BackendProfile {
             id: "default".to_string(),
             provider,
@@ -1153,12 +1138,9 @@ impl RealmConnectionSet {
             base_url: spec.base_url,
             options: spec.options,
         };
-        let source = match inline_secret {
-            Some(secret) => CredentialSourceSpec::InlineSecret { secret },
-            None => CredentialSourceSpec::Env {
-                env: spec.env_var.to_string(),
-                fallback: spec.fallback,
-            },
+        let source = CredentialSourceSpec::Env {
+            env: spec.env_var.to_string(),
+            fallback: spec.fallback,
         };
         let auth = AuthProfile {
             id: "default".to_string(),

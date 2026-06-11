@@ -253,7 +253,6 @@ export interface ToolExecutionCompletedEvent {
   readonly type: "tool_execution_completed";
   readonly id: string;
   readonly name: string;
-  readonly result: string;
   readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
   readonly durationMs?: number;
@@ -456,7 +455,6 @@ export type ToolConfigChangeStatus =
 export interface ToolConfigChangedPayload {
   readonly operation?: ToolConfigChangeOperation;
   readonly target?: string;
-  readonly status?: string;
   readonly status_info?: ToolConfigChangeStatus;
   readonly persisted?: boolean;
   readonly applied_at_turn?: number;
@@ -1155,8 +1153,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         id: requireStringField(raw, "id"),
         name: requireStringField(raw, "name"),
-        result: requireStringField(raw, "result"),
-        content: parseContentBlocks(raw.content, raw.result),
+        content: parseContentBlocks(raw.content, undefined),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
           ? { durationMs: raw.duration_ms }
@@ -1236,7 +1233,6 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ...(statusInfo != null ? { status_info: statusInfo } : {}),
           operation: requireOneOf(requireStringField(payloadRaw, "operation"), "operation", ["add", "remove", "reload"] as const),
           target: requireStringField(payloadRaw, "target"),
-          status: requireStringField(payloadRaw, "status"),
           persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },

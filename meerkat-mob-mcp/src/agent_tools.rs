@@ -17,7 +17,7 @@ use meerkat_core::types::{
 };
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
-    SpawnMemberSpec, SpawnResult, ids::MeerkatId, runtime::MobSessionService,
+    SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -1011,7 +1011,7 @@ impl AgentMobToolSurface {
 
         let mut spec = SpawnMemberSpec::new(
             ProfileName::from(args.profile),
-            MeerkatId::from(args.member_id),
+            AgentIdentity::from(args.member_id),
         );
         spec.initial_message = args.initial_message;
         spec.runtime_mode = args.runtime_mode;
@@ -2460,12 +2460,14 @@ mod tests {
                     authority
                         .validate_public_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
-                    let created = !self
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    let created = self
                         .trusted
-                        .read()
+                        .write()
                         .await
-                        .contains_key(&peer.peer_id.as_str().to_string());
-                    self.add_trusted_peer(peer).await?;
+                        .insert(peer.peer_id.as_str().to_string(), peer)
+                        .is_none();
                     Ok(CommsTrustMutationResult::Added { created })
                 }
                 CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
@@ -2475,7 +2477,7 @@ mod tests {
                     authority
                         .validate_public_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    let removed = self.trusted.write().await.remove(&peer_id).is_some();
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
@@ -2483,7 +2485,8 @@ mod tests {
                     authority
                         .validate_private_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
-                    self.add_private_trusted_peer(peer).await?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
                     Ok(CommsTrustMutationResult::Added { created: true })
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
@@ -2493,7 +2496,7 @@ mod tests {
                     authority
                         .validate_private_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    let removed = self.trusted.write().await.remove(&peer_id).is_some();
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
             }
@@ -2560,16 +2563,6 @@ mod tests {
             Ok(())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-                .map_err(SendError::Validation)?;
-            self.trusted
-                .write()
-                .await
-                .insert(peer.peer_id.as_str().to_string(), peer);
-            Ok(())
-        }
-
         async fn add_private_trusted_peer(
             &self,
             peer: TrustedPeerDescriptor,
@@ -2577,10 +2570,6 @@ mod tests {
             TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                 .map_err(SendError::Validation)?;
             Ok(())
-        }
-
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id).is_some())
         }
 
         async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {

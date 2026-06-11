@@ -9,13 +9,10 @@ use super::terminalization::{
 use super::topology::{MobTopologyService, PolicyDecision};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
 use crate::definition::{
-    CollectionPolicy, DispatchMode, FlowNodeSpec, FlowSchemaRef, FlowStepSpec, FrameSpec,
-    FrameStepSpec, PolicyMode, StepOutputFormat,
+    CollectionPolicy, DispatchMode, FlowSchemaRef, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::ids::{
-    AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, ProfileName, RunId, StepId,
-};
+use crate::ids::{AgentIdentity, FlowId, FlowNodeId, FrameId, ProfileName, RunId, StepId};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
@@ -135,13 +132,7 @@ impl FlowEngine {
             .map(Duration::from_millis)
             .map(|limit| flow_started_at + limit);
 
-        let synthesized_root;
-        let root_spec = if let Some(root_spec) = &config.flow_spec.root {
-            root_spec
-        } else {
-            synthesized_root = legacy_flat_steps_as_root_frame(&config.flow_spec.steps);
-            &synthesized_root
-        };
+        let root_spec = &config.flow_spec.root;
         // All flow execution is routed through FlowFrameEngine so branch,
         // dependency, loop, and ready-queue decisions remain MobMachine-owned.
         {
@@ -335,7 +326,7 @@ impl FlowEngine {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         fault: &StepOutputFault,
         attempt: usize,
         max_retries: usize,
@@ -576,7 +567,7 @@ impl FlowEngine {
         }
 
         // ── 4. Target selection ────────────────────────────────────────────
-        let mut targets: Vec<MeerkatId> = self
+        let mut targets: Vec<AgentIdentity> = self
             .handle
             .list_runnable_members()
             .await
@@ -710,7 +701,7 @@ impl FlowEngine {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        targets: &[MeerkatId],
+        targets: &[AgentIdentity],
         step: &FlowStepSpec,
         context: &FlowContext,
         config: &FlowRunConfig,
@@ -764,7 +755,7 @@ impl FlowEngine {
             });
         }
 
-        let mut successes: Vec<(MeerkatId, Value)> = Vec::new();
+        let mut successes: Vec<(AgentIdentity, Value)> = Vec::new();
         let mut failures: Vec<StepTargetFailure> = Vec::new();
 
         while let Some((target, result)) = in_flight.next().await {
@@ -831,7 +822,7 @@ impl FlowEngine {
         &self,
         run_id: &RunId,
         step_id: &StepId,
-        target: &MeerkatId,
+        target: &AgentIdentity,
         prompt: &ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
         output_format: StepOutputFormat,
@@ -1865,28 +1856,6 @@ impl FlowEngine {
     }
 }
 
-fn legacy_flat_steps_as_root_frame(steps: &IndexMap<StepId, FlowStepSpec>) -> FrameSpec {
-    let nodes = steps
-        .iter()
-        .map(|(step_id, step)| {
-            (
-                FlowNodeId::from(step_id.as_str()),
-                FlowNodeSpec::Step(FrameStepSpec {
-                    step_id: step_id.clone(),
-                    depends_on: step
-                        .depends_on
-                        .iter()
-                        .map(|dependency| FlowNodeId::from(dependency.as_str()))
-                        .collect(),
-                    depends_on_mode: step.depends_on_mode.clone(),
-                    branch: step.branch.clone(),
-                }),
-            )
-        })
-        .collect();
-    FrameSpec { nodes }
-}
-
 /// Outcome of canonical step execution via `execute_step_with_all_guards`.
 pub(crate) enum StepGuardOutcome {
     Completed(Value),
@@ -2028,7 +1997,7 @@ fn has_effect(
     effects: &[flow_run::Effect],
     expected: FlowRunEffectKind,
     expected_step_id: Option<&StepId>,
-    expected_target_id: Option<&MeerkatId>,
+    expected_target_id: Option<&AgentIdentity>,
 ) -> bool {
     effects.iter().any(|effect| {
         if FlowRunEffectKind::parse(effect) != Some(expected) {
@@ -2062,7 +2031,7 @@ fn effect_step_id(effect: &flow_run::Effect) -> Result<Option<StepId>, MobError>
     Ok(step_id)
 }
 
-fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobError> {
+fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<AgentIdentity>, MobError> {
     let target_id = match effect {
         flow_run::Effect::ProjectTargetSuccess(payload) => Some(payload.target_id.clone()),
         flow_run::Effect::ProjectTargetFailure(payload) => Some(payload.target_id.clone()),
@@ -2108,7 +2077,7 @@ enum StepOutputFault {
     /// parse as JSON.
     MalformedJson {
         step_id: StepId,
-        target: MeerkatId,
+        target: AgentIdentity,
         error: String,
         excerpt: String,
     },
@@ -2133,7 +2102,7 @@ impl std::fmt::Display for StepOutputFault {
 fn parse_output_value(
     raw: &str,
     step_id: &StepId,
-    target: &MeerkatId,
+    target: &AgentIdentity,
     format: &StepOutputFormat,
 ) -> Result<Value, StepOutputFault> {
     if matches!(format, StepOutputFormat::Text) {
@@ -2168,7 +2137,7 @@ fn completed_output_value(
     raw: &str,
     structured_output: Option<Value>,
     step_id: &StepId,
-    target: &MeerkatId,
+    target: &AgentIdentity,
     format: &StepOutputFormat,
 ) -> Result<Value, StepOutputFault> {
     match (format, structured_output) {
@@ -2213,7 +2182,7 @@ fn strip_code_fences(raw: &str) -> String {
 fn aggregate_output(
     dispatch_mode: &DispatchMode,
     policy: &CollectionPolicy,
-    successes: &[(MeerkatId, Value)],
+    successes: &[(AgentIdentity, Value)],
 ) -> Value {
     if matches!(dispatch_mode, DispatchMode::FanIn) {
         return Value::Array(

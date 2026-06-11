@@ -66,7 +66,7 @@ fn recovered_create_request_holds_registration_flag() {
     let request = CreateSessionRequest {
         model: "test-model".into(),
         prompt: ContentInput::from("hello"),
-        system_prompt: None,
+        system_prompt: meerkat::SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
         initial_turn: InitialTurnPolicy::RunImmediately,

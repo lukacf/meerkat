@@ -126,21 +126,13 @@ impl BuiltinTool for PeersTool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
+    use meerkat_comms::{CommsConfig, Keypair};
 
     fn make_test_state() -> CommsToolState {
         let keypair = Keypair::generate();
-        let peer_keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "test-peer".into(),
-            pubkey: peer_keypair.public_key(),
-            addr: "tcp://127.0.0.1:4200".to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::new(
             keypair,
-            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,

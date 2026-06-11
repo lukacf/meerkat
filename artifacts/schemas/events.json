@@ -1825,7 +1825,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -1861,9 +1861,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -1874,7 +1871,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],
@@ -2546,6 +2542,7 @@
           "type",
           "id",
           "name",
+          "content",
           "is_error"
         ],
         "type": "object"
@@ -2596,7 +2593,7 @@
         "description": "Tool execution completed",
         "properties": {
           "content": {
-            "description": "Canonical typed tool-result content.",
+            "description": "Canonical typed tool-result content. Display text is derived from\nthese blocks at the consumer edge, never carried beside them.",
             "items": {
               "$ref": "#/$defs/ContentBlock"
             },
@@ -2616,10 +2613,6 @@
           "name": {
             "type": "string"
           },
-          "result": {
-            "description": "Legacy text projection retained for existing event consumers.",
-            "type": "string"
-          },
           "type": {
             "const": "tool_execution_completed",
             "type": "string"
@@ -2629,7 +2622,7 @@
           "type",
           "id",
           "name",
-          "result",
+          "content",
           "is_error",
           "duration_ms"
         ],
@@ -2829,11 +2822,7 @@
         "properties": {
           "reason": {
             "$ref": "#/$defs/SkillResolutionFailureReason",
-            "default": {
-              "message": "",
-              "reason_type": "unknown"
-            },
-            "description": "Structured reason for the failure. Legacy payloads deserialize as\n`unknown`. Display text is the `Display` projection of this typed\nreason, never a separately-carried field."
+            "description": "Structured reason for the failure. Display text is the `Display`\nprojection of this typed reason, never a separately-carried field."
           },
           "skill_key": {
             "anyOf": [
@@ -2852,7 +2841,8 @@
           }
         },
         "required": [
-          "type"
+          "type",
+          "reason"
         ],
         "type": "object"
       },
@@ -3831,6 +3821,7 @@
               "type",
               "id",
               "name",
+              "content",
               "is_error"
             ],
             "type": "object"
@@ -3881,7 +3872,7 @@
             "description": "Tool execution completed",
             "properties": {
               "content": {
-                "description": "Canonical typed tool-result content.",
+                "description": "Canonical typed tool-result content. Display text is derived from\nthese blocks at the consumer edge, never carried beside them.",
                 "items": {
                   "$ref": "#/$defs/ContentBlock"
                 },
@@ -3901,10 +3892,6 @@
               "name": {
                 "type": "string"
               },
-              "result": {
-                "description": "Legacy text projection retained for existing event consumers.",
-                "type": "string"
-              },
               "type": {
                 "const": "tool_execution_completed",
                 "type": "string"
@@ -3914,7 +3901,7 @@
               "type",
               "id",
               "name",
-              "result",
+              "content",
               "is_error",
               "duration_ms"
             ],
@@ -4114,11 +4101,7 @@
             "properties": {
               "reason": {
                 "$ref": "#/$defs/SkillResolutionFailureReason",
-                "default": {
-                  "message": "",
-                  "reason_type": "unknown"
-                },
-                "description": "Structured reason for the failure. Legacy payloads deserialize as\n`unknown`. Display text is the `Display` projection of this typed\nreason, never a separately-carried field."
+                "description": "Structured reason for the failure. Display text is the `Display`\nprojection of this typed reason, never a separately-carried field."
               },
               "skill_key": {
                 "anyOf": [
@@ -4137,7 +4120,8 @@
               }
             },
             "required": [
-              "type"
+              "type",
+              "reason"
             ],
             "type": "object"
           },
@@ -5791,7 +5775,7 @@
         ]
       },
       "ToolConfigChangedPayload": {
-        "description": "Payload for tool configuration change notifications.",
+        "description": "Payload for tool configuration change notifications.\n\nThe typed `status_info` is the sole owner of the change status; display\ntext is derived at read time via [`ToolConfigChangedPayload::status_text`].",
         "properties": {
           "applied_at_turn": {
             "format": "uint32",
@@ -5827,9 +5811,6 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
             "$ref": "#/$defs/ToolConfigChangeStatus"
           },
@@ -5840,7 +5821,6 @@
         "required": [
           "operation",
           "target",
-          "status",
           "status_info",
           "persisted"
         ],

@@ -4,7 +4,7 @@
 use std::fmt;
 
 pub const SESSION_VERSION: u32 = 2;
-pub const STORED_INPUT_STATE_VERSION: u32 = 2;
+pub const STORED_INPUT_STATE_VERSION: u32 = 3;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

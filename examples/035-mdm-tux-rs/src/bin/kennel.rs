@@ -8,9 +8,9 @@ use mdm_tux::machines::kennel_target_control::{
     self, Effect as ControlEffect, Event as ControlEvent, State as ControlState,
 };
 use mdm_tux::{
-    ClaimGrant, ExampleGeneratedCommsTrustRouter, KennelPayload, KennelTargetState,
-    LeaseTerminationReason, LeaseView, ListScope, ProviderKind, SignedKennelEnvelope,
-    TargetListEntry, TargetRegistrationRejectReason, DEFAULT_OPENAI_MODEL, build_signed_envelope,
+    ClaimGrant, DEFAULT_OPENAI_MODEL, ExampleGeneratedCommsTrustRouter, KennelPayload,
+    KennelTargetState, LeaseTerminationReason, LeaseView, ListScope, ProviderKind,
+    SignedKennelEnvelope, TargetListEntry, TargetRegistrationRejectReason, build_signed_envelope,
     load_or_generate_keypair, read_envelope, verify_envelope, write_envelope,
 };
 use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, WiringRules};
@@ -313,16 +313,13 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|error| anyhow::anyhow!("enable hive comms drain: {}", error.message))?;
         eprintln!("[kennel] hive comms drain enabled for {session_id}");
     }
-    let hive_comms_trust =
-        hive_session_id_typed
-            .clone()
-            .map(|session_id| {
-                Arc::new(ExampleGeneratedCommsTrustRouter::new(
-                    hive_runtime.runtime_adapter(),
-                    session_id,
-                    Arc::clone(&hive_comms_runtime),
-                ))
-            });
+    let hive_comms_trust = hive_session_id_typed.clone().map(|session_id| {
+        Arc::new(ExampleGeneratedCommsTrustRouter::new(
+            hive_runtime.runtime_adapter(),
+            session_id,
+            Arc::clone(&hive_comms_runtime),
+        ))
+    });
 
     // ── Create hive mob (external backend) ────────────────────────────────
     let hive_mob_id: Option<MobId> = if enable_experimental_hive_mob {
@@ -516,12 +513,7 @@ async fn handle_connection(
                             );
                         };
                         hive_comms_trust
-                            .add_trusted_peer(meerkat_comms::TrustedPeer {
-                                name: name.clone(),
-                                pubkey: target_pubkey,
-                                addr: direct_addr.clone(),
-                                meta: meerkat_comms::PeerMeta::default(),
-                            })
+                            .add_trusted_peer(&name, target_pubkey, &direct_addr)
                             .await?;
 
                         let reply = build_signed_envelope(
@@ -566,7 +558,7 @@ async fn handle_connection(
                                     peer_id: target_id,
                                     address: direct_addr,
                                     bootstrap_token: Some(bootstrap_token.into()),
-                                    pubkey: Some(*target_pubkey.as_bytes()),
+                                    pubkey: *target_pubkey.as_bytes(),
                                 });
                                 match tokio::time::timeout(
                                     std::time::Duration::from_secs(10),

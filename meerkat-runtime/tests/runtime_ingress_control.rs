@@ -36,8 +36,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -212,7 +211,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .expect("input record");
     assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        stored.state.terminal_outcome(),
+        stored.seed.terminal_outcome,
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })

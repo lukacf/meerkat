@@ -35,7 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-6".into(),
             prompt: "What makes Rust's ownership model unique? Answer in two sentences.".into(),
-            system_prompt: Some("You are a helpful assistant. Be concise.".into()),
+            system_prompt: meerkat::SystemPromptOverride::Set(
+                "You are a helpful assistant. Be concise.".into(),
+            ),
             max_tokens: Some(512),
             event_tx: None,
             initial_turn: InitialTurnPolicy::RunImmediately,

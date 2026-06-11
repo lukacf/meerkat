@@ -65,7 +65,6 @@ fn create_dispatcher_with_shell(
         None,
         Some(session_id.to_string()),
         Some(ops_registry),
-        true,
     )?;
     Ok(dispatcher)
 }

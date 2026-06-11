@@ -2242,24 +2242,12 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Ok(())
     }
 
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        Err(SendError::Unsupported(
-            "add_trusted_peer requires apply_trust_mutation authority".to_string(),
-        ))
-    }
-
     async fn add_private_trusted_peer(
         &self,
         _peer: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
-        ))
-    }
-
-    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-        Err(SendError::Unsupported(
-            "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
         ))
     }
 
@@ -3231,7 +3219,7 @@ fn runtime_binding_from_wire(
                 peer_id: resolved.peer_id.to_string(),
                 address,
                 bootstrap_token,
-                pubkey: Some(resolved.pubkey),
+                pubkey: resolved.pubkey,
             })
         }
     }
@@ -3879,11 +3867,6 @@ mod tests {
         )
         .expect("valid peer descriptor");
 
-        let raw_add = runtime
-            .add_trusted_peer(peer.clone())
-            .await
-            .expect_err("raw add must fail closed");
-        assert!(matches!(raw_add, SendError::Unsupported(_)));
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
         let projection_authority = std::sync::Arc::new(std::sync::Mutex::new(
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
@@ -3965,11 +3948,6 @@ mod tests {
         assert_eq!(added, CommsTrustMutationResult::Added { created: true });
         assert!(runtime.trusted.read().await.contains_key(&peer_id));
 
-        let raw_remove = runtime
-            .remove_trusted_peer(&peer_id)
-            .await
-            .expect_err("raw remove must fail closed");
-        assert!(matches!(raw_remove, SendError::Unsupported(_)));
         let unwiring_transition = {
             let mut authority = projection_authority
                 .lock()
@@ -4097,7 +4075,7 @@ mod tests {
             peer_id,
             meerkat_core::comms::PeerId::from_ed25519_pubkey(&expected_pubkey).to_string()
         );
-        assert_eq!(pubkey, Some(expected_pubkey));
+        assert_eq!(pubkey, expected_pubkey);
     }
 
     #[test]
@@ -4478,27 +4456,12 @@ mod tests {
             Ok(())
         }
 
-        async fn add_trusted_peer(
-            &self,
-            _peer: meerkat_core::comms::TrustedPeerDescriptor,
-        ) -> Result<(), SendError> {
-            Err(SendError::Unsupported(
-                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
         async fn add_private_trusted_peer(
             &self,
             _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
             Err(SendError::Unsupported(
                 "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
-        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-            Err(SendError::Unsupported(
-                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
             ))
         }
 
@@ -4910,7 +4873,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -4951,7 +4914,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5027,7 +4990,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5113,7 +5076,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5159,7 +5122,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -5762,7 +5725,9 @@ mod tests {
         let turn_handle = state.handle_for(&mob_id).await.expect("handle");
         let in_flight_turn = tokio::spawn(async move {
             turn_handle
-                .internal_turn(AgentIdentity::from("worker-1"), "observe the mob")
+                .member(&AgentIdentity::from("worker-1"))
+                .await?
+                .internal_turn("observe the mob")
                 .await
         });
 
@@ -7213,7 +7178,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -7270,7 +7235,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -7351,7 +7316,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "test".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,

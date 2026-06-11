@@ -419,7 +419,6 @@ export interface MobMemberListEntryWire {
   member_ref: WireMemberRef;
   role: string;
   runtime_mode: WireMobRuntimeMode;
-  state: WireMemberState;
   status: WireMobMemberStatus;
   wired_to?: string[];
 }
@@ -1556,7 +1555,7 @@ export type WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplit
 
 export type WireToolFilter = "All" | { Allow: string[] } | { Deny: string[] };
 
-export type WireMemberState = "active" | "retiring";
+export type WireMemberState = unknown;
 
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
@@ -2367,14 +2366,12 @@ export interface LiveCommitInputParams {
 export type LiveRefreshStatus = "queued";
 
 export interface LiveRefreshResult {
-  refresh_enqueued: boolean;
   status: "queued";
 }
 
 export type LiveCloseStatus = "closed";
 
 export interface LiveCloseResult {
-  closed: boolean;
   status: "closed";
 }
 

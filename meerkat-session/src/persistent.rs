@@ -65,9 +65,7 @@ use meerkat_runtime::input_state::{
     InputLifecycleState, InputStatePersistenceRecord, InputTerminalOutcome, StoredInputState,
 };
 use meerkat_runtime::store::SessionDelta;
-use meerkat_runtime::{
-    MachineSessionControlAuthority, MeerkatMachine, RuntimeMode, RuntimeState, RuntimeStore,
-};
+use meerkat_runtime::{MachineSessionControlAuthority, MeerkatMachine, RuntimeState, RuntimeStore};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1599,7 +1597,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 bundle.seed.last_boundary_sequence = Some(sequence);
                 bundle.seed.phase = InputLifecycleState::Consumed;
                 bundle.seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                bundle.state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 Some(bundle)
             })
             .collect())
@@ -3383,10 +3380,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.event_store = Some(event_store);
         self.projector = Some(projector);
         self
-    }
-
-    pub fn runtime_mode(&self) -> RuntimeMode {
-        RuntimeMode::V9Compliant
     }
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
@@ -9101,7 +9094,7 @@ mod tests {
             model: "test".to_string(),
             prompt: prompt.to_string().into(),
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            system_prompt: None,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn,
@@ -17617,7 +17610,9 @@ mod tests {
             .expect("initial runtime snapshot should exist");
         store_session
             .set_build_state(meerkat_core::SessionBuildState {
-                system_prompt: Some("store-owned recovery prompt".to_string()),
+                system_prompt: meerkat_core::SystemPromptOverride::Set(
+                    "store-owned recovery prompt".to_string(),
+                ),
                 ..Default::default()
             })
             .expect("build state should serialize");
@@ -19899,7 +19894,8 @@ mod tests {
         );
 
         let mut req = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
-        req.system_prompt = Some("You are the old prompt.".to_string());
+        req.system_prompt =
+            meerkat_core::SystemPromptOverride::Set("You are the old prompt.".to_string());
         let created = service
             .create_session(req)
             .await

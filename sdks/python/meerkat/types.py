@@ -189,7 +189,6 @@ from .generated.types import (
     WireInputState as WireInputState,
     WireMemberLaunchMode as WireMemberLaunchMode,
     WireMemberRef as WireMemberRef,
-    WireMemberState as WireMemberState,
     WireMobBackendKind as WireMobBackendKind,
     WireMobMemberStatus as WireMobMemberStatus,
     WireMobProfile as WireMobProfile,
@@ -800,7 +799,6 @@ class EventEnvelope:
 
     event_id: str = ""
     source: EventSourceIdentity | None = None
-    source_id: str = ""
     seq: int = 0
     timestamp_ms: int = 0
     payload: Event | None = None

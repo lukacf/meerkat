@@ -49,7 +49,6 @@ function canonicalEnvelope(overrides = {}) {
       type: 'runtime',
       runtime_id: 'worker-runtime',
     },
-    source_id: 'runtime:worker-runtime',
     seq: 7,
     timestamp_ms: 1710000000000,
     payload: {
@@ -398,7 +397,7 @@ test('Mob subscriptions reject malformed typed EventEnvelope source instead of t
   assert.throws(() => subscription.poll(), /source missing session_id/);
 });
 
-test('Mob subscriptions keep legacy source_id inert when typed source disagrees', async () => {
+test('Mob subscriptions drop legacy source_id strings instead of surfacing them', async () => {
   const envelope = canonicalEnvelope({
     source: {
       type: 'session',
@@ -418,7 +417,8 @@ test('Mob subscriptions keep legacy source_id inert when typed source disagrees'
     type: 'session',
     session_id: '00000000-0000-4000-8000-000000000001',
   });
-  assert.equal(item.source_id, 'session:not-a-uuid');
+  // The legacy envelope-level string is not part of the typed envelope.
+  assert.equal(item.source_id, undefined);
 });
 
 test('Mob subscriptions reject unrecognized event envelopes instead of fabricating unknown events', async () => {
@@ -638,7 +638,11 @@ test('Mob.status projects only generated status truth', async () => {
 
   assert.equal(status.mob_id, 'mob-web-unit');
   assert.equal(status.status, 'Running');
-  assert.equal(status.state, 'Running');
+  assert.equal(
+    Object.hasOwn(status, 'state'),
+    false,
+    'the deleted legacy state projection must not reappear',
+  );
 });
 
 test('MeerkatRuntime.listMobs projects only generated mob list status truth', async () => {
@@ -652,7 +656,6 @@ test('MeerkatRuntime.listMobs projects only generated mob list status truth', as
     {
       mob_id: 'mob-web-unit',
       status: 'Running',
-      state: 'Running',
     },
   ]);
 });
@@ -1081,7 +1084,6 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
         {
           event_id: 'evt-1',
           source: { type: 'session', session_id: 'session-typed-1' },
-          source_id: 'session-1',
           seq: 1,
           timestamp_ms: 123,
           payload: { type: 'text_delta', delta: 'hello' },
@@ -1096,7 +1098,6 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
 
   assert.equal(memberEvent.payload.type, 'text_delta');
   assert.deepEqual(memberEvent.source, { type: 'session', session_id: 'session-typed-1' });
-  assert.equal(memberEvent.source_id, 'session-1');
   assert.equal(memberEvent.seq, 1);
 
   const mobWide = new Mob('mob-web-unit', {
@@ -1112,7 +1113,6 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
           envelope: {
             event_id: 'evt-2',
             source: { type: 'session', session_id: 'session-typed-2' },
-            source_id: 'session-2',
             seq: 2,
             timestamp_ms: 456,
             payload: { type: 'turn_completed' },
@@ -1133,7 +1133,6 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
     type: 'session',
     session_id: 'session-typed-2',
   });
-  assert.equal(mobEvent.envelope.source_id, 'session-2');
   assert.equal(mobEvent.envelope.payload.type, 'turn_completed');
 });
 

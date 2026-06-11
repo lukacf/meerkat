@@ -529,11 +529,11 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_unwire(mobId, member, peer) {
       calls.push(["unwire", mobId, member, peer]);
     },
-    async mob_wire_target(mobId, member, targetJson) {
-      calls.push(["wire_target", mobId, member, JSON.parse(targetJson)]);
+    async mob_wire_peer(mobId, member, peerJson) {
+      calls.push(["wire_peer", mobId, member, JSON.parse(peerJson)]);
     },
-    async mob_unwire_target(mobId, member, targetJson) {
-      calls.push(["unwire_target", mobId, member, JSON.parse(targetJson)]);
+    async mob_unwire_peer(mobId, member, peerJson) {
+      calls.push(["unwire_peer", mobId, member, JSON.parse(peerJson)]);
     },
     async mob_list_members() {
       return JSON.stringify([

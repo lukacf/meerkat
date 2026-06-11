@@ -1030,15 +1030,6 @@ fn default_ci_limits() -> CompositionStateLimits {
     }
 }
 
-/// Compatibility composition registry.
-///
-/// All remaining handoff protocols are canonical: runtime/Mob protocols are
-/// hosted directly by `meerkat_mob_seam_composition`, and auth lease lifecycle
-/// publication is a canonical AuthMachine perimeter composition.
-pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
-    Vec::new()
-}
-
 /// Host composition for the `ops_barrier_satisfaction` handoff protocol.
 ///
 /// The producer is the canonical `MeerkatMachine` which declares

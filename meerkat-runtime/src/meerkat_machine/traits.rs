@@ -4,10 +4,6 @@ use crate::input_state::StoredInputState;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SessionServiceRuntimeExt for MeerkatMachine {
-    fn runtime_mode(&self) -> RuntimeMode {
-        self.mode
-    }
-
     async fn accept_input(
         &self,
         session_id: &SessionId,

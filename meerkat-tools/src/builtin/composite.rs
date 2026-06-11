@@ -91,8 +91,6 @@ pub struct CompositeDispatcher {
     shell_config: Option<ShellConfig>,
     #[allow(dead_code)]
     session_id: Option<String>,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    image_tool_results: bool,
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
@@ -108,9 +106,8 @@ pub struct CompositeDispatcher {
 impl CompositeDispatcher {
     /// Create a new composite dispatcher with builtin tools.
     ///
-    /// `image_tool_results` is accepted for API compatibility but no longer used
-    /// for filtering — view_image is always registered. Visibility is controlled
-    /// at the factory level via `ToolScope` external filters.
+    /// view_image is always registered; visibility for non-image models is
+    /// controlled at the factory level via `ToolScope` external filters.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         task_store: Arc<dyn TaskStore>,
@@ -119,7 +116,6 @@ impl CompositeDispatcher {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         Self::new_with_ops_lifecycle(
             task_store,
@@ -129,7 +125,6 @@ impl CompositeDispatcher {
             external,
             session_id,
             None,
-            _image_tool_results,
         )
     }
 
@@ -144,7 +139,6 @@ impl CompositeDispatcher {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
-        _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
@@ -190,7 +184,7 @@ impl CompositeDispatcher {
                     .as_deref()
                     .and_then(|id| meerkat_core::types::SessionId::parse(id).ok())
                 {
-                    manager = manager.with_owner_session_id(session_id);
+                    manager = manager.with_owner_bridge_session_id(session_id);
                 }
                 if let Some(registry) = ops_lifecycle {
                     manager = manager.with_ops_registry(registry);
@@ -226,9 +220,9 @@ impl CompositeDispatcher {
             }
         }
 
-        // NOTE: view_image is always kept in allowed_tools regardless of image_tool_results.
-        // Visibility gating for non-image models is handled at the factory level via
-        // ToolScope external filters, enabling hot-swap to reveal view_image later.
+        // NOTE: view_image is always kept in allowed_tools. Visibility gating
+        // for non-image models is handled at the factory level via ToolScope
+        // external filters, enabling hot-swap to reveal view_image later.
 
         Ok(Self {
             builtin_tools,
@@ -240,7 +234,6 @@ impl CompositeDispatcher {
             project_root: Some(project_root),
             shell_config,
             session_id: shell_session_id,
-            image_tool_results: _image_tool_results,
             job_manager,
             image_generation_runtime: None,
             web_search_runtime: None,
@@ -293,7 +286,6 @@ impl CompositeDispatcher {
             builtin_config: config.clone(),
             task_store,
             session_id,
-            image_tool_results: true,
             #[cfg(not(target_arch = "wasm32"))]
             job_manager: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -824,7 +816,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 rebound_external,
                 Some(owner_bridge_session_id.to_string()),
                 Some(registry),
-                owned.image_tool_results,
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
@@ -1108,17 +1099,10 @@ mod tests {
         // laundering the ambient process CWD into apply_patch / view_image
         // (dogma row #299).
         let store = Arc::new(MemoryTaskStore::new());
-        let err = CompositeDispatcher::new(
-            store,
-            &BuiltinToolConfig::default(),
-            None,
-            None,
-            None,
-            None,
-            true,
-        )
-        .err()
-        .expect("composite must fail closed without a concrete project root");
+        let err =
+            CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
+                .err()
+                .expect("composite must fail closed without a concrete project root");
         match err {
             CompositeDispatcherError::ToolInitFailed { name, message } => {
                 assert_eq!(name, "apply_patch");
@@ -1146,7 +1130,6 @@ mod tests {
             Some(shell_config),
             None,
             None,
-            true,
         )
         .expect("composite should resolve project root from shell config");
         assert!(
@@ -1171,7 +1154,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1196,7 +1178,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1241,7 +1222,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1287,7 +1267,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1326,16 +1305,9 @@ mod tests {
             policy: ToolPolicyLayer::new().disable_tool("datetime"),
             ..Default::default()
         };
-        let dispatcher = CompositeDispatcher::new(
-            store,
-            &config,
-            Some(test_project_root()),
-            None,
-            None,
-            None,
-            true,
-        )
-        .expect("composite dispatcher should build");
+        let dispatcher =
+            CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)
+                .expect("composite dispatcher should build");
 
         assert!(
             !dispatcher
@@ -1365,7 +1337,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1424,7 +1395,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1466,7 +1436,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1495,7 +1464,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1533,7 +1501,6 @@ mod tests {
             None,
             Some(external),
             None,
-            true,
         )
         .expect("composite dispatcher should build");
         dispatcher.allowed_tools.insert("mob_list".to_string());
@@ -1561,7 +1528,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1590,7 +1556,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1628,7 +1593,6 @@ mod tests {
             None,
             None,
             None,
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1679,7 +1643,6 @@ mod tests {
             None,
             None,
             Some(SessionId::new().to_string()),
-            true,
         )
         .expect("composite dispatcher should build");
         dispatcher.register_blob_file_tools(store);
@@ -1719,7 +1682,6 @@ mod tests {
             Some(shell_config),
             None,
             Some(SessionId::new().to_string()),
-            true,
         )
         .expect("composite dispatcher should build");
 
@@ -1752,7 +1714,6 @@ mod tests {
                 Some(shell_config),
                 None,
                 Some(SessionId::new().to_string()),
-                true,
             )
             .expect("composite dispatcher should build"),
         );
@@ -1819,28 +1780,25 @@ mod tests {
 
     #[test]
     fn view_image_always_in_base_tool_set() {
-        // view_image is always registered regardless of image_tool_results flag.
-        // Visibility gating is handled at the factory/ToolScope level via external filters.
-        for image_tool_results in [false, true] {
-            let store = Arc::new(MemoryTaskStore::new());
-            let dispatcher = CompositeDispatcher::new(
-                store,
-                &BuiltinToolConfig::default(),
-                Some(test_project_root()),
-                None,
-                None,
-                None,
-                image_tool_results,
-            )
-            .expect("composite dispatcher should build");
+        // view_image is always registered. Visibility gating is handled at the
+        // factory/ToolScope level via external filters.
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
 
-            let tools = dispatcher.tools();
-            let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-            assert!(
-                tool_names.contains(&"view_image".to_string()),
-                "view_image should always be in base tool set (image_tool_results={image_tool_results}), but found: {tool_names:?}"
-            );
-        }
+        let tools = dispatcher.tools();
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+        assert!(
+            tool_names.contains(&"view_image".to_string()),
+            "view_image should always be in base tool set, but found: {tool_names:?}"
+        );
     }
 
     #[test]
@@ -1857,7 +1815,6 @@ mod tests {
             None,
             None,
             None,
-            false,
         )
         .unwrap();
 
@@ -2000,7 +1957,6 @@ mod tests {
             None,
             None,
             None,
-            false,
         )
         .unwrap();
 
@@ -2032,16 +1988,9 @@ mod tests {
                 .enable_tool("load_skill"),
             ..BuiltinToolConfig::default()
         };
-        let mut dispatcher = CompositeDispatcher::new(
-            store,
-            &config,
-            Some(test_project_root()),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let mut dispatcher =
+            CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)
+                .unwrap();
 
         dispatcher.register_skill_tools(stub_skill_tool_set());
 

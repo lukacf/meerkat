@@ -117,12 +117,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeKeepAlivePreserve`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
-- `ResolveLiveInterruptRequiredSteer`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveLiveInterruptRequiredQueue`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingIdle`
   - anchors: `session_turn_admission_authority`
   - scenarios: (unclaimed)
@@ -161,9 +155,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeKeepAliveResolved`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
-- `LiveInterruptRequired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 
 ### Invariants
 - `shutdown_phase_is_not_active`

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::registry::{ToolIdentityEntry, ToolIdentityRegistry, ToolRegistry};
+use crate::registry::{ToolIdentityEntry, ToolIdentityRegistry};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::error::ToolValidationError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -181,7 +181,7 @@ impl ToolDispatcher {
         name: &str,
         args: &Value,
     ) -> Result<(), ToolValidationError> {
-        ToolRegistry::validate_tool_def(tool, name, args)
+        crate::registry::validate_tool_def(tool, name, args)
     }
 
     /// Dispatch a tool call

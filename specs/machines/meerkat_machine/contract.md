@@ -498,7 +498,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CommitDeferredNames`(authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<ToolName>, deny_names: Set<ToolName>)
 - `ClearTurnToolOverlay`
-- `SyncVisibilityRevisions`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
+- `ReplaceVisibilityState`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SurfaceRegister`(surface_id: String)
 - `SurfaceSetRemovalTimeout`(timeout_ms: u64)
 - `SurfaceStageAdd`(surface_id: String, now_ms: u64)
@@ -668,9 +668,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestCancelledBeforePublish`(request_key: String)
 - `SurfaceRequestCompleted`(request_key: String)
 - `SurfaceRequestSupersededByCancel`(request_key: String)
-- `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
-- `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, closed: Bool, sequence: u64, close_observation_sequence: u64)
-- `LiveCommandResultResolved`(channel_id: String, command: LiveCommandPublicKind, accepted: Bool, sequence: u64, command_acceptance_sequence: u64)
+- `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, sequence: u64, queue_acceptance_sequence: u64)
+- `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, sequence: u64, close_observation_sequence: u64)
+- `LiveCommandResultResolved`(channel_id: String, command: LiveCommandPublicKind, sequence: u64, command_acceptance_sequence: u64)
 - `LiveCommandRejectionResolved`(channel_id: String, command: LiveCommandPublicKind, rejection: LiveCommandRejectionReason, public_error_class: LiveCommandRejectionPublicErrorClass, sequence: u64)
 - `LiveChannelRequestRejectionResolved`(channel_id: String, request: LiveChannelRequestPublicKind, rejection: LiveChannelRequestRejectionReason, public_error_class: LiveChannelRequestRejectionPublicErrorClass, sequence: u64)
 - `LiveWebrtcTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
@@ -688,7 +688,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `RealtimeTranscriptAppended`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind, sequence: u64)
-- `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
 - `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>, phase: PeerIngressAuthorityPhaseClass)
@@ -6759,7 +6758,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeMessageRunning`
@@ -6768,7 +6767,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedAttached`
@@ -6778,7 +6777,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedIdle`
@@ -6788,7 +6787,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedRunning`
@@ -6798,7 +6797,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
@@ -6808,7 +6807,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredIdle`
@@ -6818,7 +6817,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRetired`
@@ -6828,7 +6827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredStopped`
@@ -6838,7 +6837,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
@@ -6848,7 +6847,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
@@ -6858,7 +6857,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredIdle`
@@ -6868,7 +6867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRetired`
@@ -6878,7 +6877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredStopped`
@@ -6888,7 +6887,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
@@ -6898,7 +6897,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
@@ -6907,7 +6906,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentIdle`
@@ -6916,7 +6915,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
@@ -6925,7 +6924,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSilentAttached`
@@ -6934,7 +6933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSilentRunning`
@@ -6943,7 +6942,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorAttached`
@@ -6952,7 +6951,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorIdle`
@@ -6961,7 +6960,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorRunning`
@@ -6970,7 +6969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeRequestActionableAttached`
@@ -6979,7 +6978,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeRequestActionableRunning`
@@ -6988,7 +6987,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedIdle`
@@ -6998,7 +6997,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedAttached`
@@ -7008,7 +7007,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleAddedRunning`
@@ -7018,7 +7017,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_added`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredIdle`
@@ -7028,7 +7027,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredRetired`
@@ -7038,7 +7037,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredStopped`
@@ -7048,7 +7047,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredAttached`
@@ -7058,7 +7057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredRunning`
@@ -7068,7 +7067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredIdle`
@@ -7078,7 +7077,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Idle`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredRetired`
@@ -7088,7 +7087,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Retired`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredStopped`
@@ -7098,7 +7097,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Stopped`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
@@ -7108,7 +7107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
@@ -7118,7 +7117,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
   - `lifecycle_peer_subject_present`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseAcceptedAttached`
@@ -7127,7 +7126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseAcceptedRunning`
@@ -7136,7 +7135,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseCompletedAttached`
@@ -7145,7 +7144,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseCompletedRunning`
@@ -7154,7 +7153,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeResponseFailedAttached`
@@ -7163,7 +7162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeResponseFailedRunning`
@@ -7172,7 +7171,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyExternalEnvelopeAckAttached`
@@ -7181,7 +7180,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyExternalEnvelopeAckRunning`
@@ -7190,7 +7189,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyPlainEventAttached`
@@ -7198,7 +7197,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyPlainEventRunning`
@@ -7206,7 +7205,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- Emits: `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyPeerResponseReplyAcceptedInitializing`
@@ -13672,9 +13671,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Stopped`
 
-### `SyncVisibilityRevisionsIdle`
+### `ReplaceVisibilityStateIdle`
 - From: `Idle`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13688,9 +13687,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Idle`
 
-### `SyncVisibilityRevisionsAttached`
+### `ReplaceVisibilityStateAttached`
 - From: `Attached`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13704,9 +13703,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Attached`
 
-### `SyncVisibilityRevisionsRunning`
+### `ReplaceVisibilityStateRunning`
 - From: `Running`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13720,9 +13719,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Running`
 
-### `SyncVisibilityRevisionsRetired`
+### `ReplaceVisibilityStateRetired`
 - From: `Retired`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -13736,9 +13735,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_have_identity`
 - To: `Retired`
 
-### `SyncVisibilityRevisionsStopped`
+### `ReplaceVisibilityStateStopped`
 - From: `Stopped`
-- On: `SyncVisibilityRevisions`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`

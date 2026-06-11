@@ -53,12 +53,6 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub recoverable_tool_defs: Option<Vec<ToolDef>>,
 }
 
-/// Canonical name for resumed-turn semantic overrides.
-///
-/// The older `SurfaceSessionRecoveryOverrides` name is kept as the public
-/// compatibility spelling for existing CLI/RPC callers.
-pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
-
 /// Typed session-store backend pinned by a realm.
 ///
 /// This is the one semantic owner of the realm-pinned storage backend value
@@ -208,7 +202,8 @@ impl Default for SurfaceSessionRecoveryContext {
 ///
 /// This is the internal contract for:
 ///
-/// `EffectiveTurnConfig = RealmDefaults + SessionDefaults + TurnOverrides`
+/// `EffectiveTurnConfig = RealmDefaults + SessionDefaults +
+/// SurfaceSessionRecoveryOverrides`
 ///
 /// Non-semantic render/transport resources remain in
 /// [`SurfaceSessionRecoveryContext`] and are copied into `build` only as host
@@ -216,7 +211,7 @@ impl Default for SurfaceSessionRecoveryContext {
 #[derive(Debug)]
 pub struct EffectiveTurnConfig {
     pub model: String,
-    pub system_prompt: Option<String>,
+    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -226,7 +221,7 @@ pub struct EffectiveTurnConfig {
 #[derive(Debug)]
 pub struct RecoveredSessionBuild {
     pub model: String,
-    pub system_prompt: Option<String>,
+    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -359,7 +354,7 @@ pub fn resolve_resume_llm_binding(
 fn authorize_resume_overrides(
     stored_provider: Provider,
     stored_self_hosted_server_id: Option<String>,
-    overrides: &TurnOverrides,
+    overrides: &SurfaceSessionRecoveryOverrides,
     first_turn_phase: crate::generated::session_document::SessionFirstTurnPhase,
 ) -> Result<ResumeLlmBinding, SurfaceSessionRecoveryError> {
     use crate::generated::session_document::{
@@ -449,7 +444,7 @@ pub fn build_recovered_session(
 pub fn resolve_effective_turn_config(
     session: Session,
     realm_defaults: RealmDefaults,
-    overrides: &TurnOverrides,
+    overrides: &SurfaceSessionRecoveryOverrides,
     context: SurfaceSessionRecoveryContext,
 ) -> Result<EffectiveTurnConfig, SurfaceSessionRecoveryError> {
     let SessionDefaults {
@@ -504,12 +499,12 @@ pub fn resolve_effective_turn_config(
         .clone()
         .unwrap_or_else(|| metadata.model.clone());
     let system_prompt = if allows_first_turn_build_overrides {
-        overrides
-            .system_prompt
-            .clone()
-            .or(build_state.system_prompt.clone())
+        match overrides.system_prompt.clone() {
+            Some(prompt) => crate::config::SystemPromptOverride::Set(prompt),
+            None => build_state.system_prompt.clone(),
+        }
     } else {
-        None
+        crate::config::SystemPromptOverride::Inherit
     };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
     let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
@@ -754,7 +749,9 @@ mod tests {
             .expect("session metadata");
         session
             .set_build_state(SessionBuildState {
-                system_prompt: Some("persisted system prompt".to_string()),
+                system_prompt: crate::config::SystemPromptOverride::Set(
+                    "persisted system prompt".to_string(),
+                ),
                 output_schema: Some(
                     OutputSchema::from_json_value(
                         json!({"type":"object","properties":{"ok":{"type":"boolean"}}}),
@@ -826,7 +823,7 @@ mod tests {
                 backend: Some(RecoveryBackendKind::Jsonl),
                 config_generation: Some(99),
             },
-            &TurnOverrides::default(),
+            &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext::default(),
         )
         .expect("effective turn config");
@@ -907,7 +904,7 @@ mod tests {
 
         assert_eq!(recovered.model, "gpt-5.2");
         assert_eq!(
-            recovered.system_prompt.as_deref(),
+            recovered.system_prompt.as_set_prompt(),
             Some("override system prompt")
         );
         assert_eq!(recovered.max_tokens, Some(2048));
@@ -1476,7 +1473,7 @@ mod tests {
         .expect("recovered session without rewriting prompt");
 
         assert!(
-            recovered.system_prompt.is_none(),
+            recovered.system_prompt.is_inherit(),
             "consumed sessions must not re-emit a create-time system_prompt override"
         );
     }

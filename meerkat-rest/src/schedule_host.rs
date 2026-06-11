@@ -130,11 +130,13 @@ impl RestScheduleContext {
         let mut build_config = AgentBuildConfig::new(create.model.clone());
         build_config.provider = create.provider;
         build_config.max_tokens = create.max_tokens;
-        build_config.system_prompt = meerkat::SystemPromptOverride::from_wire_option(
-            prompt_system_prompt
-                .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
-        );
+        build_config.system_prompt = match prompt_system_prompt
+            .map(str::to_owned)
+            .or_else(|| create.system_prompt.clone())
+        {
+            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+            None => meerkat::SystemPromptOverride::Inherit,
+        };
         build_config.output_schema = create.output_schema.clone();
         build_config.structured_output_retries = create.structured_output_retries;
         build_config.provider_params = create.provider_params.clone();
@@ -183,7 +185,7 @@ impl RestScheduleContext {
         let create_req = SvcCreateSessionRequest {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: build_config.system_prompt.to_persisted_option(),
+            system_prompt: build_config.system_prompt.clone(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,

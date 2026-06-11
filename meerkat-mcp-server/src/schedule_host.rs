@@ -272,9 +272,13 @@ impl McpScheduleContext {
         let request = CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: prompt_system_prompt
+            system_prompt: match prompt_system_prompt
                 .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
+                .or_else(|| create.system_prompt.clone())
+            {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens: create.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,

@@ -66,9 +66,8 @@ mod tests {
                 request_id: "r".into(),
                 phase: ResponseProgressPhase::InProgress,
             }),
-            body: "working".into(),
+            content: "working".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
-            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         let err = validate_peer_handling_mode(&input).unwrap_err();
@@ -86,9 +85,8 @@ mod tests {
                 request_id: "r".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -102,9 +100,8 @@ mod tests {
                 request_id: "r".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
-            body: "done".into(),
+            content: "done".into(),
             payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -115,9 +112,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::Message),
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -131,9 +127,8 @@ mod tests {
                 request_id: "r".into(),
                 intent: "i".into(),
             }),
-            body: "do it".into(),
+            content: "do it".into(),
             payload: Some(serde_json::json!({"subject": "x"})),
-            blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -144,9 +139,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: None,
-            body: "hi".into(),
+            content: "hi".into(),
             payload: None,
-            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -173,9 +167,8 @@ mod tests {
             let input = Input::Peer(PeerInput {
                 header: make_header(),
                 convention,
-                body: "hi".into(),
+                content: "hi".into(),
                 payload: None,
-                blocks: None,
                 handling_mode: None,
             });
             assert!(
@@ -198,8 +191,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: "hi".into(),
-            blocks: None,
+            content: "hi".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });

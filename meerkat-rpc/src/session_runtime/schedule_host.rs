@@ -84,6 +84,59 @@ fn runtime_delivery_dispatch(
     }
 }
 
+/// Project a schedule materialization spec into the spec-derived
+/// [`AgentBuildConfig`] fields.
+///
+/// Runtime-scoped fallbacks (realm/instance/backend inherited from the
+/// runtime, config generation, default LLM client) are layered on by
+/// `SessionRuntime::materialize_scheduled_session`.
+fn scheduled_build_config(
+    create: &SessionMaterializationSpec,
+    prompt_system_prompt: Option<&str>,
+) -> Result<AgentBuildConfig, ScheduleDomainError> {
+    let mut build_config = AgentBuildConfig::new(create.model.clone());
+    build_config.provider = create.provider;
+    build_config.max_tokens = create.max_tokens;
+    // Parse the schedule-spec prompt representation once at this ingest
+    // boundary: an occurrence-rendered prompt wins over the spec prompt;
+    // either becomes an explicit `Set`, absence inherits.
+    build_config.system_prompt = match prompt_system_prompt
+        .map(str::to_owned)
+        .or_else(|| create.system_prompt.clone())
+    {
+        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+        None => meerkat::SystemPromptOverride::Inherit,
+    };
+    build_config.output_schema = create.output_schema.clone();
+    build_config.structured_output_retries = create.structured_output_retries;
+    build_config.provider_params = create.provider_params.clone();
+    build_config.comms_name = create.comms_name.clone();
+    build_config.peer_meta = create.peer_meta.clone();
+    // Typed pass-through: `SessionMaterializationSpec.preload_skills` is the
+    // canonical `Vec<SkillKey>` carrier; an empty list normalizes to `None`
+    // (metadata-only inventory), matching the facade schedule host.
+    build_config.preload_skills =
+        (!create.preload_skills.is_empty()).then(|| create.preload_skills.clone());
+    build_config.additional_instructions = (!create.additional_instructions.is_empty())
+        .then(|| create.additional_instructions.clone());
+    // Schedule specs carry the realm as a plain slug string; parse it once
+    // at this ingest boundary. A malformed slug fails closed.
+    build_config.realm_id = create
+        .realm_id
+        .as_deref()
+        .map(meerkat_core::RealmId::parse)
+        .transpose()
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+    build_config.instance_id = create.instance_id.clone();
+    build_config.backend = create
+        .backend
+        .as_deref()
+        .and_then(meerkat_core::RecoveryBackendKind::parse);
+    build_config.keep_alive = create.keep_alive;
+    build_config.app_context = create.app_context.clone();
+    Ok(build_config)
+}
+
 struct RpcScheduleTargetAdapter {
     runtime: Weak<SessionRuntime>,
 }
@@ -230,52 +283,18 @@ impl SessionRuntime {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let mut build_config = AgentBuildConfig::new(create.model.clone());
-        build_config.provider = create.provider;
-        build_config.max_tokens = create.max_tokens;
-        build_config.system_prompt = meerkat::SystemPromptOverride::from_wire_option(
-            prompt_system_prompt
-                .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
-        );
-        build_config.output_schema = create.output_schema.clone();
-        build_config.structured_output_retries = create.structured_output_retries;
-        build_config.provider_params = create.provider_params.clone();
-        build_config.comms_name = create.comms_name.clone();
-        build_config.peer_meta = create.peer_meta.clone();
-        // Post-wave-a dogma: typed `SkillKey` path only; legacy string
-        // `preload_skills: Vec<String>` from schedule types is not auto-parsed.
-        // When the schedule surface needs to carry preload skills it must do
-        // so via the typed `SkillKey` seam.
-        let _ = &create.preload_skills;
-        build_config.preload_skills = None;
-        build_config.additional_instructions = (!create.additional_instructions.is_empty())
-            .then(|| create.additional_instructions.clone());
-        // Schedule specs carry the realm as a plain slug string; parse it once
-        // at this ingest boundary, falling back to the runtime's typed realm.
-        let spec_realm = create
-            .realm_id
-            .as_deref()
-            .map(meerkat_core::RealmId::parse)
-            .transpose()
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        build_config.realm_id = spec_realm.or_else(|| self.inner.realm_id());
-        build_config.instance_id = create
+        let mut build_config = scheduled_build_config(create, prompt_system_prompt)?;
+        // Runtime-scoped fallbacks for facts the spec leaves unset.
+        build_config.realm_id = build_config.realm_id.or_else(|| self.inner.realm_id());
+        build_config.instance_id = build_config
             .instance_id
-            .clone()
             .or_else(|| self.inner.instance_id());
-        build_config.backend = create
-            .backend
-            .as_deref()
-            .and_then(meerkat_core::RecoveryBackendKind::parse)
-            .or_else(|| {
-                self.inner
-                    .backend()
-                    .as_deref()
-                    .and_then(meerkat_core::RecoveryBackendKind::parse)
-            });
-        build_config.keep_alive = create.keep_alive;
-        build_config.app_context = create.app_context.clone();
+        build_config.backend = build_config.backend.or_else(|| {
+            self.inner
+                .backend()
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse)
+        });
         build_config.config_generation = if let Some(runtime) = self.config_runtime() {
             runtime.get().await.ok().map(|snapshot| snapshot.generation)
         } else {
@@ -475,5 +494,85 @@ fn rpc_schedule_mob_host(runtime: &Arc<SessionRuntime>) -> Arc<dyn SurfaceSchedu
         Arc::new(NoopScheduleMobHost::new(
             "scheduled mob targets require the mob feature on the RPC host",
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        let skill_name = match SkillName::parse(name) {
+            Ok(skill_name) => skill_name,
+            Err(err) => unreachable!("static skill fixture is invalid: {err}"),
+        };
+        SkillKey::new(SourceUuid::builtin(), skill_name)
+    }
+
+    fn materialization_spec() -> SessionMaterializationSpec {
+        SessionMaterializationSpec {
+            model: "claude-sonnet-4-6".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: None,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: Default::default(),
+            preload_skills: Vec::new(),
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        }
+    }
+
+    #[test]
+    fn scheduled_build_config_forwards_preload_skill_keys() {
+        // Delivery pin for the typed pass-through: scheduled-session preload
+        // skills reach the build config instead of being discarded.
+        let key = fixture_skill_key("email");
+        let mut create = materialization_spec();
+        create.preload_skills = vec![key.clone()];
+
+        let build = scheduled_build_config(&create, None).expect("valid spec");
+
+        assert_eq!(build.preload_skills, Some(vec![key]));
+    }
+
+    #[test]
+    fn scheduled_build_config_empty_preload_skills_normalizes_to_none() {
+        let build = scheduled_build_config(&materialization_spec(), None).expect("valid spec");
+        assert_eq!(build.preload_skills, None);
+    }
+
+    #[test]
+    fn scheduled_build_config_system_prompt_ingest() {
+        // Occurrence-rendered prompt wins over the spec prompt.
+        let mut create = materialization_spec();
+        create.system_prompt = Some("spec prompt".to_string());
+        let build = scheduled_build_config(&create, Some("rendered prompt")).expect("valid spec");
+        assert_eq!(
+            build.system_prompt,
+            meerkat::SystemPromptOverride::Set("rendered prompt".to_string())
+        );
+
+        // Spec prompt applies when no rendered prompt is present.
+        let build = scheduled_build_config(&create, None).expect("valid spec");
+        assert_eq!(
+            build.system_prompt,
+            meerkat::SystemPromptOverride::Set("spec prompt".to_string())
+        );
+
+        // Absence of both inherits.
+        let build = scheduled_build_config(&materialization_spec(), None).expect("valid spec");
+        assert!(build.system_prompt.is_inherit());
     }
 }

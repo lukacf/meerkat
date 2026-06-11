@@ -1,9 +1,9 @@
-use crate::MeerkatId;
+use crate::AgentIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MobRuntimeBridgeEffect {
     DeliverLifecycleNotice {
-        peer_id: MeerkatId,
+        peer_id: AgentIdentity,
         intent: &'static str,
     },
 }
@@ -13,7 +13,7 @@ pub(super) struct MobRuntimeBridgeAuthority;
 impl MobRuntimeBridgeAuthority {
     pub(super) fn plan_lifecycle_notice(
         sender_ready: bool,
-        wired_peers: &[MeerkatId],
+        wired_peers: &[AgentIdentity],
         intent: &'static str,
     ) -> Vec<MobRuntimeBridgeEffect> {
         if !sender_ready {
@@ -35,7 +35,7 @@ mod tests {
     fn missing_sender_skips_notice_delivery() {
         let effects = MobRuntimeBridgeAuthority::plan_lifecycle_notice(
             false,
-            &[MeerkatId::from("a")],
+            &[AgentIdentity::from("a")],
             "mob.kickoff_failed",
         );
         assert!(effects.is_empty());
@@ -45,7 +45,7 @@ mod tests {
     fn wired_peers_receive_bridge_notice_plan() {
         let effects = MobRuntimeBridgeAuthority::plan_lifecycle_notice(
             true,
-            &[MeerkatId::from("a"), MeerkatId::from("b")],
+            &[AgentIdentity::from("a"), AgentIdentity::from("b")],
             "mob.kickoff_failed",
         );
         assert_eq!(effects.len(), 2);

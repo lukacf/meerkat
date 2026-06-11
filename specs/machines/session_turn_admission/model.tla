@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionTurnAdmissionMachine.
 
-CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnHandlingModeValues
+CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -308,22 +308,6 @@ ResolveRuntimeKeepAlivePreserve(keep_alive_request) ==
     /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
 
 
-ResolveLiveInterruptRequiredSteer(handling_mode) ==
-    /\ phase = "Admitted"
-    /\ (handling_mode = "Steer")
-    /\ phase' = "Admitted"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
-
-
-ResolveLiveInterruptRequiredQueue(handling_mode) ==
-    /\ phase = "Admitted"
-    /\ (handling_mode = "Queue")
-    /\ phase' = "Admitted"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
-
-
 ResolveLastStartTurnPublicTerminalNoPendingIdle ==
     /\ phase = "Idle"
     /\ (last_public_terminal = Some("NoPendingBoundary"))
@@ -398,8 +382,6 @@ Next ==
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveEnable(keep_alive_request)
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveDisable(keep_alive_request)
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAlivePreserve(keep_alive_request)
-    \/ \E handling_mode \in TurnHandlingModeValues : ResolveLiveInterruptRequiredSteer(handling_mode)
-    \/ \E handling_mode \in TurnHandlingModeValues : ResolveLiveInterruptRequiredQueue(handling_mode)
     \/ ResolveLastStartTurnPublicTerminalNoPendingIdle
     \/ ResolveLastStartTurnPublicTerminalNoPendingAdmitted
     \/ ResolveLastStartTurnPublicTerminalNoPendingRunning

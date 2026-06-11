@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::ToolCallId;
 use meerkat_core::ToolDispatchOutcome;
@@ -51,7 +50,6 @@ use meerkat_core::live_adapter::{
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
 use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult, Usage};
-use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 /// Opaque channel identifier for a live adapter session.
@@ -292,7 +290,6 @@ impl LiveChannelCloseCommitAuthority {
                 effect,
                 meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineEffect::LiveCloseResultResolved {
                     channel_id: effect_channel_id,
-                    closed: true,
                     close_observation_sequence,
                     ..
                 } if *effect_channel_id == channel_id_string && *close_observation_sequence == close_sequence
@@ -1426,9 +1423,8 @@ pub enum ObservationRouting {
 ///
 /// The provider only reports a tool call and a live channel id. The host
 /// resolves that channel back to the owning [`SessionId`] and hands the call to
-/// this trait. Production surfaces should implement it by delegating to the
-/// canonical session service / runtime tool dispatcher; tests and compatibility
-/// adapters may wrap a plain [`AgentToolDispatcher`].
+/// this trait. Production surfaces implement it by delegating to the
+/// canonical session service / runtime tool dispatcher.
 #[async_trait::async_trait]
 pub trait LiveToolDispatcher: Send + Sync {
     async fn dispatch_live_tool_call(
@@ -1447,7 +1443,7 @@ pub trait LiveToolDispatcher: Send + Sync {
 /// *distinct* variant via [`LiveToolDispatchError::from_session_error`],
 /// carrying the session error's stable `error_code` so the terminal class
 /// survives back through the live adapter rather than being flattened into a
-/// generic `Internal(other.to_string())` string. This mirrors the
+/// prose-only string. This mirrors the
 /// [`LiveProjectionError::from_session_error`] classification owner.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -1478,8 +1474,6 @@ pub enum LiveToolDispatchError {
     /// Carries the code so callers route on the typed class, not the message.
     #[error("live tool dispatch session error [{code}]: {message}")]
     Session { code: &'static str, message: String },
-    #[error("live tool dispatch internal error: {0}")]
-    Internal(String),
 }
 
 impl LiveToolDispatchError {
@@ -1489,11 +1483,11 @@ impl LiveToolDispatchError {
     /// `session_id` is the dispatch target, used to populate identity-bearing
     /// variants. Every `SessionError` lands in a distinct typed variant
     /// carrying the session error's stable `code()` — no variant is collapsed
-    /// into a prose-only `Internal(to_string())`. This is the single
-    /// classification owner; the RPC dispatch seam routes through it instead of
-    /// re-deriving the mapping inline, so the terminal class (not found / busy /
-    /// not running / capability disabled / rejected / internal) survives back
-    /// through the live adapter.
+    /// into a prose-only string. This is the single classification owner; the
+    /// RPC dispatch seam routes through it instead of re-deriving the mapping
+    /// inline, so the terminal class (not found / busy / not running /
+    /// capability disabled / rejected / session) survives back through the
+    /// live adapter.
     #[must_use]
     pub fn from_session_error(session_id: &SessionId, err: meerkat_core::SessionError) -> Self {
         use meerkat_core::SessionError;
@@ -1514,49 +1508,13 @@ impl LiveToolDispatchError {
             // catch-all): a store error, an agent-level failure, or a
             // structured `FailedWithData` all carry the stable typed `code`
             // into `Session { code, message }` rather than a prose-only
-            // `Internal(to_string())`. Spelling these out means a future
-            // `SessionError` variant forces a compile error here instead of
-            // silently folding into a catch-all.
+            // string. Spelling these out means a future `SessionError`
+            // variant forces a compile error here instead of silently
+            // folding into a catch-all.
             SessionError::Store(_)
             | SessionError::Agent(_)
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
-    }
-}
-
-struct AgentLiveToolDispatcher {
-    inner: Arc<dyn AgentToolDispatcher>,
-}
-
-impl AgentLiveToolDispatcher {
-    fn new(inner: Arc<dyn AgentToolDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl LiveToolDispatcher for AgentLiveToolDispatcher {
-    async fn dispatch_live_tool_call(
-        &self,
-        _session_id: &SessionId,
-        call: ToolCall,
-    ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
-        let args_string = serde_json::to_string(&call.args).map_err(|err| {
-            LiveToolDispatchError::Internal(format!(
-                "failed to serialize live tool-call arguments: {err}"
-            ))
-        })?;
-        let raw = RawValue::from_string(args_string).map_err(|err| {
-            LiveToolDispatchError::Internal(format!(
-                "failed to create live tool-call argument payload: {err}"
-            ))
-        })?;
-        let view = meerkat_core::types::ToolCallView {
-            id: &call.id,
-            name: &call.name,
-            args: raw.as_ref(),
-        };
-        self.inner.dispatch(view).await.map_err(Into::into)
     }
 }
 
@@ -1593,8 +1551,8 @@ pub struct LiveAdapterHost {
     /// that point, so we expose [`set_live_tool_dispatcher`] as a late setter.
     /// Reads are short and fully sync — never held across an `.await`.
     tool_dispatcher: std::sync::Mutex<Option<Arc<dyn LiveToolDispatcher>>>,
-    /// Optional per-tool-call dispatch timeout. When set, `dispatch_tool_call`
-    /// races the dispatcher future against
+    /// Per-tool-call dispatch timeout. `dispatch_tool_call` races the
+    /// dispatcher future against
     /// [`tokio::time::timeout`](tokio::time::timeout); on elapse, the host
     /// submits a typed `LiveAdapterCommand::SubmitToolError` to the adapter
     /// and returns [`ObservationOutcome::ToolCallTimedOut`] instead of
@@ -1602,10 +1560,11 @@ pub struct LiveAdapterHost {
     /// dispatcher that holds a tool call forever (dogma: the adapter cannot
     /// stall canonical session lifecycle).
     ///
-    /// `None` (the default) preserves legacy unbounded-await behavior. Surfaces
-    /// that want a deadline budget explicitly opt in via
-    /// [`Self::with_tool_timeout`].
-    tool_timeout: Option<Duration>,
+    /// Initialized to [`DEFAULT_LIVE_TOOL_TIMEOUT`] by [`Self::new`]; surfaces
+    /// that need a different deadline budget override it via
+    /// [`Self::with_tool_timeout`]. There is no unbounded-await mode — the
+    /// deadline is type-enforced.
+    tool_timeout: Duration,
 }
 
 /// Default tool-call dispatch timeout used by surfaces that opt into a
@@ -1641,14 +1600,14 @@ impl LiveAdapterHost {
             }),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
-            tool_timeout: None,
+            tool_timeout: DEFAULT_LIVE_TOOL_TIMEOUT,
         }
     }
 
-    /// Builder: install a per-tool-call dispatch timeout.
+    /// Builder: override the per-tool-call dispatch timeout.
     ///
-    /// When set, every `ToolCallRequested` observation triggers a dispatcher
-    /// call wrapped in [`tokio::time::timeout`]; if the dispatcher does not
+    /// Every `ToolCallRequested` observation triggers a dispatcher call
+    /// wrapped in [`tokio::time::timeout`]; if the dispatcher does not
     /// produce a result before the deadline, the host:
     ///
     /// 1. Sends a typed `LiveAdapterCommand::SubmitToolError` to the adapter
@@ -1656,36 +1615,18 @@ impl LiveAdapterHost {
     /// 2. Returns [`ObservationOutcome::ToolCallTimedOut`] (not
     ///    `ToolCallDispatched`) so the projection layer can audit the miss.
     ///
-    /// Surfaces that omit this builder retain the prior unbounded-await
-    /// behavior. [`DEFAULT_LIVE_TOOL_TIMEOUT`] is the recommended default.
+    /// [`Self::new`] initializes the deadline to
+    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`]; this builder overrides it.
     #[must_use]
     pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
-        self.tool_timeout = Some(timeout);
+        self.tool_timeout = timeout;
         self
     }
 
     /// Read the configured per-tool-call dispatch timeout.
-    ///
-    /// `None` indicates the host runs with unbounded await behavior. Surfaces
-    /// (notably `rkat-rpc`) MUST install [`DEFAULT_LIVE_TOOL_TIMEOUT`] at
-    /// startup; this accessor is the test seam that pins that contract.
     #[must_use]
-    pub fn tool_timeout(&self) -> Option<Duration> {
+    pub fn tool_timeout(&self) -> Duration {
         self.tool_timeout
-    }
-
-    /// Builder: install a legacy agent tool dispatcher.
-    ///
-    /// Without a dispatcher, observed tool calls return
-    /// `ObservationOutcome::ToolCallSkipped { reason: NoDispatcher, .. }`.
-    /// This compatibility helper wraps the dispatcher in a
-    /// [`LiveToolDispatcher`] that ignores the session id. Production surfaces
-    /// should prefer [`Self::with_live_tool_dispatcher`] so tool execution can
-    /// flow through the session-owned dispatcher.
-    #[must_use]
-    pub fn with_tool_dispatcher(self, dispatcher: Arc<dyn AgentToolDispatcher>) -> Self {
-        self.set_tool_dispatcher(dispatcher);
-        self
     }
 
     /// Builder: install the session-scoped live tool dispatcher.
@@ -1693,14 +1634,6 @@ impl LiveAdapterHost {
     pub fn with_live_tool_dispatcher(self, dispatcher: Arc<dyn LiveToolDispatcher>) -> Self {
         self.set_live_tool_dispatcher(dispatcher);
         self
-    }
-
-    /// Late setter for a legacy agent tool dispatcher.
-    ///
-    /// Kept for tests and compatibility. Runtime surfaces should install a
-    /// session-scoped dispatcher with [`Self::set_live_tool_dispatcher`].
-    pub fn set_tool_dispatcher(&self, dispatcher: Arc<dyn AgentToolDispatcher>) {
-        self.set_live_tool_dispatcher(Arc::new(AgentLiveToolDispatcher::new(dispatcher)));
     }
 
     /// Late setter for the session-scoped live tool dispatcher.
@@ -1804,7 +1737,7 @@ impl LiveAdapterHost {
     ///
     /// F32: the channel does NOT become `Ready` here. Status remains
     /// `Opening` until the adapter emits `LiveAdapterObservation::Ready`,
-    /// which is observed via `apply_observation`/`next_observation`.
+    /// which is observed via `next_observation_raw`/`apply_observation`.
     pub async fn attach_adapter(
         &self,
         channel_id: &LiveChannelId,
@@ -1971,8 +1904,9 @@ impl LiveAdapterHost {
 
     /// Submit a tool result back to the adapter on a channel.
     ///
-    /// Used by the projection contract after [`AgentToolDispatcher::dispatch`]
-    /// produces a result for a `ToolCallRequested` observation (A5).
+    /// Used by the projection contract after
+    /// [`LiveToolDispatcher::dispatch_live_tool_call`] produces a result for
+    /// a `ToolCallRequested` observation (A5).
     pub async fn submit_tool_result(
         &self,
         channel_id: &LiveChannelId,
@@ -2016,38 +1950,6 @@ impl LiveAdapterHost {
     ) -> Result<(), LiveAdapterHostError> {
         self.submit_tool_error(channel_id, call_id, timeout.to_string())
             .await
-    }
-
-    /// Poll the next observation from the adapter on a channel and project it.
-    ///
-    /// Convenience wrapper around `next_observation_raw` + `apply_observation`.
-    /// This wrapper fails closed on non-terminal status observations because
-    /// the host has no generated status feedback handle here. Surfaces that
-    /// need status, terminality, or typed [`ObservationOutcome`] values must
-    /// call `next_observation_raw`, route status/close evidence through
-    /// generated authority, then call `apply_observation`.
-    pub async fn next_observation(
-        &self,
-        channel_id: &LiveChannelId,
-    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
-        let obs = self.next_observation_raw(channel_id).await?;
-        if let Some(ref obs) = obs {
-            if let ObservationRouting::UpdateStatus(status) = Self::classify_observation(obs)
-                && !status.is_terminal()
-            {
-                return Err(LiveAdapterHostError::StatusNotAuthorized);
-            }
-            if Self::observation_requires_generated_close(obs)
-                && !self.generated_close_has_committed(channel_id).await?
-            {
-                return Err(LiveAdapterHostError::CloseNotAuthorized);
-            }
-            // Best-effort projection. Errors are surfaced by `apply_observation`
-            // for callers that want to react; here we discard so the read API
-            // stays compatible with existing handlers.
-            let _ = self.apply_observation(channel_id, obs).await?;
-        }
-        Ok(obs)
     }
 
     /// Read the next adapter observation without applying it to canonical state.
@@ -2405,38 +2307,36 @@ impl LiveAdapterHost {
         let session_id = self.channel_session(channel_id).await?;
         let call = ToolCall::new(provider_call_id.0.clone(), tool_name.to_string(), arguments);
 
-        // Race the dispatcher future against the configured timeout (if any).
-        // Without a timeout, fall through to the legacy unbounded await so
-        // existing surfaces (and tests that don't pause the clock) keep their
-        // behavior.
+        // Race the dispatcher future against the configured timeout. The
+        // deadline is mandatory — `LiveAdapterHost::new` initializes it to
+        // `DEFAULT_LIVE_TOOL_TIMEOUT` — so a stuck dispatcher can never hold
+        // a live provider's turn unboundedly.
         let dispatch_call = dispatcher.dispatch_live_tool_call(&session_id, call);
-        let dispatch_result = match self.tool_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, dispatch_call).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    // D281: notify the adapter so the provider can unblock its
-                    // turn — but carry the typed `LiveToolDispatchTimeout` fact
-                    // rather than fabricating a parseable prose string. The
-                    // typed `ObservationOutcome::ToolCallTimedOut` is returned
-                    // to the host's own callers; the adapter-facing submission
-                    // renders the typed fact only at the meerkat-core
-                    // `SubmitToolError { error: String }` seam edge (that wire
-                    // field is owned by meerkat-core and cannot be made fully
-                    // typed from this crate).
-                    self.submit_tool_dispatch_timeout(
-                        channel_id,
-                        provider_call_id.clone(),
-                        LiveToolDispatchTimeout::new(timeout),
-                    )
-                    .await?;
-                    return Ok(ObservationOutcome::ToolCallTimedOut {
-                        provider_call_id: provider_call_id.0.clone(),
-                        tool_name: tool_name.to_string(),
-                        timeout,
-                    });
-                }
-            },
-            None => dispatch_call.await,
+        let timeout = self.tool_timeout;
+        let dispatch_result = match tokio::time::timeout(timeout, dispatch_call).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // D281: notify the adapter so the provider can unblock its
+                // turn — but carry the typed `LiveToolDispatchTimeout` fact
+                // rather than fabricating a parseable prose string. The
+                // typed `ObservationOutcome::ToolCallTimedOut` is returned
+                // to the host's own callers; the adapter-facing submission
+                // renders the typed fact only at the meerkat-core
+                // `SubmitToolError { error: String }` seam edge (that wire
+                // field is owned by meerkat-core and cannot be made fully
+                // typed from this crate).
+                self.submit_tool_dispatch_timeout(
+                    channel_id,
+                    provider_call_id.clone(),
+                    LiveToolDispatchTimeout::new(timeout),
+                )
+                .await?;
+                return Ok(ObservationOutcome::ToolCallTimedOut {
+                    provider_call_id: provider_call_id.0.clone(),
+                    tool_name: tool_name.to_string(),
+                    timeout,
+                });
+            }
         };
         match dispatch_result {
             Ok(outcome) => {
@@ -3072,31 +2972,28 @@ mod tests {
         LiveAdapterError, LiveAdapterErrorCode, LiveAdapterObservation, LiveDegradationReason,
     };
     use meerkat_core::ops::ToolDispatchOutcome;
-    use meerkat_core::types::{StopReason, ToolDef, Usage};
-    use meerkat_core::{DispatcherCapabilities, ToolCatalogCapabilities, ToolCatalogEntry};
+    use meerkat_core::types::{StopReason, Usage};
     use std::sync::Mutex as StdMutex;
 
     fn test_session_id() -> SessionId {
         SessionId::new()
     }
 
-    // -- Tool timeout accessor (G6 regression) --
+    // -- Tool timeout default (G6 regression, type-enforced) --
 
-    /// G6 (P2): production rkat-rpc startup MUST install
-    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`] on the live host. The binary's
-    /// build pattern is not directly testable, so the host exposes
-    /// [`LiveAdapterHost::tool_timeout`] as a stable accessor; this test
-    /// pins both the default-`None` behavior and the builder wiring so
-    /// the production callsite (meerkat-rpc/src/main.rs) can be
-    /// asserted to produce a host with the timeout populated.
+    /// G6 (P2): the per-tool-call dispatch deadline is mandatory and
+    /// type-enforced — [`LiveAdapterHost::new`] initializes it to
+    /// [`DEFAULT_LIVE_TOOL_TIMEOUT`], so no surface can construct a host
+    /// with an unbounded await. The builder is an override, not an opt-in.
     #[test]
-    fn tool_timeout_defaults_to_none_and_builder_sets_it() {
+    fn tool_timeout_defaults_to_canonical_value_and_builder_overrides_it() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        assert_eq!(host.tool_timeout(), None);
+        assert_eq!(host.tool_timeout(), DEFAULT_LIVE_TOOL_TIMEOUT);
 
-        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink))
-            .with_tool_timeout(DEFAULT_LIVE_TOOL_TIMEOUT);
-        assert_eq!(host.tool_timeout(), Some(DEFAULT_LIVE_TOOL_TIMEOUT));
+        let override_timeout = Duration::from_secs(7);
+        let host =
+            LiveAdapterHost::new(Arc::new(NoOpProjectionSink)).with_tool_timeout(override_timeout);
+        assert_eq!(host.tool_timeout(), override_timeout);
         // Pin the canonical default value so accidental constant drift
         // is caught here rather than at integration time.
         assert_eq!(DEFAULT_LIVE_TOOL_TIMEOUT, Duration::from_secs(30));
@@ -4525,7 +4422,7 @@ mod tests {
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4660,10 +4557,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_tool_dispatcher_late_binds_after_construction() {
+    async fn set_live_tool_dispatcher_late_binds_after_construction() {
         // Wave-3 follow-up: rkat-rpc constructs the host before the
         // callback channel that backs the dispatcher exists. Pre-set, a
-        // ToolCallRequested must skip; post-`set_tool_dispatcher`, the same
+        // ToolCallRequested must skip; post-`set_live_tool_dispatcher`, the same
         // observation must dispatch through the newly-installed dispatcher.
         let sink = Arc::new(RecordingProjectionSink::default());
         let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -4696,7 +4593,7 @@ mod tests {
         assert_eq!(dispatcher.calls.lock().unwrap().len(), 0);
 
         // Phase 2: late install → dispatch flows through.
-        host.set_tool_dispatcher(Arc::clone(&dispatcher) as _);
+        host.set_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let obs2 = LiveAdapterObservation::ToolCallRequested {
             provider_call_id: ToolCallId::new("call_post"),
             tool_name: ToolName::new("calc"),
@@ -4716,7 +4613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_tool_dispatcher_replaces_previously_installed_dispatcher() {
+    async fn set_live_tool_dispatcher_replaces_previously_installed_dispatcher() {
         // The setter is idempotent on repeated installs and the most recent
         // install wins. (In-flight dispatches that already cloned an Arc to
         // the prior value are unaffected — that's the documented contract.)
@@ -4725,7 +4622,7 @@ mod tests {
         let second = Arc::new(RecordingDispatcher::default());
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&first) as _);
+            .with_live_tool_dispatcher(Arc::clone(&first) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4737,7 +4634,7 @@ mod tests {
             .await
             .unwrap();
 
-        host.set_tool_dispatcher(Arc::clone(&second) as _);
+        host.set_live_tool_dispatcher(Arc::clone(&second) as _);
         let obs = LiveAdapterObservation::ToolCallRequested {
             provider_call_id: ToolCallId::new("call_swap"),
             tool_name: ToolName::new("calc"),
@@ -4755,7 +4652,7 @@ mod tests {
         let dispatcher = Arc::new(FailingDispatcher);
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
             .await
@@ -4812,37 +4709,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for SlowDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for SlowDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             *self.calls.lock().unwrap() += 1;
             tokio::time::sleep(self.sleep_for).await;
             // Echo result so a non-timed-out dispatch still produces a sane outcome.
-            let tool_result =
-                meerkat_core::types::ToolResult::new(call.id.to_string(), "ok".into(), false);
+            let tool_result = meerkat_core::types::ToolResult::new(call.id, "ok".into(), false);
             Ok(ToolDispatchOutcome::from(tool_result))
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
         }
     }
 
@@ -4857,7 +4734,7 @@ mod tests {
         let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
@@ -4945,7 +4822,7 @@ mod tests {
         let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
         let ch = host
             .open_channel_with_generated_test_machine_authority(test_session_id())
@@ -4981,39 +4858,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].call_id.0, "call_fast");
         assert!(adapter.submitted_errors.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn tool_call_dispatch_without_timeout_preserves_unbounded_await() {
-        // K61 companion: a host without `with_tool_timeout` must still
-        // produce `ToolCallDispatched` for a fast dispatcher (the legacy
-        // unbounded-await branch). Smoke-tests the `None` arm of
-        // `tool_timeout`.
-        let sink = Arc::new(RecordingProjectionSink::default());
-        let dispatcher = Arc::new(RecordingDispatcher::default());
-        let adapter = Arc::new(RecordingAdapter::default());
-        let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
-            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
-        let ch = host
-            .open_channel_with_generated_test_machine_authority(test_session_id())
-            .await
-            .unwrap();
-        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
-            .await
-            .unwrap();
-        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
-            .await
-            .unwrap();
-        let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: ToolCallId::new("call_legacy"),
-            tool_name: ToolName::new("calc"),
-            arguments: serde_json::json!({}),
-        };
-        match host.apply_observation(&ch, &obs).await.unwrap() {
-            ObservationOutcome::ToolCallDispatched { .. } => {}
-            other => panic!("expected ToolCallDispatched on no-timeout host, got {other:?}"),
-        }
-        assert_eq!(adapter.submitted_results.lock().unwrap().len(), 1);
     }
 
     // -- A6: barge-in projection --
@@ -5340,39 +5184,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentToolDispatcher for RecordingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for RecordingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
+            _session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
             self.calls.lock().unwrap().push((
-                call.id.to_string(),
-                call.name.to_string(),
-                call.args.get().to_string(),
+                call.id.clone(),
+                call.name.clone(),
+                call.args.to_string(),
             ));
-            let tool_result =
-                meerkat_core::types::ToolResult::new(call.id.to_string(), "ok".into(), false);
+            let tool_result = meerkat_core::types::ToolResult::new(call.id, "ok".into(), false);
             Ok(ToolDispatchOutcome::from(tool_result))
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
         }
     }
 
@@ -5380,34 +5204,17 @@ mod tests {
     struct FailingDispatcher;
 
     #[async_trait]
-    impl AgentToolDispatcher for FailingDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::from([])
-        }
-
-        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-            ToolCatalogCapabilities::default()
-        }
-
-        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-            Arc::from([])
-        }
-
-        fn pending_catalog_sources(&self) -> Arc<[String]> {
-            Arc::from([])
-        }
-
-        async fn dispatch(
+    impl LiveToolDispatcher for FailingDispatcher {
+        async fn dispatch_live_tool_call(
             &self,
-            _call: meerkat_core::types::ToolCallView<'_>,
-        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
-            Err(meerkat_core::error::ToolError::ExecutionFailed {
-                message: "bang".into(),
-            })
-        }
-
-        fn capabilities(&self) -> DispatcherCapabilities {
-            DispatcherCapabilities::default()
+            _session_id: &SessionId,
+            _call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+            Err(LiveToolDispatchError::Tool(
+                meerkat_core::error::ToolError::ExecutionFailed {
+                    message: "bang".into(),
+                },
+            ))
         }
     }
 

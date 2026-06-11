@@ -953,8 +953,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
             },
-            text: text.into(),
-            blocks: None,
+            content: text.into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })

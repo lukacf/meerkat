@@ -1286,7 +1286,7 @@ mod tests {
         config.entries = vec![HookEntryConfig {
             id: HookId::new("legacy-patch-command"),
             point: HookPoint::PreLlmRequest,
-            capability: HookCapability::Rewrite,
+            capability: HookCapability::Guardrail,
             runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::Command,
                 Some(serde_json::json!({
@@ -1449,12 +1449,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewrite_runtime_error_returns_typed_engine_failure() {
+    async fn guardrail_runtime_error_returns_typed_engine_failure() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
-            id: HookId::new("rewrite-missing-handler"),
+            id: HookId::new("guardrail-missing-handler"),
             point: HookPoint::PreToolExecution,
-            capability: HookCapability::Rewrite,
+            capability: HookCapability::Guardrail,
             runtime: runtime_in_process("missing"),
             ..Default::default()
         }];
@@ -1482,7 +1482,7 @@ mod tests {
         assert!(matches!(
             err,
             HookEngineError::ExecutionFailed { ref hook_id, .. }
-                if hook_id == &HookId::new("rewrite-missing-handler")
+                if hook_id == &HookId::new("guardrail-missing-handler")
         ));
     }
 

@@ -167,7 +167,7 @@ mod tests {
     use crate::classify::test_support;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
-    use crate::trust::{TrustedPeer, TrustedPeers};
+    use crate::trust::{TrustEntry, TrustStore};
     use crate::types::InboxItem;
     use futures::StreamExt;
     use parking_lot::RwLock;
@@ -179,17 +179,30 @@ mod tests {
         Keypair::generate()
     }
 
-    fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustedPeers>> {
-        Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
-            name: "test-peer".to_string(),
+    fn test_trust_entry(name: &str, pubkey: &PubKey, addr: &str) -> TrustEntry {
+        TrustEntry {
+            peer_id: pubkey.to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(name).expect("valid peer name"),
             pubkey: *pubkey,
-            addr: "tcp://127.0.0.1:4200".to_string(),
+            address: meerkat_core::comms::PeerAddress::parse(addr).expect("valid peer address"),
             meta: crate::PeerMeta::default(),
-        }])))
+        }
+    }
+
+    fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustStore>> {
+        let mut store = TrustStore::new();
+        store
+            .insert(test_trust_entry(
+                "test-peer",
+                pubkey,
+                "tcp://127.0.0.1:4200",
+            ))
+            .expect("trusted test peer should insert");
+        Arc::new(RwLock::new(store))
     }
 
     fn classified_inbox_for_trust(
-        trusted: &Arc<RwLock<TrustedPeers>>,
+        trusted: &Arc<RwLock<TrustStore>>,
         require_peer_auth: bool,
     ) -> (Inbox, InboxSender) {
         Inbox::new_classified(test_support::classification_context_shared(
@@ -244,7 +257,7 @@ mod tests {
         fn _check_signature<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             _stream: S,
             _keypair: &Keypair,
-            _trusted: &Arc<RwLock<TrustedPeers>>,
+            _trusted: &Arc<RwLock<TrustStore>>,
             _inbox_sender: &InboxSender,
         ) {
             // The handle_connection function exists with correct signature
@@ -914,7 +927,7 @@ mod tests {
     }
 
     /// Regression: the IO task must read trust through the shared
-    /// `Arc<RwLock<TrustedPeers>>` handle — not a snapshot — so that a
+    /// `Arc<RwLock<TrustStore>>` handle — not a snapshot — so that a
     /// peer added to the router *after* the connection is accepted is
     /// still admitted. This locks in the Wave 3 D Row 20 invariant: one
     /// trust authority, one read path, no snapshot divergence.
@@ -926,7 +939,7 @@ mod tests {
         // Start with an EMPTY trust set. If the IO task snapshotted at
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
-        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
+        let trusted = Arc::new(RwLock::new(TrustStore::new()));
         let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
@@ -947,12 +960,14 @@ mod tests {
         // Mutate the trust set AFTER the IO task would normally have
         // snapshotted, but BEFORE the envelope is delivered. The live
         // read must observe this mutation.
-        trusted.write().push_unchecked_for_test(crate::TrustedPeer {
-            name: "sender".to_string(),
-            pubkey: sender_keypair.public_key(),
-            addr: "tcp://127.0.0.1:0".to_string(),
-            meta: crate::PeerMeta::default(),
-        });
+        trusted
+            .write()
+            .insert(test_trust_entry(
+                "sender",
+                &sender_keypair.public_key(),
+                "tcp://127.0.0.1:0",
+            ))
+            .expect("live trust insert should succeed");
 
         tokio::spawn(async move {
             client_write.write_all(&bytes).await.unwrap();

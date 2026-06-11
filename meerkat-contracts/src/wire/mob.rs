@@ -62,7 +62,6 @@ pub enum WireMobRuntimeMode {
 pub enum WireMemberLaunchMode {
     Fresh,
     Resume {
-        #[serde(alias = "session_id")]
         bridge_session_id: String,
     },
     Fork {
@@ -1519,7 +1518,6 @@ pub struct MobMemberListEntryWire {
     pub member_ref: WireMemberRef,
     pub role: String,
     pub runtime_mode: WireMobRuntimeMode,
-    pub state: WireMemberState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wired_to: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2072,7 +2070,6 @@ pub enum SupervisorRotationIncompleteKind {
 #[serde(rename_all = "snake_case")]
 pub enum SupervisorRotationRetryAuthority {
     PendingRotation,
-    ProcessLocalPendingRotation,
     PreRotation,
 }
 
@@ -2082,7 +2079,6 @@ pub enum SupervisorRotationRetryAuthority {
 #[serde(rename_all = "snake_case")]
 pub enum SupervisorRotationRetryScope {
     Durable,
-    SameProcess,
     PreRotation,
 }
 
@@ -2098,7 +2094,6 @@ pub struct SupervisorRotationIncompleteDetailsWire {
     pub rotated_peer_count: usize,
     pub rollback_succeeded: bool,
     pub pending_authority_recorded: bool,
-    pub pending_authority_process_local: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_error: Option<String>,
     pub retry_authority: SupervisorRotationRetryAuthority,
@@ -2309,15 +2304,6 @@ pub struct MobCancelAllWorkParams {
     pub member_ref: WireMemberRef,
 }
 
-/// Roster member lifecycle state for `MobMemberFilterWire`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireMemberState {
-    Active,
-    Retiring,
-}
-
 /// Filter for `mob/list_members_matching`. Non-empty / `Some` fields are
 /// combined conjunctively; an empty filter matches every member.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2330,9 +2316,9 @@ pub struct MobMemberFilterWire {
     /// Required profile name (role).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// Required roster state.
+    /// Required canonical machine-projected member status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<WireMemberState>,
+    pub status: Option<WireMobMemberStatus>,
 }
 
 /// Request payload for `mob/list_members_matching`.

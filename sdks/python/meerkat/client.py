@@ -1667,11 +1667,6 @@ class MeerkatClient:
                         else {}
                     ),
                     **(
-                        {"state": str(entry["state"])}
-                        if entry.get("state") is not None
-                        else {}
-                    ),
-                    **(
                         {
                             "wired_to": [
                                 str(peer) for peer in entry["wired_to"]
@@ -2585,7 +2580,6 @@ class MeerkatClient:
         return EventEnvelope(
             event_id=str(raw.get("event_id", "")),
             source=MeerkatClient._parse_event_source_identity(raw.get("source")),
-            source_id=str(raw.get("source_id", "")),
             seq=int(raw.get("seq", 0)),
             timestamp_ms=int(raw.get("timestamp_ms", 0)),
             payload=parse_event(payload) if isinstance(payload, dict) else None,
@@ -2974,7 +2968,6 @@ class MeerkatClient:
         raw = await self._request("live/close", {"channel_id": channel_id})
         context = "Invalid live/close response"
         raw = self._require_dict(raw, "result", context)
-        closed = self._require_bool_field(raw, "closed", context)
         status = self._require_string_field(raw, "status", context)
         if status != "closed":
             raise MeerkatError(
@@ -2982,7 +2975,6 @@ class MeerkatClient:
                 f"{context}: unsupported status {status!r}",
             )
         return LiveCloseResult(
-            closed=closed,
             status=cast("LiveCloseStatus", status),
         )
 
@@ -3160,10 +3152,9 @@ class MeerkatClient:
         ``session.update``.
 
         R4-5 (P3): the result is a typed
-        :class:`meerkat.generated.types.LiveRefreshResult` carrying both the
-        generated-authority ``status`` discriminator (today: ``"queued"``)
-        and the legacy ``refresh_enqueued: True`` back-compat boolean. This
-        SDK build accepts the generated status set it was built with and
+        :class:`meerkat.generated.types.LiveRefreshResult` carrying the
+        generated-authority ``status`` discriminator (today: ``"queued"``).
+        This SDK build accepts the generated status set it was built with and
         rejects missing or unknown status values until regenerated for a newer
         contract. Refresh completion is asynchronous (the adapter pump applies
         the ``session.update`` after the host accepts the queued command); the
@@ -3177,7 +3168,6 @@ class MeerkatClient:
         )
         context = "Invalid live/refresh response"
         raw = self._require_dict(raw, "result", context)
-        refresh_enqueued = self._require_bool_field(raw, "refresh_enqueued", context)
         status = self._require_string_field(raw, "status", context)
         if status != "queued":
             raise MeerkatError(
@@ -3185,7 +3175,6 @@ class MeerkatClient:
                 f"{context}: unsupported status {status!r}",
             )
         return LiveRefreshResult(
-            refresh_enqueued=refresh_enqueued,
             status=cast("LiveRefreshStatus", status),
         )
 

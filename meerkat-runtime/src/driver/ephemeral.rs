@@ -1182,7 +1182,6 @@ impl EphemeralRuntimeDriver {
             to: phase,
             reason: Some(reason.into()),
         });
-        state.terminal_outcome = Some(terminal_outcome);
         state.updated_at = now;
         Ok(())
     }
@@ -1903,7 +1902,6 @@ impl EphemeralRuntimeDriver {
                 },
                 "IncrementAttemptCount",
             )?;
-            let attempt_count = self.input_attempt_count(input_id);
 
             let now = Utc::now();
             if let Some(state) = self.ledger.get_mut(input_id) {
@@ -1913,7 +1911,6 @@ impl EphemeralRuntimeDriver {
                     to: InputLifecycleState::Staged,
                     reason: Some(format!("StageForRun({run_id})")),
                 });
-                state.attempt_count = attempt_count;
                 state.updated_at = now;
             }
             self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
@@ -2967,7 +2964,6 @@ impl EphemeralRuntimeDriver {
                     to: InputLifecycleState::Consumed,
                     reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
                 });
-                state.terminal_outcome = Some(terminal_outcome);
                 state.updated_at = now;
                 self.ledger.accept(state);
                 self.record_admission_metadata(
@@ -3370,9 +3366,8 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::Message),
-            body: "peer body".into(),
+            content: "peer body".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -3419,9 +3414,8 @@ mod tests {
                 request_id: format!("request-{label}"),
                 phase: crate::input::ResponseProgressPhase::InProgress,
             }),
-            body: format!("progress {label}"),
+            content: format!("progress {label}").into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         })
     }
@@ -3864,17 +3858,12 @@ mod tests {
         let outcome = driver.accept_input(input).await.unwrap();
 
         match outcome {
-            crate::accept::AcceptOutcome::Accepted { seed, state, .. } => {
+            crate::accept::AcceptOutcome::Accepted { seed, .. } => {
                 assert_eq!(seed.phase, InputLifecycleState::Consumed);
                 assert_eq!(
                     seed.terminal_outcome,
                     Some(InputTerminalOutcome::Consumed),
                     "accepted result must project terminal outcome from generated machine state"
-                );
-                assert_eq!(
-                    state.terminal_outcome,
-                    Some(InputTerminalOutcome::Consumed),
-                    "shell cache should mirror the generated terminal outcome"
                 );
             }
             other => panic!("expected consume-on-accept accepted outcome, got {other:?}"),
@@ -4007,9 +3996,8 @@ mod tests {
                 request_id: request_uuid.to_string(),
                 status: meerkat_core::handles::PeerResponseTerminalProjectionStatus::Cancelled,
             }),
-            body: String::new(),
+            content: meerkat_core::types::ContentInput::Text(String::new()),
             payload: Some(serde_json::json!({"ok": false})),
-            blocks: None,
             handling_mode: None,
         });
 
@@ -4031,7 +4019,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandon_all_non_terminal_cache_mirrors_generated_projection() {
+    async fn abandon_all_non_terminal_projects_generated_terminal_outcome() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("abandon-projection"));
         let input = prompt_input("abandon me");
         let input_id = input.id().clone();
@@ -4046,15 +4034,8 @@ mod tests {
             driver.input_terminal_outcome(&input_id),
             Some(InputTerminalOutcome::Abandoned {
                 reason: InputAbandonReason::Stopped
-            })
-        );
-        let cached = driver
-            .input_state(&input_id)
-            .and_then(|state| state.terminal_outcome.clone());
-        assert_eq!(
-            cached,
-            driver.input_terminal_outcome(&input_id),
-            "compatibility cache must mirror the generated terminal projection"
+            }),
+            "generated machine projection is the only terminal-outcome owner"
         );
     }
 

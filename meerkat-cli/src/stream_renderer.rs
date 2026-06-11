@@ -276,11 +276,12 @@ fn render_event(
 
         AgentEvent::ToolExecutionCompleted {
             name,
-            result,
+            content,
             is_error,
             duration_ms,
             ..
         } => {
+            let result = meerkat_core::types::text_content(content);
             let (marker, color) = if *is_error {
                 ("✗", RED)
             } else {
@@ -303,7 +304,7 @@ fn render_event(
             );
             if !result.is_empty() {
                 let preview = preview_tool_result(
-                    result,
+                    &result,
                     (!verbose).then_some(ToolResultPreviewLimits {
                         max_lines: MAX_TOOL_RESULT_LINES,
                         max_line_bytes: MAX_TOOL_RESULT_LINE_BYTES,

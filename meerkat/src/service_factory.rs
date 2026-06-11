@@ -920,8 +920,6 @@ mod tests {
                 transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: meerkat_core::SelfHostedApiStyle::Responses,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -1012,7 +1010,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "video-alias".to_string(),
             prompt: "fail closed on stale config".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1048,7 +1046,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "video-alias".to_string(),
                 prompt: "defer identity parity".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
                 max_tokens: None,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1312,7 +1310,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 
@@ -1404,7 +1402,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 
@@ -1511,7 +1509,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -1578,7 +1576,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -1772,7 +1770,7 @@ mod tests {
         CreateSessionRequest {
             model: model.to_string(),
             prompt: "test".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
             max_tokens: None,
             event_tx: None,
 

@@ -86,14 +86,6 @@ pub fn classified_interaction_to_runtime_input(
     peer_candidate_to_peer_input(classified, runtime_id)
 }
 
-/// Compatibility alias while callers migrate to the classified bridge naming.
-pub fn peer_input_candidate_to_runtime_input(
-    classified: &PeerInputCandidate,
-    runtime_id: &LogicalRuntimeId,
-) -> Result<Input, PeerIngressProjectionError> {
-    classified_interaction_to_runtime_input(classified, runtime_id)
-}
-
 fn peer_candidate_to_peer_input(
     classified: &PeerInputCandidate,
     runtime_id: &LogicalRuntimeId,
@@ -148,9 +140,11 @@ fn peer_input_from_ingress_fact(
             correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
         },
         convention: Some(convention),
-        body: peer_rendered_body(interaction),
+        content: match peer_blocks(interaction) {
+            Some(blocks) => meerkat_core::types::ContentInput::Blocks(blocks),
+            None => meerkat_core::types::ContentInput::Text(peer_rendered_body(interaction)),
+        },
         payload: peer_payload(interaction),
-        blocks: peer_blocks(interaction),
         handling_mode,
     }))
 }
@@ -357,7 +351,7 @@ mod tests {
 
     fn peer_input_for_test(interaction: &InboxInteraction, runtime_id: &LogicalRuntimeId) -> Input {
         let candidate = candidate_for_interaction(interaction.clone());
-        peer_input_candidate_to_runtime_input(&candidate, runtime_id)
+        classified_interaction_to_runtime_input(&candidate, runtime_id)
             .expect("test candidate should project to runtime input")
     }
 
@@ -378,7 +372,7 @@ mod tests {
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
             assert!(matches!(p.convention, Some(PeerConvention::Message)));
-            assert_eq!(p.body, "hello");
+            assert_eq!(p.content.text_content(), "hello");
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(
                 p.handling_mode,
@@ -470,7 +464,7 @@ mod tests {
         };
 
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("worker"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("worker"))
                 .expect("classified request should project to peer input");
         let Input::Peer(peer) = &input else {
             panic!("Expected PeerInput");
@@ -479,7 +473,7 @@ mod tests {
             panic!("Expected peer source");
         };
         assert_eq!(peer_id, "11111111-1111-4111-8111-111111111111");
-        assert_eq!(peer.body, "stale helper prose");
+        assert_eq!(peer.content.text_content(), "stale helper prose");
 
         let prompt = crate::input::input_prompt_text(&input);
         assert!(prompt.starts_with(
@@ -513,7 +507,7 @@ mod tests {
             },
         };
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
                 .expect("plain event should project to external event input");
         match input {
             Input::ExternalEvent(event) => {
@@ -557,11 +551,11 @@ mod tests {
             },
         };
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
                 .expect("classified peer event should project to peer input");
         match input {
             Input::Peer(peer) => {
-                assert_eq!(peer.body, "stale rendered text");
+                assert_eq!(peer.content.text_content(), "stale rendered text");
                 match peer.header.source {
                     InputOrigin::Peer { peer_id, .. } => {
                         assert_eq!(peer_id, test_peer_id().as_str());
@@ -610,7 +604,7 @@ mod tests {
         };
 
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
                 .expect("classified peer projection should use typed canonical id");
         let Input::Peer(peer) = input else {
             panic!("Expected Peer input");
@@ -622,7 +616,7 @@ mod tests {
             }
             other => panic!("Expected peer source, got {other:?}"),
         }
-        assert_eq!(peer.body, "stale rendered text");
+        assert_eq!(peer.content.text_content(), "stale rendered text");
     }
 
     #[test]
@@ -657,7 +651,7 @@ mod tests {
         };
 
         let result =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         assert!(
             matches!(
                 result,
@@ -685,7 +679,7 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "stale rendered text");
+            assert_eq!(peer.content.text_content(), "stale rendered text");
             assert_eq!(peer.payload, Some(serde_json::json!({"peer":"agent-1"})));
         } else {
             panic!("Expected PeerInput");
@@ -717,8 +711,12 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "stale rendered text");
-            assert_eq!(peer.blocks, Some(blocks));
+            // Single-owner semantics: when typed blocks are present they ARE
+            // the content; the stale rendered text is not stored beside them.
+            assert_eq!(
+                peer.content,
+                meerkat_core::types::ContentInput::Blocks(blocks)
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -775,7 +773,10 @@ mod tests {
         )
         .expect("classified request should project");
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.blocks, Some(blocks));
+            assert_eq!(
+                peer.content,
+                meerkat_core::types::ContentInput::Blocks(blocks)
+            );
             assert_eq!(
                 peer.payload,
                 Some(serde_json::json!({"subject": "describe-image"}))
@@ -786,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_message_uses_rendered_projection_while_preserving_blocks() {
+    fn multimodal_message_blocks_own_content_with_derived_text_projection() {
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {
                 text: "caption text".into(),
@@ -801,7 +802,7 @@ mod tests {
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "please inspect this image".into(),
-                blocks: Some(blocks),
+                blocks: Some(blocks.clone()),
             },
             id: make_interaction_id(),
             rendered_text: "stale rendered text".into(),
@@ -810,7 +811,16 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "stale rendered text");
+            // Single-owner semantics: typed blocks ARE the content; the text
+            // projection is derived from them at read time, never stored.
+            assert_eq!(
+                peer.content,
+                meerkat_core::types::ContentInput::Blocks(blocks)
+            );
+            assert_eq!(
+                peer.content.text_content(),
+                "caption text\n[image: image/png]"
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -846,7 +856,7 @@ mod tests {
             },
         };
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
                 .expect("plain event with blocks should project");
         match input {
             Input::ExternalEvent(event) => {
@@ -888,7 +898,7 @@ mod tests {
             },
         };
 
-        match peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+        match classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
             .expect("plain event should preserve render metadata")
         {
             Input::ExternalEvent(event) => {
@@ -1109,8 +1119,9 @@ mod tests {
                 disposition: meerkat_core::TerminalDisposition::Completed,
             }),
         };
-        let err = peer_input_candidate_to_runtime_input(&candidate, &LogicalRuntimeId::new("test"))
-            .unwrap_err();
+        let err =
+            classified_interaction_to_runtime_input(&candidate, &LogicalRuntimeId::new("test"))
+                .unwrap_err();
         assert!(matches!(
             err,
             PeerIngressProjectionError::MissingCanonicalPeerId { .. }
@@ -1225,7 +1236,7 @@ mod tests {
         };
 
         let input =
-            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"))
                 .expect("classified response should project");
 
         if let Input::Peer(p) = &input {

@@ -9,7 +9,7 @@
 1. 531-agent default-active verification (adversarial refute on downgrades; 89 refuted back).
 2. 183-row defender screen (design-intent hunt).
 3. 24-row repair (13 never-verified + 11 duplicate-name tiebreaks; root cause: verifier index-misreads — later passes carry `row_index` making misattribution mechanically detectable).
-4. **Corrected-criterion re-audits** (deliberate ≠ valid; functional justification required: durable-format stability / wire-opaqueness / external protocol / divergence-free projection / fail-closed rejection; pre-1.0 self-compat and pinning tests NEVER justify): 28 prior by-designs → 13 overturned (46%); 62 screen by-designs → 42 overturned (68%); 59 screen already-fixed claims QA'd → 34 refuted (~58%, all sibling-residual shape); 5 misattribution holes closed + 2 conflict tiebreaks.
+4. **Corrected-criterion re-audits** (deliberate ≠ valid; functional justification required, drawn from the named retention categories: (1) durable-format stability, (2) wire-opaqueness, (3) external protocol we don't own, (4) divergence-free projection, (5) **fail-closed rejection machinery** — code whose job is to REJECT legacy persisted/wire shapes with a typed error is the policy-mandated disposal of legacy data, not retention debt, and is retained by design together with its negative tests; pre-1.0 self-compat and pinning tests NEVER justify): 28 prior by-designs → 13 overturned (46%); 62 screen by-designs → 42 overturned (68%); 59 screen already-fixed claims QA'd → 34 refuted (~58%, all sibling-residual shape); 5 misattribution holes closed + 2 conflict tiebreaks.
 5. Lead/user adjudications (archive mirror; provider_params split verdict).
 6. Independent post-fix validation of every keystone landed this PR (no self-certification).
 
@@ -41,7 +41,7 @@
 ## Follow-up (named, not deferred-by-vagueness)
 
 1. SessionDocumentMachine fold (LUC-524): ends the archive lifecycle mode-split (R004 residual) — the one remaining hard fold.
-2. Remaining FOLD_THEN_DELETE sweep items (~1.1k lines) + KEEP_FUNCTIONAL doc corrections (MemberRef carrier wording; fail-closed-rejection as an explicitly named retention category).
+2. ~~Remaining FOLD_THEN_DELETE sweep items (~1.1k lines) + KEEP_FUNCTIONAL doc corrections (MemberRef carrier wording; fail-closed-rejection as an explicitly named retention category).~~ **DONE (w5-ftd):** all 26 FOLD_THEN_DELETE findings closed (folded+deleted or verified already-landed) plus the DELETE_NOW stragglers the waves missed (TrustStore cutover, comms-agent runtime deletion, MemberState mirror, MeerkatId rename, FlowSpec.root, input content-carrier unification, mandatory live tool_timeout, McpAuthTarget fold, legacy-bearer fold, SystemPromptOverride tri-state wire/persist retype, live-result boolean mirrors incl. the DSL-side `refresh_enqueued`/`closed`/`accepted` projections, and more); doc corrections landed (MemberRef carrier wording rewritten; fail-closed rejection machinery named as a retention category in the criterion list above; content_blocks_serde tripwire test added). Excluded by design: the archive-lifecycle/SessionDocumentMachine fold (item 1, sibling-owned).
 3. Respawn-after-retire wiring defect (pre-existing, A/B-proven; task filed).
 4. Scanner-conversion gates for already-folded clusters (machines.rs token scanners; ownership-ledger boundary resolution).
 

@@ -155,7 +155,6 @@ MobMember = TypedDict(
         "peer_id": NotRequired[str],
         "external_peer_specs": NotRequired[dict[str, dict[str, Any]]],
         "runtime_mode": NotRequired[str],
-        "state": NotRequired[str],
         "wired_to": NotRequired[list[str]],
         "labels": NotRequired[dict[str, str]],
         "status": NotRequired[str],

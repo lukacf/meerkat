@@ -808,9 +808,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Apply a comms trust projection mutation authorized by generated
     /// machine/composition authority.
     ///
-    /// This is the only mutable trust-store seam. The compatibility
-    /// add/remove helpers below intentionally fail closed when no generated
-    /// handoff is provided.
+    /// This is the only mutable trust-store seam.
     async fn apply_trust_mutation(
         &self,
         _mutation: CommsTrustMutation,
@@ -867,26 +865,6 @@ pub trait CommsRuntime: Send + Sync {
         Err(SendError::Unsupported(
             "recovered generated mob trust owner binding not supported for this CommsRuntime"
                 .to_string(),
-        ))
-    }
-
-    /// Compatibility helper for legacy callers without generated authority.
-    ///
-    /// This fails closed by default so public surfaces cannot mutate trust
-    /// without the generated handoff required by [`Self::apply_trust_mutation`].
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        Err(SendError::Unsupported(
-            "generated comms trust mutation authority required".to_string(),
-        ))
-    }
-
-    /// Compatibility helper for legacy callers without generated authority.
-    ///
-    /// This fails closed by default so public surfaces cannot mutate trust
-    /// without the generated handoff required by [`Self::apply_trust_mutation`].
-    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-        Err(SendError::Unsupported(
-            "generated comms trust mutation authority required".to_string(),
         ))
     }
 
@@ -1363,24 +1341,16 @@ mod tests {
             notify: Arc::new(Notify::new()),
         };
         assert!(<NoopCommsRuntime as CommsRuntime>::public_key(&runtime).is_none());
+        // The only mutable trust seam is apply_trust_mutation; without a
+        // generated handoff it fails closed.
         let peer = TrustedPeerDescriptor {
             peer_id: PeerId::new(),
             name: PeerName::new("peer-a").expect("valid peer name"),
             address: PeerAddress::new(PeerTransport::Inproc, "peer-a"),
             pubkey: [0u8; 32],
         };
-        let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
-        assert!(matches!(result, Err(SendError::Unsupported(_))));
-    }
-
-    #[tokio::test]
-    async fn test_remove_trusted_peer_default_unsupported() {
-        let runtime = NoopCommsRuntime {
-            notify: Arc::new(Notify::new()),
-        };
-        let peer_id = PeerId::new().to_string();
         let result =
-            <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, &peer_id).await;
+            <NoopCommsRuntime as CommsRuntime>::add_private_trusted_peer(&runtime, peer).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
     }
 

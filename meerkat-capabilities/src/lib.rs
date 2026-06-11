@@ -42,10 +42,11 @@ pub enum CapabilityId {
     McpLive,
 }
 
-/// Capability tokens that appear in mobpack manifests.
+/// A mobpack manifest capability token paired with its typed classification.
 ///
-/// Manifests remain string-based for compatibility, but policy checks should
-/// classify those strings before making allow/forbid decisions.
+/// This is the parse-once classifier used at the manifest boundary: a raw
+/// token is classified into a [`MobpackCapabilityId`] exactly once, and policy
+/// decisions take the typed id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MobpackCapabilityRequirement<'a> {
     raw: &'a str,
@@ -156,13 +157,11 @@ impl BrowserMobpackCapabilityDecision {
 }
 
 pub fn browser_mobpack_capability_decision(
-    requirement: MobpackCapabilityRequirement<'_>,
+    capability: MobpackCapabilityId,
 ) -> BrowserMobpackCapabilityDecision {
-    match requirement.id() {
+    match capability {
         MobpackCapabilityId::Known(CapabilityId::Shell) | MobpackCapabilityId::HostProcess(_) => {
-            BrowserMobpackCapabilityDecision::Forbidden {
-                capability: requirement.id(),
-            }
+            BrowserMobpackCapabilityDecision::Forbidden { capability }
         }
         MobpackCapabilityId::Known(_)
         | MobpackCapabilityId::DeploySurface(_)
@@ -390,7 +389,7 @@ mod tests {
     fn browser_mobpack_policy_forbids_shell_and_host_process_capabilities() {
         for raw in ["shell", "mcp_stdio", "process_spawn"] {
             assert!(
-                browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw))
+                browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw).id())
                     .is_forbidden(),
                 "{raw} should be forbidden in browser mobpacks"
             );
@@ -400,13 +399,13 @@ mod tests {
     #[test]
     fn browser_mobpack_policy_allows_safe_known_and_unknown_capabilities() {
         assert_eq!(
-            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse("comms")),
+            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse("comms").id()),
             BrowserMobpackCapabilityDecision::Allowed
         );
         assert_eq!(
-            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(
-                "vendor.custom"
-            )),
+            browser_mobpack_capability_decision(
+                MobpackCapabilityRequirement::parse("vendor.custom").id()
+            ),
             BrowserMobpackCapabilityDecision::Allowed
         );
     }

@@ -590,13 +590,13 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
     });
     const malformed = parseEvent({
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
       is_error: "false",
     });
 
@@ -841,7 +841,6 @@ describe("Typed Events", () => {
       payload: {
         operation: "remove",
         target: "filesystem",
-        status: "staged",
         status_info: {
           kind: "boundary_applied",
           base_changed: true,
@@ -856,7 +855,6 @@ describe("Typed Events", () => {
     if (event.type === "tool_config_changed") {
       assert.equal(event.payload.operation, "remove");
       assert.equal(event.payload.target, "filesystem");
-      assert.equal(event.payload.status, "staged");
       assert.deepEqual(event.payload.status_info, {
         kind: "boundary_applied",
         base_changed: true,
@@ -1202,7 +1200,6 @@ describe("Typed Events", () => {
         type: "session",
         session_id: "00000000-0000-4000-8000-000000000001",
       },
-      source_id: "session:not-a-uuid",
       payload: { type: "text_delta", delta: "hi" },
     });
 
@@ -1210,7 +1207,6 @@ describe("Typed Events", () => {
       type: "session",
       sessionId: "00000000-0000-4000-8000-000000000001",
     });
-    assert.equal(envelope.sourceId, "session:not-a-uuid");
   });
 
   it("should not classify source from legacy session strings", () => {
@@ -1219,8 +1215,10 @@ describe("Typed Events", () => {
       payload: { type: "text_delta", delta: "hi" },
     });
 
+    // The legacy envelope-level string never classifies a typed source and is
+    // no longer surfaced on the typed envelope.
     assert.equal(envelope.source, undefined);
-    assert.equal(envelope.sourceId, "session:00000000-0000-4000-8000-000000000001");
+    assert.equal(envelope.sourceId, undefined);
   });
 });
 
@@ -3441,7 +3439,7 @@ describe("Live wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
-      return { status: "closed", closed: true };
+      return { status: "closed" };
     };
 
     const result = await client.liveClose({ channel_id: "live_channel_41" });
@@ -3449,14 +3447,13 @@ describe("Live wrappers", () => {
     assert.deepEqual(calls, [
       { method: "live/close", params: { channel_id: "live_channel_41" } },
     ]);
-    assert.deepEqual(result, { status: "closed", closed: true });
+    assert.deepEqual(result, { status: "closed" });
   });
 
   it("rejects missing or unknown live/close generated status", async () => {
     const malformedResponses = [
       { closed: true },
-      { status: "closed" },
-      { status: "already_closed", closed: true },
+      { status: "already_closed" },
     ];
 
     for (const response of malformedResponses) {
@@ -3481,7 +3478,7 @@ describe("Live wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
-      return { status: "queued", refresh_enqueued: true };
+      return { status: "queued" };
     };
 
     const result = await client.liveRefresh({ channel_id: "live_channel_42" });
@@ -3489,14 +3486,13 @@ describe("Live wrappers", () => {
     assert.deepEqual(calls, [
       { method: "live/refresh", params: { channel_id: "live_channel_42" } },
     ]);
-    assert.deepEqual(result, { status: "queued", refresh_enqueued: true });
+    assert.deepEqual(result, { status: "queued" });
   });
 
   it("rejects missing or unknown live/refresh generated status", async () => {
     const malformedResponses = [
       { refresh_enqueued: true },
-      { status: "queued" },
-      { status: "applied_sync", refresh_enqueued: true },
+      { status: "applied_sync" },
     ];
 
     for (const response of malformedResponses) {

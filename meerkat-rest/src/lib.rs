@@ -4014,7 +4014,9 @@ fn help_request_to_create_session(
 
     Ok(CreateSessionRequest {
         prompt: prompt.into(),
-        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
+        system_prompt: meerkat::SystemPromptOverride::Set(
+            meerkat::help::help_system_prompt().to_string(),
+        ),
         model: req.model,
         provider,
         max_tokens: req.max_tokens,
@@ -5391,7 +5393,10 @@ async fn continue_session_inner(
         let create_req = SvcCreateSessionRequest {
             model,
             prompt: turn_prompt.clone(),
-            system_prompt: req.system_prompt.clone(),
+            system_prompt: match req.system_prompt.clone() {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens: req.max_tokens.or(Some(state.max_tokens)),
             event_tx: Some(caller_event_tx.clone()),
             initial_turn: InitialTurnPolicy::Defer,
@@ -7212,8 +7217,6 @@ mod tests {
                 transport: SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://127.0.0.1:11434".to_string(),
                 api_style: SelfHostedApiStyle::ChatCompletions,
-                bearer_token: None,
-                bearer_token_env: None,
             },
         );
         config.self_hosted.models.insert(
@@ -7277,7 +7280,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -7397,7 +7400,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -7536,7 +7539,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -7587,7 +7590,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -7767,7 +7770,7 @@ mod tests {
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -7820,7 +7823,7 @@ mod tests {
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -8945,7 +8948,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -9593,7 +9596,7 @@ mod tests {
         assert!(
             create
                 .system_prompt
-                .as_deref()
+                .as_set_prompt()
                 .is_some_and(|prompt| prompt.contains("dedicated help surface"))
         );
         assert_eq!(create.model.as_deref(), Some("claude-sonnet-4-5"));
@@ -10091,7 +10094,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
@@ -10171,7 +10174,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
@@ -10249,7 +10252,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
 
@@ -10869,7 +10872,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -10941,7 +10944,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -11026,7 +11029,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -11114,7 +11117,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -11204,7 +11207,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -11285,7 +11288,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -12502,7 +12505,7 @@ mod tests {
                 .create_session(SvcCreateSessionRequest {
                     model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
-                    system_prompt: None,
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
                     max_tokens: Some(state.max_tokens),
                     event_tx: None,
                     initial_turn: InitialTurnPolicy::Defer,
@@ -12570,7 +12573,7 @@ mod tests {
                 .create_session(SvcCreateSessionRequest {
                     model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
-                    system_prompt: None,
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
                     max_tokens: Some(state.max_tokens),
                     event_tx: None,
                     initial_turn: InitialTurnPolicy::Defer,

@@ -28,7 +28,6 @@ path = "tests/live_rpc_regression.rs"
 meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph", "live"] }
 meerkat-core = { workspace = true }
 meerkat-live = { workspace = true }
-base64 = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "openai-realtime"] }
 meerkat-anthropic = { workspace = true, features = ["oauth"] }

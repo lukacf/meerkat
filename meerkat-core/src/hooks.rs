@@ -81,9 +81,6 @@ pub enum HookExecutionMode {
 pub enum HookCapability {
     Observe,
     Guardrail,
-    /// Legacy fail-closed capability label. Semantic patch authority has been
-    /// removed from hooks; retained entries may observe and deny only.
-    Rewrite,
 }
 
 /// Typed reason codes for guardrail denials.
@@ -253,10 +250,6 @@ pub struct HookToolResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_blocks: Vec<ContentBlock>,
     pub is_error: bool,
-    /// Legacy side flag retained for Rust compatibility. New hook payloads
-    /// carry `content_blocks` instead of serializing this projection hint.
-    #[serde(default, skip_serializing)]
-    pub has_images: bool,
 }
 
 impl Serialize for HookToolResult {
@@ -266,10 +259,9 @@ impl Serialize for HookToolResult {
     {
         use serde::ser::SerializeStruct;
         // `content` is a serialize-only text projection derived from the
-        // canonical `content_blocks` for external hook consumers (row #331);
-        // `has_images` is intentionally not serialized. The field count is
-        // `tool_use_id`, `name`, `content`, `is_error`, plus `content_blocks`
-        // when present.
+        // canonical `content_blocks` for external hook consumers (row #331).
+        // The field count is `tool_use_id`, `name`, `content`, `is_error`,
+        // plus `content_blocks` when present.
         let mut len = 4;
         if !self.content_blocks.is_empty() {
             len += 1;
@@ -301,7 +293,6 @@ impl HookToolResult {
             name: name.into(),
             content_blocks: result.content.clone(),
             is_error: result.is_error,
-            has_images: result.has_images(),
         }
     }
 
@@ -619,26 +610,22 @@ mod tests {
             name: "test_tool".into(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
-            has_images: tr.has_images(),
         };
         // text projection concatenates text from blocks; image blocks produce "[image: image/png]"
         assert_eq!(hook_result.text_projection(), "hello\n[image: image/png]");
-        assert!(hook_result.has_images);
     }
 
     #[test]
-    fn hook_result_text_only_has_images_false() {
+    fn hook_result_text_only_uses_text_projection() {
         let tr = ToolResult::new("tc_1".into(), "just text".into(), false);
         let hook_result = HookToolResult {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
-            has_images: tr.has_images(),
         };
         assert_eq!(hook_result.text_projection(), "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
-        assert!(!hook_result.has_images);
     }
 
     #[test]
@@ -660,10 +647,6 @@ mod tests {
             json["content"],
             serde_json::json!("just text"),
             "wire envelope must carry the derived `content` text projection"
-        );
-        assert!(
-            json.get("has_images").is_none(),
-            "typed content blocks should replace the image side flag on the hook surface"
         );
     }
 
@@ -688,10 +671,6 @@ mod tests {
                 "source": "inline",
                 "data": "AAAA"
             }])
-        );
-        assert!(
-            json.get("has_images").is_none(),
-            "typed content blocks should replace the image side flag on the hook surface"
         );
     }
 
@@ -735,7 +714,6 @@ mod tests {
             name: "tool".into(),
             content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
             is_error: false,
-            has_images: true,
         };
         assert_eq!(
             result.text_projection(),
@@ -751,54 +729,17 @@ mod tests {
     }
 
     #[test]
-    fn hook_tool_result_has_images_serde_default() {
-        // Verify has_images defaults to false when deserializing JSON without it.
-        // This ensures backwards compatibility with existing hook payloads.
-        let json = r#"{
-            "tool_use_id": "tc_1",
-            "name": "test",
-            "content": "hello",
-            "is_error": false
-        }"#;
-        let result: HookToolResult =
-            serde_json::from_str(json).expect("should deserialize without has_images");
-        assert!(!result.has_images);
-    }
-
-    #[test]
-    fn hook_tool_result_has_images_is_deserialize_only_legacy_flag() {
-        let result = HookToolResult {
-            tool_use_id: "tc_1".into(),
-            name: "tool".into(),
-            content_blocks: vec![text_block("text")],
-            is_error: false,
-            has_images: true,
-        };
-        let json = serde_json::to_value(&result).expect("should serialize");
-        assert!(
-            json.get("has_images").is_none(),
-            "new hook payloads carry content_blocks instead of has_images"
-        );
-        // `content` is serialized as a derived text projection (row #331), not a
-        // stored mirror — incoming `content` is still ignored on deserialize.
-        assert_eq!(
-            json["content"],
-            serde_json::json!("text"),
-            "wire envelope serializes the derived content text projection"
-        );
-
+    fn hook_tool_result_ignores_incoming_content_string_as_authority() {
+        // The incoming `content` string is not ingested as authority; the
+        // canonical content comes from `content_blocks`.
         let decoded: HookToolResult = serde_json::from_value(serde_json::json!({
             "tool_use_id": "tc_1",
             "name": "tool",
             "content": "ignored-incoming-string",
             "content_blocks": [{"type": "text", "text": "text"}],
-            "is_error": false,
-            "has_images": true
+            "is_error": false
         }))
         .expect("should deserialize");
-        assert!(decoded.has_images);
-        // The incoming `content` string is not ingested as authority; the
-        // canonical content comes from `content_blocks`.
         assert_eq!(decoded.content_blocks, vec![text_block("text")]);
         assert_eq!(decoded.text_projection(), "text");
     }
@@ -813,7 +754,6 @@ mod tests {
             name: "tool".into(),
             content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
             is_error: false,
-            has_images: true,
         };
         let json = serde_json::to_value(&original).expect("serialize");
         assert_eq!(

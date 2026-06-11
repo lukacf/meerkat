@@ -171,9 +171,39 @@ pub enum ConditionExpr {
 }
 
 /// A frame is a DAG of nodes that executes as a unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSpec {
     pub nodes: IndexMap<FlowNodeId, FlowNodeSpec>,
+}
+
+impl FrameSpec {
+    /// Compile flat-authored steps into the canonical root frame.
+    ///
+    /// Flat `steps` remain a valid authoring ergonomic only because they are
+    /// compiled into the execution root exactly once, at the decode/construct
+    /// boundary; the runtime sees a single structure owner.
+    #[must_use]
+    pub fn from_flat_steps(steps: &IndexMap<StepId, FlowStepSpec>) -> Self {
+        let nodes = steps
+            .iter()
+            .map(|(step_id, step)| {
+                (
+                    FlowNodeId::from(step_id.as_str()),
+                    FlowNodeSpec::Step(FrameStepSpec {
+                        step_id: step_id.clone(),
+                        depends_on: step
+                            .depends_on
+                            .iter()
+                            .map(|dependency| FlowNodeId::from(dependency.as_str()))
+                            .collect(),
+                        depends_on_mode: step.depends_on_mode.clone(),
+                        branch: step.branch.clone(),
+                    }),
+                )
+            })
+            .collect();
+        Self { nodes }
+    }
 }
 
 /// A node in a FrameSpec: either a step or a repeat_until loop.
@@ -357,15 +387,54 @@ pub struct FlowStepSpec {
 }
 
 /// Flow definition for a named workflow.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct FlowSpec {
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub steps: IndexMap<StepId, FlowStepSpec>,
-    /// v2 flows carry a FrameSpec as the execution root. v1 flows omit this field.
+    /// Canonical execution root. Always present: flat-authored specs are
+    /// compiled into a root frame once at the decode/construct boundary.
+    pub root: FrameSpec,
+}
+
+impl FlowSpec {
+    /// Canonicalizing constructor.
+    ///
+    /// When `root` is omitted, the flat `steps` are compiled into the
+    /// canonical root frame here — the single boundary where flat authoring
+    /// becomes execution structure.
+    #[must_use]
+    pub fn new(
+        description: Option<String>,
+        steps: IndexMap<StepId, FlowStepSpec>,
+        root: Option<FrameSpec>,
+    ) -> Self {
+        let root = root.unwrap_or_else(|| FrameSpec::from_flat_steps(&steps));
+        Self {
+            description,
+            steps,
+            root,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FlowSpecDe {
     #[serde(default)]
-    pub root: Option<FrameSpec>,
+    description: Option<String>,
+    #[serde(default)]
+    steps: IndexMap<StepId, FlowStepSpec>,
+    #[serde(default)]
+    root: Option<FrameSpec>,
+}
+
+impl<'de> Deserialize<'de> for FlowSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let de = FlowSpecDe::deserialize(deserializer)?;
+        Ok(Self::new(de.description, de.steps, de.root))
+    }
 }
 
 /// Topology enforcement mode.
@@ -1346,24 +1415,50 @@ include_patterns = ["text_complete"]
 
     #[test]
     fn test_flow_spec_with_root_roundtrip_json() {
-        let spec = FlowSpec {
-            description: Some("test flow".into()),
-            steps: indexmap::IndexMap::new(),
-            root: Some(FrameSpec {
+        let spec = FlowSpec::new(
+            Some("test flow".into()),
+            indexmap::IndexMap::new(),
+            Some(FrameSpec {
                 nodes: indexmap::IndexMap::new(),
             }),
-        };
+        );
         let encoded = serde_json::to_string(&spec).expect("serialize");
         let decoded: FlowSpec = serde_json::from_str(&encoded).expect("deserialize");
-        assert!(decoded.root.is_some());
+        assert_eq!(decoded.root, spec.root);
     }
 
     #[test]
-    fn test_flow_spec_without_root_deserializes_none() {
-        // Legacy FlowSpec without root field deserializes with root: None
-        let json = r#"{"description":null,"steps":{}}"#;
-        let decoded: FlowSpec = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(decoded.root, None);
+    fn test_flow_spec_without_root_synthesizes_root_from_flat_steps() {
+        // Flat-authored specs are canonicalized at the decode boundary: the
+        // omitted root is compiled from `steps` exactly once, here.
+        let mut steps = indexmap::IndexMap::new();
+        steps.insert(
+            StepId::from("a"),
+            FlowStepSpec {
+                role: ProfileName::from("worker"),
+                message: ContentInput::from("go".to_string()),
+                depends_on: Vec::new(),
+                dispatch_mode: DispatchMode::default(),
+                collection_policy: CollectionPolicy::default(),
+                condition: None,
+                timeout_ms: None,
+                expected_schema_ref: None,
+                branch: None,
+                depends_on_mode: DependencyMode::default(),
+                allowed_tools: None,
+                blocked_tools: None,
+                output_format: StepOutputFormat::default(),
+            },
+        );
+        let mut value =
+            serde_json::to_value(FlowSpec::new(None, steps.clone(), None)).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("flow spec serializes as object")
+            .remove("root");
+        let decoded: FlowSpec = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded.root, FrameSpec::from_flat_steps(&steps));
+        assert!(decoded.root.nodes.contains_key(&FlowNodeId::from("a")));
     }
 
     #[test]

@@ -275,9 +275,16 @@ impl RuntimeBackedScheduleSessionHost {
         Ok(CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: prompt_system_prompt
+            // Parse the schedule-spec prompt representation once at this
+            // ingest boundary: an occurrence-rendered prompt wins over the
+            // spec prompt; either becomes an explicit `Set`, absence inherits.
+            system_prompt: match prompt_system_prompt
                 .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone()),
+                .or_else(|| create.system_prompt.clone())
+            {
+                Some(prompt) => crate::SystemPromptOverride::Set(prompt),
+                None => crate::SystemPromptOverride::Inherit,
+            },
             max_tokens: create.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,

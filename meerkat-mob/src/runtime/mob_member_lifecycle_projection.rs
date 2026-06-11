@@ -1,6 +1,6 @@
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken};
 use crate::machines::mob_machine as mob_dsl;
-use crate::roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 use crate::runtime::handle::{HelperResult, MobMemberSnapshot, MobMemberStatus};
 use meerkat_core::time_compat::UNIX_EPOCH;
 use meerkat_core::types::SessionId;
@@ -31,16 +31,6 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
 }
 
 impl CanonicalMemberSnapshotMaterial {
-    pub(super) fn roster_state(&self) -> MemberState {
-        match self.status {
-            CanonicalMemberStatus::Retiring => MemberState::Retiring,
-            CanonicalMemberStatus::Unknown
-            | CanonicalMemberStatus::Active
-            | CanonicalMemberStatus::Broken
-            | CanonicalMemberStatus::Completed => MemberState::Active,
-        }
-    }
-
     pub(super) fn to_snapshot(&self) -> MobMemberSnapshot {
         let status = match self.status {
             CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
@@ -134,18 +124,6 @@ impl MobMemberLifecycleProjection {
             mob_dsl::MobMemberLifecycleStatus::Retiring => CanonicalMemberStatus::Retiring,
             mob_dsl::MobMemberLifecycleStatus::Broken => CanonicalMemberStatus::Broken,
             mob_dsl::MobMemberLifecycleStatus::Completed => CanonicalMemberStatus::Completed,
-        }
-    }
-
-    pub(super) fn roster_state_for_machine_lifecycle(
-        lifecycle: &mob_dsl::MobMemberLifecycleMaterial,
-    ) -> MemberState {
-        match lifecycle.status {
-            mob_dsl::MobMemberLifecycleStatus::Retiring => MemberState::Retiring,
-            mob_dsl::MobMemberLifecycleStatus::Unknown
-            | mob_dsl::MobMemberLifecycleStatus::Active
-            | mob_dsl::MobMemberLifecycleStatus::Broken
-            | mob_dsl::MobMemberLifecycleStatus::Completed => MemberState::Active,
         }
     }
 

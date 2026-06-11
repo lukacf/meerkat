@@ -22,7 +22,7 @@ machine! {
 
         init(Ready) {
             session_envelope_version = 2,
-            stored_input_state_version = 2,
+            stored_input_state_version = 3,
             session_metadata_schema_version = 2,
         }
 

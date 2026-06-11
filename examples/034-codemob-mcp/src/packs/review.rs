@@ -132,11 +132,7 @@ impl Pack for ReviewPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec {
-                description: Some("Parallel code review with synthesis".into()),
-                steps,
-                root: None,
-            },
+            FlowSpec::new(Some("Parallel code review with synthesis".into()), steps, None),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

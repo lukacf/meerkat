@@ -74,11 +74,10 @@ impl OperationSource {
 pub struct OperationSpec {
     pub id: OperationId,
     pub kind: OperationKind,
-    /// Compatibility owner binding field.
+    /// Canonical owner bridge session binding for this operation.
     ///
-    /// Under the identity-first Mob regime this carries the canonical bridge
-    /// session binding, even though the stored field name still says
-    /// `owner_session_id`.
+    /// The serde field name `owner_session_id` is durable in
+    /// `PersistedOpsSnapshot`; renaming it is a persisted-shape change.
     pub owner_session_id: SessionId,
     pub display_name: String,
     pub source_label: String,
@@ -86,19 +85,6 @@ pub struct OperationSpec {
     pub operation_source: Option<OperationSource>,
     pub child_session_id: Option<SessionId>,
     pub expect_peer_channel: bool,
-}
-
-impl OperationSpec {
-    /// Canonical owner bridge binding for this operation.
-    pub fn owner_bridge_session_id(&self) -> &SessionId {
-        &self.owner_session_id
-    }
-
-    /// Compatibility alias retained while older surfaces still speak in
-    /// session-centric terms.
-    pub fn owner_session_id(&self) -> &SessionId {
-        &self.owner_session_id
-    }
 }
 
 /// Peer-facing connection handoff surfaced once an operation is ready.

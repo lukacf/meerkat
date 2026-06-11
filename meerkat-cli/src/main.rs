@@ -4786,12 +4786,8 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
             && backend_kind == Some(provider.normalized_backend_kind())
             && let Some(base_url) = provider.backend_base_url()
         {
-            let should_heal_base_url = backend.base_url.as_deref().is_none_or(str::is_empty)
-                || (provider == LoginProvider::OpenAi
-                    && backend.base_url.as_deref().is_some_and(|url| {
-                        meerkat_core::provider_matrix::openai::OpenAiBackendKind::is_legacy_chatgpt_base_url(url)
-                    }));
-            if should_heal_base_url {
+            let should_seed_base_url = backend.base_url.as_deref().is_none_or(str::is_empty);
+            if should_seed_base_url {
                 backend.base_url = Some(base_url.to_string());
                 changed = true;
             }
@@ -5871,8 +5867,6 @@ fn cli_provider_registry() -> meerkat_providers::ProviderRuntimeRegistry {
     registry
 }
 
-const SELF_HOSTED_LEGACY_REALM_ID: &str = "self_hosted_legacy";
-
 struct DoctorSelfHostedProbeConnection {
     base_url: String,
     bearer_token: Option<String>,
@@ -5934,121 +5928,19 @@ fn doctor_configured_self_hosted_target(
     }
 }
 
-fn doctor_legacy_self_hosted_binding_id(
-    server_id: &str,
-) -> anyhow::Result<meerkat_core::BindingId> {
-    if let Ok(binding_id) = meerkat_core::BindingId::parse(server_id.to_string()) {
-        return Ok(binding_id);
-    }
-
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in server_id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    let generated = format!("legacy-{hash:016x}");
-    meerkat_core::BindingId::parse(generated).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to derive transient legacy binding id for self-hosted server '{server_id}': {err}"
-        )
-    })
-}
-
-fn doctor_legacy_self_hosted_connection(
-    server_id: &str,
-    server: &meerkat_core::SelfHostedServerConfig,
-) -> anyhow::Result<(meerkat_core::RealmConnectionSet, AuthBindingRef)> {
-    let realm_id = meerkat_core::RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
-        anyhow::anyhow!(
-            "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
-        )
-    })?;
-    let binding_id = doctor_legacy_self_hosted_binding_id(server_id)?;
-    let binding_key = binding_id.as_str().to_string();
-
-    // K18: the auth-method literal is owned by the typed provider matrix —
-    // project it from `SelfHostedAuthMethod`, never a CLI-local string.
-    use meerkat_core::provider_matrix::self_hosted::SelfHostedAuthMethod;
-    let (auth_method, source) = match (&server.bearer_token, &server.bearer_token_env) {
-        (Some(secret), _) => (
-            SelfHostedAuthMethod::StaticBearer.as_str().to_string(),
-            meerkat_core::CredentialSourceSpec::InlineSecret {
-                secret: secret.clone(),
-            },
-        ),
-        (None, Some(env)) => (
-            SelfHostedAuthMethod::StaticBearer.as_str().to_string(),
-            meerkat_core::CredentialSourceSpec::Env {
-                env: env.clone(),
-                fallback: Vec::new(),
-            },
-        ),
-        (None, None) => (
-            SelfHostedAuthMethod::None.as_str().to_string(),
-            meerkat_core::CredentialSourceSpec::PlatformDefault,
-        ),
-    };
-
-    let backend = meerkat_core::BackendProfile {
-        id: server_id.to_string(),
-        provider: meerkat_core::Provider::SelfHosted,
-        backend_kind: "self_hosted".to_string(),
-        base_url: Some(server.base_url.clone()),
-        options: serde_json::Value::Null,
-    };
-    let auth = meerkat_core::AuthProfile {
-        id: format!("{server_id}_auth"),
-        provider: meerkat_core::Provider::SelfHosted,
-        auth_method,
-        source,
-        constraints: Default::default(),
-        metadata_defaults: Default::default(),
-    };
-    let binding = meerkat_core::ProviderBinding {
-        id: binding_key.clone(),
-        backend_profile: backend.id.clone(),
-        auth_profile: auth.id.clone(),
-        default_model: None,
-        policy: Default::default(),
-        provider_default: false,
-    };
-
-    let mut backends = std::collections::BTreeMap::new();
-    backends.insert(backend.id.clone(), backend);
-    let mut auth_profiles = std::collections::BTreeMap::new();
-    auth_profiles.insert(auth.id.clone(), auth);
-    let mut bindings = std::collections::BTreeMap::new();
-    bindings.insert(binding.id.clone(), binding);
-
-    Ok((
-        meerkat_core::RealmConnectionSet {
-            realm_id: realm_id.clone(),
-            backends,
-            auth_profiles,
-            bindings,
-            default_binding: Some(binding_key),
-        },
-        AuthBindingRef {
-            realm: realm_id,
-            binding: binding_id,
-            profile: None,
-            origin: meerkat_core::connection::BindingOrigin::Configured,
-        },
-    ))
-}
-
 async fn resolve_doctor_self_hosted_probe_connection(
     config: &Config,
     preferred_realm: &meerkat_core::RealmId,
     server_id: &str,
     server: &meerkat_core::SelfHostedServerConfig,
 ) -> anyhow::Result<DoctorSelfHostedProbeConnection> {
-    let (realm, auth_binding) =
-        if let Some(target) = doctor_configured_self_hosted_target(config, preferred_realm)? {
-            (target.realm, target.auth_binding)
-        } else {
-            doctor_legacy_self_hosted_connection(server_id, server)?
-        };
+    let Some(target) = doctor_configured_self_hosted_target(config, preferred_realm)? else {
+        anyhow::bail!(
+            "self-hosted server '{server_id}' has no realm auth binding for provider self_hosted; \
+             configure a realm auth profile + binding (auth_binding) for this server"
+        );
+    };
+    let (realm, auth_binding) = (target.realm, target.auth_binding);
 
     let connection = doctor_self_hosted_registry()
         .resolve(&realm, &auth_binding, &doctor_resolver_environment())
@@ -8794,7 +8686,10 @@ async fn run_agent(
         let create_req = CreateSessionRequest {
             model: model.to_string(),
             prompt: prompt.to_string().into(),
-            system_prompt,
+            system_prompt: match system_prompt {
+                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                None => meerkat::SystemPromptOverride::Inherit,
+            },
             max_tokens: Some(max_tokens),
             event_tx: output_pipeline.event_sender(),
 
@@ -10149,9 +10044,13 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: "".into(),
-                system_prompt: prompt_system_prompt
+                system_prompt: match prompt_system_prompt
                     .map(str::to_owned)
-                    .or_else(|| create.system_prompt.clone()),
+                    .or_else(|| create.system_prompt.clone())
+                {
+                    Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                    None => meerkat::SystemPromptOverride::Inherit,
+                },
                 max_tokens: create.max_tokens,
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -11686,7 +11585,10 @@ async fn login_mcp_server(
     }
 
     let authority = open_mcp_oauth_authority(CliMcpAuthMode::Interactive)?;
-    let target = meerkat_auth_core::McpAuthTarget::new(server.name.clone(), http.url.clone());
+    let target = meerkat_auth_core::McpServerIdentity::from_server_config(
+        server.name.clone(),
+        http.url.clone(),
+    );
     let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
     authority
         .interactive_login(&target, www_authenticate.as_deref())
@@ -12342,8 +12244,13 @@ async fn execute_mob_web_build(
         load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
     if let Some(requires) = &verified.archive.manifest.requires {
         for cap in &requires.capabilities {
-            if matches!(cap.token(), "shell" | "mcp_stdio" | "process_spawn") {
-                anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
+            if meerkat_contracts::capability::browser_mobpack_capability_decision(cap.id())
+                .is_forbidden()
+            {
+                anyhow::bail!(
+                    "forbidden capability '{}' is not allowed for web builds",
+                    cap.token()
+                );
             }
         }
     }
@@ -13625,8 +13532,9 @@ mod tests {
             .base_url = Some("https://chatgpt.com/backend-api".into());
 
         assert!(
-            ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config),
-            "legacy ChatGPT backend URL should be healed to the Codex endpoint"
+            !ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config),
+            "a configured base URL is never silently rewritten; the legacy \
+             ChatGPT backend URL is rejected at runtime with InvalidBaseUrl"
         );
         let backend = config
             .realm
@@ -13637,7 +13545,7 @@ mod tests {
             .expect("openai chatgpt backend");
         assert_eq!(
             backend.base_url.as_deref(),
-            Some("https://chatgpt.com/backend-api/codex")
+            Some("https://chatgpt.com/backend-api")
         );
     }
 
@@ -14797,24 +14705,12 @@ default_model = "gemma"
             }
         }
 
-        async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            Err(SendError::Unsupported(
-                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
         async fn add_private_trusted_peer(
             &self,
             _peer: TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
             Err(SendError::Unsupported(
                 "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
-            ))
-        }
-
-        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-            Err(SendError::Unsupported(
-                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
             ))
         }
 
@@ -18515,7 +18411,7 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(32),
             event_tx: None,
 
@@ -18570,7 +18466,7 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -18687,7 +18583,7 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -18825,7 +18721,7 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(32),
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -18963,7 +18859,7 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -19036,7 +18932,7 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                system_prompt: None,
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
                 max_tokens: Some(32),
                 event_tx: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -19108,7 +19004,7 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(32),
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -19177,7 +19073,7 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            system_prompt: None,
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(32),
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -19912,7 +19808,7 @@ supports_reasoning = true
     fn test_comms_tool_dispatcher_provides_comms_tools() {
         use meerkat_comms::Inbox;
         use meerkat_comms::agent::CommsToolDispatcher;
-        use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
+        use meerkat_comms::{CommsConfig, Keypair};
         use meerkat_core::AgentToolDispatcher;
 
         // Create mock comms infrastructure
@@ -19920,7 +19816,6 @@ supports_reasoning = true
         let (_inbox, inbox_sender) = Inbox::new();
         let router = std::sync::Arc::new(meerkat_comms::Router::new(
             keypair,
-            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,

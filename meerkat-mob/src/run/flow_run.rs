@@ -12,7 +12,7 @@
     clippy::redundant_clone
 )]
 
-pub use crate::ids::MeerkatId;
+pub use crate::ids::AgentIdentity;
 pub use crate::ids::{BranchId, FlowNodeId, FrameId, LoopInstanceId, StepId};
 
 #[allow(non_camel_case_types)]
@@ -232,7 +232,7 @@ pub(crate) mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordTargetSuccess {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordTargetTerminalFailure {
@@ -241,12 +241,12 @@ pub(crate) mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordTargetCanceled {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordTargetFailure {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
         pub retry_key: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -374,17 +374,17 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProjectTargetSuccess {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProjectTargetFailure {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProjectTargetCanceled {
         pub step_id: StepId,
-        pub target_id: MeerkatId,
+        pub target_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct GrantNodeSlot {

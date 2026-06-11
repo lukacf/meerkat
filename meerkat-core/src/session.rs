@@ -1381,8 +1381,11 @@ impl AuthorizedSessionToolVisibilityState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionBuildState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::config::SystemPromptOverride::is_inherit"
+    )]
+    pub system_prompt: crate::config::SystemPromptOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<crate::OutputSchema>,
     #[serde(default, skip_serializing_if = "is_default_hook_run_overrides")]
@@ -4121,54 +4124,6 @@ impl ToolCategoryOverride {
     }
 }
 
-/// Backward-compatible deserializer: accepts both old `bool` JSON and new
-/// tri-state `"inherit"` / `"enable"` / `"disable"` strings.
-///
-/// Old persisted sessions have `"mob": false` or `"builtins": true`.
-/// - `true`  → `Enable`  (user explicitly had it on)
-/// - `false` → `Inherit` (can't distinguish "disabled" from "didn't exist")
-/// - string  → normal enum deserialization
-fn deserialize_tool_category_compat<'de, D>(
-    deserializer: D,
-) -> Result<ToolCategoryOverride, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct ToolCategoryVisitor;
-
-    impl de::Visitor<'_> for ToolCategoryVisitor {
-        type Value = ToolCategoryOverride;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a boolean or one of \"inherit\", \"enable\", \"disable\"")
-        }
-
-        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
-            Ok(if v {
-                ToolCategoryOverride::Enable
-            } else {
-                ToolCategoryOverride::Inherit
-            })
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            match v {
-                "inherit" => Ok(ToolCategoryOverride::Inherit),
-                "enable" => Ok(ToolCategoryOverride::Enable),
-                "disable" => Ok(ToolCategoryOverride::Disable),
-                _ => Err(de::Error::unknown_variant(
-                    v,
-                    &["inherit", "enable", "disable"],
-                )),
-            }
-        }
-    }
-
-    deserializer.deserialize_any(ToolCategoryVisitor)
-}
-
 /// Tooling intent captured at session creation time.
 ///
 /// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
@@ -4178,29 +4133,29 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionTooling {
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub builtins: ToolCategoryOverride,
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub shell: ToolCategoryOverride,
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub comms: ToolCategoryOverride,
     /// Mob (multi-agent orchestration) tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub mob: ToolCategoryOverride,
     /// Semantic memory.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub memory: ToolCategoryOverride,
     /// Scheduler tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub schedule: ToolCategoryOverride,
     /// WorkGraph durable work tools.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub workgraph: ToolCategoryOverride,
     /// Assistant image generation.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub image_generation: ToolCategoryOverride,
     /// Meerkat-owned fallback web search.
-    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    #[serde(default)]
     pub web_search: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]

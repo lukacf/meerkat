@@ -4,7 +4,7 @@
 
 use crate::inproc::InprocRegistry;
 use crate::peer_types::ContentShape as PeerContentShape;
-use crate::trust::TrustedPeers;
+use crate::trust::TrustStore;
 use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressAdmission, PeerIngressAuthDecision, PeerIngressConvention,
@@ -23,7 +23,7 @@ pub(crate) type PeerCommsHandleSlot = Arc<parking_lot::RwLock<Option<Arc<dyn Pee
 /// using receiver-owned trust/auth state.
 pub(crate) struct IngressClassificationContext {
     pub(crate) require_peer_auth: bool,
-    pub(crate) trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+    pub(crate) trusted_peers: Arc<parking_lot::RwLock<TrustStore>>,
     pub(crate) peer_comms_handle: PeerCommsHandleSlot,
     pub(crate) inproc_namespace: Option<String>,
 }
@@ -141,11 +141,14 @@ impl IngressClassificationContext {
     pub(crate) fn prepare(&self, item: InboxItem) -> Option<PreparedIngressItem> {
         match item {
             InboxItem::External { envelope } => {
-                let trusted = self.trusted_peers.read();
-                let from_peer = trusted.get_peer(&envelope.from).map(|p| p.name.clone());
+                let from_peer_id = envelope.from.to_peer_id();
+                let from_peer = self
+                    .trusted_peers
+                    .read()
+                    .get(&from_peer_id)
+                    .map(|entry| entry.name.as_string());
                 let trusted_sender = from_peer.is_some();
 
-                let from_peer_id = envelope.from.to_peer_id();
                 let registry_name = self.inproc_display_name_for(&envelope.from);
 
                 let from_name = registry_name
@@ -345,7 +348,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn classification_context(
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
         require_peer_auth: bool,
     ) -> Arc<IngressClassificationContext> {
         classification_context_shared(
@@ -355,7 +358,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn classification_context_shared(
-        trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+        trusted_peers: Arc<parking_lot::RwLock<TrustStore>>,
         require_peer_auth: bool,
     ) -> Arc<IngressClassificationContext> {
         Arc::new(IngressClassificationContext {
@@ -379,7 +382,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey, Signature};
-    use crate::trust::TrustedPeer;
+    use crate::trust::TrustEntry;
     use crate::types::Envelope;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
@@ -564,7 +567,7 @@ mod tests {
 
     fn make_context(
         require_peer_auth: bool,
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
         silent_intents: Vec<&str>,
     ) -> IngressClassificationContext {
         let handle =
@@ -580,7 +583,7 @@ mod tests {
 
     fn make_context_with_namespace(
         require_peer_auth: bool,
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
         silent_intents: Vec<&str>,
         inproc_namespace: Option<String>,
     ) -> IngressClassificationContext {
@@ -597,7 +600,7 @@ mod tests {
 
     fn make_context_without_machine(
         require_peer_auth: bool,
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
     ) -> IngressClassificationContext {
         make_context_with_machine_and_namespace(
             require_peer_auth,
@@ -610,7 +613,7 @@ mod tests {
 
     fn make_context_with_machine(
         require_peer_auth: bool,
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
         silent_intents: Vec<&str>,
         peer_comms_handle: Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>>,
     ) -> IngressClassificationContext {
@@ -625,7 +628,7 @@ mod tests {
 
     fn make_context_with_machine_and_namespace(
         require_peer_auth: bool,
-        trusted_peers: TrustedPeers,
+        trusted_peers: TrustStore,
         _silent_intents: Vec<&str>,
         peer_comms_handle: Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>>,
         inproc_namespace: Option<String>,
@@ -638,13 +641,19 @@ mod tests {
         }
     }
 
-    fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers::from_peers(vec![TrustedPeer {
-            name: name.to_string(),
-            pubkey: *pubkey,
-            addr: "tcp://127.0.0.1:4200".to_string(),
-            meta: crate::PeerMeta::default(),
-        }])
+    fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustStore {
+        let mut store = TrustStore::new();
+        store
+            .insert(TrustEntry {
+                peer_id: pubkey.to_peer_id(),
+                name: meerkat_core::comms::PeerName::new(name).expect("valid peer name"),
+                pubkey: *pubkey,
+                address: meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4200")
+                    .expect("valid peer address"),
+                meta: crate::PeerMeta::default(),
+            })
+            .expect("trusted test peer should insert");
+        store
     }
 
     fn make_envelope(from: &Keypair, kind: MessageKind) -> Envelope {
@@ -918,7 +927,7 @@ mod tests {
     #[test]
     fn classify_untrusted_supervisor_bridge_request_remains_admissible() {
         let sender = make_keypair();
-        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let trusted = TrustStore::new(); // sender NOT trusted yet
         let ctx = make_context(true, trusted, vec![]);
         let envelope = make_envelope(
             &sender,
@@ -968,7 +977,7 @@ mod tests {
         let machine = RecordingPeerCommsHandle::rejecting_external();
         let ctx = make_context_with_machine(
             true,
-            TrustedPeers::new(),
+            TrustStore::new(),
             vec![],
             Some(machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
@@ -1074,7 +1083,7 @@ mod tests {
         let auth_machine = RecordingPeerCommsHandle::accepting();
         let auth_ctx = make_context_with_machine(
             true,
-            TrustedPeers::new(),
+            TrustStore::new(),
             vec![],
             Some(auth_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
@@ -1240,7 +1249,7 @@ mod tests {
 
     #[test]
     fn classify_plain_event() {
-        let ctx = make_context(false, TrustedPeers::new(), vec![]);
+        let ctx = make_context(false, TrustStore::new(), vec![]);
         let item = InboxItem::PlainEvent {
             blocks: None,
             body: "event".to_string(),
@@ -1259,7 +1268,7 @@ mod tests {
         let machine = RecordingPeerCommsHandle::accepting();
         let ctx = make_context_with_machine(
             false,
-            TrustedPeers::new(),
+            TrustStore::new(),
             vec![],
             Some(machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
@@ -1288,7 +1297,7 @@ mod tests {
         let machine = RecordingPeerCommsHandle::rejecting_plain();
         let ctx = make_context_with_machine(
             false,
-            TrustedPeers::new(),
+            TrustStore::new(),
             vec![],
             Some(machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
@@ -1311,7 +1320,7 @@ mod tests {
 
     #[test]
     fn no_lifecycle_leakage_plain_events_remain_the_only_non_peer_inbox_class() {
-        let ctx = make_context(false, TrustedPeers::new(), vec![]);
+        let ctx = make_context(false, TrustStore::new(), vec![]);
         let item = InboxItem::PlainEvent {
             body: "event".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
@@ -1387,7 +1396,7 @@ mod tests {
 
     #[test]
     fn prepare_plain_event_assigns_interaction_id_and_projection() {
-        let ctx = make_context(false, TrustedPeers::new(), vec![]);
+        let ctx = make_context(false, TrustStore::new(), vec![]);
         let prepared = ctx
             .prepare(InboxItem::PlainEvent {
                 body: "event body".to_string(),

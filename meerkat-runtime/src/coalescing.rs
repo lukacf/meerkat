@@ -147,9 +147,8 @@ mod tests {
                 request_id: "req-1".into(),
                 phase: ResponseProgressPhase::InProgress,
             }),
-            body: "progress".into(),
+            content: "progress".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
-            blocks: None,
             handling_mode: None,
         });
         assert!(is_coalescing_eligible(&input));
@@ -159,8 +158,7 @@ mod tests {
     fn prompt_not_coalescing_eligible() {
         let input = Input::Prompt(PromptInput {
             header: make_header_with_supersession(None),
-            text: "hello".into(),
-            blocks: None,
+            content: "hello".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
@@ -172,9 +170,8 @@ mod tests {
         let input = Input::Peer(PeerInput {
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
-            body: "hello".into(),
+            content: "hello".into(),
             payload: None,
-            blocks: None,
             handling_mode: None,
         });
         assert!(!is_coalescing_eligible(&input));
@@ -263,8 +260,7 @@ mod tests {
         // Different kind (Prompt vs ExternalEvent) but same supersession key
         let input2 = Input::Prompt(PromptInput {
             header: make_header_with_supersession(Some("same-key")),
-            text: "hello".into(),
-            blocks: None,
+            content: "hello".into(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });

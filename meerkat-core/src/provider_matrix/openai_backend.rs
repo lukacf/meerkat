@@ -11,12 +11,6 @@ pub enum OpenAiBackendKind {
 
 pub const CHATGPT_CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
-/// Legacy ChatGPT backend base URLs that predate the canonical
-/// [`CHATGPT_CODEX_DEFAULT_BASE_URL`] and must be healed to it. Single owner
-/// consulted by both the CLI config-seed/heal path and the provider-internal
-/// `chatgpt_backend_base_url` normalizer.
-const LEGACY_CHATGPT_BASE_URLS: &[&str] = &["https://chatgpt.com/backend-api"];
-
 impl OpenAiBackendKind {
     pub const ALL: &'static [Self] = &[Self::OpenAiApi, Self::ChatGptBackend, Self::AzureOpenAi];
 
@@ -63,15 +57,6 @@ impl OpenAiBackendKind {
             Self::ChatGptBackend => CHATGPT_CODEX_DEFAULT_BASE_URL,
             Self::AzureOpenAi => "",
         }
-    }
-
-    /// Whether `url` is a legacy ChatGPT backend base URL that should be healed
-    /// to [`CHATGPT_CODEX_DEFAULT_BASE_URL`]. Trailing slashes are ignored.
-    /// Single owner of the legacy-base-url set (replaces the duplicated magic
-    /// literal compared in the CLI and the OpenAI runtime).
-    pub fn is_legacy_chatgpt_base_url(url: &str) -> bool {
-        let trimmed = url.trim_end_matches('/');
-        LEGACY_CHATGPT_BASE_URLS.contains(&trimmed)
     }
 }
 

@@ -42,9 +42,8 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "hello".into(),
+        content: "hello".into(),
         payload: None,
-        blocks: None,
         handling_mode,
     })
 }

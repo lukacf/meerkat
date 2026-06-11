@@ -413,7 +413,7 @@ let service = build_persistent_service(factory, config, 64, persistence);
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "What is Rust?".into(),
-    system_prompt: None,
+    system_prompt: SystemPromptOverride::Inherit,
     max_tokens: None,
     event_tx: None,
     skill_references: None,

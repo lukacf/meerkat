@@ -297,8 +297,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "trigger wake".into(),
-        blocks: None,
+        content: "trigger wake".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -406,8 +405,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "trigger".into(),
-        blocks: None,
+        content: "trigger".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -541,8 +539,7 @@ async fn choke_004_completion_during_running_defers_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "start turn".into(),
-        blocks: None,
+        content: "start turn".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
@@ -689,8 +686,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
             supersession_key: None,
             correlation_id: None,
         },
-        text: "flush".into(),
-        blocks: None,
+        content: "flush".into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });

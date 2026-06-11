@@ -280,7 +280,6 @@ class ToolExecutionCompleted(Event):
 
     id: str = ""
     name: str = ""
-    result: str = ""
     content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
     duration_ms: int | None = None
@@ -523,7 +522,6 @@ class ToolConfigChangedPayload:
 
     operation: str | None = None
     target: str | None = None
-    status: str | None = None
     status_info: ToolConfigChangeStatus | None = None
     persisted: bool | None = None
     applied_at_turn: int | None = None
@@ -1028,7 +1026,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_result_received": ("id", "name", "is_error"),
         "turn_completed": ("stop_reason", "usage"),
         "tool_execution_started": ("id", "name"),
-        "tool_execution_completed": ("id", "name", "result"),
+        "tool_execution_completed": ("id", "name", "content"),
         "tool_execution_timed_out": ("id", "name", "timeout_ms"),
         "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
@@ -1065,7 +1063,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if operation not in {"add", "remove", "reload"}:
             raise ValueError("payload.operation must be add, remove, or reload")
         _require_str(payload, "target")
-        _require_str(payload, "status")
         _require_bool(payload, "persisted")
         return
     if event_type == "turn_completed":
@@ -1103,6 +1100,9 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
+        elif field_name == "content" and event_type == "tool_execution_completed":
+            if not isinstance(raw.get("content"), list):
+                raise ValueError("content must be an array of content blocks")
         elif field_name in _STRING_FIELDS:
             _require_str(raw, field_name)
         elif field_name in _NUMBER_FIELDS:
@@ -1176,7 +1176,7 @@ def parse_event(raw: dict[str, Any]) -> Event:
             elif f == "content" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["content"] = _parse_content_blocks(
                     raw.get("content"),
-                    raw.get("result") if cls is ToolExecutionCompleted else None,
+                    None,
                 )
             elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
@@ -1199,7 +1199,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["payload"] = ToolConfigChangedPayload(
                     operation=payload_raw["operation"],
                     target=payload_raw["target"],
-                    status=payload_raw["status"],
                     status_info=_parse_tool_config_change_status(
                         payload_raw.get("status_info")
                     ),

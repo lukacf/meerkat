@@ -44,8 +44,7 @@ fn make_prompt(text: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
         },
-        text: text.into(),
-        blocks: None,
+        content: text.into(),
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
@@ -1348,9 +1347,8 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 request_id: format!("req-{label}"),
                 phase: ResponseProgressPhase::InProgress,
             }),
-            body: format!("progress-{label}"),
+            content: format!("progress-{label}").into(),
             payload: Some(serde_json::json!({ "label": label })),
-            blocks: None,
             handling_mode: None,
         })
     }

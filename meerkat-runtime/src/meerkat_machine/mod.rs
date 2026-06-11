@@ -52,7 +52,7 @@ use crate::meerkat_machine_types::{
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
-use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+use crate::service_ext::SessionServiceRuntimeExt;
 use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
@@ -1823,7 +1823,6 @@ impl LiveOpenAdmissionAuthority {
 #[cfg(feature = "live")]
 pub struct LiveRefreshResultAuthority {
     pub status: dsl::LiveRefreshPublicStatus,
-    pub refresh_enqueued: bool,
     pub sequence: u64,
     pub queue_acceptance_sequence: u64,
 }
@@ -1836,7 +1835,6 @@ pub struct LiveRefreshResultAuthority {
 #[cfg(feature = "live")]
 pub struct LiveCloseResultAuthority {
     pub status: dsl::LiveClosePublicStatus,
-    pub closed: bool,
     pub sequence: u64,
     pub close_observation_sequence: u64,
     channel_close_commit_authority: Option<meerkat_live::LiveChannelCloseCommitAuthority>,
@@ -1847,21 +1845,17 @@ impl LiveCloseResultAuthority {
     pub(crate) fn from_generated_effect(
         channel_id: String,
         status: dsl::LiveClosePublicStatus,
-        closed: bool,
         sequence: u64,
         close_observation_sequence: u64,
     ) -> Result<Self, String> {
-        let channel_close_commit_authority = if closed {
-            Some(build_live_channel_close_commit_authority(
+        let channel_close_commit_authority = match status {
+            dsl::LiveClosePublicStatus::Closed => Some(build_live_channel_close_commit_authority(
                 channel_id,
                 close_observation_sequence,
-            )?)
-        } else {
-            None
+            )?),
         };
         Ok(Self {
             status,
-            closed,
             sequence,
             close_observation_sequence,
             channel_close_commit_authority,
@@ -1892,7 +1886,6 @@ impl LiveCloseResultAuthority {
 #[cfg(feature = "live")]
 pub struct LiveCommandResultAuthority {
     pub command: dsl::LiveCommandPublicKind,
-    pub accepted: bool,
     pub sequence: u64,
     pub command_acceptance_sequence: u64,
 }
@@ -2061,8 +2054,6 @@ impl LiveChannelStatusAuthority {
 pub struct MeerkatMachine {
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
-    /// Runtime mode.
-    mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
@@ -2151,7 +2142,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: None,
             blob_store: None,
             llm_reconfigure_host: StdRwLock::new(None),
@@ -2180,7 +2170,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(blob_store),
             llm_reconfigure_host: StdRwLock::new(None),
@@ -2213,7 +2202,6 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(Arc::new(UnavailableBlobStore)),
             llm_reconfigure_host: StdRwLock::new(None),

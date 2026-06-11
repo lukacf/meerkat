@@ -116,15 +116,30 @@ pub struct OperationProgressUpdate {
 }
 
 /// Terminal lifecycle outcome recorded for an operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` exists solely for generated machine-authority plumbing
+/// (`OptionValueExt::get` on `Option<OpTerminalPayload>` guard projections);
+/// the defaulted `Retired` value can never be admitted as truth because the
+/// generated guards reject any transition whose payload presence witness is
+/// `None` before the variant-match guard is consulted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome_type", rename_all = "snake_case")]
 pub enum OperationTerminalOutcome {
     Completed(OperationResult),
-    Failed { error: String },
-    Aborted { reason: Option<String> },
-    Cancelled { reason: Option<String> },
+    Failed {
+        error: String,
+    },
+    Aborted {
+        reason: Option<String>,
+    },
+    Cancelled {
+        reason: Option<String>,
+    },
+    #[default]
     Retired,
-    Terminated { reason: String },
+    Terminated {
+        reason: String,
+    },
 }
 
 /// Current lifecycle status for an operation.

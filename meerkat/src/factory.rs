@@ -5465,7 +5465,7 @@ mod tests {
         tool_names: &[&str],
     ) -> (
         meerkat_core::InheritedToolVisibilityAuthority,
-        BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        BTreeMap<meerkat_core::ToolName, meerkat_core::ToolVisibilityWitness>,
     ) {
         let tools = Arc::from(
             tool_names
@@ -7401,13 +7401,11 @@ mod tests {
             staged_filter: meerkat_core::tool_scope::ToolFilter::Allow(
                 ["staged_visible".to_string()].into_iter().collect(),
             ),
-            active_requested_deferred_names: ["deferred_existing".to_string()]
-                .into_iter()
-                .collect(),
+            active_requested_deferred_names: ["deferred_existing".into()].into_iter().collect(),
             active_revision: 11,
             staged_revision: 13,
             requested_witnesses: [(
-                "deferred_existing".to_string(),
+                "deferred_existing".into(),
                 meerkat_core::ToolVisibilityWitness {
                     last_seen_provenance: Some(meerkat_core::ToolProvenance {
                         kind: meerkat_core::ToolSourceKind::Callback,
@@ -7419,7 +7417,7 @@ mod tests {
             .collect(),
             filter_witnesses: [
                 (
-                    "active_secret".to_string(),
+                    "active_secret".into(),
                     meerkat_core::ToolVisibilityWitness {
                         last_seen_provenance: Some(meerkat_core::ToolProvenance {
                             kind: meerkat_core::ToolSourceKind::Callback,
@@ -7428,7 +7426,7 @@ mod tests {
                     },
                 ),
                 (
-                    "staged_visible".to_string(),
+                    "staged_visible".into(),
                     meerkat_core::ToolVisibilityWitness {
                         last_seen_provenance: Some(meerkat_core::ToolProvenance {
                             kind: meerkat_core::ToolSourceKind::Callback,

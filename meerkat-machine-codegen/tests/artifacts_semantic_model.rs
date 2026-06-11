@@ -176,7 +176,11 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
         tool_filter_operator_line(&model, "ToolFilterValuesDeep"),
         tool_filter_domain(
             "ToolFilterValuesDeep",
-            &[r"{}", r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]
+            &[
+                r"{}",
+                r#"{"view_image"}"#,
+                r#"{"view_image", "toolname_1"}"#
+            ]
         ),
         "deep ToolFilterValues must cover differing same-variant structural payloads"
     );

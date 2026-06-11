@@ -23,17 +23,26 @@ use crate::{
 
 pub const WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY: &str = "workgraph.attention_projection";
 
-pub fn workgraph_attention_continuation_key(projection: &AttentionContextProjection) -> String {
-    let payload = serde_json::to_vec(projection).unwrap_or_default();
+pub fn workgraph_attention_continuation_key(
+    projection: &AttentionContextProjection,
+) -> Result<String, crate::WorkGraphError> {
+    // Fail-closed: a projection that cannot serialize must not collapse to a
+    // digest of the empty payload (which would alias distinct projections to
+    // one continuation identity).
+    let payload = serde_json::to_vec(projection).map_err(|error| {
+        crate::WorkGraphError::InvalidInput(format!(
+            "WorkGraph attention projection failed to serialize for continuation key: {error}"
+        ))
+    })?;
     let digest = Sha256::digest(payload);
-    format!(
+    Ok(format!(
         "workgraph_attention:{}:{}:{}:{}:{}:{digest:x}",
         projection.work_ref.realm_id,
         projection.work_ref.namespace,
         projection.binding_id,
         projection.binding_revision,
         projection.item_revision
-    )
+    ))
 }
 
 pub fn workgraph_attention_supersession_key(projection: &AttentionContextProjection) -> String {
@@ -194,22 +203,37 @@ impl WorkGraphToolSurface {
 
     pub fn turn_overlay_for_attention_projection(
         projection: &AttentionContextProjection,
-    ) -> TurnToolOverlay {
+    ) -> Result<TurnToolOverlay, crate::WorkGraphError> {
         let allowed = allowed_tools_for_projection(projection);
         let blocked_tools = workgraph_tools_list()
             .into_iter()
-            .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
+            .filter_map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .map(meerkat_core::types::ToolName::from)
+            })
             .filter(|name| !allowed.contains(name.as_str()))
             .collect::<Vec<_>>();
+        // Fail-closed: a projection that cannot serialize must never produce
+        // an overlay without its dispatch-context witness — the consumer
+        // would silently lose the attention scope.
+        let value = serde_json::to_value(projection).map_err(|error| {
+            crate::WorkGraphError::InvalidInput(format!(
+                "WorkGraph attention projection failed to serialize for turn tool overlay: {error}"
+            ))
+        })?;
         let mut dispatch_context = BTreeMap::new();
-        if let Ok(value) = serde_json::to_value(projection) {
-            dispatch_context.insert(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY.to_string(), value);
-        }
-        TurnToolOverlay {
-            allowed_tools: Some(allowed.into_iter().map(ToOwned::to_owned).collect()),
+        dispatch_context.insert(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY.to_string(), value);
+        Ok(TurnToolOverlay {
+            allowed_tools: Some(
+                allowed
+                    .into_iter()
+                    .map(meerkat_core::types::ToolName::from)
+                    .collect(),
+            ),
             blocked_tools: Some(blocked_tools),
             dispatch_context,
-        }
+        })
     }
 }
 
@@ -1023,7 +1047,8 @@ mod tests {
             .await
             .expect("projection")
             .projection;
-        let overlay = WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
+        let overlay = WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection)
+            .expect("attention projection must produce a turn overlay");
         let context = ToolDispatchContext::default().with_turn_metadata(overlay.dispatch_context);
         let surface = WorkGraphToolSurface::new(service);
         let args = serde_json::value::RawValue::from_string(

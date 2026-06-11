@@ -266,6 +266,13 @@ SourceTransportKind = Literal['embedded', 'filesystem', 'git', 'http', 'stdio']
 # Canonical source identifier.
 SourceUuid = str
 
+# Canonical typed name for an LLM-callable tool.
+#
+# The model-facing wire shape is still the provider's string tool name, but
+# internal policy, routing, and registry surfaces carry this handle so raw
+# strings do not become the tool identity owner.
+ToolName = str
+
 @dataclass
 class SkillEntry:
     """Wire representation of a skill entry (for list responses)."""
@@ -1149,8 +1156,8 @@ class MobStreamCloseResult:
 @dataclass
 class PublicTurnToolOverlay:
     """Public caller-safe per-turn tool overlay."""
-    allowed_tools: Optional[list[str]] = None
-    blocked_tools: Optional[list[str]] = None
+    allowed_tools: Optional[list[ToolName]] = None
+    blocked_tools: Optional[list[ToolName]] = None
 
 
 @dataclass

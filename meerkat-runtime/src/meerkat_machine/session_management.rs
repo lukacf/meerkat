@@ -1691,7 +1691,10 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         filter: meerkat_core::ToolFilter,
-        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        witnesses: std::collections::BTreeMap<
+            meerkat_core::ToolName,
+            meerkat_core::ToolVisibilityWitness,
+        >,
     ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(

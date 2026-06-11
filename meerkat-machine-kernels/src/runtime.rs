@@ -1708,6 +1708,11 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
         {
             named_type_variant_matches(schema, name, variant)
         }
+        // Bare (unwrapped) representation of a named value domain: shells may
+        // carry named values in the atom's natural shape (e.g. a `ToolName`
+        // map key as a plain string) instead of the `KernelValue::Named`
+        // wrapper. Accept iff the value inhabits the named domain's atom.
+        (value, TypeRef::Named(name)) if named_type_inner_matches(schema, name, value) => true,
         (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Enum(name))
             if enum_name == name =>
         {
@@ -1903,7 +1908,7 @@ fn named_type_inner_matches(
             ..
         }) => {
             type_path_enum_unit_matches(name, unit_variants, value)
-                || type_path_enum_structural_matches(structural_variants, value)
+                || type_path_enum_structural_matches(schema, structural_variants, value)
         }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
@@ -1943,6 +1948,7 @@ fn type_path_struct_matches(
 }
 
 fn type_path_enum_structural_matches(
+    schema: &MachineSchema,
     structural_variants: &[TypePathEnumStructuralVariant],
     value: &KernelValue,
 ) -> bool {
@@ -1966,7 +1972,7 @@ fn type_path_enum_structural_matches(
         let Some(value) = fields.get(&string_key(field.name.as_str())) else {
             return false;
         };
-        match field.atom {
+        match &field.atom {
             TypePathEnumPayloadAtom::StringSet => matches!(
                 value,
                 KernelValue::Set(values)
@@ -1974,8 +1980,35 @@ fn type_path_enum_structural_matches(
                         .iter()
                         .all(|value| matches!(value, KernelValue::String(_)))
             ),
+            TypePathEnumPayloadAtom::NamedSet(type_name) => matches!(
+                value,
+                KernelValue::Set(values)
+                    if values
+                        .iter()
+                        .all(|value| named_domain_value_matches(schema, type_name, value))
+            ),
+            TypePathEnumPayloadAtom::String => matches!(value, KernelValue::String(_)),
+            TypePathEnumPayloadAtom::OptionalString => {
+                value_matches_type(schema, value, &TypeRef::Option(Box::new(TypeRef::String)))
+            }
+            TypePathEnumPayloadAtom::Named(type_name) => {
+                named_domain_value_matches(schema, type_name, value)
+            }
         }
     })
+}
+
+/// Whether `value` inhabits the named value domain `type_name`, accepting both
+/// the `KernelValue::Named`-wrapped representation and the atom's natural bare
+/// shape (mirroring [`named_type_inner_matches`] leniency for string-shaped
+/// atoms used by shell constructors).
+fn named_domain_value_matches(
+    schema: &MachineSchema,
+    type_name: &NamedTypeId,
+    value: &KernelValue,
+) -> bool {
+    value_matches_type(schema, value, &TypeRef::Named(type_name.clone()))
+        || named_type_inner_matches(schema, type_name, value)
 }
 
 fn type_path_enum_unit_matches(

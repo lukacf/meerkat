@@ -1652,7 +1652,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -1664,7 +1664,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -2870,6 +2870,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
@@ -14805,7 +14809,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -14817,7 +14821,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -16086,6 +16090,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
@@ -36977,7 +36985,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -36989,7 +36997,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -37699,6 +37707,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -48975,7 +48987,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -48987,7 +48999,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -49697,6 +49709,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -50855,7 +50871,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -50867,7 +50883,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -51577,6 +51593,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -53178,7 +53198,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -53190,7 +53210,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -53900,6 +53920,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",

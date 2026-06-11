@@ -133,6 +133,8 @@ pub use meerkat_core::{
     ToolDef,
     ToolGateway,
     ToolGatewayBuilder,
+    // Canonical typed tool identity (K8a fold)
+    ToolName,
     ToolResult,
     Usage,
     UserMessage,

@@ -276,12 +276,12 @@ fn rewrite_phase_field_to_current(expr: &ExprDef, phase_field: &str) -> ExprDef 
             value,
             enum_name,
             variant,
-            tuple_variant,
+            data_variant,
         } => ExprDef::EnumVariantIs {
             value: Box::new(rewrite_phase_field_to_current(value, phase_field)),
             enum_name: enum_name.clone(),
             variant: variant.clone(),
-            tuple_variant: *tuple_variant,
+            data_variant: *data_variant,
         },
         ExprDef::EnumStringSetPayload {
             value,

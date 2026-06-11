@@ -427,12 +427,12 @@ pub struct SessionToolVisibilityState {
     pub inherited_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
-    pub active_requested_deferred_names: std::collections::BTreeSet<String>,
-    pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
+    pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub staged_requested_deferred_names: std::collections::BTreeSet<ToolName>,
     pub active_revision: u64,
     pub staged_revision: u64,
-    pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub requested_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub filter_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl SessionToolVisibilityState {
@@ -596,8 +596,14 @@ impl SessionToolVisibilityDelta {
     }
 }
 
+/// Canonical typed tool identity. This IS the domain type —
+/// [`meerkat_core::types::ToolName`] — carried directly through the machine
+/// (K8a fold: the tool-visibility name domain is `ToolName`-keyed end to end;
+/// no stringly bridge inside the machine).
+pub type ToolName = meerkat_core::types::ToolName;
+
 /// Typed mirror of [`meerkat_core::ToolFilter`] — closed 3-variant
-/// discriminant with a `BTreeSet<String>` name payload for
+/// discriminant with a `BTreeSet<ToolName>` name payload for
 /// `Allow`/`Deny` so the value is `Ord + Hash` and deterministic across
 /// iteration, matching the R3 `InputAbandonReason::MaxAttemptsExhausted {
 /// attempts }` pattern of carrying the discriminant's companion data in a
@@ -606,20 +612,16 @@ impl SessionToolVisibilityDelta {
 pub enum ToolFilter {
     #[default]
     All,
-    Allow(std::collections::BTreeSet<String>),
-    Deny(std::collections::BTreeSet<String>),
+    Allow(std::collections::BTreeSet<ToolName>),
+    Deny(std::collections::BTreeSet<ToolName>),
 }
 
 impl From<&meerkat_core::ToolFilter> for ToolFilter {
     fn from(f: &meerkat_core::ToolFilter) -> Self {
         match f {
             meerkat_core::ToolFilter::All => Self::All,
-            meerkat_core::ToolFilter::Allow(names) => {
-                Self::Allow(names.iter().map(|name| name.as_str().to_string()).collect())
-            }
-            meerkat_core::ToolFilter::Deny(names) => {
-                Self::Deny(names.iter().map(|name| name.as_str().to_string()).collect())
-            }
+            meerkat_core::ToolFilter::Allow(names) => Self::Allow(names.iter().cloned().collect()),
+            meerkat_core::ToolFilter::Deny(names) => Self::Deny(names.iter().cloned().collect()),
         }
     }
 }
@@ -2828,18 +2830,17 @@ impl From<OperationStatus> for meerkat_core::ops_lifecycle::OperationStatus {
 }
 
 /// Typed discriminant mirror of
-/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] — replaces the
-/// former opaque JSON string carried in the DSL's `op_terminal_outcomes`
-/// map. Unit variants only; payload data (completion result, failure error,
-/// cancellation reason, terminated reason) rides on the companion
-/// `op_terminal_payload: Map<String, String>` field of the DSL state as
-/// JSON keyed to the same operation id, and is reconstructed in the shell
-/// by pairing the typed discriminant with the companion entry.
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`]. Unit variants
+/// only; the full typed payload (completion result, failure error,
+/// cancellation reason, terminated reason) is carried by the companion
+/// `op_terminal_payload: Map<String, OpTerminalPayload>` field, keyed by the
+/// same operation id. The machine guards that the payload variant matches
+/// the discriminant on every terminal transition.
 ///
 /// The DSL writes these variants directly on each terminal transition
 /// (`CompleteOp`, `FailOp`, `CancelOp`, `AbortOp`, `RetireCompletedOp`,
-/// `TerminateOp`); the shell reads them through the typed map and rebuilds
-/// the domain enum in `ShellState::terminal_outcome`.
+/// `TerminateOp`); the shell reads the typed payload map directly — no JSON
+/// codec, no string compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationTerminalOutcomeKind {
     #[default]
@@ -2849,6 +2850,30 @@ pub enum OperationTerminalOutcomeKind {
     Cancelled,
     Retired,
     Terminated,
+}
+
+/// Typed terminal payload carried by the ops-lifecycle authority. This IS the
+/// domain type — the machine state stores
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] directly, so the
+/// shell needs no codec in either direction (K8b fold: the former
+/// `Map<String, String>` opaque-JSON payload carrier is deleted).
+pub type OpTerminalPayload = meerkat_core::ops_lifecycle::OperationTerminalOutcome;
+
+/// Result payload for completed operations, referenced by the
+/// `OpTerminalPayload::Completed` structural variant binding.
+pub type OperationResult = meerkat_core::ops::OperationResult;
+
+impl From<&OpTerminalPayload> for OperationTerminalOutcomeKind {
+    fn from(payload: &OpTerminalPayload) -> Self {
+        match payload {
+            OpTerminalPayload::Completed(_) => Self::Completed,
+            OpTerminalPayload::Failed { .. } => Self::Failed,
+            OpTerminalPayload::Aborted { .. } => Self::Aborted,
+            OpTerminalPayload::Cancelled { .. } => Self::Cancelled,
+            OpTerminalPayload::Retired => Self::Retired,
+            OpTerminalPayload::Terminated { .. } => Self::Terminated,
+        }
+    }
 }
 
 /// Typed public result class for operation lifecycle projections. Shell/tool

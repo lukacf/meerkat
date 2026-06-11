@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::ToolName;
 
 #[path = "../user_interrupt.rs"]
 mod user_interrupt;
@@ -14,9 +15,9 @@ pub(super) enum SessionBindingPreparation {
 }
 
 fn visibility_authorities_for_names(
-    names: &std::collections::BTreeSet<String>,
-    witnesses: &std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
-) -> std::collections::BTreeMap<String, crate::meerkat_machine::dsl::ToolVisibilityWitness> {
+    names: &std::collections::BTreeSet<ToolName>,
+    witnesses: &std::collections::BTreeMap<ToolName, meerkat_core::ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<ToolName, crate::meerkat_machine::dsl::ToolVisibilityWitness> {
     names
         .iter()
         .filter_map(|name| {

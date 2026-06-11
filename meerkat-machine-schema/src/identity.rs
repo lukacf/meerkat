@@ -280,7 +280,16 @@ impl<'de> Deserialize<'de> for StorePrimitiveId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypePathEnumPayloadAtom {
+    /// Finite set of plain strings.
     StringSet,
+    /// Finite set of values drawn from a named value domain.
+    NamedSet(NamedTypeId),
+    /// Single plain string value.
+    String,
+    /// Optional plain string value.
+    OptionalString,
+    /// Single value drawn from a named value domain.
+    Named(NamedTypeId),
 }
 
 /// One field in a structural enum-variant sample carried by the typed owner.
@@ -299,6 +308,48 @@ impl TypePathEnumPayloadField {
             atom: TypePathEnumPayloadAtom::StringSet,
         }
     }
+
+    /// Construct a payload field whose value is a finite set of values from a
+    /// named value domain.
+    pub fn named_set(name: &str, type_name: &str) -> Self {
+        #[allow(clippy::expect_used)]
+        let type_name = NamedTypeId::parse(type_name).expect("valid nested named-type slug");
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::NamedSet(type_name),
+        }
+    }
+
+    /// Construct a payload field whose value is a single string.
+    pub fn string(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::String,
+        }
+    }
+
+    /// Construct a payload field whose value is an optional string.
+    pub fn optional_string(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::OptionalString,
+        }
+    }
+
+    /// Construct a payload field whose value is a single value from a named
+    /// value domain.
+    pub fn named(name: &str, type_name: &str) -> Self {
+        #[allow(clippy::expect_used)]
+        let type_name = NamedTypeId::parse(type_name).expect("valid nested named-type slug");
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::Named(type_name),
+        }
+    }
 }
 
 /// Structural enum variants whose sample values are represented as tagged maps.
@@ -315,6 +366,25 @@ impl TypePathEnumStructuralVariant {
             #[allow(clippy::expect_used)]
             variant: EnumVariantId::parse(variant).expect("valid enum variant slug"),
             fields: vec![TypePathEnumPayloadField::string_set(field)],
+        }
+    }
+
+    /// Construct a one-field structural variant whose payload is a finite set
+    /// of values from a named value domain.
+    pub fn named_set(variant: &str, field: &str, type_name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            variant: EnumVariantId::parse(variant).expect("valid enum variant slug"),
+            fields: vec![TypePathEnumPayloadField::named_set(field, type_name)],
+        }
+    }
+
+    /// Construct a structural variant from explicit payload fields.
+    pub fn with_fields(variant: &str, fields: Vec<TypePathEnumPayloadField>) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            variant: EnumVariantId::parse(variant).expect("valid enum variant slug"),
+            fields,
         }
     }
 }

@@ -5702,14 +5702,19 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         .expect("create mob with persistent session service")
 }
 
-fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<String> {
+fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<meerkat_core::ToolName> {
     let blocked = overlay
         .and_then(|overlay| overlay.blocked_tools.as_ref())
-        .map(|tools| tools.iter().map(String::as_str).collect::<HashSet<_>>())
+        .map(|tools| {
+            tools
+                .iter()
+                .map(meerkat_core::ToolName::as_str)
+                .collect::<HashSet<_>>()
+        })
         .unwrap_or_default();
     let candidates = overlay
         .and_then(|overlay| overlay.allowed_tools.clone())
-        .unwrap_or_else(|| vec!["alpha".to_string(), "beta".to_string()]);
+        .unwrap_or_else(|| vec!["alpha".into(), "beta".into()]);
 
     candidates
         .into_iter()
@@ -5719,7 +5724,7 @@ fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<String>
 
 struct OverlayProbeSessionAgent {
     session: Session,
-    provider_visible_tools: Arc<Mutex<Vec<Vec<String>>>>,
+    provider_visible_tools: Arc<Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
     flow_tool_overlay: Option<TurnToolOverlay>,
     system_context_state: meerkat_core::SystemContextStateHandle,
 }
@@ -5839,7 +5844,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
 }
 
 struct OverlayProbeSessionAgentBuilder {
-    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
 }
 
 #[async_trait]
@@ -5871,8 +5876,13 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
 
 async fn create_test_mob_with_overlay_probe_service(
     definition: MobDefinition,
-) -> (MobHandle, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
-    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+) -> (
+    MobHandle,
+    Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
+) {
+    let provider_visible_tools = Arc::new(std::sync::Mutex::new(
+        Vec::<Vec<meerkat_core::ToolName>>::new(),
+    ));
     let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
@@ -12552,8 +12562,8 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
     assert_eq!(
         overlays[0],
         Some(TurnToolOverlay {
-            allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
-            blocked_tools: Some(vec!["beta".to_string()]),
+            allowed_tools: Some(vec!["alpha".into(), "beta".into()]),
+            blocked_tools: Some(vec!["beta".into()]),
             ..TurnToolOverlay::default()
         }),
         "flow step turn should pass flow overlay"

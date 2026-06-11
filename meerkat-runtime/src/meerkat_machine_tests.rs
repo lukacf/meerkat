@@ -16179,7 +16179,7 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
     seed_deferred_tool_authority_catalog(&bindings, vec![Arc::clone(&catalog_tool)], &[]);
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
     let witnesses = [(
-        "secret".to_string(),
+        "secret".into(),
         meerkat_core::ToolVisibilityWitness {
             last_seen_provenance: catalog_tool.provenance.clone(),
         },
@@ -16297,7 +16297,7 @@ fn seed_deferred_tool_authority_catalog(
         std::collections::HashSet::new(),
         deferred_names
             .iter()
-            .map(|name| (*name).to_string())
+            .map(|name| meerkat_core::ToolName::from(*name))
             .collect(),
         bindings.tool_visibility_owner().clone(),
     )
@@ -16316,7 +16316,7 @@ async fn stage_persistent_filter_rejects_filter_authority_mismatched_with_visibl
     seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &[]);
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
     let forged_witnesses = [(
-        "secret".to_string(),
+        "secret".into(),
         meerkat_core::ToolVisibilityWitness {
             last_seen_provenance: Some(callback_tool_provenance("forged")),
         },
@@ -16392,7 +16392,7 @@ async fn machine_requested_deferred_names_rejects_name_only_staging() {
 
     let err = bindings
         .tool_visibility_owner()
-        .stage_requested_deferred_names(["deferred_tool".to_string()].into_iter().collect())
+        .stage_requested_deferred_names(["deferred_tool".into()].into_iter().collect())
         .expect_err("name-only deferred staging must not become authority");
 
     assert!(
@@ -16465,7 +16465,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
     );
     assert_eq!(
         authority.state().staged_deferred_names,
-        ["deferred_tool".to_string()].into_iter().collect(),
+        ["deferred_tool".into()].into_iter().collect(),
         "staged names are retained only as the routing projection"
     );
 }
@@ -16523,7 +16523,7 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
     assert_eq!(
         authority.state().staged_deferred_authorities,
         [(
-            "second_tool".to_string(),
+            "second_tool".into(),
             crate::meerkat_machine::dsl::ToolVisibilityWitness::from(&second_witness),
         )]
         .into_iter()
@@ -18089,7 +18089,7 @@ fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
         mm_dsl::MeerkatMachineInput::RequestDeferredTools {
             authorities:
                 [(
-                    "deferred_tool".to_string(),
+                    "deferred_tool".into(),
                     mm_dsl::ToolVisibilityWitness::from(
                         &meerkat_core::ToolVisibilityWitness::default(),
                     ),
@@ -18122,8 +18122,8 @@ fn request_deferred_tools_accepts_provenance_only_dsl_authority_witness() {
             source_id: "test".into(),
         }),
     });
-    let witnesses: BTreeMap<String, mm_dsl::ToolVisibilityWitness> =
-        [("deferred_tool".to_string(), witness.clone())]
+    let witnesses: BTreeMap<meerkat_core::ToolName, mm_dsl::ToolVisibilityWitness> =
+        [("deferred_tool".into(), witness.clone())]
             .into_iter()
             .collect();
     mm_dsl::MeerkatMachineMutator::apply(
@@ -18163,7 +18163,7 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
     seed_deferred_tool_authority_catalog(&bindings, vec![Arc::clone(&catalog_tool)], &[]);
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
     let witnesses = [(
-        "secret".to_string(),
+        "secret".into(),
         meerkat_core::ToolVisibilityWitness {
             last_seen_provenance: catalog_tool.provenance.clone(),
         },
@@ -18267,10 +18267,7 @@ async fn machine_owned_turn_overlay_routes_through_generated_authority() {
 
     let accepted = bindings
         .tool_visibility_owner()
-        .set_turn_overlay(
-            Some(BTreeSet::from(["visible".to_string()])),
-            BTreeSet::new(),
-        )
+        .set_turn_overlay(Some(BTreeSet::from(["visible".into()])), BTreeSet::new())
         .expect("catalog-backed turn overlay should be accepted");
     assert!(
         accepted
@@ -18309,10 +18306,7 @@ async fn machine_owned_turn_overlay_routes_through_generated_authority() {
 
     let err = bindings
         .tool_visibility_owner()
-        .set_turn_overlay(
-            Some(BTreeSet::from(["missing".to_string()])),
-            BTreeSet::new(),
-        )
+        .set_turn_overlay(Some(BTreeSet::from(["missing".into()])), BTreeSet::new())
         .expect_err("unknown overlay tool must be rejected by generated authority");
     assert!(
         err.to_string().contains("SetTurnToolOverlay"),
@@ -18329,7 +18323,7 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         .await
         .expect("bindings should prepare");
     let replacement = meerkat_core::SessionToolVisibilityState {
-        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
         staged_revision: 1,
         ..Default::default()
     };
@@ -18382,13 +18376,13 @@ async fn replace_visibility_state_installs_full_state_in_generated_authority() {
             ["secret".to_string()].into_iter().collect(),
         ),
         staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
-        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
         active_revision: 7,
         staged_revision: 9,
-        requested_witnesses: [("deferred_tool".to_string(), deferred_witness.clone())]
+        requested_witnesses: [("deferred_tool".into(), deferred_witness.clone())]
             .into_iter()
             .collect(),
-        filter_witnesses: [("secret".to_string(), filter_witness.clone())]
+        filter_witnesses: [("secret".into(), filter_witness.clone())]
             .into_iter()
             .collect(),
         ..Default::default()
@@ -18527,7 +18521,7 @@ async fn replace_visibility_state_rejects_staged_filter_with_empty_witness() {
     let replacement = meerkat_core::SessionToolVisibilityState {
         staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
         filter_witnesses: [(
-            "secret".to_string(),
+            "secret".into(),
             meerkat_core::ToolVisibilityWitness::default(),
         )]
         .into_iter()
@@ -18569,7 +18563,7 @@ async fn replace_visibility_state_rejects_filter_authority_mismatched_with_visib
         active_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
         staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
         filter_witnesses: [(
-            "secret".to_string(),
+            "secret".into(),
             meerkat_core::ToolVisibilityWitness {
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
@@ -18609,9 +18603,9 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
         .await
         .expect("bindings should prepare");
     let replacement = meerkat_core::SessionToolVisibilityState {
-        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
         requested_witnesses: [(
-            "deferred_tool".to_string(),
+            "deferred_tool".into(),
             meerkat_core::ToolVisibilityWitness::default(),
         )]
         .into_iter()
@@ -18650,10 +18644,10 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
     let catalog_tool = runtime_deferred_tool("deferred_tool", "catalog");
     seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &["deferred_tool"]);
     let replacement = meerkat_core::SessionToolVisibilityState {
-        active_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
-        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        active_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
         requested_witnesses: [(
-            "deferred_tool".to_string(),
+            "deferred_tool".into(),
             meerkat_core::ToolVisibilityWitness {
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
@@ -18788,7 +18782,7 @@ async fn publish_committed_visible_set_rejects_active_requested_names_outside_st
         .expect("register session");
 
     let state = meerkat_core::SessionToolVisibilityState {
-        active_requested_deferred_names: ["probe_tool".to_string()].into_iter().collect(),
+        active_requested_deferred_names: ["probe_tool".into()].into_iter().collect(),
         staged_requested_deferred_names: BTreeSet::new(),
         active_revision: 4,
         staged_revision: 3,
@@ -18817,10 +18811,10 @@ async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_wit
     seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &["deferred_tool"]);
 
     let state = meerkat_core::SessionToolVisibilityState {
-        active_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
-        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        active_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".into()].into_iter().collect(),
         requested_witnesses: [(
-            "deferred_tool".to_string(),
+            "deferred_tool".into(),
             meerkat_core::ToolVisibilityWitness {
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
@@ -19049,7 +19043,7 @@ struct TestLlmReconfigureHost {
     target_identity: meerkat_core::SessionLlmIdentity,
     current_capability_surface: Option<SessionLlmCapabilitySurface>,
     target_capability_surface: SessionLlmCapabilitySurface,
-    base_tool_names: std::collections::BTreeSet<String>,
+    base_tool_names: std::collections::BTreeSet<meerkat_core::ToolName>,
     fail_persist: bool,
 }
 
@@ -19200,9 +19194,11 @@ async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-            .into_iter()
-            .collect(),
+        base_tool_names: [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect(),
         fail_persist: false,
     }));
 
@@ -19554,9 +19550,11 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-            .into_iter()
-            .collect(),
+        base_tool_names: [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect(),
         fail_persist: false,
     }));
 
@@ -19700,9 +19698,11 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-            .into_iter()
-            .collect(),
+        base_tool_names: [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect(),
         fail_persist: false,
     }));
 
@@ -19845,9 +19845,11 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-            .into_iter()
-            .collect(),
+        base_tool_names: [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect(),
         fail_persist: true,
     }));
 
@@ -19951,9 +19953,11 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                     .clone(),
                 current_capability_surface: Some(test_llm_capability_surface(true)),
                 capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
-                base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-                    .into_iter()
-                    .collect(),
+                base_tool_names: [meerkat_core::ToolName::from(
+                    meerkat_core::VIEW_IMAGE_TOOL_NAME,
+                )]
+                .into_iter()
+                .collect(),
             })
         }
 
@@ -20963,6 +20967,18 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 value: Box::new(KernelValue::U64(value.as_u64().unwrap_or(0))),
             }
         }
+        // K8a: `ToolName` is a transparent string newtype — carry the plain
+        // string as the named inner value (matching the input-side modeled
+        // witness/name constructors) instead of the JSON-quoted fallback.
+        TypeRef::Named(name) if name.as_str() == "ToolName" => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(KernelValue::String(
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default()),
+            )),
+        },
         TypeRef::Named(name) if name.as_str() == "ToolVisibilityWitness" => KernelValue::Named {
             type_name: name.clone(),
             value: Box::new(runtime_modeled_tool_visibility_witness_inner_from_json(
@@ -21372,7 +21388,7 @@ fn runtime_modeled_witness_map() -> KernelValue {
     let mut entries = BTreeMap::new();
     for (name, witness) in runtime_parity_witnesses() {
         entries.insert(
-            KernelValue::String(name),
+            KernelValue::String(name.into_string()),
             runtime_modeled_tool_visibility_witness_inner_from_domain(&witness),
         );
     }
@@ -21853,9 +21869,10 @@ fn modeled_tool_filter_input_rejects_legacy_json_string_payload() {
     );
 }
 
-fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {
+fn runtime_parity_witnesses()
+-> BTreeMap<meerkat_core::ToolName, meerkat_core::ToolVisibilityWitness> {
     [(
-        "probe_tool".to_string(),
+        "probe_tool".into(),
         meerkat_core::ToolVisibilityWitness {
             last_seen_provenance: Some(meerkat_core::ToolProvenance {
                 kind: meerkat_core::ToolSourceKind::Callback,
@@ -22538,9 +22555,11 @@ fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-            .into_iter()
-            .collect(),
+        base_tool_names: [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect(),
         fail_persist: false,
     }));
 }

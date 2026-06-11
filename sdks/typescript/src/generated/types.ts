@@ -218,6 +218,8 @@ export type SourceTransportKind = "embedded" | "filesystem" | "git" | "http" | "
 
 export type SourceUuid = string;
 
+export type ToolName = string;
+
 export interface SkillEntry {
   description: string;
   is_active: boolean;
@@ -833,8 +835,8 @@ export interface MobStreamCloseResult {
 }
 
 export interface PublicTurnToolOverlay {
-  allowed_tools?: string[];
-  blocked_tools?: string[];
+  allowed_tools?: ToolName[];
+  blocked_tools?: ToolName[];
 }
 
 export interface MobDefinitionInput {

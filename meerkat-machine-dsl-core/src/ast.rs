@@ -250,7 +250,7 @@ pub enum ExprDef {
         value: Box<ExprDef>,
         enum_name: Ident,
         variant: Ident,
-        tuple_variant: bool,
+        data_variant: bool,
     },
     EnumStringSetPayload {
         value: Box<ExprDef>,

@@ -3007,7 +3007,12 @@ fn collect_named_literals_from_expr(
                 );
             }
         }
-        Expr::Quantified { over, body, .. } => {
+        Expr::Quantified {
+            binding,
+            over,
+            body,
+            ..
+        } => {
             collect_named_literals_from_expr(
                 samples,
                 over,
@@ -3016,13 +3021,26 @@ fn collect_named_literals_from_expr(
                 helper_returns,
                 binding_types,
             );
+            // Thread the quantifier binding's element type into the body so
+            // literals compared against the binding land in the element's
+            // named sample domain (e.g. `exists(name in <Set<ToolName>>,
+            // name == "view_image")` buckets the literal under `ToolName`).
+            let element_ty = infer_expr_type(over, field_types, helper_returns, binding_types)
+                .and_then(|ty| match ty {
+                    TypeRef::Set(inner) | TypeRef::Seq(inner) => Some(*inner),
+                    _ => None,
+                });
+            let mut body_binding_types = binding_types.clone();
+            if let Some(element_ty) = element_ty {
+                body_binding_types.insert(binding.clone(), element_ty);
+            }
             collect_named_literals_from_expr(
                 samples,
                 body,
                 Some(&TypeRef::Bool),
                 field_types,
                 helper_returns,
-                binding_types,
+                &body_binding_types,
             );
         }
         Expr::Bool(_)
@@ -3409,8 +3427,14 @@ fn render_named_type_domain_assignment(
             ..
         } => format!(
             "{{{}}}",
-            type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality)
-                .join(", ")
+            type_path_enum_variant_samples(
+                unit_variants,
+                structural_variants,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
+            .join(", ")
         ),
         RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => format!(
             "{{{}}}",
@@ -3445,7 +3469,7 @@ fn render_named_type_domain_assignment(
 fn render_enum_type_domain_assignment(
     name: impl AsRef<str>,
     sample_cardinality: usize,
-    _named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
     named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> String {
     use meerkat_machine_schema::RustTypeAtom;
@@ -3464,8 +3488,14 @@ fn render_enum_type_domain_assignment(
             ..
         } => format!(
             "{{{}}}",
-            type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality)
-                .join(", ")
+            type_path_enum_variant_samples(
+                unit_variants,
+                structural_variants,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
+            .join(", ")
         ),
         other => {
             panic!(
@@ -3511,7 +3541,7 @@ fn sample_values(
         }
         TypeRef::Enum(name) => {
             let name = name.as_str();
-            sample_values_for_enum_type(name, sample_cardinality, named_bindings)
+            sample_values_for_enum_type(name, sample_cardinality, named_samples, named_bindings)
         }
         TypeRef::Option(inner) => {
             let mut values = vec![format!(
@@ -3575,7 +3605,13 @@ fn sample_values_for_named_type(
             unit_variants,
             structural_variants,
             ..
-        } => type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality),
+        } => type_path_enum_variant_samples(
+            unit_variants,
+            structural_variants,
+            sample_cardinality,
+            named_samples,
+            bindings,
+        ),
         RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
             field_presence_set_samples(fields, sample_cardinality)
         }
@@ -3608,6 +3644,7 @@ fn sample_values_for_named_type(
 fn sample_values_for_enum_type(
     name: &str,
     sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
     bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> Vec<String> {
     use meerkat_machine_schema::RustTypeAtom;
@@ -3618,7 +3655,13 @@ fn sample_values_for_enum_type(
             unit_variants,
             structural_variants,
             ..
-        } => type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality),
+        } => type_path_enum_variant_samples(
+            unit_variants,
+            structural_variants,
+            sample_cardinality,
+            named_samples,
+            bindings,
+        ),
         other => {
             panic!(
                 "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
@@ -3667,6 +3710,8 @@ fn type_path_enum_variant_samples(
     unit_variants: &[meerkat_machine_schema::identity::EnumVariantId],
     structural_variants: &[TypePathEnumStructuralVariant],
     sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> Vec<String> {
     let unit_variants_are_records = !structural_variants.is_empty();
     let mut samples = unit_variants
@@ -3682,7 +3727,12 @@ fn type_path_enum_variant_samples(
         .collect::<Vec<_>>();
     if sample_cardinality > 0 {
         samples.extend(structural_variants.iter().flat_map(|variant| {
-            render_type_path_enum_structural_samples(variant, sample_cardinality)
+            render_type_path_enum_structural_samples(
+                variant,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
         }));
     }
     samples
@@ -3813,14 +3863,57 @@ fn type_path_struct_field_samples(
 fn render_type_path_enum_structural_samples(
     variant: &TypePathEnumStructuralVariant,
     sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> Vec<String> {
     let mut samples = vec![vec![format!(
         "tag |-> {}",
         tla_string(variant.variant.as_str())
     )]];
     for field in &variant.fields {
-        let values = match field.atom {
+        let values = match &field.atom {
             TypePathEnumPayloadAtom::StringSet => string_set_payload_samples(sample_cardinality),
+            TypePathEnumPayloadAtom::NamedSet(type_name) => named_set_payload_samples(
+                type_name.as_str(),
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            ),
+            TypePathEnumPayloadAtom::String => {
+                if sample_cardinality == 0 {
+                    Vec::new()
+                } else {
+                    generic_string_samples(sample_cardinality)
+                        .into_iter()
+                        .map(tla_string)
+                        .collect()
+                }
+            }
+            TypePathEnumPayloadAtom::OptionalString => {
+                let mut values = vec![format!(
+                    "[tag |-> {}, value |-> {}]",
+                    tla_string("none"),
+                    tla_string("none")
+                )];
+                if sample_cardinality > 0 {
+                    values.extend(generic_string_samples(sample_cardinality).into_iter().map(
+                        |sample| {
+                            format!(
+                                "[tag |-> {}, value |-> {}]",
+                                tla_string("some"),
+                                tla_string(&sample)
+                            )
+                        },
+                    ));
+                }
+                values
+            }
+            TypePathEnumPayloadAtom::Named(type_name) => sample_values_for_named_type(
+                type_name.as_str(),
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            ),
         };
         let mut next_samples = Vec::new();
         for sample in &samples {
@@ -3836,6 +3929,46 @@ fn render_type_path_enum_structural_samples(
         .into_iter()
         .map(|fields| format!("[{}]", fields.join(", ")))
         .collect()
+}
+
+/// TLA sample sets for a structural enum payload carrying a finite set of
+/// values from a named value domain. Mirrors [`string_set_payload_samples`]
+/// shape (empty / one-member / two-member sets) over the named domain's
+/// sample pool so payload sets stay aligned with catalog key domains.
+fn named_set_payload_samples(
+    type_name: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    let mut values = if sample_cardinality == 0 {
+        Vec::new()
+    } else {
+        sample_values_for_named_type(type_name, sample_cardinality, named_samples, named_bindings)
+    };
+    // Pad the payload element pool with synthetic domain members up to the
+    // requested cardinality so the deep model still covers differing
+    // same-variant multi-member payloads when the collected named-sample
+    // pool is smaller than the cardinality.
+    let mut synthetic_idx = 0usize;
+    while sample_cardinality > 0 && values.len() < sample_cardinality {
+        synthetic_idx += 1;
+        let synthetic = tla_string(format!(
+            "{}_{synthetic_idx}",
+            tla_ident(type_name).to_lowercase()
+        ));
+        if !values.contains(&synthetic) {
+            values.push(synthetic);
+        }
+    }
+    let mut samples = vec!["{}".to_owned()];
+    if let Some(first) = values.first() {
+        samples.push(format!("{{{first}}}"));
+    }
+    if values.len() >= 2 {
+        samples.push(format!("{{{}, {}}}", values[0], values[1]));
+    }
+    samples
 }
 
 fn string_set_payload_samples(sample_cardinality: usize) -> Vec<String> {

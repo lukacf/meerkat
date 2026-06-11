@@ -1952,8 +1952,18 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
         return None;
     }
     Some(TurnToolOverlay {
-        allowed_tools: step.allowed_tools.clone(),
-        blocked_tools: step.blocked_tools.clone(),
+        allowed_tools: step.allowed_tools.clone().map(|names| {
+            names
+                .into_iter()
+                .map(meerkat_core::ToolName::from)
+                .collect()
+        }),
+        blocked_tools: step.blocked_tools.clone().map(|names| {
+            names
+                .into_iter()
+                .map(meerkat_core::ToolName::from)
+                .collect()
+        }),
         dispatch_context: Default::default(),
     })
 }

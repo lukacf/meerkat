@@ -38,7 +38,7 @@ pub struct NoToolScope;
 /// default visibility as if it were authoritative.
 struct ResolvedLoadVisibility {
     visibility_state: SessionToolVisibilityState,
-    visible_tool_names: BTreeSet<String>,
+    visible_tool_names: BTreeSet<meerkat_core::ToolName>,
 }
 
 #[derive(Default)]
@@ -70,7 +70,7 @@ impl CatalogControlVisibilityProvider {
         *guard = Some(visibility_state);
     }
 
-    fn visible_tool_names(&self) -> Option<BTreeSet<String>> {
+    fn visible_tool_names(&self) -> Option<BTreeSet<meerkat_core::ToolName>> {
         self.scope
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -385,11 +385,11 @@ impl CatalogControlDispatcher {
                     };
                     let staged_or_accepted = visibility_state
                         .staged_requested_deferred_names
-                        .contains(&name)
+                        .contains(name.as_str())
                         || accepted_authorities.contains_key(&name);
                     let already_requested = staged_or_accepted
                         && (Self::request_witness_matches_entry(
-                            visibility_state.requested_witnesses.get(&name),
+                            visibility_state.requested_witnesses.get(name.as_str()),
                             provenance,
                             &entry.tool,
                         ) || Self::request_witness_matches_entry(
@@ -397,7 +397,7 @@ impl CatalogControlDispatcher {
                             provenance,
                             &entry.tool,
                         ));
-                    let already_visible = visible_tool_names.contains(&name);
+                    let already_visible = visible_tool_names.contains(name.as_str());
                     if already_requested || already_visible {
                         noop_names.insert(name.clone());
                         resolutions.push(ToolCatalogLoadResolution {
@@ -735,7 +735,7 @@ mod tests {
 
     fn generated_visibility_scope(
         tools: Arc<[Arc<ToolDef>]>,
-        deferred_tool_names: HashSet<String>,
+        deferred_tool_names: HashSet<meerkat_core::ToolName>,
     ) -> ToolScope {
         let identity = meerkat_core::SessionLlmIdentity {
             model: "test-model".to_string(),
@@ -776,7 +776,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         visibility_provider.set_scope(scope);
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
@@ -900,16 +900,14 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
-                staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                    .into_iter()
-                    .collect(),
+                staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
                 staged_revision: 1,
                 requested_witnesses: [(
-                    "deferred_mcp_tool".to_string(),
+                    "deferred_mcp_tool".into(),
                     ToolVisibilityWitness {
                         last_seen_provenance: deferred.provenance.clone(),
                     },
@@ -976,9 +974,7 @@ mod tests {
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
-            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                .into_iter()
-                .collect(),
+            staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
             ..Default::default()
         });
 
@@ -1040,7 +1036,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_scope(generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         ));
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
@@ -1181,7 +1177,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_scope(generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         ));
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
@@ -1221,11 +1217,9 @@ mod tests {
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
-            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                .into_iter()
-                .collect(),
+            staged_requested_deferred_names: ["deferred_mcp_tool".into()].into_iter().collect(),
             requested_witnesses: [(
-                "deferred_mcp_tool".to_string(),
+                "deferred_mcp_tool".into(),
                 ToolVisibilityWitness {
                     last_seen_provenance: None,
                 },
@@ -1417,7 +1411,7 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+            ["deferred_mcp_tool".into()].into_iter().collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
@@ -1426,7 +1420,7 @@ mod tests {
                 ),
                 staged_revision: 1,
                 filter_witnesses: [(
-                    "deferred_mcp_tool".to_string(),
+                    "deferred_mcp_tool".into(),
                     ToolVisibilityWitness {
                         last_seen_provenance: deferred.provenance.clone(),
                     },
@@ -1554,24 +1548,24 @@ mod tests {
             ]
             .into(),
             [
-                "loaded_secret_lookup".to_string(),
-                "deferred_secret_lookup".to_string(),
-                "blocked_secret_lookup".to_string(),
-                "offline_secret_lookup".to_string(),
+                "loaded_secret_lookup".into(),
+                "deferred_secret_lookup".into(),
+                "blocked_secret_lookup".into(),
+                "offline_secret_lookup".into(),
             ]
             .into_iter()
             .collect(),
         );
         scope
             .set_visibility_state(SessionToolVisibilityState {
-                active_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                active_requested_deferred_names: ["loaded_secret_lookup".into()]
                     .into_iter()
                     .collect(),
-                staged_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                staged_requested_deferred_names: ["loaded_secret_lookup".into()]
                     .into_iter()
                     .collect(),
                 requested_witnesses: [(
-                    "loaded_secret_lookup".to_string(),
+                    "loaded_secret_lookup".into(),
                     meerkat_core::ToolVisibilityWitness {
                         last_seen_provenance: loaded.provenance.clone(),
                     },
@@ -1585,7 +1579,7 @@ mod tests {
                     ["blocked_secret_lookup".to_string()].into_iter().collect(),
                 ),
                 filter_witnesses: [(
-                    "blocked_secret_lookup".to_string(),
+                    "blocked_secret_lookup".into(),
                     ToolVisibilityWitness {
                         last_seen_provenance: blocked.provenance.clone(),
                     },

@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# GOVERNANCE CLASSIFICATION: deliberately text-level tombstone gate.
+# These patterns are deleted auth-identity string idioms (binding_key
+# format!s and profile-id token keys); the ban targets the literal idiom
+# text wherever it appears, and the typed replacement is enforced
+# structurally by the AuthMachine authority seams. Structural source-shape
+# governance lives in the xtask syn-AST gates.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

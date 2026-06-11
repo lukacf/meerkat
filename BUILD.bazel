@@ -153,16 +153,6 @@ filegroup(
 )
 
 sh_test(
-    name = "audit_effect_authority_test",
-    srcs = ["scripts/audit-effect-authority.sh"],
-    data = [":workspace_runfiles"],
-    size = "small",
-    tags = [
-        "fast",
-    ],
-)
-
-sh_test(
     name = "e2e_smoke_remote_test",
     srcs = ["scripts/buildbuddy-e2e-smoke-remote-test"],
     data = [
@@ -397,6 +387,7 @@ test_suite(
         "//tests/integration:meerkat_integration_tests_unit_test",
         "//xtask:buildbuddy_static_lanes_test",
         "//xtask:ci_gate_requires_rmat_test",
+        "//xtask:effect_authority_test",
         "//xtask:protocol_codegen_drift_test",
         "//xtask:rmat_audit_test",
         "//xtask:rmat_strict_test",

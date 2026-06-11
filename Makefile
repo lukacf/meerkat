@@ -399,10 +399,10 @@ machine-check-drift: xtask-build
 	$(XTASK_BIN) machine-check-drift --all
 
 # RMAT structural seam audit: protocol coverage, feedback constraints,
-# terminal mapping, ownership-ledger drift, and heuristic authority hygiene checks.
+# terminal mapping, ownership-ledger drift, and structural authority hygiene checks.
 rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
-	./scripts/audit-effect-authority.sh
+	$(CARGO) run -p xtask -- effect-authority
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
 	bash -lc 'ulimit -s unlimited 2>/dev/null || ulimit -s 65520; exec "$$@"' _ $(CARGO) run -p xtask -- rmat-audit --strict
 

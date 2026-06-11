@@ -134,6 +134,17 @@ macro_rules! mob_catalog_machine_dsl {
             supervisor_pending_authority_epoch: Option<u64>,
             supervisor_pending_authority_protocol_version: Option<SupervisorProtocolVersion>,
             supervisor_pending_authority_accepted_peer_ids: Set<PeerId>,
+            // Machine-owned trust-install-before-authorization-terminality
+            // window (dogma row R044). The comms router requires recipient
+            // trust before a bridge command can be routed, so the shell must
+            // install trust ahead of the `AuthorizeSupervisor`/`BindMember`
+            // terminality verdict. Every such window is recorded here as an
+            // explicit obligation: recorded before trust install, removed by
+            // `ResolvePendingRecipientTrust` on confirmed-accept terminality
+            // or by `RollbackPendingRecipientTrust` after the shell rolls the
+            // installed trust back on a failure path. Volatile like the trust
+            // it tracks (no wall-clock state; trivially recoverable as empty).
+            pending_recipient_trust: Set<PeerId>,
             // Owner bridge-session lifecycle authority. The shell may observe
             // the owning session, but MobMachine owns whether the mob is
             // indexed to that session, whether owner archive should destroy
@@ -315,6 +326,7 @@ macro_rules! mob_catalog_machine_dsl {
             supervisor_pending_authority_epoch = None,
             supervisor_pending_authority_protocol_version = None,
             supervisor_pending_authority_accepted_peer_ids = EmptySet,
+            pending_recipient_trust = EmptySet,
             owner_bridge_session_id = None,
             owner_bridge_destroy_on_archive = false,
             implicit_delegation_mob = false,
@@ -640,6 +652,16 @@ macro_rules! mob_catalog_machine_dsl {
             CommitSupervisorRotation { current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion },
             ClearSupervisorAuthorityForDestroy { current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion },
             RestoreSupervisorAuthorityAfterDestroyRollback { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
+            // Dogma row R044: trust-install-before-terminality obligation.
+            // Recorded before the shell installs recipient trust for a routed
+            // bridge command; removed on authorization terminality success
+            // (Resolve) or after the shell rolls the installed trust back on
+            // a failure path (Rollback). Set semantics make all three inputs
+            // idempotent so nested authorize/bind windows for the same peer
+            // compose without double-record/double-resolve failures.
+            RecordPendingRecipientTrust { peer_id: PeerId },
+            ResolvePendingRecipientTrust { peer_id: PeerId },
+            RollbackPendingRecipientTrust { peer_id: PeerId },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
             SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
@@ -4981,6 +5003,46 @@ macro_rules! mob_catalog_machine_dsl {
                 pending_protocol_version: Some(protocol_version),
                 pending_accepted_peer_ids: accepted_peer_ids
             }
+        }
+
+        // --- Recipient-trust obligation window (dogma row R044) ---
+        //
+        // The comms router refuses to route to untrusted peers, so the shell
+        // must install recipient trust BEFORE the AuthorizeSupervisor /
+        // BindMember terminality verdict. That trust-install-to-terminality
+        // window is a machine fact, mirroring the pending-rotation metadata
+        // pattern: Record before trust install, Resolve on confirmed-accept
+        // terminality, Rollback after the shell removes the installed trust
+        // on a failure path (send error, terminal rejection, decode error).
+        // No guards beyond phase: set insert/remove are idempotent so nested
+        // authorize-then-bind windows for the same peer compose. The state is
+        // volatile exactly like the trust it tracks (recovery seeds empty).
+
+        transition RecordPendingRecipientTrust {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input RecordPendingRecipientTrust { peer_id }
+            update {
+                self.pending_recipient_trust.insert(peer_id);
+            }
+            to Running
+        }
+
+        transition ResolvePendingRecipientTrust {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolvePendingRecipientTrust { peer_id }
+            update {
+                self.pending_recipient_trust.remove(peer_id);
+            }
+            to Running
+        }
+
+        transition RollbackPendingRecipientTrust {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input RollbackPendingRecipientTrust { peer_id }
+            update {
+                self.pending_recipient_trust.remove(peer_id);
+            }
+            to Running
         }
 
         transition CommitSupervisorRotation {

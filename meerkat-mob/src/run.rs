@@ -403,6 +403,9 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
             | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
             | mob_dsl::MobMachineInput::RestoreSupervisorAuthorityAfterDestroyRollback { .. }
+            | mob_dsl::MobMachineInput::RecordPendingRecipientTrust { .. }
+            | mob_dsl::MobMachineInput::ResolvePendingRecipientTrust { .. }
+            | mob_dsl::MobMachineInput::RollbackPendingRecipientTrust { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
@@ -1567,6 +1570,9 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
             | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
             | mob_dsl::MobMachineInput::RestoreSupervisorAuthorityAfterDestroyRollback { .. }
+            | mob_dsl::MobMachineInput::RecordPendingRecipientTrust { .. }
+            | mob_dsl::MobMachineInput::ResolvePendingRecipientTrust { .. }
+            | mob_dsl::MobMachineInput::RollbackPendingRecipientTrust { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }

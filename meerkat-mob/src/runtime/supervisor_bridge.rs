@@ -16,6 +16,22 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 
+/// Outcome of installing recipient trust ahead of a routed bridge send
+/// (see [`MobSupervisorBridge::trust_recipient`]).
+///
+/// Fail-closed rollback after a non-confirmed authorization outcome must be
+/// scoped to trust installed by THAT call: rolling back `AlreadyTrusted`
+/// would rip out trust that an earlier confirmed terminality legitimately
+/// established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecipientTrustInstall {
+    /// This call installed the trust; a failure path must remove it.
+    NewlyInstalled,
+    /// The recipient was already a trusted direct peer endpoint before this
+    /// call; a failure path must leave the pre-existing trust in place.
+    AlreadyTrusted,
+}
+
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
     endpoint_config: SupervisorBridgeEndpointConfig,
@@ -383,7 +399,7 @@ impl MobSupervisorBridge {
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
-    ) -> Result<(), MobError> {
+    ) -> Result<RecipientTrustInstall, MobError> {
         let local_endpoint = Self::local_endpoint_for_runtime(runtime.as_ref())?;
         dsl.apply_input(
             mm_dsl::MeerkatMachineInput::PublishLocalEndpoint {
@@ -402,7 +418,7 @@ impl MobSupervisorBridge {
             .direct_peer_endpoints
             .contains(&endpoint)
         {
-            return Ok(());
+            return Ok(RecipientTrustInstall::AlreadyTrusted);
         }
         let transition = dsl
             .apply_input_with_transition(
@@ -439,7 +455,7 @@ impl MobSupervisorBridge {
         reconciler
             .reconcile(&obligation)
             .await
-            .map(|_report| ())
+            .map(|_report| RecipientTrustInstall::NewlyInstalled)
             .map_err(|error| {
                 MobError::Internal(format!(
                     "supervisor bridge generated trust reconciliation failed: {error}"
@@ -679,7 +695,7 @@ impl MobSupervisorBridge {
                 // branch below and trust_recipient (Invariant #1: no raw or
                 // legacy authority writes).
                 let dsl = self.dsl.read().await.clone();
-                Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+                let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
                 self.request_json_with_runtime(
                     &runtime,
                     recipient,
@@ -713,7 +729,7 @@ impl MobSupervisorBridge {
         );
         let (runtime, dsl) =
             Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
-        Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+        let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
         self.request_json_with_runtime(
             &runtime,
             recipient,
@@ -724,10 +740,17 @@ impl MobSupervisorBridge {
         .await
     }
 
+    /// Install recipient trust ahead of a routed bridge send.
+    ///
+    /// Returns whether THIS call installed the trust or the recipient was
+    /// already a trusted direct peer endpoint before the call. Fail-closed
+    /// rollback on authorization failure must remove only newly installed
+    /// trust: a peer whose trust was confirmed by an earlier terminality must
+    /// not lose it because a later re-authorization attempt failed.
     pub(crate) async fn trust_recipient(
         &self,
         recipient: &TrustedPeerDescriptor,
-    ) -> Result<(), MobError> {
+    ) -> Result<RecipientTrustInstall, MobError> {
         let runtime = self.runtime().await;
         let dsl = self.dsl.read().await.clone();
         Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await

@@ -61,6 +61,9 @@ pub enum MobMachineCatalogInput {
     CommitSupervisorRotation,
     ClearSupervisorAuthorityForDestroy,
     RestoreSupervisorAuthorityAfterDestroyRollback,
+    RecordPendingRecipientTrust,
+    ResolvePendingRecipientTrust,
+    RollbackPendingRecipientTrust,
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
@@ -176,6 +179,9 @@ impl MobMachineCatalogInput {
         Self::CommitSupervisorRotation,
         Self::ClearSupervisorAuthorityForDestroy,
         Self::RestoreSupervisorAuthorityAfterDestroyRollback,
+        Self::RecordPendingRecipientTrust,
+        Self::ResolvePendingRecipientTrust,
+        Self::RollbackPendingRecipientTrust,
         Self::SessionIngressDetachedForMobDestroy,
         Self::SessionIngressDetachFailedForMobDestroy,
         Self::SubmitWork,
@@ -294,6 +300,9 @@ impl MobMachineCatalogInput {
             Self::CommitSupervisorRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitSupervisorRotation,
             Self::ClearSupervisorAuthorityForDestroy => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClearSupervisorAuthorityForDestroy,
             Self::RestoreSupervisorAuthorityAfterDestroyRollback => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreSupervisorAuthorityAfterDestroyRollback,
+            Self::RecordPendingRecipientTrust => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordPendingRecipientTrust,
+            Self::ResolvePendingRecipientTrust => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolvePendingRecipientTrust,
+            Self::RollbackPendingRecipientTrust => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RollbackPendingRecipientTrust,
             Self::SessionIngressDetachedForMobDestroy => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SessionIngressDetachedForMobDestroy,
             Self::SessionIngressDetachFailedForMobDestroy => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SessionIngressDetachFailedForMobDestroy,
             Self::SubmitWork => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SubmitWork,
@@ -417,6 +426,9 @@ impl MobMachineCatalogInput {
             Self::RestoreSupervisorAuthorityAfterDestroyRollback => {
                 "RestoreSupervisorAuthorityAfterDestroyRollback"
             }
+            Self::RecordPendingRecipientTrust => "RecordPendingRecipientTrust",
+            Self::ResolvePendingRecipientTrust => "ResolvePendingRecipientTrust",
+            Self::RollbackPendingRecipientTrust => "RollbackPendingRecipientTrust",
             Self::SessionIngressDetachedForMobDestroy => "SessionIngressDetachedForMobDestroy",
             Self::SessionIngressDetachFailedForMobDestroy => {
                 "SessionIngressDetachFailedForMobDestroy"

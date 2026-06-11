@@ -3985,4 +3985,79 @@ mod tests {
             )
         }));
     }
+
+    /// Dogma row R044: the trust-install-before-authorization-terminality
+    /// window is a machine-owned obligation. Record opens it, Resolve (on
+    /// confirmed-accept terminality) and Rollback (after a failure path
+    /// removed the installed trust) close it; all three are idempotent set
+    /// operations so nested authorize-then-bind windows compose.
+    #[test]
+    fn pending_recipient_trust_obligation_lifecycle() {
+        let mut authority = MobMachineAuthority::new();
+        let peer_id = PeerId::from("peer-r044");
+        assert!(authority.state().pending_recipient_trust.is_empty());
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordPendingRecipientTrust {
+                peer_id: peer_id.clone(),
+            },
+        )
+        .expect("record pending recipient trust");
+        assert!(
+            authority.state().pending_recipient_trust.contains(&peer_id),
+            "recorded obligation must be visible in machine state"
+        );
+
+        // Re-recording the same peer is idempotent (nested windows).
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordPendingRecipientTrust {
+                peer_id: peer_id.clone(),
+            },
+        )
+        .expect("re-record pending recipient trust");
+        assert_eq!(authority.state().pending_recipient_trust.len(), 1);
+
+        // Success terminality closes the window.
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolvePendingRecipientTrust {
+                peer_id: peer_id.clone(),
+            },
+        )
+        .expect("resolve pending recipient trust");
+        assert!(
+            authority.state().pending_recipient_trust.is_empty(),
+            "obligation must be empty after success terminality"
+        );
+
+        // Failure terminality (after the shell untrusted) closes the window.
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordPendingRecipientTrust {
+                peer_id: peer_id.clone(),
+            },
+        )
+        .expect("record pending recipient trust before failure");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RollbackPendingRecipientTrust {
+                peer_id: peer_id.clone(),
+            },
+        )
+        .expect("rollback pending recipient trust");
+        assert!(
+            authority.state().pending_recipient_trust.is_empty(),
+            "obligation must be empty after failure terminality"
+        );
+
+        // Closing an absent obligation stays a no-op.
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RollbackPendingRecipientTrust { peer_id },
+        )
+        .expect("rollback of an absent obligation is a no-op");
+        assert!(authority.state().pending_recipient_trust.is_empty());
+    }
 }

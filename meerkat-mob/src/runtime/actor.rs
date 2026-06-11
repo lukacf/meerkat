@@ -985,6 +985,14 @@ pub(super) struct PendingSpawn {
     pub(super) authorized_profile_material: AuthorizedSpawnProfileMaterial,
     pub(super) continuity_intent: super::handle::SpawnContinuityIntent,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
+    /// External peer id whose recipient trust the provisioner installs ahead
+    /// of bind/authorize terminality during this provision. Recorded as a
+    /// MobMachine `pending_recipient_trust` obligation at enqueue; resolved
+    /// (provision succeeded — terminality confirmed) or rolled back
+    /// (provision failed — the provisioner already removed newly installed
+    /// trust) when the provision result lands. `None` for session-backed
+    /// members, which install no bridge recipient trust.
+    pub(super) pending_recipient_trust_peer_id: Option<String>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
 
@@ -2676,11 +2684,26 @@ impl MobActor {
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         // Transport requires the recipient be trusted before the request can be
         // routed (see comms admission), so trust is installed before the send.
-        // The invariant is enforced by rolling the trust back below on every
-        // path where this `peer` is not a CONFIRMED, ACCEPTED supervisor: an
-        // `AuthorizeSupervisor` rejection or send failure must leave NO
-        // installed recipient trust (fail closed).
-        self.supervisor_bridge.trust_recipient(peer).await?;
+        // The trust-install-to-terminality window is recorded as a MobMachine
+        // `pending_recipient_trust` obligation before the install, and the
+        // invariant is enforced by rolling trust newly installed by THIS
+        // attempt back below on every path where this `peer` is not a
+        // CONFIRMED, ACCEPTED supervisor (fail closed). Trust that pre-existed
+        // the call was established by an earlier confirmed terminality and is
+        // left in place.
+        self.record_pending_recipient_trust_obligation(peer, "ensure_supervisor_authorized")?;
+        let install = match self.supervisor_bridge.trust_recipient(peer).await {
+            Ok(install) => install,
+            Err(trust_error) => {
+                // No trust was installed, so the recorded window never opened;
+                // close the obligation before propagating the install error.
+                self.rollback_pending_recipient_trust_obligation(
+                    peer,
+                    "ensure_supervisor_authorized trust install failed",
+                )?;
+                return Err(trust_error);
+            }
+        };
         // 60s (not 30s): the requester must tolerate the same async
         // trust/peer-registration propagation lag the live peer waits out
         // before replying (see `spawn_live_external_peer`, 60s). Bounds genuine
@@ -2695,13 +2718,23 @@ impl MobActor {
             Ok(value) => value,
             Err(send_error) => {
                 return Err(self
-                    .rollback_supervisor_recipient_trust(peer, send_error)
+                    .rollback_supervisor_recipient_trust(peer, install, send_error)
                     .await);
             }
         };
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             let should_rebind = match rejection.typed_cause() {
-                Some(cause) => self.classify_bridge_rejection_recovery(cause)?,
+                Some(cause) => match self.classify_bridge_rejection_recovery(cause) {
+                    Ok(should_rebind) => should_rebind,
+                    Err(classify_error) => {
+                        // The recovery verdict could not be obtained, so the
+                        // peer is not a confirmed supervisor: roll the
+                        // just-installed trust back before propagating.
+                        return Err(self
+                            .rollback_supervisor_recipient_trust(peer, install, classify_error)
+                            .await);
+                    }
+                },
                 None => false,
             };
             if should_rebind && let Some(binding) = binding {
@@ -2715,10 +2748,17 @@ impl MobActor {
                         Ok(authorized_bind) => authorized_bind,
                         Err(bind_error) => {
                             return Err(self
-                                .rollback_supervisor_recipient_trust(peer, bind_error)
+                                .rollback_supervisor_recipient_trust(peer, install, bind_error)
                                 .await);
                         }
                     };
+                // The re-bind reached confirmed-accept terminality for this
+                // peer, closing the recipient-trust obligation window before
+                // the post-terminality persistence steps run.
+                self.resolve_pending_recipient_trust_obligation(
+                    peer,
+                    "ensure_supervisor_authorized rebind confirmed",
+                )?;
                 self.persist_rebound_binding(
                     binding,
                     &authorized_bind.peer,
@@ -2737,7 +2777,11 @@ impl MobActor {
                 return Ok(authorized_bind.peer);
             }
             return Err(self
-                .rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))
+                .rollback_supervisor_recipient_trust(
+                    peer,
+                    install,
+                    Self::bridge_rejection_error(rejection),
+                )
                 .await);
         }
         let _ack = match super::bridge_protocol::decode_bridge_ack(
@@ -2748,27 +2792,127 @@ impl MobActor {
             Ok(ack) => ack,
             Err(decode_error) => {
                 return Err(self
-                    .rollback_supervisor_recipient_trust(peer, decode_error)
+                    .rollback_supervisor_recipient_trust(peer, install, decode_error)
                     .await);
             }
         };
+        self.resolve_pending_recipient_trust_obligation(
+            peer,
+            "ensure_supervisor_authorized confirmed",
+        )?;
         Ok(peer.clone())
+    }
+
+    /// Record the MobMachine `pending_recipient_trust` obligation for a peer
+    /// whose recipient trust is about to be installed ahead of authorization
+    /// terminality (dogma row R044). Set semantics make the input idempotent,
+    /// so nested authorize-then-bind windows for the same peer compose.
+    fn record_pending_recipient_trust_obligation(
+        &mut self,
+        peer: &TrustedPeerDescriptor,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.record_pending_recipient_trust_obligation_for_peer_id(
+            &peer.peer_id.to_string(),
+            context,
+        )
+    }
+
+    fn record_pending_recipient_trust_obligation_for_peer_id(
+        &mut self,
+        peer_id: &str,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::RecordPendingRecipientTrust {
+                peer_id: mob_dsl::PeerId::from(peer_id.to_string()),
+            },
+            context,
+        )
+    }
+
+    /// Close the `pending_recipient_trust` obligation after the peer reached
+    /// confirmed-accept authorization terminality.
+    fn resolve_pending_recipient_trust_obligation(
+        &mut self,
+        peer: &TrustedPeerDescriptor,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.resolve_pending_recipient_trust_obligation_for_peer_id(
+            &peer.peer_id.to_string(),
+            context,
+        )
+    }
+
+    fn resolve_pending_recipient_trust_obligation_for_peer_id(
+        &mut self,
+        peer_id: &str,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::ResolvePendingRecipientTrust {
+                peer_id: mob_dsl::PeerId::from(peer_id.to_string()),
+            },
+            context,
+        )
+    }
+
+    /// Close the `pending_recipient_trust` obligation after a failure path
+    /// rolled the installed trust back (or established no trust at all).
+    fn rollback_pending_recipient_trust_obligation(
+        &mut self,
+        peer: &TrustedPeerDescriptor,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.rollback_pending_recipient_trust_obligation_for_peer_id(
+            &peer.peer_id.to_string(),
+            context,
+        )
+    }
+
+    fn rollback_pending_recipient_trust_obligation_for_peer_id(
+        &mut self,
+        peer_id: &str,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::RollbackPendingRecipientTrust {
+                peer_id: mob_dsl::PeerId::from(peer_id.to_string()),
+            },
+            context,
+        )
     }
 
     /// Fail-closed rollback for supervisor recipient trust installed ahead of an
     /// `AuthorizeSupervisor` send. The recipient was trusted only so the bridge
     /// request could be routed; if authorization did not terminate in a
-    /// confirmed accept, the trust must not survive. The authorization
-    /// `original_error` is preserved; an untrust failure is folded into a typed
-    /// `MobError` rather than silently dropped.
+    /// confirmed accept, trust newly installed by this attempt must not
+    /// survive. Trust that pre-existed the attempt was established by an
+    /// earlier confirmed terminality and is left in place. The MobMachine
+    /// `pending_recipient_trust` obligation is rolled back once the trust
+    /// state is restored; if the untrust itself fails the obligation stays
+    /// pending because the window genuinely remains open. The authorization
+    /// `original_error` is preserved; an untrust or obligation-rollback
+    /// failure is folded into a typed `MobError` rather than silently dropped.
     async fn rollback_supervisor_recipient_trust(
-        &self,
+        &mut self,
         peer: &TrustedPeerDescriptor,
+        install: super::supervisor_bridge::RecipientTrustInstall,
         original_error: MobError,
     ) -> MobError {
-        if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await {
+        if install == super::supervisor_bridge::RecipientTrustInstall::NewlyInstalled
+            && let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await
+        {
             return MobError::WiringError(format!(
                 "supervisor authorization failed ({original_error}); additionally failed to roll back installed recipient trust: {untrust_error}"
+            ));
+        }
+        if let Err(obligation_error) = self.rollback_pending_recipient_trust_obligation(
+            peer,
+            "rollback_supervisor_recipient_trust",
+        ) {
+            return MobError::WiringError(format!(
+                "supervisor authorization failed ({original_error}); additionally failed to roll back the pending recipient-trust obligation: {obligation_error}"
             ));
         }
         original_error
@@ -2855,20 +2999,60 @@ impl MobActor {
     }
 
     async fn send_bridge_command_typed<R: super::bridge_protocol::FromBridgeReply>(
-        &self,
+        &mut self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: std::time::Duration,
     ) -> Result<R, MobError> {
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        // Trust is installed ahead of the routed send (comms admission), with
+        // the window recorded as a MobMachine `pending_recipient_trust`
+        // obligation. Every non-confirmed outcome — send failure, terminal
+        // rejection, decode failure — rolls trust newly installed by THIS
+        // call back fail-closed; pre-existing trust is left in place.
+        self.record_pending_recipient_trust_obligation(peer, "send_bridge_command_typed")?;
+        let install = match self.supervisor_bridge.trust_recipient(peer).await {
+            Ok(install) => install,
+            Err(trust_error) => {
+                self.rollback_pending_recipient_trust_obligation(
+                    peer,
+                    "send_bridge_command_typed trust install failed",
+                )?;
+                return Err(trust_error);
+            }
+        };
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(send_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, install, send_error)
+                    .await);
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+            return Err(self
+                .rollback_supervisor_recipient_trust(
+                    peer,
+                    install,
+                    Self::bridge_rejection_error(rejection),
+                )
+                .await);
         }
-        super::bridge_protocol::decode_bridge_payload(command, value, "command")
+        match super::bridge_protocol::decode_bridge_payload(command, value, "command") {
+            Ok(payload) => {
+                self.resolve_pending_recipient_trust_obligation(
+                    peer,
+                    "send_bridge_command_typed confirmed",
+                )?;
+                Ok(payload)
+            }
+            Err(decode_error) => Err(self
+                .rollback_supervisor_recipient_trust(peer, install, decode_error)
+                .await),
+        }
     }
 
     fn bridge_ack_from_value(
@@ -7289,6 +7473,7 @@ impl MobActor {
                         supervisor_pending_authority_accepted_peer_ids: dsl
                             .supervisor_pending_authority_accepted_peer_ids
                             .clone(),
+                        pending_recipient_trust: dsl.pending_recipient_trust.clone(),
                         member_state_markers: dsl.member_state_markers.clone(),
                         wiring_edges: dsl.wiring_edges.clone(),
                         external_peer_edges: dsl.external_peer_edges.clone(),
@@ -8136,6 +8321,12 @@ impl MobActor {
         Ok(())
     }
 
+    /// NOTE (dogma row R044): aborting a pending spawn mid-provision does NOT
+    /// close its `pending_recipient_trust` obligation. The provisioning task
+    /// may have installed recipient trust without reaching an authorization
+    /// terminality verdict, so the machine truthfully keeps the window open;
+    /// the obligation is volatile (like the trust it tracks) and clears on
+    /// restart. Only a provision RESULT (success or failure) closes it.
     async fn fail_all_pending_spawns(&mut self, reason: &str) -> Result<(), MobError> {
         self.drain_pending_spawn_cleanup_anchors(reason).await?;
         if self.pending_spawns.is_empty() {
@@ -8888,6 +9079,26 @@ impl MobActor {
             return;
         }
 
+        // External provisioning installs supervisor-bridge recipient trust
+        // ahead of bind terminality inside the provisioner (which cannot reach
+        // MobMachine authority). The actor owns the machine fact: record the
+        // `pending_recipient_trust` obligation before the provisioning task
+        // starts; `handle_spawn_provisioned_batch` resolves or rolls it back
+        // when the provision result lands.
+        let pending_recipient_trust_peer_id = match &provision_request.binding {
+            crate::RuntimeBinding::External { peer_id, .. } => Some(peer_id.clone()),
+            crate::RuntimeBinding::Session => None,
+        };
+        if let Some(peer_id) = pending_recipient_trust_peer_id.as_deref()
+            && let Err(error) = self.record_pending_recipient_trust_obligation_for_peer_id(
+                peer_id,
+                "enqueue_spawn external provision",
+            )
+        {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+
         let pending = PendingSpawn {
             profile_name,
             agent_identity,
@@ -8903,6 +9114,7 @@ impl MobActor {
             authorized_profile_material,
             continuity_intent,
             progress: pending_progress.clone(),
+            pending_recipient_trust_peer_id,
             reply_tx,
         };
         // Treat pending spawn lifecycle as a single keyed table: pending intent
@@ -9087,8 +9299,33 @@ impl MobActor {
                 authorized_profile_material,
                 continuity_intent,
                 progress: _,
+                pending_recipient_trust_peer_id,
                 reply_tx,
             } = pending;
+            // Close the external recipient-trust obligation window recorded at
+            // enqueue: a successful provision means bind/authorize terminality
+            // was confirmed (Resolve); a failed provision means the provisioner
+            // already rolled newly installed trust back (Rollback).
+            if let Some(peer_id) = pending_recipient_trust_peer_id.as_deref() {
+                let close_result = if result.is_ok() {
+                    self.resolve_pending_recipient_trust_obligation_for_peer_id(
+                        peer_id,
+                        "spawn provisioned batch confirmed",
+                    )
+                } else {
+                    self.rollback_pending_recipient_trust_obligation_for_peer_id(
+                        peer_id,
+                        "spawn provisioned batch failed",
+                    )
+                };
+                if let Err(error) = close_result {
+                    tracing::error!(
+                        peer_id,
+                        error = %error,
+                        "failed to close pending recipient-trust obligation after provision result"
+                    );
+                }
+            }
             let reply = match result {
                 Ok(spawn_receipt) => {
                     let provision = PendingProvision::new(
@@ -9295,6 +9532,24 @@ impl MobActor {
             &mut provision_request,
             generated_self_owned_operation_owner,
         )?;
+
+        // External provisioning installs supervisor-bridge recipient trust
+        // ahead of bind terminality inside the provisioner. The inline policy
+        // spawn runs on the actor task, so the obligation window is recorded
+        // here (before any pending slot exists), resolved inside the spawn
+        // future once the provision confirms terminality, and rolled back
+        // below if the provision failed.
+        let inline_pending_trust_peer_id = match &provision_request.binding {
+            crate::RuntimeBinding::External { peer_id, .. } => Some(peer_id.clone()),
+            crate::RuntimeBinding::Session => None,
+        };
+        if let Some(peer_id) = inline_pending_trust_peer_id.as_deref() {
+            self.record_pending_recipient_trust_obligation_for_peer_id(
+                peer_id,
+                "spawn_from_policy_inline external provision",
+            )?;
+        }
+
         let (pending_reply_tx, _pending_reply_rx) = oneshot::channel();
         let pending = PendingSpawn {
             profile_name: profile_name.clone(),
@@ -9311,6 +9566,7 @@ impl MobActor {
             authorized_profile_material: authorized_profile_material.clone(),
             continuity_intent: continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
+            pending_recipient_trust_peer_id: None,
             reply_tx: pending_reply_tx,
         };
         let pending_task = tokio::spawn(async {
@@ -9325,6 +9581,14 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment violated while staging inline policy spawn"
             );
+            // The provision never started: close the recorded obligation
+            // window before the staging cleanup can short-circuit.
+            if let Some(peer_id) = inline_pending_trust_peer_id.as_deref() {
+                self.rollback_pending_recipient_trust_obligation_for_peer_id(
+                    peer_id,
+                    "spawn_from_policy_inline staging failed",
+                )?;
+            }
             self.fail_all_pending_spawns(
                 "pending spawn alignment violated while staging inline policy spawn",
             )
@@ -9334,6 +9598,14 @@ impl MobActor {
 
         let spawn_result = Box::pin(async {
             let spawn_receipt = self.provisioner.provision_member(provision_request).await?;
+            if let Some(peer_id) = inline_pending_trust_peer_id.as_deref() {
+                // Provision success means bind/authorize terminality was
+                // confirmed for the external peer: close the obligation.
+                self.resolve_pending_recipient_trust_obligation_for_peer_id(
+                    peer_id,
+                    "spawn_from_policy_inline provision confirmed",
+                )?;
+            }
             if runtime_mode == crate::MobRuntimeMode::AutonomousHost
                 && let Err(capability_error) =
                     Self::ensure_autonomous_dispatch_capability_for_provisioner(
@@ -9395,6 +9667,18 @@ impl MobActor {
             self.complete_pending_spawn_slot(spawn_ticket, "policy inline spawn completion");
         if let Some(handle) = task_handle {
             handle.abort();
+        }
+        if spawn_result.is_err()
+            && let Some(peer_id) = inline_pending_trust_peer_id.as_deref()
+        {
+            // Provision-stage failures already rolled newly installed trust
+            // back inside the provisioner; post-terminality failures resolved
+            // the obligation inside the spawn future (rollback is then an
+            // idempotent no-op). Either way the window is closed here.
+            self.rollback_pending_recipient_trust_obligation_for_peer_id(
+                peer_id,
+                "spawn_from_policy_inline provision failed",
+            )?;
         }
         if let Err(error) =
             self.ensure_pending_spawn_alignment("spawn_from_policy_inline completion")
@@ -13750,6 +14034,27 @@ impl MobActor {
             identity: AgentIdentity::from(agent_identity.as_str()),
             reason: format!("failed to authorize respawn replacement operation owner: {error}"),
         })?;
+        // External provisioning installs supervisor-bridge recipient trust
+        // ahead of bind terminality inside the provisioner. The respawn
+        // replacement provisions inline on the actor task, so the obligation
+        // window is recorded here (before any pending slot exists), resolved
+        // once the provision confirms terminality, and rolled back below if
+        // the provision failed.
+        let respawn_pending_trust_peer_id = match &snapshot.binding {
+            crate::RuntimeBinding::External { peer_id, .. } => Some(peer_id.clone()),
+            crate::RuntimeBinding::Session => None,
+        };
+        if let Some(peer_id) = respawn_pending_trust_peer_id.as_deref() {
+            self.record_pending_recipient_trust_obligation_for_peer_id(
+                peer_id,
+                "handle_respawn external provision",
+            )
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                identity: AgentIdentity::from(agent_identity.as_str()),
+                reason: error.to_string(),
+            })?;
+        }
+
         let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
         let respawn_pending = PendingSpawn {
             profile_name: snapshot.profile_name.clone(),
@@ -13768,6 +14073,7 @@ impl MobActor {
             authorized_profile_material: replacement_authorized_profile_material.clone(),
             continuity_intent: replacement_continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
+            pending_recipient_trust_peer_id: None,
             reply_tx: respawn_inline_reply_tx,
         };
         let respawn_inline_task = tokio::spawn(async {
@@ -13781,6 +14087,18 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment violated while staging respawn replacement"
             );
+            // The provision never started: close the recorded obligation
+            // window before the staging error propagates.
+            if let Some(peer_id) = respawn_pending_trust_peer_id.as_deref() {
+                self.rollback_pending_recipient_trust_obligation_for_peer_id(
+                    peer_id,
+                    "handle_respawn staging failed",
+                )
+                .map_err(|rollback_error| MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: rollback_error.to_string(),
+                })?;
+            }
             if let Err(cleanup_error) = self
                 .fail_all_pending_spawns(
                     "pending spawn alignment violated while staging respawn replacement",
@@ -13813,6 +14131,18 @@ impl MobActor {
                     identity: AgentIdentity::from(agent_identity.as_str()),
                     reason: error.to_string(),
                 })?;
+            if let Some(peer_id) = respawn_pending_trust_peer_id.as_deref() {
+                // Provision success means bind/authorize terminality was
+                // confirmed for the external peer: close the obligation.
+                self.resolve_pending_recipient_trust_obligation_for_peer_id(
+                    peer_id,
+                    "handle_respawn provision confirmed",
+                )
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: error.to_string(),
+                })?;
+            }
             tracing::debug!(
                 agent_identity = %agent_identity,
                 member_ref = ?spawn_receipt.member_ref,
@@ -13954,6 +14284,22 @@ impl MobActor {
             self.complete_pending_spawn_slot(respawn_spawn_ticket, "respawn replacement spawn");
         if let Some(handle) = respawn_task {
             handle.abort();
+        }
+        if replacement_result.is_err()
+            && let Some(peer_id) = respawn_pending_trust_peer_id.as_deref()
+        {
+            // Provision-stage failures already rolled newly installed trust
+            // back inside the provisioner; post-terminality failures resolved
+            // the obligation inside the replacement future (rollback is then
+            // an idempotent no-op). Either way the window is closed here.
+            self.rollback_pending_recipient_trust_obligation_for_peer_id(
+                peer_id,
+                "handle_respawn provision failed",
+            )
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                identity: AgentIdentity::from(agent_identity.as_str()),
+                reason: error.to_string(),
+            })?;
         }
         self.ensure_pending_spawn_alignment("handle_respawn completion")
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
@@ -19770,67 +20116,18 @@ mod bridge_rejection_tests {
         }
     }
 
-    /// Row #53 (atomicity_window): an `AuthorizeSupervisor` rejection or send
-    /// failure must leave NO installed recipient trust. The recipient is
-    /// trusted only so the bridge request can be routed; the authorization
-    /// path must roll the trust back (`untrust_recipient`) on every
-    /// non-confirmed-accept outcome. This ratchet pins that the actor's
-    /// `ensure_supervisor_authorized` invokes the rollback on the send-failure,
-    /// rejection, and decode-failure branches instead of returning while leaving
-    /// trust installed.
-    #[test]
-    fn authorize_supervisor_rejection_rolls_back_recipient_trust_in_actor() {
-        let source = include_str!("actor.rs");
-        let start = source
-            .find("async fn ensure_supervisor_authorized")
-            .expect("actor ensure_supervisor_authorized exists");
-        let end = source[start..]
-            .find("\n    /// Fail-closed rollback for supervisor recipient trust")
-            .expect("ensure_supervisor_authorized precedes its rollback helper doc");
-        let body = &source[start..start + end];
-
-        assert!(
-            body.contains("self.supervisor_bridge.trust_recipient(peer).await?;"),
-            "authorization must still establish recipient trust before the routed send"
-        );
-        assert!(
-            body.contains("rollback_supervisor_recipient_trust(peer, send_error)"),
-            "a send failure must roll back the just-installed recipient trust"
-        );
-        assert!(
-            body.contains("rollback_supervisor_recipient_trust(peer, decode_error)"),
-            "a malformed authorize response must roll back the just-installed recipient trust"
-        );
-        assert!(
-            body.contains("rollback_supervisor_recipient_trust(peer, bind_error)"),
-            "a failed rebind must roll back the rejected recipient's trust"
-        );
-        assert!(
-            body.contains(
-                "rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))"
-            ),
-            "a terminal rejection must roll back trust, carrying the typed rejection error"
-        );
-        // The terminal rejection arm must not return the raw rejection without
-        // rolling trust back first.
-        assert!(
-            !body.contains("return Err(Self::bridge_rejection_error(rejection));"),
-            "terminal rejection must route through the trust rollback, not return raw"
-        );
-
-        // The rollback helper itself must actually untrust the recipient.
-        let helper_start = source
-            .find("async fn rollback_supervisor_recipient_trust")
-            .expect("actor rollback helper exists");
-        let helper_end = source[helper_start..]
-            .find("\n    async fn load_supervisor_authority_snapshot")
-            .expect("rollback helper precedes the authority-snapshot loader");
-        let helper_body = &source[helper_start..helper_start + helper_end];
-        assert!(
-            helper_body.contains("self.supervisor_bridge.untrust_recipient(peer).await"),
-            "rollback helper must untrust the recipient so a rejection leaves no trust"
-        );
-    }
+    // Row #53 (atomicity_window) / dogma row R044: the former TEXT-BASED
+    // ratchet for ensure_supervisor_authorized trust rollback was replaced by
+    // behavioral tests in runtime/tests.rs:
+    //   - test_authorize_rejection_rolls_back_newly_installed_recipient_trust
+    //   - test_authorize_rejection_preserves_preexisting_recipient_trust
+    //   - test_bind_rejection_rolls_back_provisioner_recipient_trust
+    //   - test_bind_send_failure_rolls_back_provisioner_recipient_trust
+    //   - test_bind_decode_failure_rolls_back_provisioner_recipient_trust
+    //   - test_pending_recipient_trust_obligation_resolves_on_success
+    // which assert the live trust surface (supervisor bridge runtime peers)
+    // and the MobMachine `pending_recipient_trust` obligation instead of
+    // grepping source text.
 
     /// Row #155 (fault_laundered): the supervisor-activation rollback must
     /// classify "did the attempted new-supervisor-trust cleanup also fail" by a

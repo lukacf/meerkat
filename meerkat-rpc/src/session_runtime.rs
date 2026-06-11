@@ -15431,7 +15431,11 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn rpc_archive_direct_deferred_projection_failure_keeps_machine_retire_authoritative() {
+    async fn rpc_archive_direct_deferred_projection_failure_fails_closed_and_converges_on_retry() {
+        // LUC-524 R004: the durable lifecycle commit realizes BEFORE the
+        // runtime retire and a failed commit fails the archive operation —
+        // the former warn-continue (retire stands, durable doc stays Active,
+        // standalone reopen resurrects) is unrepresentable.
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -15449,10 +15453,40 @@ mod tests {
             .expect("direct deferred create should reserve capacity");
         store.set_fail_save(true);
 
+        let failed = runtime.archive_session(&direct.session_id).await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "archive must fail closed when the durable lifecycle commit fails: {failed:?}"
+        );
+        assert_ne!(
+            runtime
+                .service
+                .persisted_runtime_state(&direct.session_id)
+                .await
+                .expect("read direct deferred archive runtime state"),
+            Some(RuntimeState::Retired),
+            "failed archive must not retire the runtime (document commit realizes first)"
+        );
+        let durable = runtime
+            .load_persisted_session(&direct.session_id)
+            .await
+            .expect("load direct deferred snapshot after failed archive")
+            .expect("failed archive must keep the durable document visible");
+        assert!(
+            !durable
+                .lifecycle_terminal()
+                .is_some_and(meerkat_core::SessionLifecycleTerminal::is_archived),
+            "failed archive must leave the durable document active"
+        );
+
+        store.clear_failures();
         runtime
             .archive_session(&direct.session_id)
             .await
-            .expect("machine-retired archive should ignore compatibility projection failure");
+            .expect("retried archive should converge after the store heals");
         assert_eq!(
             runtime
                 .service
@@ -15460,7 +15494,7 @@ mod tests {
                 .await
                 .expect("read direct deferred archive runtime state"),
             Some(RuntimeState::Retired),
-            "machine retirement should remain authoritative when projection save fails"
+            "retried archive must retire the runtime after the document commit"
         );
         assert!(
             runtime
@@ -15470,16 +15504,14 @@ mod tests {
                 .is_none(),
             "runtime retirement should hide compatibility projection state"
         );
-
-        store.clear_failures();
         runtime
             .create_session(mock_build_config(), None, None)
             .await
-            .expect("machine-retired direct deferred archive should release admission");
+            .expect("converged archive should release admission");
     }
 
     #[tokio::test]
-    async fn non_staged_archive_projection_failure_runs_runtime_cleanup_after_machine_retire() {
+    async fn non_staged_archive_projection_failure_fails_closed_and_cleans_up_on_retry() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
         let mut runtime = make_runtime_with_session_store_and_runtime_store(
@@ -15520,10 +15552,41 @@ mod tests {
         );
 
         store.set_fail_save(true);
+        let failed = runtime.archive_session(&session_id).await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "archive must fail closed when the durable lifecycle commit fails: {failed:?}"
+        );
+        assert_ne!(
+            runtime
+                .service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("read materialized archive runtime state"),
+            Some(RuntimeState::Retired),
+            "failed archive must not retire the runtime (document commit realizes first)"
+        );
+        assert!(
+            runtime
+                .pending_session_event_streams
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "failed archive must not run runtime cleanup"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed archive must keep runtime bindings for retry"
+        );
+
+        store.clear_failures();
         runtime
             .archive_session(&session_id)
             .await
-            .expect("machine-retired archive should ignore compatibility projection failure");
+            .expect("retried archive should converge after the store heals");
         assert_eq!(
             runtime
                 .service
@@ -15531,7 +15594,7 @@ mod tests {
                 .await
                 .expect("read materialized archive runtime state"),
             Some(RuntimeState::Retired),
-            "machine retirement should remain authoritative when projection save fails"
+            "retried archive must retire the runtime after the document commit"
         );
         assert!(
             !runtime
@@ -18004,7 +18067,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_start_pre_run_archive_projection_failure_keeps_machine_retire_authoritative() {
+    async fn pending_start_pre_run_archive_projection_failure_fails_closed_and_retries() {
+        // LUC-524 R004: the no-pending pre-run cleanup archive fails closed
+        // when the durable lifecycle commit fails — the runtime is NOT
+        // retired, the staged session is restored for retry, and a retried
+        // pending start converges to the typed no-pending outcome with a
+        // fully archived session.
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -18018,13 +18086,44 @@ mod tests {
             .await
             .expect("create staged session");
         store.fail_after_successful_saves(1);
+        let failed = drive_pending_start_resume_pending(&runtime, &session_id).await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "no-pending cleanup archive must fail closed when the durable lifecycle commit \
+             fails: {failed:?}"
+        );
+        assert_ne!(
+            runtime
+                .service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("read persisted no-pending start runtime state"),
+            Some(RuntimeState::Retired),
+            "failed cleanup archive must not retire the runtime (document commit realizes first)"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "restored staged session must keep admission reserved after the failed cleanup: \
+             {blocked:?}"
+        );
+
+        store.clear_failures();
         let no_pending = drive_pending_start_resume_pending(&runtime, &session_id).await;
         assert!(
             no_pending
                 .as_ref()
                 .err()
                 .is_some_and(|err| err.message.contains("no pending boundary")),
-            "no-pending start cleanup should preserve the typed machine outcome: {no_pending:?}"
+            "retried no-pending start should resolve the typed machine outcome: {no_pending:?}"
         );
         assert_eq!(
             runtime
@@ -18033,7 +18132,7 @@ mod tests {
                 .await
                 .expect("read persisted no-pending start runtime state"),
             Some(RuntimeState::Retired),
-            "machine retirement should remain authoritative when projection save fails"
+            "retried no-pending start must retire the runtime after the document commit"
         );
         assert!(
             runtime
@@ -18047,8 +18146,6 @@ mod tests {
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "machine-retired no-pending start should unregister prepared runtime bindings"
         );
-
-        store.clear_failures();
         runtime
             .create_session(mock_build_config(), None, None)
             .await
@@ -18129,8 +18226,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_runtime_apply_pre_run_archive_projection_failure_keeps_machine_retire_authoritative()
-     {
+    async fn pending_runtime_apply_pre_run_archive_projection_failure_fails_closed_and_retries() {
+        // LUC-524 R004: the no-pending pre-run cleanup archive on the
+        // runtime-apply path fails closed when the durable lifecycle commit
+        // fails — no retire, staged session restored — and a retried apply
+        // converges to the typed no-pending terminal with a fully archived
+        // session.
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -18146,6 +18247,37 @@ mod tests {
         store.fail_after_successful_saves(1);
         let primitive = runtime_resume_pending_primitive();
         let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "no-pending cleanup archive must fail closed when the durable lifecycle commit \
+             fails: {failed:?}"
+        );
+        assert_ne!(
+            runtime
+                .service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("read persisted no-pending apply runtime state"),
+            Some(RuntimeState::Retired),
+            "failed cleanup archive must not retire the runtime (document commit realizes first)"
+        );
+
+        store.clear_failures();
+        let (event_tx, _event_rx) = mpsc::channel(100);
         let output = runtime
             .apply_runtime_turn(
                 &session_id,
@@ -18157,7 +18289,7 @@ mod tests {
                 None,
             )
             .await
-            .expect("no-pending boundary should be returned as a runtime terminal");
+            .expect("retried no-pending apply should resolve the typed runtime terminal");
         assert!(
             matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
             "resume-pending without a boundary should preserve the typed machine terminal: {output:?}"
@@ -18169,7 +18301,7 @@ mod tests {
                 .await
                 .expect("read persisted no-pending apply runtime state"),
             Some(RuntimeState::Retired),
-            "machine retirement should remain authoritative when projection save fails"
+            "retried no-pending apply must retire the runtime after the document commit"
         );
         assert!(
             runtime
@@ -18183,8 +18315,6 @@ mod tests {
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "machine-retired no-pending apply should unregister prepared runtime bindings"
         );
-
-        store.clear_failures();
         runtime
             .create_session(mock_build_config(), None, None)
             .await

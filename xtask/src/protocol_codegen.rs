@@ -4624,6 +4624,8 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
+        "SessionDocumentLifecycle",
+        "SessionArchiveDisposition",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4714,6 +4716,8 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ResumeSelfHostedSelection" => Ok("Clear"),
         "LiveSessionAuthorityKind" => Ok("LiveAuthoritative"),
         "LiveSessionAuthorityReason" => Ok("StoredArchived"),
+        "SessionDocumentLifecycle" => Ok("Active"),
+        "SessionArchiveDisposition" => Ok("Archive"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5524,6 +5528,8 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "ObservedSessionTailKind"
             | "PendingContinuationDisposition"
             | "PendingContinuationPublicTerminal"
+            | "SessionDocumentLifecycle"
+            | "SessionArchiveDisposition"
     )
 }
 
@@ -5575,6 +5581,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "AuthorizeSystemPromptMutation",
         "ResolvePendingContinuation",
         "AuthorizeSessionResumeOverrides",
+        "RecoverSessionLifecycleTerminal",
+        "ArchiveSessionDocument",
     ] {
         machine
             .inputs
@@ -5604,6 +5612,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionResumeOverridesAuthorized",
         "SessionResumeOverridesRejected",
         "LiveSessionAuthorityClassified",
+        "SessionLifecycleTerminalRecovered",
+        "SessionArchiveResolved",
     ] {
         machine
             .effects
@@ -5629,6 +5639,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
+        "SessionDocumentLifecycle",
+        "SessionArchiveDisposition",
     ] {
         let binding = machine
             .named_types

@@ -1100,14 +1100,20 @@ pub struct PendingSystemContextAppend {
     pub accepted_at: SystemTime,
 }
 
-/// Canonical typed terminal-lifecycle fact for the standalone (runtime-less)
-/// session path.
+/// Typed terminal-lifecycle projection of the canonical
+/// [`session_document::SessionDocumentMachine`] `session_lifecycle_terminal`
+/// fact.
 ///
-/// The runtime-backed path owns terminality through `RuntimeState::Retired`;
-/// the standalone path has no runtime store, so this typed reserved-key field
-/// is the authoritative owner there. A two-variant enum (rather than a bare
-/// bool) keeps future terminal classes — e.g. `Destroyed` — extending the type
-/// rather than the call sites.
+/// The machine owns archive lifecycle truth for ALL profiles (LUC-524 R004
+/// fold): both the runtime-backed and the store-only archive paths drive the
+/// machine's `ArchiveSessionDocument` input, and this reserved-key field is
+/// the machine-realized durable projection of the emitted verdict — the shell
+/// realizes it, it never decides it. `RuntimeState::Retired` is the runtime
+/// realization of the SAME verdict; the fail-closed realization order (durable
+/// document commit first, runtime retire second) keeps the two projections
+/// convergent. A two-variant enum (rather than a bare bool) keeps future
+/// terminal classes — e.g. `Destroyed` — extending the type rather than the
+/// call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleTerminal {
@@ -1122,6 +1128,24 @@ impl SessionLifecycleTerminal {
     #[must_use]
     pub fn is_archived(self) -> bool {
         matches!(self, Self::Archived)
+    }
+}
+
+impl From<SessionLifecycleTerminal> for session_document::SessionDocumentLifecycle {
+    fn from(value: SessionLifecycleTerminal) -> Self {
+        match value {
+            SessionLifecycleTerminal::Active => Self::Active,
+            SessionLifecycleTerminal::Archived => Self::Archived,
+        }
+    }
+}
+
+impl From<session_document::SessionDocumentLifecycle> for SessionLifecycleTerminal {
+    fn from(value: session_document::SessionDocumentLifecycle) -> Self {
+        match value {
+            session_document::SessionDocumentLifecycle::Active => Self::Active,
+            session_document::SessionDocumentLifecycle::Archived => Self::Archived,
+        }
     }
 }
 
@@ -3218,7 +3242,14 @@ impl Session {
         }
     }
 
-    /// Store the typed session lifecycle-terminal fact in the session metadata map.
+    /// Realize the typed session lifecycle-terminal projection in the session
+    /// metadata map.
+    ///
+    /// The lifecycle-terminal fact is owned by the canonical
+    /// [`session_document::SessionDocumentMachine`]; production archive paths
+    /// call this only to realize a machine-emitted `SessionArchiveResolved`
+    /// verdict (the value written mirrors the machine's decision — the shell
+    /// decides nothing here).
     pub fn set_lifecycle_terminal(
         &mut self,
         terminal: SessionLifecycleTerminal,

@@ -356,3 +356,24 @@
 | R305 | Architecture doctrine assigns runtime semantics to surfaces | `NARROWED_PARTIAL` | Low |  | All four flagged doctrine lines verbatim name surfaces as owners of runtime semantics: docs/reference/session-contracts.mdx:13 "- **runtime-backed surfaces** own `keep_alive`, Queue/Steer routing, comms drain lifecycle,  |
 | R306 | Embedded platform help advertises nonexistent live host type | `CONFIRMED_ACTIVE` | Low |  | Minimal fix: change `LiveHost` to `LiveAdapterHost` at meerkat/src/help_content/platform_skill.md:140. Root fix for the shape: eliminate or gate the handmirror — either restore single ownership by hav |
 | R307 | MCP contributed tool lifecycles default outside feature-owned descriptors | `CONFIRMED_ACTIVE` | Medium |  | meerkat-mcp-server/src/lib.rs:1719-1721 "Default lifecycle for any MCP tool whose name is not declared in the typed [`base_tool_descriptors`] table (e.g. schedule/workgraph/mob/comms tools). const MCP_TOOL_DEFAULT_LIFECY |
+
+---
+
+# CAMPAIGN CLOSE-OUT (final, HEAD `ed3b51157`)
+
+**The open set is ZERO.** Final disposition of all 307 baseline rows:
+
+| Final verdict | Count |
+| --- | ---: |
+| `FIXED_THIS_PR` (independently validated at landed HEADs) | **147** |
+| `STALE_FIXED` (already fixed before this PR's waves) | 123 |
+| `OVERFLAGGED_BY_DESIGN` (named functional justification) | 37 |
+| **OPEN** | **0** |
+
+Trajectory: 307 codex rows → 183 default-active → 147 corrected-criterion genuine → elimination waves 1–3 (143 keystone-fixed across 6 lanes ×2 + residual round) → **wave 4 eliminated all 7 former deferrals** (no valid reason not to: K8a full tool-identity domain fold — one `ToolName` type machine-to-shell, TLC-verified; K8b `OpTerminalPayload` = the domain type, shell JSON codecs deleted; K21 inline-object promotion + fail-closed parser emission, workgraph baseline emptied; typed `EffectTeardownClass` with coherence rule; 93-element ownership-ledger migration with **zero exceptions**; RMAT token scans → syn-AST; typed coverage claims with byte-identical seeding).
+
+**Also closed in this PR:** the pre-existing #34 respawn-after-retire defect (two-layer root cause: empty reaction prompt → provider 400 → silent live-session discard; respawn hard-fail fan-out over machine-owned restore edges — fixed at both roots, live-proven); a genuine browser-trust regression (Strict + hardcoded-empty signers = structurally dead verification — fixed with host-suppliable typed `MobpackTrustConfig`, fixture signed under strict); 4 stale live-lane scenario pins updated to landed contracts.
+
+**Final verification:** workspace 8511/8511 (`--all-features`), clippy `-D warnings` clean, all machine/schema/parity/poster/alignment/governance gates green (several now structurally stronger: seam-inventory hard-fail with teardown coherence, ownership-ledger strict with empty baseline, coverage claims fail-closed), three SDK suites green, and the **full live e2e-smoke lane 41/41 — zero skips, zero failures**.
+
+**Tracked follow-ups (not dogma-ledger rows):** #36 BuildBuddy Bazel external-fetch corruption (infra; cargo path used for the smoke lane); #37 post-discard member revival seam (design follow-up surfaced by the #34 fix).

@@ -287,7 +287,8 @@ struct CliCallbackPending {
 
 #[derive(Debug, Clone)]
 enum CliRuntimeTurnResult {
-    Completed(meerkat_core::types::RunResult),
+    // Boxed: RunResult dwarfs the callback variant on the CI clippy lane.
+    Completed(Box<meerkat_core::types::RunResult>),
     CallbackPending(CliCallbackPending),
 }
 
@@ -299,7 +300,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
 ) -> anyhow::Result<CliRuntimeTurnResult> {
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
-            Ok(CliRuntimeTurnResult::Completed(*result))
+            Ok(CliRuntimeTurnResult::Completed(result))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
@@ -8921,7 +8922,7 @@ async fn run_agent(
                 }
                 None => {
                     eprintln!("Warning: duplicate input — already processed");
-                    Ok(CliRuntimeTurnResult::Completed(create_result))
+                    Ok(CliRuntimeTurnResult::Completed(Box::new(create_result)))
                 }
             }
         }
@@ -8971,7 +8972,7 @@ async fn run_agent(
         // Output the result
         match result {
             CliRuntimeTurnResult::Completed(result) => {
-                print_completed_run_result(result, &output, stream, scope, false).await?;
+                print_completed_run_result(*result, &output, stream, scope, false).await?;
             }
             CliRuntimeTurnResult::CallbackPending(pending) => {
                 print_cli_callback_pending(&pending, Some(output.format.as_str()))?;
@@ -9583,7 +9584,7 @@ async fn resume_session_with_llm_override(
                 }
                 None => {
                     eprintln!("Warning: duplicate input — already processed");
-                    Ok(CliRuntimeTurnResult::Completed(create_result))
+                    Ok(CliRuntimeTurnResult::Completed(Box::new(create_result)))
                 }
             }
         }
@@ -9630,7 +9631,7 @@ async fn resume_session_with_llm_override(
         log_stage("print_result");
         match result {
             CliRuntimeTurnResult::Completed(result) => {
-                print_completed_run_result(result, &output, stream, scope, true).await?;
+                print_completed_run_result(*result, &output, stream, scope, true).await?;
             }
             CliRuntimeTurnResult::CallbackPending(pending) => {
                 print_cli_callback_pending(&pending, Some(output.format.as_str()))?;

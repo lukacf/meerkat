@@ -4407,7 +4407,7 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -4426,7 +4426,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
@@ -4459,7 +4459,7 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -4478,7 +4478,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;

@@ -3051,7 +3051,7 @@ capabilities = [{capability_values}]
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -3067,7 +3067,7 @@ capabilities = [{capability_values}]
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let owner_session_id = meerkat_core::types::SessionId::parse(owner_session_id)
             .expect("valid owner bridge session id");

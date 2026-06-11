@@ -443,19 +443,28 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(flow_profile(&models.lead, "Lead flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(&models.lead, "Lead flow responder"))),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        ProfileBinding::Inline(flow_profile(&models.worker, "Worker flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.worker,
+            "Worker flow responder",
+        ))),
     );
     profiles.insert(
         ProfileName::from("reviewer"),
-        ProfileBinding::Inline(flow_profile(&models.reviewer, "Reviewer flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.reviewer,
+            "Reviewer flow responder",
+        ))),
     );
     profiles.insert(
         ProfileName::from("analyst"),
-        ProfileBinding::Inline(flow_profile(&models.analyst, "Analyst flow responder")),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.analyst,
+            "Analyst flow responder",
+        ))),
     );
 
     let mut flows = BTreeMap::new();
@@ -2605,7 +2614,7 @@ fn external_tcp_smoke_definition(
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -2625,7 +2634,7 @@ fn external_tcp_smoke_definition(
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
 
     let mut definition = MobDefinition::explicit(mob_id);

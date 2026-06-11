@@ -141,7 +141,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: model.clone(),
             provider: None,
             self_hosted_server_id: None,
@@ -160,11 +160,11 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model,
             provider: None,
             self_hosted_server_id: None,
@@ -183,7 +183,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("joke-smoke"));

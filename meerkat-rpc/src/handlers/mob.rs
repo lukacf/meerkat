@@ -2358,7 +2358,7 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -2374,7 +2374,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let mut definition = MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;

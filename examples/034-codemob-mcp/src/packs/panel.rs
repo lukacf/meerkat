@@ -87,7 +87,7 @@ impl Pack for PanelPack {
         for (name, skill, desc, m) in &agents {
             profiles.insert(
                 ProfileName::from(*name),
-                ProfileBinding::Inline(Profile {
+                ProfileBinding::Inline(Box::new(Profile {
                     model: m.clone(),
                     skills: vec![skill.to_string()],
                     tools: tools.clone(),
@@ -98,7 +98,7 @@ impl Pack for PanelPack {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: pp.cloned(),
-                }),
+                })),
             );
         }
 

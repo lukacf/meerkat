@@ -509,10 +509,13 @@ mod tests {
 
     fn base_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("lead"), ProfileBinding::Inline(profile()));
+        profiles.insert(
+            ProfileName::from("lead"),
+            ProfileBinding::Inline(Box::new(profile())),
+        );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(profile()),
+            ProfileBinding::Inline(Box::new(profile())),
         );
 
         let mut definition = MobDefinition::explicit("mob");

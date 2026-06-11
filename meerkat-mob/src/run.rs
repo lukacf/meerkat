@@ -6416,7 +6416,7 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("lead"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -6432,11 +6432,11 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -6452,7 +6452,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut definition = MobDefinition::explicit("mob");

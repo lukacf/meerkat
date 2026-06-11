@@ -64,7 +64,8 @@ pub enum ProfileBinding {
         realm_profile: String,
     },
     /// Inline profile definition (original behavior).
-    Inline(Profile),
+    /// Boxed: `Profile` is large; keeps the untagged wire shape unchanged.
+    Inline(Box<Profile>),
 }
 
 impl ProfileBinding {
@@ -134,7 +135,8 @@ pub enum ProfileSource {
         name: String,
     },
     /// Inline profile definition.
-    Inline(Profile),
+    /// Boxed: `Profile` is large; keeps the tagged wire shape unchanged.
+    Inline(Box<Profile>),
 }
 
 /// Profile template for spawning mob members.
@@ -633,7 +635,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
                 provider_params: None,
             }
         };
-        let binding = ProfileBinding::Inline(profile.clone());
+        let binding = ProfileBinding::Inline(Box::new(profile.clone()));
         let json = serde_json::to_string(&binding).unwrap();
         let parsed: ProfileBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.as_inline().unwrap().model, "claude-opus-4-8");
@@ -726,7 +728,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
             provider_params: None,
         };
         let tooling = SpawnTooling::Profile {
-            source: Box::new(ProfileSource::Inline(profile)),
+            source: Box::new(ProfileSource::Inline(Box::new(profile))),
             allow_overlay: None,
             deny_overlay: None,
         };

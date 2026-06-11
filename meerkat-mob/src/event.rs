@@ -701,7 +701,7 @@ mod tests {
         let mut definition = MobDefinition::explicit("test-mob");
         definition.profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -717,7 +717,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         definition
     }

@@ -4585,7 +4585,7 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -4601,7 +4601,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let owner_session_id =
             meerkat::SessionId::parse(owner_session_id).expect("valid owner bridge session id");
@@ -4630,7 +4630,7 @@ mod tests {
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -4649,7 +4649,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
             .with_session_service(mob_state.session_service())

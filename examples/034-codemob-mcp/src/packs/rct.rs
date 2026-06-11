@@ -102,7 +102,7 @@ impl Pack for RctPack {
         for (name, skill, desc, default, tools) in &agents {
             profiles.insert(
                 ProfileName::from(*name),
-                ProfileBinding::Inline(Profile {
+                ProfileBinding::Inline(Box::new(Profile {
                     model: resolve_model(overrides, name, default),
                     skills: vec![skill.to_string()],
                     tools: tools.clone(),
@@ -113,7 +113,7 @@ impl Pack for RctPack {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: pp.cloned(),
-                }),
+                })),
             );
         }
 

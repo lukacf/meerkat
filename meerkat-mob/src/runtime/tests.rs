@@ -3332,7 +3332,7 @@ fn sample_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: "claude-opus-4-8".into(),
             provider: None,
             self_hosted_server_id: None,
@@ -3359,11 +3359,11 @@ fn sample_definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        ProfileBinding::Inline(Profile {
+        ProfileBinding::Inline(Box::new(Profile {
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
@@ -3382,7 +3382,7 @@ fn sample_definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        }),
+        })),
     );
 
     let mut definition = MobDefinition::explicit("test-mob");

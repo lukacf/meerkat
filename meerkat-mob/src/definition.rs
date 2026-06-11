@@ -599,7 +599,7 @@ impl MobDefinition {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: model.to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -618,7 +618,7 @@ impl MobDefinition {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         Self {
             id: mob_id,
@@ -689,7 +689,7 @@ impl MobDefinition {
         realm_profile_store: Option<&std::sync::Arc<dyn crate::store::RealmProfileStore>>,
     ) -> Result<Profile, crate::error::MobError> {
         match self.profiles.get(name) {
-            Some(ProfileBinding::Inline(p)) => Ok(p.clone()),
+            Some(ProfileBinding::Inline(p)) => Ok((**p).clone()),
             Some(ProfileBinding::RealmRef { realm_profile }) => {
                 let store = realm_profile_store.ok_or_else(|| {
                     crate::error::MobError::Internal(
@@ -897,7 +897,7 @@ comms = true
                 let mut m = BTreeMap::new();
                 m.insert(
                     ProfileName::from("lead"),
-                    ProfileBinding::Inline(Profile {
+                    ProfileBinding::Inline(Box::new(Profile {
                         model: "claude-opus-4-8".to_string(),
                         provider: None,
                         self_hosted_server_id: None,
@@ -913,7 +913,7 @@ comms = true
                         max_inline_peer_notifications: None,
                         output_schema: None,
                         provider_params: None,
-                    }),
+                    })),
                 );
                 m
             },

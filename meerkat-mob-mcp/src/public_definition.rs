@@ -87,7 +87,7 @@ fn decode_profile_binding(
             let profile = decode_profile(profile_input)?;
             Ok((
                 ProfileName::from(profile_name),
-                ProfileBinding::Inline(profile),
+                ProfileBinding::Inline(Box::new(profile)),
             ))
         }
     }

@@ -329,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("target"),
-            ProfileBinding::Inline(Profile {
+            ProfileBinding::Inline(Box::new(Profile {
                 model: hive_model.clone(),
                 skills: Vec::new(),
                 tools: ToolConfig {
@@ -345,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut definition = MobDefinition::explicit(MobId::from("hive-fleet"));

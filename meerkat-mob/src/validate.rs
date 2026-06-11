@@ -471,12 +471,12 @@ mod tests {
                 let mut p = base_profile();
                 p.skills = vec!["skill-a".to_string()];
                 p.tools.mcp = vec!["server-a".to_string()];
-                p
+                Box::new(p)
             }),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            ProfileBinding::Inline(base_profile()),
+            ProfileBinding::Inline(Box::new(base_profile())),
         );
 
         let mut skills = BTreeMap::new();
@@ -585,7 +585,7 @@ mod tests {
         let mut def = valid_definition();
         def.profiles.insert(
             ProfileName::from("123-invalid"),
-            ProfileBinding::Inline(base_profile()),
+            ProfileBinding::Inline(Box::new(base_profile())),
         );
 
         let diagnostics = validate_definition(&def);
@@ -601,7 +601,7 @@ mod tests {
         let mut def = valid_definition();
         def.profiles.insert(
             crate::runtime::flow_system_member_id().as_str().into(),
-            ProfileBinding::Inline(base_profile()),
+            ProfileBinding::Inline(Box::new(base_profile())),
         );
 
         let diagnostics = validate_definition(&def);
@@ -765,7 +765,7 @@ model = "claude-sonnet-4-5"
             ProfileBinding::Inline({
                 let mut p = base_profile();
                 p.model = "uncatalogued-model".to_string();
-                p
+                Box::new(p)
             }),
         );
         let diagnostics = validate_definition(&def);
@@ -789,7 +789,7 @@ model = "claude-sonnet-4-5"
                 let mut p = base_profile();
                 p.model = "uncatalogued-model".to_string();
                 p.provider = Some(meerkat_core::Provider::Anthropic);
-                p
+                Box::new(p)
             }),
         );
         let diagnostics = validate_definition(&def);
@@ -821,7 +821,7 @@ model = "claude-sonnet-4-5"
             ProfileBinding::Inline({
                 let mut p = base_profile();
                 p.model = "uncatalogued-model".to_string();
-                p
+                Box::new(p)
             }),
         );
         let diagnostics = validate_definition(&def);

@@ -548,20 +548,22 @@ impl AgentMobToolSurface {
                                     "Profile tooling with RealmProfile source requires a realm profile store",
                                 )
                             })?;
-                        store
-                            .get(name)
-                            .await
-                            .map_err(|e| {
-                                ToolError::execution_failed(format!(
-                                    "failed to resolve realm profile '{name}': {e}"
-                                ))
-                            })?
-                            .ok_or_else(|| {
-                                ToolError::execution_failed(format!(
-                                    "realm profile '{name}' not found"
-                                ))
-                            })?
-                            .profile
+                        Box::new(
+                            store
+                                .get(name)
+                                .await
+                                .map_err(|e| {
+                                    ToolError::execution_failed(format!(
+                                        "failed to resolve realm profile '{name}': {e}"
+                                    ))
+                                })?
+                                .ok_or_else(|| {
+                                    ToolError::execution_failed(format!(
+                                        "realm profile '{name}' not found"
+                                    ))
+                                })?
+                                .profile,
+                        )
                     }
                 };
 
@@ -607,7 +609,7 @@ impl AgentMobToolSurface {
 
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter,
-                    override_profile: Some(resolved_profile),
+                    override_profile: Some(*resolved_profile),
                 })
             }
         }
@@ -3047,7 +3049,7 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -3066,11 +3068,11 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
         profiles.insert(
             ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -3089,7 +3091,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            }),
+            })),
         );
 
         let mut definition = MobDefinition::explicit(MobId::from(mob_id));
@@ -4834,23 +4836,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_no_overlays_returns_none() {
         let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                provider: None,
-                self_hosted_server_id: None,
-                image_generation_provider: None,
-                auto_compact_threshold: None,
-                resume_overrides: Vec::new(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: None,
         };
@@ -4865,23 +4869,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_with_deny_overlay() {
         let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                provider: None,
-                self_hosted_server_id: None,
-                image_generation_provider: None,
-                auto_compact_threshold: None,
-                resume_overrides: Vec::new(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: Some(vec!["bash".to_string()]),
         };
@@ -4895,23 +4901,25 @@ mod tests {
     async fn test_resolve_spawn_tooling_profile_with_overlays_standalone_errors() {
         let surface = surface_standalone();
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                provider: None,
-                self_hosted_server_id: None,
-                image_generation_provider: None,
-                auto_compact_threshold: None,
-                resume_overrides: Vec::new(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: Some(vec!["send".to_string()]),
             deny_overlay: None,
         };
@@ -4926,23 +4934,25 @@ mod tests {
         let surface = surface_with_parent_tools().await;
         let expected_model = "claude-opus-4-8".to_string();
         let tooling = meerkat_mob::SpawnTooling::Profile {
-            source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
-                model: expected_model.clone(),
-                provider: None,
-                self_hosted_server_id: None,
-                image_generation_provider: None,
-                auto_compact_threshold: None,
-                resume_overrides: Vec::new(),
-                skills: Vec::new(),
-                tools: meerkat_mob::ToolConfig::default(),
-                peer_description: "override test".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            })),
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model: expected_model.clone(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "override test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
             allow_overlay: None,
             deny_overlay: None,
         };

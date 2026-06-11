@@ -158,31 +158,31 @@ fn pictionary_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("artist"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "claude-sonnet-4-5",
             "Artist — validates guesses",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-a"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "claude-opus-4-8",
             "guesser-a (Opus) — lead, literal/shapes",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-b"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "gemini-3.1-pro-preview",
             "guesser-b (Gemini) — emotions/mood",
-        )),
+        ))),
     );
     profiles.insert(
         ProfileName::from("guesser-c"),
-        ProfileBinding::Inline(comms_profile(
+        ProfileBinding::Inline(Box::new(comms_profile(
             "gpt-5.4",
             "guesser-c (GPT) — context/narrative",
-        )),
+        ))),
     );
 
     let mut definition = MobDefinition::explicit(MobId::from("pictionary"));

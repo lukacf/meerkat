@@ -19,6 +19,7 @@ meerkat-core = { workspace = true, features = [
     "__meerkat-facade-agent-factory-build",
 ] }
 meerkat-llm-core = { workspace = true }
+meerkat-models = { workspace = true }
 meerkat-client = { workspace = true, default-features = false }
 meerkat-providers = { workspace = true, default-features = false }
 meerkat-anthropic = { workspace = true, optional = true, default-features = false }

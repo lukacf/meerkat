@@ -12,8 +12,8 @@ use std::time::Duration;
 
 /// Resolver for model-specific operational defaults.
 ///
-/// Implemented by the facade/factory layer using
-/// `meerkat_core::model_profile::profile_for(...)`.
+/// Implemented by the facade/factory layer using the injected
+/// `ModelCatalog`/`ModelRegistry` profile lookup.
 /// Injected into the agent at build time and consulted at each LLM call to resolve
 /// profile-derived defaults for the current effective model/provider.
 pub trait ModelOperationalDefaultsResolver: Send + Sync {

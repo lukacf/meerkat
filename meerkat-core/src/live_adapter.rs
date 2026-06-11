@@ -1145,7 +1145,7 @@ mod tests {
                 seed_messages: vec![],
                 visible_tools: vec![],
                 system_prompt: Some("You are helpful.".into()),
-                model_id: "gpt-5.4".into(),
+                model_id: "test-model-a".into(),
                 provider_id: Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: vec![],
@@ -1170,7 +1170,7 @@ mod tests {
             seed_messages: vec![],
             visible_tools: vec![],
             system_prompt: None,
-            model_id: "gpt-5.4".into(),
+            model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![crate::session::PendingSystemContextAppend {
@@ -1696,7 +1696,7 @@ mod tests {
             seed_messages: vec![],
             visible_tools: vec![],
             system_prompt: None,
-            model_id: "gpt-5.4".into(),
+            model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![],
@@ -1950,8 +1950,8 @@ mod tests {
         // field.
         let code = LiveAdapterErrorCode::ConfigRejected {
             reason: LiveConfigRejectionReason::RefreshModelSwap {
-                from_model: "gpt-realtime".to_string(),
-                to_model: "gpt-realtime-mini-v2".to_string(),
+                from_model: "test-realtime".to_string(),
+                to_model: "test-realtime-mini-v2".to_string(),
             },
         };
         let json = serde_json::to_string(&code).unwrap();
@@ -1970,7 +1970,7 @@ mod tests {
                 assert!(matches!(
                     reason,
                     LiveConfigRejectionReason::RefreshModelSwap { ref to_model, .. }
-                        if to_model == "gpt-realtime-mini-v2"
+                        if to_model == "test-realtime-mini-v2"
                 ));
                 // Display impl preserves the human-readable swap text used
                 // by `signal_terminal_error` to populate `Error.message`.
@@ -1988,20 +1988,20 @@ mod tests {
     fn config_rejection_reason_round_trips_each_typed_variant() {
         let cases = vec![
             LiveConfigRejectionReason::ChannelIdentitySwap {
-                from_model: "gpt-realtime".into(),
+                from_model: "test-realtime".into(),
                 from_provider: Provider::OpenAI,
-                to_model: "gpt-realtime-2".into(),
+                to_model: "test-realtime-2".into(),
                 to_provider: Provider::OpenAI,
             },
             LiveConfigRejectionReason::NonRealtimeResolution {
-                detail: "ModelNotRealtime { model: \"gpt-5.4\", provider: \"openai\" }".into(),
+                detail: "ModelNotRealtime { model: \"test-model-a\", provider: \"openai\" }".into(),
             },
             LiveConfigRejectionReason::ImageInputNotImplemented,
             LiveConfigRejectionReason::VideoFrameInputNotImplemented,
             LiveConfigRejectionReason::UnsupportedInputChunkVariant,
             LiveConfigRejectionReason::RefreshModelSwap {
-                from_model: "gpt-realtime".into(),
-                to_model: "gpt-realtime-2".into(),
+                from_model: "test-realtime".into(),
+                to_model: "test-realtime-2".into(),
             },
             LiveConfigRejectionReason::RefreshProviderSwap {
                 from_provider: Provider::OpenAI,

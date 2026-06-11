@@ -421,9 +421,9 @@ pub trait SessionAgentBuilder: Send + Sync {
     /// Resolve whether the selected model accepts inline video user content.
     ///
     /// Implementations with a richer configured model registry can override
-    /// this; the default uses the built-in model capability catalog.
+    /// this; the default uses the canonical model capability catalog.
     async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
-        meerkat_core::model_profile::inline_video_support_for(identity.provider, &identity.model)
+        meerkat_models::inline_video_support_for(identity.provider, &identity.model)
     }
 
     /// Build an agent for a new session.

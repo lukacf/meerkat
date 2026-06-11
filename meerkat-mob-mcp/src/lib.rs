@@ -476,12 +476,20 @@ impl MobMcpState {
         Ok((self.bind_realm_profile_store(MobStorage::in_memory()), None))
     }
 
-    async fn maybe_remove_storage_file(path: Option<&Path>) {
+    /// Remove the mob's durable storage files. Fails CLOSED: a surviving
+    /// db file after destroy is durable truth contradicting the reported
+    /// terminal state, so the caller must surface the failure rather than
+    /// report a clean destroy over a still-present store.
+    async fn remove_storage_files(path: Option<&Path>) -> Result<(), MobError> {
         #[cfg(target_arch = "wasm32")]
-        let _ = path;
+        {
+            let _ = path;
+            Ok(())
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = path {
+        {
+            let Some(path) = path else { return Ok(()) };
             let mut paths = Vec::with_capacity(3);
             paths.push(path.to_path_buf());
             for suffix in ["-wal", "-shm"] {
@@ -490,20 +498,34 @@ impl MobMcpState {
                 paths.push(PathBuf::from(value));
             }
 
-            for path in paths {
-                Self::maybe_remove_one_storage_file(&path).await;
+            for path in &paths {
+                Self::remove_one_storage_file(path).await?;
+            }
+            // Removal succeeded; verify the primary db path is actually
+            // gone so a concurrent by-path re-open cannot silently
+            // resurrect it behind a clean destroy report.
+            match tokio::fs::metadata(&paths[0]).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(MobError::Internal(format!(
+                    "mob storage '{}' post-remove verification failed: {error}",
+                    paths[0].display()
+                ))),
+                Ok(_) => Err(MobError::Internal(format!(
+                    "mob storage '{}' still exists after removal (recreated by a live handle?)",
+                    paths[0].display()
+                ))),
             }
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn maybe_remove_one_storage_file(path: &Path) {
+    async fn remove_one_storage_file(path: &Path) -> Result<(), MobError> {
         let mut last_error = None;
         let mut delay = Duration::from_millis(10);
         for attempt in 0..5 {
             match tokio::fs::remove_file(path).await {
-                Ok(()) => return,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => {
                     last_error = Some(error);
                     if attempt < 4 {
@@ -513,9 +535,11 @@ impl MobMcpState {
                 }
             }
         }
-        if let Some(error) = last_error {
-            tracing::warn!(path = %path.display(), error = %error, "failed to remove mob storage file");
-        }
+        Err(MobError::Internal(format!(
+            "failed to remove mob storage file '{}': {}",
+            path.display(),
+            last_error.map_or_else(|| "unknown error".to_string(), |error| error.to_string())
+        )))
     }
 
     async fn restore_from_persistent_storage(&self) -> Result<(), MobError> {
@@ -575,7 +599,9 @@ impl MobMcpState {
 
                 let storage = self.bind_realm_profile_store(MobStorage::persistent(&path)?);
                 if storage.is_event_log_empty().await? {
-                    Self::maybe_remove_storage_file(Some(path.as_path())).await;
+                    if let Err(error) = Self::remove_storage_files(Some(path.as_path())).await {
+                        tracing::error!(error = %error, "empty mob store sweep failed");
+                    }
                     continue;
                 }
 
@@ -701,7 +727,9 @@ impl MobMcpState {
                         "duplicate mob create cleanup failed"
                     );
                 }
-                Self::maybe_remove_storage_file(storage_path.as_deref()).await;
+                if let Err(error) = Self::remove_storage_files(storage_path.as_deref()).await {
+                    tracing::error!(error = %error, "duplicate mob create storage cleanup failed");
+                }
                 return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
             }
         }
@@ -859,7 +887,9 @@ impl MobMcpState {
                     .or_else(|| managed.storage_path.clone());
                 drop(removed);
                 drop(managed);
-                Self::maybe_remove_storage_file(storage_path.as_deref()).await;
+                Self::remove_storage_files(storage_path.as_deref())
+                    .await
+                    .map_err(MobMcpDestroyError::Mob)?;
                 Ok(report)
             }
             Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {

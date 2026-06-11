@@ -168,13 +168,15 @@ fn validate_config_for_runtime(
     config: &Config,
     runtime: &SessionRuntime,
 ) -> Result<(), RpcResponse> {
-    config.validate().map_err(|err| {
-        RpcResponse::error(
-            id.clone(),
-            error::INVALID_PARAMS,
-            format!("Invalid config: {err}"),
-        )
-    })?;
+    config
+        .validate(meerkat_models::canonical())
+        .map_err(|err| {
+            RpcResponse::error(
+                id.clone(),
+                error::INVALID_PARAMS,
+                format!("Invalid config: {err}"),
+            )
+        })?;
     build_registry_for_runtime(id, config, runtime).map(|_| ())
 }
 

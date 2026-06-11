@@ -686,6 +686,7 @@ fn is_root_flag_with_value(arg: &str) -> bool {
             | "--state-root"
             | "--context-root"
             | "--user-config-root"
+            | "--default-model"
     )
 }
 
@@ -813,7 +814,7 @@ async fn init_project_config() -> anyhow::Result<()> {
     })?;
 
     if !global_path.exists() {
-        let _ = meerkat_core::FileConfigStore::global().await?;
+        let _ = meerkat_core::FileConfigStore::global(meerkat_models::canonical()).await?;
     }
 
     let project_config = rkat_dir.join("config.toml");
@@ -912,8 +913,20 @@ struct Cli {
     )]
     user_config_root: Option<PathBuf>,
 
+    /// Persist the default agent model into the scope-resolved config
+    /// (project/user/realm — same resolution as every other command), then
+    /// run the given command or exit. The model is validated against the
+    /// catalog and configured custom models.
+    #[arg(
+        long,
+        global = true,
+        value_name = "MODEL",
+        help_heading = "Config options"
+    )]
+    default_model: Option<String>,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2545,7 +2558,7 @@ impl From<CliMcpScope> for Option<McpScope> {
 }
 
 fn cli_enables_verbose_tracing(cli: &Cli) -> bool {
-    matches!(&cli.command, Commands::Run { verbose: true, .. })
+    matches!(&cli.command, Some(Commands::Run { verbose: true, .. }))
 }
 
 fn default_trace_filter(cli: &Cli) -> &'static str {
@@ -2570,7 +2583,7 @@ fn init_tracing(cli: &Cli) {
 #[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
-    let auth_config_realm = if matches!(&cli.command, Commands::Auth { .. }) {
+    let auth_config_realm = if matches!(&cli.command, Some(Commands::Auth { .. })) {
         cli.realm.clone()
     } else {
         None
@@ -2583,7 +2596,20 @@ async fn main() -> anyhow::Result<ExitCode> {
         resolve_runtime_scope(&cli)?
     };
 
-    let result = match cli.command {
+    if let Some(model) = cli.default_model.as_deref()
+        && let Err(e) = handle_set_default_model(model, &cli_scope).await
+    {
+        eprintln!("Error: {e}");
+        return Ok(ExitCode::from(EXIT_ERROR));
+    }
+    let Some(command) = cli.command else {
+        if cli.default_model.is_some() {
+            return Ok(ExitCode::from(EXIT_SUCCESS));
+        }
+        <Cli as clap::CommandFactory>::command().print_help().ok();
+        return Ok(ExitCode::from(EXIT_ERROR));
+    };
+    let result = match command {
         Commands::Init => init_project_config().await,
         Commands::Run {
             prompt,
@@ -3655,7 +3681,10 @@ async fn resolve_config_store(
             .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     }
     Ok((
-        Arc::new(FileConfigStore::new(paths.config_path)),
+        Arc::new(FileConfigStore::new(
+            paths.config_path,
+            meerkat_models::canonical(),
+        )),
         paths.root,
     ))
 }
@@ -3670,7 +3699,7 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
         .apply_env_overrides()
         .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
     config
-        .validate()
+        .validate(meerkat_models::canonical())
         .map_err(|e| anyhow::anyhow!("Invalid runtime config: {e}"))?;
     Ok((config, base_dir))
 }
@@ -3694,7 +3723,7 @@ const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
 
 fn model_provider(config: &Config, model: &str) -> Option<Provider> {
     config
-        .model_registry()
+        .model_registry(meerkat_models::canonical())
         .ok()
         .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
         .and_then(Provider::from_core)
@@ -3707,7 +3736,12 @@ fn provider_default_model(config: &Config, provider: Provider) -> Option<String>
         Provider::Gemini => &config.models.gemini,
         Provider::SelfHosted => return None,
     };
-    (!model.is_empty()).then(|| model.clone())
+    if model.is_empty() {
+        // No operator override: fall through to the catalog-owned
+        // per-provider default (core's `ModelDefaults::default` is empty).
+        return meerkat_models::default_model(provider.as_core()).map(str::to_string);
+    }
+    Some(model.clone())
 }
 
 fn resolve_cli_default_agent_model(config: &Config) -> String {
@@ -3719,10 +3753,16 @@ fn resolve_cli_default_agent_model(config: &Config) -> String {
         return meerkat::resolve_provider_catalog_default_model(config);
     }
 
-    config.agent.model.clone()
+    // Canonical ladder: operator-set `config.agent.model` (tier 1), else the
+    // per-provider/catalog defaults. An unset agent model is the normal state
+    // (core embeds no provider data), not an error.
+    meerkat::resolve_create_session_default_model(config)
 }
 
 fn resolve_provider_constrained_default_model(config: &Config, provider: Provider) -> String {
+    if config.agent.model.is_empty() {
+        return provider_default_model(config, provider).unwrap_or_default();
+    }
     match model_provider(config, &config.agent.model) {
         Some(model_provider) if model_provider == provider => config.agent.model.clone(),
         Some(_) => {
@@ -3828,6 +3868,50 @@ async fn handle_config_set(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
     println!("generation={}", snapshot.generation);
+    Ok(())
+}
+
+/// `rkat --default-model <MODEL>`: validate the model against the injected
+/// catalog + configured custom models, then persist `agent.model` through the
+/// same scope-resolved config runtime every other command reads (project /
+/// user / realm resolution included).
+async fn handle_set_default_model(model: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(anyhow::anyhow!(
+            "--default-model requires a non-empty model id"
+        ));
+    }
+    let catalog = meerkat_models::canonical();
+    let (config, _) = load_config(scope).await?;
+    let provider = catalog
+        .infer_provider(model)
+        .or_else(|| config.models.custom.get(model).map(|custom| custom.provider))
+        .ok_or_else(|| {
+            let mut known: Vec<&str> = catalog.entries.iter().map(|entry| entry.id).collect();
+            let customs: Vec<&str> = config.models.custom.keys().map(String::as_str).collect();
+            known.extend(customs.iter());
+            anyhow::anyhow!(
+                "unknown model `{model}`. Known models: {}. Custom models are added under [models.<id>] in config with a `provider`.",
+                known.join(", ")
+            )
+        })?;
+
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    let snapshot = runtime
+        .patch(
+            ConfigDelta(serde_json::json!({"agent": {"model": model}})),
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to persist default model: {e}"))?;
+    println!(
+        "Default model set to {model} ({}) [generation {}]",
+        provider.as_str(),
+        snapshot.generation
+    );
     Ok(())
 }
 
@@ -4596,7 +4680,7 @@ impl LoginProvider {
     }
 
     fn sample_model(self) -> &'static str {
-        meerkat_core::model_profile::catalog::default_model(self.provider())
+        meerkat_models::default_model(self.provider())
             .expect("login provider must have a catalog default model")
     }
 
@@ -12717,8 +12801,10 @@ where
     let session_store = persistence.session_store();
     let paths =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    let base_store: Arc<dyn ConfigStore> =
-        Arc::new(FileConfigStore::new(paths.config_path.clone()));
+    let base_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
+        paths.config_path.clone(),
+        meerkat_models::canonical(),
+    ));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
@@ -12935,11 +13021,11 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Infer provider from the built-in model catalog.
+    /// Infer provider from the canonical model catalog.
     /// Returns None for uncatalogued models; self-hosted aliases resolve
     /// through `Config::model_registry()` in `resolve_cli_provider`.
     pub fn infer_from_model(model: &str) -> Option<Self> {
-        meerkat_core::Provider::infer_from_model(model).and_then(Provider::from_core)
+        meerkat_models::infer_provider(model).and_then(Provider::from_core)
     }
 
     /// Convert to string for storage in session metadata
@@ -12990,16 +13076,20 @@ fn resolve_cli_provider(
     explicit: Option<Provider>,
 ) -> anyhow::Result<Provider> {
     if let Some(provider) = explicit {
-        if let Some(reason) = config.model_registry().ok().and_then(|registry| {
-            registry.provider_override_mismatch_reason(provider.as_core(), model)
-        }) {
+        if let Some(reason) = config
+            .model_registry(meerkat_models::canonical())
+            .ok()
+            .and_then(|registry| {
+                registry.provider_override_mismatch_reason(provider.as_core(), model)
+            })
+        {
             anyhow::bail!(reason);
         }
         return Ok(provider);
     }
 
     if let Some(provider) = config
-        .model_registry()
+        .model_registry(meerkat_models::canonical())
         .ok()
         .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
         .and_then(Provider::from_core)
@@ -13071,9 +13161,13 @@ fn resolve_cli_provider_with_auth_binding(
     }
 
     if let Some(selection) = auth_binding {
-        if let Some(reason) = config.model_registry().ok().and_then(|registry| {
-            registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
-        }) {
+        if let Some(reason) = config
+            .model_registry(meerkat_models::canonical())
+            .ok()
+            .and_then(|registry| {
+                registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
+            })
+        {
             anyhow::bail!(
                 "--auth-binding selects provider '{}', but {reason}",
                 selection.provider.as_str()
@@ -13385,14 +13479,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+            meerkat_models::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13437,14 +13531,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+            meerkat_models::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13476,9 +13570,7 @@ mod tests {
                     .binding
                     .get("anthropic_oauth")
                     .and_then(|binding| binding.default_model.as_deref()),
-                meerkat_core::model_profile::catalog::default_model(
-                    meerkat_core::Provider::Anthropic
-                )
+                meerkat_models::default_model(meerkat_core::Provider::Anthropic)
             );
         }
     }
@@ -15609,7 +15701,7 @@ default_model = "gemma"
         ])
         .expect("run should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 prompt,
                 tools,
@@ -15663,7 +15755,7 @@ default_model = "gemma"
         ])
         .expect("run html flags should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 output,
                 open_in_browser,
@@ -15712,7 +15804,7 @@ default_model = "gemma"
 
         let cli = Cli::try_parse_from(["rkat", "workgraph", "snapshot", "--json"])
             .expect("workgraph snapshot should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::WorkGraph {
                 command: WorkGraphCommands::Snapshot { json, .. },
             } => assert!(json),
@@ -15732,7 +15824,7 @@ default_model = "gemma"
             "1",
         ])
         .expect("workgraph goal-confirm should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::WorkGraph {
                 command: WorkGraphCommands::GoalConfirm { kind, .. },
             } => assert_eq!(kind, "host_confirmation"),
@@ -15795,7 +15887,7 @@ default_model = "gemma"
             "dev",
             "auth command --realm is a config selector and must not override RuntimeScope"
         );
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Auth {
                 command: AuthCommands::Test { binding_id },
             } => assert_eq!(binding_id, "google_oauth"),
@@ -15805,7 +15897,7 @@ default_model = "gemma"
         let cli = Cli::try_parse_from(["rkat", "auth", "test", "google_oauth"])
             .expect("auth test should parse with default config realm");
         assert!(cli.realm.is_none());
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Auth {
                 command: AuthCommands::Test { binding_id },
             } => assert_eq!(binding_id, "google_oauth"),
@@ -15823,7 +15915,7 @@ default_model = "gemma"
         // --keep-alive without --stdin lines
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive"])
             .expect("--keep-alive should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15839,7 +15931,7 @@ default_model = "gemma"
         // --stdin lines without --keep-alive
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--stdin", "lines"])
             .expect("--stdin lines should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15855,7 +15947,7 @@ default_model = "gemma"
         // Both together
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive", "--stdin", "lines"])
             .expect("both flags should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15891,7 +15983,7 @@ default_model = "gemma"
             "ready",
         ])
         .expect("run comms target flags should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 comms_name,
                 comms_listen_tcp,
@@ -15937,7 +16029,7 @@ default_model = "gemma"
     fn test_run_parses_no_comms() {
         let cli = Cli::try_parse_from(["rkat", "run", "--no-comms", "hello"])
             .expect("--no-comms should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run { no_comms, .. } => assert!(no_comms),
             _ => unreachable!(),
         }
@@ -15963,7 +16055,7 @@ default_model = "gemma"
             "legacy/skill",
         ])
         .expect("run --resume should parse");
-        match resume.command {
+        match resume.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 resume,
                 prompt,
@@ -16002,7 +16094,7 @@ default_model = "gemma"
         ])
         .expect("help command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Help {
                 question,
                 prompt,
@@ -16065,6 +16157,37 @@ default_model = "gemma"
         let args = normalize_cli_args(["rkat", "--realm", "test", "hello"].map(Into::into));
         assert_eq!(args[3], std::ffi::OsString::from("run"));
         assert_eq!(args[4], std::ffi::OsString::from("hello"));
+
+        // --default-model is a root flag with a value: bare invocation must
+        // NOT inject `run` (set-and-exit semantics).
+        let args =
+            normalize_cli_args(["rkat", "--default-model", "claude-fable-5"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model", "claude-fable-5"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        // --default-model followed by a bare prompt still gets the `run`
+        // shorthand, with the flag preserved ahead of it.
+        let args = normalize_cli_args(
+            ["rkat", "--default-model", "gpt-5.4", "fix the tests"].map(Into::into),
+        );
+        assert_eq!(args[3], std::ffi::OsString::from("run"));
+        assert_eq!(args[4], std::ffi::OsString::from("fix the tests"));
+
+        // --default-model followed by an explicit subcommand is left intact.
+        let args =
+            normalize_cli_args(["rkat", "--default-model", "gpt-5.4", "doctor"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model", "gpt-5.4", "doctor"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
 
         let args = normalize_cli_args(["rkat", "--isolated", "doctor"].map(Into::into));
         assert_eq!(
@@ -16154,7 +16277,7 @@ default_model = "gemma"
             "rkat", "session", "list", "--limit", "10", "--label", "env=dev",
         ])
         .expect("session list should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Sessions {
                 command: SessionCommands::List { limit, labels, .. },
             } => {
@@ -16169,7 +16292,10 @@ default_model = "gemma"
     fn test_canonical_commands_parse() {
         let session_cli =
             Cli::try_parse_from(["rkat", "session", "list"]).expect("session should parse");
-        match session_cli.command {
+        match session_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Sessions {
                 command: SessionCommands::List { .. },
             } => {}
@@ -16177,7 +16303,10 @@ default_model = "gemma"
         }
 
         let realm_cli = Cli::try_parse_from(["rkat", "realm", "list"]).expect("realm should parse");
-        match realm_cli.command {
+        match realm_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Realms {
                 command: RealmCommands::List,
             } => {}
@@ -16185,7 +16314,10 @@ default_model = "gemma"
         }
 
         let models_cli = Cli::try_parse_from(["rkat", "models"]).expect("models should parse");
-        match models_cli.command {
+        match models_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Models => {}
             _ => unreachable!("expected models command"),
         }
@@ -16402,7 +16534,7 @@ default_model = "gemma"
         let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
             .expect("mob run-flow should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::RunFlow {
@@ -16437,7 +16569,7 @@ default_model = "gemma"
         ])
         .expect("mob pack command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Pack {
@@ -16514,7 +16646,7 @@ default_model = "gemma"
         ])
         .expect("mob deploy command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Deploy {
@@ -16555,7 +16687,7 @@ default_model = "gemma"
         ])
         .expect("mob deploy --surface should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command: MobCommands::Deploy { surface, .. },
             } => {
@@ -16584,7 +16716,7 @@ default_model = "gemma"
             ".",
         ])
         .expect("mcp add should parse");
-        match add.command {
+        match add.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16609,7 +16741,7 @@ default_model = "gemma"
         let remove =
             Cli::try_parse_from(["rkat", "mcp", "remove", "filesystem", "--scope", "project"])
                 .expect("mcp remove should parse");
-        match remove.command {
+        match remove.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command: McpCommands::Remove { name, scope },
             } => {
@@ -16632,7 +16764,10 @@ default_model = "gemma"
             "https://king-be.glean.com/mcp/default",
         ])
         .expect("mcp add name --url URL should parse");
-        match codex_style.command {
+        match codex_style
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16662,7 +16797,10 @@ default_model = "gemma"
             "https://king-be.glean.com/mcp/default",
         ])
         .expect("mcp add --transport http name URL should parse");
-        match claude_style.command {
+        match claude_style
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16684,7 +16822,7 @@ default_model = "gemma"
 
         let run = Cli::try_parse_from(["rkat", "run", "Hello world", "--mcp-auth", "interactive"])
             .expect("run prompt --mcp-auth interactive should parse");
-        match run.command {
+        match run.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 prompt, mcp_auth, ..
             } => {
@@ -16696,7 +16834,7 @@ default_model = "gemma"
 
         let login = Cli::try_parse_from(["rkat", "mcp", "login", "glean", "--scope", "project"])
             .expect("mcp login should parse");
-        match login.command {
+        match login.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command: McpCommands::Login { name, scope },
             } => {
@@ -16914,7 +17052,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob wait-kickoff command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::WaitKickoff {
@@ -16953,7 +17091,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob deploy overrides should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Deploy {
@@ -16987,7 +17125,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob web build command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Web {
@@ -19516,16 +19654,27 @@ capabilities = ["definitely_missing_capability"]
     fn test_resolve_cli_default_agent_model_heals_legacy_builtin_default() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
-        // A legacy builtin default heals to the highest-priority available
-        // provider's configured model. Priority is owned by the catalog seam
-        // (`meerkat_core::model_profile::catalog::provider_priority()` —
-        // anthropic first), so even with a customized OpenAI model the heal
-        // resolves to anthropic, not whichever provider happened to be set.
+        // A legacy builtin default heals through the canonical ladder.
+        // Priority is owned by the catalog seam
+        // (`meerkat_models::provider_priority()` — anthropic first), so even
+        // with a customized OpenAI model the heal resolves to the configured
+        // anthropic override, not whichever provider happened to be set.
+        config.models.anthropic = "custom-anthropic".to_string();
         config.models.openai = "gpt-5.5-custom".to_string();
+
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-anthropic");
+    }
+
+    #[test]
+    fn test_resolve_cli_default_agent_model_heals_to_global_default_without_overrides() {
+        // With no per-provider operator overrides (core leaves them empty),
+        // the heal terminates at the catalog-owned global default.
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
 
         assert_eq!(
             resolve_cli_default_agent_model(&config),
-            config.models.anthropic
+            meerkat_models::global_default_model()
         );
     }
 
@@ -19533,17 +19682,19 @@ capabilities = ["definitely_missing_capability"]
     fn test_resolve_cli_default_agent_model_falls_back_by_best_available_priority() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
+        config.models.openai = "custom-openai".to_string();
+        config.models.gemini = "custom-gemini".to_string();
+
+        // anthropic unset: the next provider in catalog priority order wins.
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-openai");
+
         config.models.openai.clear();
+        assert_eq!(resolve_cli_default_agent_model(&config), "custom-gemini");
 
+        config.models.gemini.clear();
         assert_eq!(
             resolve_cli_default_agent_model(&config),
-            config.models.anthropic
-        );
-
-        config.models.anthropic.clear();
-        assert_eq!(
-            resolve_cli_default_agent_model(&config),
-            config.models.gemini
+            meerkat_models::global_default_model()
         );
     }
 
@@ -19575,7 +19726,8 @@ capabilities = ["definitely_missing_capability"]
 
         assert_eq!(
             resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
-            config.models.anthropic
+            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
+                .expect("anthropic catalog default")
         );
     }
 
@@ -19619,7 +19771,8 @@ capabilities = ["definitely_missing_capability"]
 
         assert_eq!(
             resolve_cli_effective_model(&config, None, None, Some(&selection)),
-            config.models.gemini
+            meerkat_models::default_model(meerkat_core::Provider::Gemini)
+                .expect("gemini catalog default")
         );
     }
 
@@ -20191,6 +20344,68 @@ supports_reasoning = true
         assert_eq!(matches[1].state_root, state_root);
         assert_eq!(matches[0].session_id, sid);
         assert_eq!(matches[1].session_id, sid);
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_persists_catalog_model_via_scope_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        handle_set_default_model("claude-fable-5", &scope)
+            .await
+            .expect("catalog model persists");
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(config.agent.model, "claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_honors_configured_custom_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        // Register a custom model first (provider owned by ModelRegistry).
+        handle_config_patch(
+            None,
+            Some(
+                serde_json::json!({
+                    "models": { "my-local-llm": { "provider": "openai" } }
+                })
+                .to_string(),
+            ),
+            None,
+            &scope,
+        )
+        .await
+        .expect("register custom model");
+
+        handle_set_default_model("my-local-llm", &scope)
+            .await
+            .expect("custom model persists");
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(config.agent.model, "my-local-llm");
+    }
+
+    #[tokio::test]
+    async fn test_set_default_model_rejects_unknown_model_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(dir.path().to_path_buf());
+
+        let error = handle_set_default_model("not-a-model", &scope)
+            .await
+            .expect_err("unknown model must fail closed");
+        assert!(
+            error.to_string().contains("unknown model `not-a-model`"),
+            "error names the rejected model: {error}"
+        );
+        assert!(
+            error.to_string().contains("Known models:"),
+            "error lists known models: {error}"
+        );
+
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_ne!(config.agent.model, "not-a-model");
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {

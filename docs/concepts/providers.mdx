@@ -191,7 +191,7 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
 
 ## Model catalog
 
-Meerkat ships a curated built-in model catalog in `meerkat_core::model_profile` and merges it with any configured self-hosted aliases into one effective runtime registry used for capability detection, provider resolution, and catalog responses.
+Meerkat ships a curated built-in model catalog in the `meerkat-models` crate (`meerkat-core` owns only the vocabulary types and `ModelCatalog` mechanics) and merges it with any configured self-hosted aliases into one effective runtime registry used for capability detection, provider resolution, and catalog responses.
 
 Query the catalog programmatically from any surface:
 

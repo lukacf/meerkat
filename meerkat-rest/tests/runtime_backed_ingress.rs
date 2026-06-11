@@ -83,7 +83,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
 
     let config = Config::default();
-    let config_store = MemoryConfigStore::new(config.clone());
+    let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -180,7 +180,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         .body(Body::from(
             serde_json::to_vec(&json!({
                 "prompt": "say ok",
-                "model": config.agent.model,
+                "model": meerkat::resolve_create_session_default_model(&config),
                 "max_tokens": config.agent.max_tokens_per_turn
             }))
             .expect("serialize payload"),

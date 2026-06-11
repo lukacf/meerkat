@@ -2,12 +2,14 @@
 # This file is used to bootstrap ~/.rkat/config.toml when missing.
 
 [agent]
-model = "gpt-5.5"
+# No model is pinned here: when `agent.model` is empty, surfaces resolve the
+# default through the injected model catalog (meerkat-models) — per-provider
+# `[models]` overrides first, then the catalog's global default.
 max_tokens_per_turn = 16384
 budget_warning_threshold = 0.8
 
-# Model defaults are sourced from the meerkat-core model_profile catalog.
-# Per-provider overrides can still be set in user config.
+# Model defaults are sourced from the meerkat-models catalog (core stays
+# provider-free). Per-provider overrides can still be set in user config.
 max_tokens = 8192
 
 [shell]

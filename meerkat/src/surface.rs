@@ -299,7 +299,7 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
 pub fn build_models_catalog_response(
     config: &meerkat_core::Config,
 ) -> Result<meerkat_contracts::ModelsCatalogResponse, meerkat_core::ConfigError> {
-    let registry = config.model_registry()?;
+    let registry = config.model_registry(meerkat_models::canonical())?;
     let providers = registry
         .provider_defaults()
         .map(|(provider, default_model_id)| {

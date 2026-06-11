@@ -412,7 +412,7 @@ async fn load_config_async(
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
-    if let Err(err) = config.validate() {
+    if let Err(err) = config.validate(meerkat_models::canonical()) {
         tracing::warn!("Invalid realm config; using defaults: {}", err);
         return Config::default();
     }
@@ -447,7 +447,10 @@ fn tagged_realm_config_store(
     instance_id: Option<&str>,
 ) -> Arc<dyn ConfigStore> {
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id.as_str());
-    let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(paths.config_path.clone()));
+    let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
+        paths.config_path.clone(),
+        meerkat_models::canonical(),
+    ));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base,
         meerkat_core::ConfigStoreMetadata {
@@ -2290,7 +2293,7 @@ fn config_envelope_value(
 
 fn validate_config_for_commit(config: &Config) -> Result<(), ToolCallError> {
     config
-        .validate()
+        .validate(meerkat_models::canonical())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
     config
         .skills
@@ -3240,7 +3243,7 @@ async fn handle_meerkat_run(
         .model
         .as_ref()
         .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| meerkat::resolve_create_session_default_model(&config));
 
     // Build callback tools supplied by the MCP client. The per-session live
     // MCP router is created after runtime bindings are prepared so its surface

@@ -1941,8 +1941,9 @@ mod tests {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let config_store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(meerkat_core::MemoryConfigStore::new(config.clone()));
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(config.clone(), meerkat_models::canonical()),
+        );
         let mut runtime = SessionRuntime::new(
             factory,
             config,
@@ -1967,8 +1968,9 @@ mod tests {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let config_store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(meerkat_core::MemoryConfigStore::new(config.clone()));
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(config.clone(), meerkat_models::canonical()),
+        );
         let mut runtime = SessionRuntime::new(
             factory,
             config,

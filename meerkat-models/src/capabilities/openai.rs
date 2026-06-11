@@ -4,9 +4,9 @@
 //! `developers.openai.com/api/docs/models/*`, `developers.openai.com/api/docs/guides/reasoning`,
 //! `openai.com/index/*`, and the Codex model index.
 
-use super::{EffortLevel, ModelCapabilities, ThinkingSupport};
-use crate::Provider;
-use crate::model_profile::catalog::ModelTier;
+use meerkat_core::Provider;
+use meerkat_core::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
+use meerkat_core::model_profile::catalog::ModelTier;
 
 /// Reasoning-effort levels accepted by recent GPT-5.x models (5.4, 5.5, 5.5-pro).
 ///

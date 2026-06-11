@@ -5,7 +5,7 @@ use crate::config::{
     Config, ConfigError, CustomModelConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedTransport,
 };
-use crate::model_profile::{ModelProfile, catalog::ModelTier};
+use crate::model_profile::{ModelCatalog, ModelProfile, catalog::ModelTier};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -124,8 +124,10 @@ impl fmt::Display for UnsupportedModelCapabilityEvidence {
 }
 
 impl ModelRegistry {
-    pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
-        Self::from_config_with_models(config, &BTreeMap::new())
+    /// Build the effective registry from a config snapshot and an explicitly
+    /// injected model catalog (canonically `meerkat_models::canonical()`).
+    pub fn from_config(config: &Config, catalog: ModelCatalog) -> Result<Self, ConfigError> {
+        Self::from_config_with_models(config, &BTreeMap::new(), catalog)
     }
 
     /// Build the effective registry from a config snapshot plus caller-scoped
@@ -137,32 +139,32 @@ impl ModelRegistry {
     pub fn from_config_with_models(
         config: &Config,
         extra_models: &BTreeMap<String, CustomModelConfig>,
+        catalog: ModelCatalog,
     ) -> Result<Self, ConfigError> {
         let mut entries = BTreeMap::new();
         let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
-        for &provider in crate::model_profile::catalog::catalog_providers() {
-            let default_model =
-                crate::model_profile::catalog::default_model(provider).ok_or_else(|| {
-                    ConfigError::InternalError(format!(
-                        "missing built-in default for '{}'",
-                        provider.as_str()
-                    ))
-                })?;
+        for &provider in catalog.providers {
+            let default_model = catalog.default_model(provider).ok_or_else(|| {
+                ConfigError::InternalError(format!(
+                    "missing catalog default for '{}'",
+                    provider.as_str()
+                ))
+            })?;
             defaults.insert(provider, default_model.to_string());
 
-            for entry in crate::model_profile::catalog::catalog()
+            for entry in catalog
+                .entries
                 .iter()
                 .filter(|entry| entry.provider == provider.as_str())
             {
-                let profile =
-                    crate::model_profile::profile_for(provider, entry.id).ok_or_else(|| {
-                        ConfigError::InternalError(format!(
-                            "missing built-in profile for {}:{}",
-                            entry.provider, entry.id
-                        ))
-                    })?;
+                let profile = catalog.profile_for(provider, entry.id).ok_or_else(|| {
+                    ConfigError::InternalError(format!(
+                        "missing catalog profile for {}:{}",
+                        entry.provider, entry.id
+                    ))
+                })?;
                 insert_unique(
                     &mut entries,
                     &mut profiles,
@@ -200,22 +202,9 @@ impl ModelRegistry {
     /// Returns model projection metadata by id.
     ///
     /// This model-only lookup intentionally does not expose `ModelProfile` or
-    /// capability fields. Capability decisions must use typed provider-aware
-    /// lookup through [`ModelRegistry::profile_for_provider`].
-    ///
-    /// ```compile_fail
-    /// let registry = meerkat_core::Config::default().model_registry().unwrap();
-    /// let entry = registry.entry("gemini-3.5-flash").unwrap();
-    /// let _inline_video = entry.profile.inline_video;
-    /// ```
-    ///
-    /// ```
-    /// let registry = meerkat_core::Config::default().model_registry().unwrap();
-    /// let profile = registry
-    ///     .profile_for_provider(meerkat_core::Provider::Gemini, "gemini-3.5-flash")
-    ///     .unwrap();
-    /// assert!(profile.inline_video);
-    /// ```
+    /// capability fields (`ModelRegistryEntry` has no profile accessor).
+    /// Capability decisions must use typed provider-aware lookup through
+    /// [`ModelRegistry::profile_for_provider`].
     pub fn entry(&self, model_id: &str) -> Option<&ModelRegistryEntry> {
         self.entries.get(model_id)
     }
@@ -495,6 +484,13 @@ mod tests {
     use crate::config::{
         SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
     };
+    use crate::model_profile::test_catalog::{
+        ANTHROPIC_MODEL, OPENAI_MODEL, TEST_CATALOG, VIDEO_MODEL,
+    };
+
+    fn test_catalog() -> ModelCatalog {
+        *TEST_CATALOG
+    }
 
     fn config_with_self_hosted() -> Config {
         let mut config = Config::default();
@@ -532,7 +528,7 @@ mod tests {
     #[test]
     fn merges_self_hosted_models_into_registry() {
         let config = config_with_self_hosted();
-        let registry = match ModelRegistry::from_config(&config) {
+        let registry = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
@@ -598,7 +594,7 @@ mod tests {
         insert_second_self_hosted_model(&mut config);
         // No `default_model` declared: the default must not be silently chosen
         // by `BTreeMap` key order. Fail closed.
-        let err = match ModelRegistry::from_config(&config) {
+        let err = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(_) => panic!("multi-model self-hosted config without explicit default should fail"),
             Err(err) => err,
         };
@@ -615,7 +611,7 @@ mod tests {
         // Declare the lexicographically-larger id as the default to prove the
         // choice is declared, not a `.min()` key-order artifact.
         config.self_hosted.default_model = Some("gemma-4-9b".to_string());
-        let registry = match ModelRegistry::from_config(&config) {
+        let registry = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
@@ -630,7 +626,7 @@ mod tests {
         let mut config = config_with_self_hosted();
         insert_second_self_hosted_model(&mut config);
         config.self_hosted.default_model = Some("does-not-exist".to_string());
-        let err = match ModelRegistry::from_config(&config) {
+        let err = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(_) => panic!("default_model referencing an absent model should fail"),
             Err(err) => err,
         };
@@ -664,7 +660,7 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        let err = match ModelRegistry::from_config(&config) {
+        let err = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(_) => panic!("unknown server should fail"),
             Err(err) => err,
         };
@@ -683,7 +679,7 @@ mod tests {
             },
         );
         config.self_hosted.models.insert(
-            "gpt-5.4".to_string(),
+            OPENAI_MODEL.to_string(),
             SelfHostedModelConfig {
                 server: "local".to_string(),
                 remote_model: "override".to_string(),
@@ -702,7 +698,7 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        let err = match ModelRegistry::from_config(&config) {
+        let err = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(_) => panic!("duplicate model id should fail"),
             Err(err) => err,
         };
@@ -725,17 +721,17 @@ mod tests {
     fn custom_models_merge_into_registry_with_provider_inference() {
         let mut config = Config::default();
         config.models.custom.insert(
-            "claude-internal-preview".to_string(),
+            "custom-internal-preview".to_string(),
             custom_model(Provider::Anthropic),
         );
-        let registry = match ModelRegistry::from_config(&config) {
+        let registry = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
         // One definition feeds provider inference...
         let entry = registry
-            .entry("claude-internal-preview")
+            .entry("custom-internal-preview")
             .unwrap_or_else(|| panic!("custom entry must be registered"));
         assert_eq!(entry.provider, Provider::Anthropic);
         assert_eq!(entry.display_name, "Claude Custom");
@@ -744,7 +740,7 @@ mod tests {
         assert_eq!(entry.max_output_tokens, Some(16_384));
         // ...capability gates and call timeouts via the typed profile owner.
         let profile = registry
-            .profile_for_provider(Provider::Anthropic, "claude-internal-preview")
+            .profile_for_provider(Provider::Anthropic, "custom-internal-preview")
             .unwrap_or_else(|| panic!("custom profile must resolve for declared provider"));
         assert!(profile.vision);
         assert!(profile.image_input);
@@ -755,7 +751,7 @@ mod tests {
         assert_eq!(profile.call_timeout_secs, Some(900));
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "claude-internal-preview")
+                .profile_for_provider(Provider::OpenAI, "custom-internal-preview")
                 .is_none(),
             "custom capability truth must stay scoped to the declared provider"
         );
@@ -768,7 +764,11 @@ mod tests {
             "mob-defined-model".to_string(),
             custom_model(Provider::Gemini),
         );
-        let registry = match ModelRegistry::from_config_with_models(&Config::default(), &extra) {
+        let registry = match ModelRegistry::from_config_with_models(
+            &Config::default(),
+            &extra,
+            test_catalog(),
+        ) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
@@ -786,8 +786,8 @@ mod tests {
         config
             .models
             .custom
-            .insert("gpt-5.4".to_string(), custom_model(Provider::OpenAI));
-        let err = match ModelRegistry::from_config(&config) {
+            .insert(OPENAI_MODEL.to_string(), custom_model(Provider::OpenAI));
+        let err = match ModelRegistry::from_config(&config, test_catalog()) {
             Ok(_) => panic!("custom entry shadowing a catalog id must fail"),
             Err(err) => err,
         };
@@ -802,7 +802,7 @@ mod tests {
                 .models
                 .custom
                 .insert("custom-x".to_string(), custom_model(provider));
-            let err = match ModelRegistry::from_config(&config) {
+            let err = match ModelRegistry::from_config(&config, test_catalog()) {
                 Ok(_) => panic!("non-concrete custom model provider must fail closed"),
                 Err(err) => err,
             };
@@ -818,9 +818,9 @@ mod tests {
         // `[models.<id>]` parses the provider into the typed closed vocabulary.
         let parsed: Result<crate::config::ModelDefaults, _> = toml::from_str(
             r#"
-anthropic = "claude-opus-4-8"
+anthropic = "custom-anthropic-default"
 
-[claude-internal-preview]
+[custom-internal-preview]
 provider = "anthropic"
 context_window = 500000
 "#,
@@ -832,14 +832,14 @@ context_window = 500000
         assert_eq!(
             defaults
                 .custom
-                .get("claude-internal-preview")
+                .get("custom-internal-preview")
                 .map(|model| model.provider),
             Some(Provider::Anthropic)
         );
 
         let rejected: Result<crate::config::ModelDefaults, _> = toml::from_str(
             r#"
-[claude-internal-preview]
+[custom-internal-preview]
 provider = "not-a-provider"
 "#,
         );
@@ -851,48 +851,48 @@ provider = "not-a-provider"
 
     #[test]
     fn uncatalogued_models_do_not_use_provider_prefix_inference() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "gpt-unknown-preview")
+                .profile_for_provider(Provider::OpenAI, "test-openai-unknown-preview")
                 .is_none()
         );
         assert!(
             registry
-                .profile_for_provider(Provider::Anthropic, "claude-unknown-preview")
+                .profile_for_provider(Provider::Anthropic, "test-anthropic-unknown-preview")
                 .is_none()
         );
         assert!(
             registry
-                .profile_for_provider(Provider::Gemini, "gemini-unknown-preview")
+                .profile_for_provider(Provider::Gemini, "test-gemini-unknown-preview")
                 .is_none()
         );
     }
 
     #[test]
     fn provider_aware_profile_lookup_requires_matching_provider() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let profile = registry.profile_for_provider(Provider::OpenAI, "gpt-5.4");
+        let profile = registry.profile_for_provider(Provider::OpenAI, OPENAI_MODEL);
         assert_eq!(
             profile.and_then(|profile| profile.call_timeout_secs),
             Some(600)
         );
         assert!(
             registry
-                .profile_for_provider(Provider::Anthropic, "gpt-5.4")
+                .profile_for_provider(Provider::Anthropic, OPENAI_MODEL)
                 .is_none(),
             "provider-aware lookup must not share OpenAI defaults with Anthropic"
         );
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "gemini-3.5-flash")
+                .profile_for_provider(Provider::OpenAI, VIDEO_MODEL)
                 .is_none(),
             "provider-aware lookup must not let provider strings select another provider's capabilities"
         );
@@ -900,31 +900,31 @@ provider = "not-a-provider"
 
     #[test]
     fn model_only_entries_are_projection_metadata_not_capability_authority() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let entry = match registry.entry("gemini-3.5-flash") {
+        let entry = match registry.entry(VIDEO_MODEL) {
             Some(entry) => entry,
             None => panic!("catalog entry must exist"),
         };
         assert_eq!(entry.provider, Provider::Gemini);
-        assert_eq!(entry.id, "gemini-3.5-flash");
+        assert_eq!(entry.id, VIDEO_MODEL);
         let rendered = format!("{entry:?}");
         assert!(
             !rendered.contains("inline_video") && !rendered.contains("supports_temperature"),
             "model-only projection entry must not expose capability fields: {rendered}"
         );
 
-        let profile = match registry.profile_for_provider(Provider::Gemini, "gemini-3.5-flash") {
+        let profile = match registry.profile_for_provider(Provider::Gemini, VIDEO_MODEL) {
             Some(profile) => profile,
             None => panic!("typed provider-aware capability lookup should resolve"),
         };
         assert!(profile.inline_video);
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "gemini-3.5-flash")
+                .profile_for_provider(Provider::OpenAI, VIDEO_MODEL)
                 .is_none(),
             "display/catalog lookup must not let another typed provider read capability truth"
         );
@@ -932,26 +932,26 @@ provider = "not-a-provider"
 
     #[test]
     fn provider_aware_profile_lookup_fails_closed_for_unknown_pairs() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
         assert!(
             registry
-                .profile_for_provider(Provider::Other, "gpt-5.4")
+                .profile_for_provider(Provider::Other, OPENAI_MODEL)
                 .is_none(),
             "unknown typed provider must not receive known model defaults"
         );
         assert!(
             registry
-                .profile_for_provider(Provider::Other, "uncatalogued-gpt-compatible")
+                .profile_for_provider(Provider::Other, "uncatalogued-compatible")
                 .is_none(),
             "unknown provider/model pairs must fail closed"
         );
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "uncatalogued-gpt-compatible")
+                .profile_for_provider(Provider::OpenAI, "uncatalogued-compatible")
                 .is_none(),
             "known provider plus uncatalogued model must fail closed"
         );
@@ -959,26 +959,23 @@ provider = "not-a-provider"
 
     #[test]
     fn inline_video_capability_requires_typed_provider_owner() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        if let Err(err) =
-            registry.require_inline_video_for_provider(Provider::Gemini, "gemini-3.5-flash")
+        if let Err(err) = registry.require_inline_video_for_provider(Provider::Gemini, VIDEO_MODEL)
         {
             panic!("Gemini catalog owner should authorize inline video: {err}");
         }
 
-        let err = match registry
-            .require_inline_video_for_provider(Provider::OpenAI, "gemini-3.5-flash")
-        {
+        let err = match registry.require_inline_video_for_provider(Provider::OpenAI, VIDEO_MODEL) {
             Ok(()) => panic!("same model name under another provider must fail closed"),
             Err(err) => err,
         };
         assert_eq!(err.capability, ModelCapability::InlineVideo);
         assert_eq!(err.provider, Provider::OpenAI);
-        assert_eq!(err.model, "gemini-3.5-flash");
+        assert_eq!(err.model, VIDEO_MODEL);
         assert_eq!(
             err.reason,
             UnsupportedModelCapabilityReason::ProviderModelProfileMissing
@@ -987,16 +984,16 @@ provider = "not-a-provider"
 
     #[test]
     fn inline_video_capability_evidence_distinguishes_disabled_and_unknown() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let disabled = match registry.require_inline_video_for_provider(Provider::OpenAI, "gpt-5.4")
-        {
-            Ok(()) => panic!("known OpenAI model has catalog-owned inline video disabled"),
-            Err(err) => err,
-        };
+        let disabled =
+            match registry.require_inline_video_for_provider(Provider::OpenAI, OPENAI_MODEL) {
+                Ok(()) => panic!("known OpenAI model has catalog-owned inline video disabled"),
+                Err(err) => err,
+            };
         assert_eq!(
             disabled.reason,
             UnsupportedModelCapabilityReason::CapabilityDisabled
@@ -1025,32 +1022,46 @@ provider = "not-a-provider"
 
     #[test]
     fn provider_override_mismatch_reason_reports_catalog_owner_contradictions() {
-        let registry = match ModelRegistry::from_config(&Config::default()) {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
         let reason =
-            match registry.provider_override_mismatch_reason(Provider::Anthropic, "gpt-5.4") {
+            match registry.provider_override_mismatch_reason(Provider::Anthropic, OPENAI_MODEL) {
                 Some(reason) => reason,
                 None => panic!("wrong-provider override for a catalog model should be rejected"),
             };
-        assert!(reason.contains("model 'gpt-5.4'"));
+        assert!(reason.contains(&format!("model '{OPENAI_MODEL}'")));
         assert!(reason.contains("registered for provider 'openai'"));
         assert!(reason.contains("not provider 'anthropic'"));
         assert!(reason.contains("explicit provider overrides"));
 
         assert!(
             registry
-                .provider_override_mismatch_reason(Provider::OpenAI, "gpt-5.4")
+                .provider_override_mismatch_reason(Provider::OpenAI, OPENAI_MODEL)
                 .is_none(),
             "matching provider override should remain valid"
         );
         assert!(
             registry
-                .provider_override_mismatch_reason(Provider::OpenAI, "uncatalogued-gpt-compatible")
+                .provider_override_mismatch_reason(Provider::OpenAI, "uncatalogued-compatible")
                 .is_none(),
             "uncatalogued models have no catalog owner to contradict"
         );
+    }
+
+    #[test]
+    fn registry_defaults_come_from_injected_catalog() {
+        let registry = match ModelRegistry::from_config(&Config::default(), test_catalog()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        assert_eq!(
+            registry.default_model(Provider::Anthropic),
+            Some(ANTHROPIC_MODEL)
+        );
+        assert_eq!(registry.default_model(Provider::OpenAI), Some(OPENAI_MODEL));
+        assert_eq!(registry.default_model(Provider::Gemini), Some(VIDEO_MODEL));
     }
 }

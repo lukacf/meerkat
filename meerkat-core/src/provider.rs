@@ -51,16 +51,6 @@ impl Provider {
         }
     }
 
-    /// Infer provider from the built-in model catalog.
-    /// Returns `None` for uncatalogued models; callers that admit custom
-    /// models must resolve them through `ModelRegistry`, not name prefixes.
-    pub fn infer_from_model(model: &str) -> Option<Self> {
-        crate::model_profile::catalog::catalog()
-            .iter()
-            .find(|entry| entry.id == model)
-            .and_then(|entry| Self::parse_strict(entry.provider))
-    }
-
     /// Return the canonical string representation.
     pub fn as_str(&self) -> &'static str {
         match self {

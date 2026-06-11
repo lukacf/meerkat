@@ -131,7 +131,7 @@ example, `meerkat-schedule` owns the Schedule policy declaration,
 | `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
 | `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2` / Codex | Yes |
 
-These fields are set in `meerkat-core/src/model_profile/**` and exposed via `ModelProfile`. They control:
+These fields are set in `meerkat-models/src/capabilities/**` (the types live in `meerkat-core/src/model_profile/**`) and exposed via `ModelProfile`. They control:
 
 - **`view_image` tool visibility** -- hidden via the capability-base `ToolFilter` (`capability_base_filter_for_image_tool_results`) when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.

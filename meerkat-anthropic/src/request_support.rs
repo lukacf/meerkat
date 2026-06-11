@@ -1,19 +1,19 @@
-//! Anthropic catalog-backed request helpers.
+//! Anthropic catalog-backed request-shaping helpers.
 //!
-//! Capability facts for Anthropic models live in the typed
-//! [`crate::model_profile::capabilities`] catalog. This module only exposes
-//! request-shaping helpers for provider clients; uncatalogued model IDs do not
+//! Capability facts for Anthropic models live in the typed capability
+//! catalog (`meerkat-models`). This module only exposes request-shaping
+//! helpers for the Anthropic client; uncatalogued model IDs do not
 //! synthesize semantic capabilities from name prefixes.
 
-use crate::Provider;
-use crate::model_profile::capabilities::capabilities_for;
+use meerkat_core::Provider;
 
 /// Whether the model accepts a non-default `temperature`.
 ///
 /// Catalog rows are authoritative. Unknown model IDs return `false` so callers
 /// do not send optional provider parameters based on model-name folklore.
-pub fn supports_temperature(model: &str) -> bool {
-    capabilities_for(Provider::Anthropic, model).is_some_and(|caps| caps.supports_temperature)
+pub(crate) fn supports_temperature(model: &str) -> bool {
+    meerkat_models::capabilities_for(Provider::Anthropic, model)
+        .is_some_and(|caps| caps.supports_temperature)
 }
 
 #[cfg(test)]

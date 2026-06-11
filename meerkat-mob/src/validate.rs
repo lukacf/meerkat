@@ -195,7 +195,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
         // delivery with "Cannot infer provider from model".
         let model_resolvable = profile.provider.is_some()
             || def.models.contains_key(&profile.model)
-            || meerkat_core::model_profile::catalog::catalog()
+            || meerkat_models::catalog()
                 .iter()
                 .any(|entry| entry.id == profile.model);
         if !model_resolvable {
@@ -214,8 +214,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
         }
 
         if let Some(provider) = profile.image_generation_provider
-            && meerkat_core::model_profile::catalog::default_image_generation_model(provider)
-                .is_none()
+            && meerkat_models::default_image_generation_model(provider).is_none()
         {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::InvalidImageGenerationProvider,
@@ -255,7 +254,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     // Mob-level image generation default must point at a provider that can
     // actually generate images.
     if let Some(provider) = def.image_generation_provider
-        && meerkat_core::model_profile::catalog::default_image_generation_model(provider).is_none()
+        && meerkat_models::default_image_generation_model(provider).is_none()
     {
         diagnostics.push(Diagnostic {
             code: DiagnosticCode::InvalidImageGenerationProvider,

@@ -147,8 +147,10 @@ fn spawn_test_server() -> (
         meerkat::PersistenceBundle::new(store, None, blob_store),
         meerkat_rpc::router::NotificationSink::noop(),
     );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(Config::default()));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+        Config::default(),
+        meerkat_models::canonical(),
+    ));
     runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
     runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
@@ -190,8 +192,10 @@ fn spawn_test_server_with_client(
         meerkat::PersistenceBundle::new(store, None, blob_store),
         meerkat_rpc::router::NotificationSink::noop(),
     );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(Config::default()));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+        Config::default(),
+        meerkat_models::canonical(),
+    ));
     runtime.set_default_llm_client(Some(client));
     runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
@@ -1190,10 +1194,11 @@ async fn in_session_model_switch_via_turn_start() {
         first_text.contains("Hello from mock"),
         "First turn should produce mock text, got: {first_text}"
     );
-    // Default model is the best available global default; verify it.
+    // Default model is the catalog-owned global default; verify it.
+    let expected_default = format!("model={}", meerkat_models::global_default_model());
     assert!(
-        first_text.contains("model=gpt-5.5"),
-        "First turn should use default model (gpt-5.5), got: {first_text}"
+        first_text.contains(&expected_default),
+        "First turn should use the catalog global default model, got: {first_text}"
     );
 
     // 2. turn/start with model override on the materialized session.

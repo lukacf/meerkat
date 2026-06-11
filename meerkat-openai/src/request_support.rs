@@ -1,27 +1,28 @@
-//! OpenAI catalog-backed request helpers.
+//! OpenAI catalog-backed request-shaping helpers.
 //!
-//! Capability facts for OpenAI models live in the typed
-//! [`crate::model_profile::capabilities`] catalog. This module only exposes
-//! request-shaping helpers for provider clients; uncatalogued model IDs do not
-//! synthesize semantic capabilities from name prefixes or substrings.
+//! Capability facts for OpenAI models live in the typed capability catalog
+//! (`meerkat-models`). This module only exposes request-shaping helpers for
+//! the OpenAI clients; uncatalogued model IDs do not synthesize semantic
+//! capabilities from name prefixes or substrings.
 
-use crate::Provider;
-use crate::model_profile::capabilities::capabilities_for;
+use meerkat_core::Provider;
 
 /// Whether the model accepts a non-default `temperature`.
 ///
 /// Catalog rows are authoritative. Unknown model IDs return `false` so callers
 /// do not send optional provider parameters based on model-name folklore.
-pub fn supports_temperature(model: &str) -> bool {
-    capabilities_for(Provider::OpenAI, model).is_some_and(|caps| caps.supports_temperature)
+pub(crate) fn supports_temperature(model: &str) -> bool {
+    meerkat_models::capabilities_for(Provider::OpenAI, model)
+        .is_some_and(|caps| caps.supports_temperature)
 }
 
 /// Whether the model supports explicit reasoning effort control.
 ///
 /// Catalog rows are authoritative. Unknown model IDs return `false` so callers
 /// do not send reasoning controls based on model-name folklore.
-pub fn supports_reasoning(model: &str) -> bool {
-    capabilities_for(Provider::OpenAI, model).is_some_and(|caps| caps.supports_reasoning)
+pub(crate) fn supports_reasoning(model: &str) -> bool {
+    meerkat_models::capabilities_for(Provider::OpenAI, model)
+        .is_some_and(|caps| caps.supports_reasoning)
 }
 
 #[cfg(test)]

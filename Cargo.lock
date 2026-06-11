@@ -2836,6 +2836,7 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-memory",
+ "meerkat-models",
  "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
@@ -2877,6 +2878,7 @@ dependencies = [
  "meerkat-auth-core",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-models",
  "meerkat-runtime",
  "reqwest",
  "serde",
@@ -2953,6 +2955,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-llm-core",
+ "meerkat-models",
  "meerkat-openai",
  "reqwest",
  "schemars 1.2.1",
@@ -3065,6 +3068,7 @@ dependencies = [
  "meerkat-auth-core",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-models",
  "meerkat-runtime",
  "reqwest",
  "serde",
@@ -3112,6 +3116,7 @@ dependencies = [
  "meerkat-machine-schema",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-models",
  "meerkat-providers",
  "meerkat-rpc",
  "meerkat-runtime",
@@ -3281,6 +3286,7 @@ dependencies = [
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
@@ -3333,6 +3339,7 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-store",
@@ -3399,6 +3406,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-models"
+version = "0.7.0"
+dependencies = [
+ "meerkat-core",
+ "serde_json",
+]
+
+[[package]]
 name = "meerkat-openai"
 version = "0.7.0"
 dependencies = [
@@ -3414,6 +3429,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-models",
  "meerkat-runtime",
  "oai-rt-rs",
  "reqwest",
@@ -3456,6 +3472,7 @@ dependencies = [
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-models",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
@@ -3493,6 +3510,7 @@ dependencies = [
  "meerkat-live",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-models",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
@@ -3570,6 +3588,7 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-skills",
  "meerkat-store",
@@ -3684,6 +3703,7 @@ dependencies = [
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
+ "meerkat-models",
  "meerkat-providers",
  "meerkat-session",
  "meerkat-store",
@@ -4788,6 +4808,7 @@ dependencies = [
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
+ "meerkat-models",
  "meerkat-openai",
  "meerkat-providers",
  "meerkat-rpc",

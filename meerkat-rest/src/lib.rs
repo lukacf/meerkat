@@ -412,8 +412,10 @@ impl AppState {
             sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
             sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
         };
-        let base_config_store: Arc<dyn ConfigStore> =
-            Arc::new(FileConfigStore::new(realm_paths.config_path.clone()));
+        let base_config_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
+            realm_paths.config_path.clone(),
+            meerkat_models::canonical(),
+        ));
         let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
             base_config_store,
             meerkat_core::ConfigStoreMetadata {
@@ -442,7 +444,7 @@ impl AppState {
         if let Err(err) = config.apply_env_overrides() {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
-        if let Err(err) = config.validate() {
+        if let Err(err) = config.validate(meerkat_models::canonical()) {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid config: {err}"),
@@ -1003,7 +1005,7 @@ async fn resolve_validation_identity(
     let snapshot = config_runtime.get().await.ok().map(|state| state.config);
     let registry = snapshot
         .as_ref()
-        .and_then(|config| config.model_registry().ok());
+        .and_then(|config| config.model_registry(meerkat_models::canonical()).ok());
     let entry = registry.as_ref().and_then(|registry| registry.entry(model));
     if let (Some(registry), Some(provider)) = (registry.as_ref(), provider)
         && let Some(reason) = registry.provider_override_mismatch_reason(provider, model)
@@ -1101,7 +1103,7 @@ async fn require_inline_video_support(
     let Ok(snapshot) = config_runtime.get().await else {
         return Err(inline_video_registry_unavailable_evidence(identity));
     };
-    let Ok(registry) = snapshot.config.model_registry() else {
+    let Ok(registry) = snapshot.config.model_registry(meerkat_models::canonical()) else {
         return Err(inline_video_registry_unavailable_evidence(identity));
     };
 
@@ -3363,7 +3365,7 @@ fn validate_config_for_commit_with_roots(
     _user_root: Option<&std::path::Path>,
 ) -> Result<(), ApiError> {
     config
-        .validate()
+        .validate(meerkat_models::canonical())
         .map_err(|e| ApiError::BadRequest(format!("Invalid config: {e}")))?;
     config
         .skills
@@ -9063,8 +9065,10 @@ mod tests {
     #[tokio::test]
     async fn validate_prompt_video_input_accepts_self_hosted_alias_from_runtime_registry() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(self_hosted_test_config(true)));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            self_hosted_test_config(true),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
 
@@ -9081,8 +9085,10 @@ mod tests {
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_for_wrong_provider_known_model() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
         let identity = validation_identity(Provider::Anthropic, "gemini-3.5-flash");
@@ -9109,8 +9115,10 @@ mod tests {
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_for_unknown_provider_model_pair() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
         let identity = validation_identity(Provider::Other, "uncatalogued-video-model");
@@ -9133,8 +9141,10 @@ mod tests {
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_without_typed_provider_authority() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
         let identity = validation_identity(Provider::Other, "gemini-3.5-flash");
@@ -9159,8 +9169,10 @@ mod tests {
     #[tokio::test]
     async fn validation_identity_rejects_explicit_provider_that_contradicts_catalog_owner() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
 
@@ -9180,8 +9192,10 @@ mod tests {
     #[tokio::test]
     async fn validation_identity_rejects_uncatalogued_model_without_provider_authority() {
         let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
 

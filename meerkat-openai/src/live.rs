@@ -960,7 +960,7 @@ fn openai_audio_response_config(voice: &Voice) -> ResponseConfig {
 /// onto the canonical realtime model's catalog companion rather than
 /// synthesizing a literal from a model-name prefix.
 fn openai_realtime_transcription_model_for(identity: &meerkat_core::SessionLlmIdentity) -> String {
-    meerkat_core::model_profile::capabilities::capabilities_for(identity.provider, &identity.model)
+    meerkat_models::capabilities_for(identity.provider, &identity.model)
         .and_then(|caps| caps.transcription_companion_model)
         .or_else(openai_canonical_realtime_transcription_companion)
         .unwrap_or_default()
@@ -971,11 +971,8 @@ fn openai_realtime_transcription_model_for(identity: &meerkat_core::SessionLlmId
 /// identity-free policy default and as the fall-closed companion when a model
 /// has no row of its own.
 fn openai_canonical_realtime_transcription_companion() -> Option<&'static str> {
-    meerkat_core::model_profile::capabilities::capabilities_for(
-        Provider::OpenAI,
-        OPENAI_CANONICAL_REALTIME_MODEL,
-    )
-    .and_then(|caps| caps.transcription_companion_model)
+    meerkat_models::capabilities_for(Provider::OpenAI, OPENAI_CANONICAL_REALTIME_MODEL)
+        .and_then(|caps| caps.transcription_companion_model)
 }
 
 fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
@@ -1330,10 +1327,7 @@ const OPENAI_CANONICAL_REALTIME_MODEL: &str = "gpt-realtime-2";
 fn openai_realtime_capabilities_for(
     identity: &meerkat_core::SessionLlmIdentity,
 ) -> RealtimeCapabilities {
-    let caps = meerkat_core::model_profile::capabilities::capabilities_for(
-        identity.provider,
-        &identity.model,
-    );
+    let caps = meerkat_models::capabilities_for(identity.provider, &identity.model);
 
     let video = caps.is_some_and(|c| c.inline_video);
 
@@ -4818,11 +4812,8 @@ mod tests {
         // Video tracks the catalog row's `inline_video`. The capability is
         // projected from the typed capability row, so it must agree with the
         // catalog rather than a hand-written literal.
-        let row = meerkat_core::model_profile::capabilities::capabilities_for(
-            realtime.provider,
-            &realtime.model,
-        )
-        .expect("gpt-realtime-2 must be catalogued");
+        let row = meerkat_models::capabilities_for(realtime.provider, &realtime.model)
+            .expect("gpt-realtime-2 must be catalogued");
         assert_eq!(
             caps.video_supported, row.inline_video,
             "video_supported must project the catalog inline_video, not a static literal"
@@ -4920,12 +4911,9 @@ mod tests {
     fn realtime_transcription_model_is_model_keyed() {
         let realtime = sample_realtime_identity();
         // Catalog-sourced: gpt-realtime-2's `transcription_companion_model`.
-        let companion = meerkat_core::model_profile::capabilities::capabilities_for(
-            realtime.provider,
-            &realtime.model,
-        )
-        .and_then(|caps| caps.transcription_companion_model)
-        .expect("gpt-realtime-2 must declare a transcription companion model");
+        let companion = meerkat_models::capabilities_for(realtime.provider, &realtime.model)
+            .and_then(|caps| caps.transcription_companion_model)
+            .expect("gpt-realtime-2 must declare a transcription companion model");
         assert_eq!(
             openai_realtime_transcription_model_for(&realtime),
             companion

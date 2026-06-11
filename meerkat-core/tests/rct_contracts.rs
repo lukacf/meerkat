@@ -30,9 +30,11 @@ fn test_tool_call_view_parse_args_contract() -> Result<(), Box<dyn std::error::E
 #[test]
 fn test_agent_factory_config_contract() {
     let config = Config::default();
-    assert!(!config.models.anthropic.is_empty());
-    assert!(!config.models.openai.is_empty());
-    assert!(!config.models.gemini.is_empty());
+    // Core embeds no provider data: per-provider defaults are empty and
+    // resolve through the injected catalog (meerkat-models) at build time.
+    assert!(config.models.anthropic.is_empty());
+    assert!(config.models.openai.is_empty());
+    assert!(config.models.gemini.is_empty());
     assert!(config.max_tokens > 0);
     assert!(!config.shell.program.is_empty());
     assert!(!config.tools.builtins_enabled);
@@ -260,7 +262,10 @@ fn test_config_patch_semantics() {
 
 #[test]
 fn test_inv_001_default_model_from_config() {
+    // The default config pins no model; both the global agent model and the
+    // per-provider defaults defer to the injected catalog.
     let config = Config::default();
+    assert!(config.agent.model.is_empty());
     assert_eq!(config.agent.model, config.models.openai);
 }
 

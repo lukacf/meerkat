@@ -164,6 +164,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-gemini:meerkat_gemini",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
         package_name = "meerkat-client",
@@ -226,6 +227,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-gemini:meerkat_gemini",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
         package_name = "meerkat-client",
@@ -289,6 +291,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-gemini:meerkat_gemini",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
         package_name = "meerkat-client",
@@ -349,6 +352,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-gemini:meerkat_gemini",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
         package_name = "meerkat-client",

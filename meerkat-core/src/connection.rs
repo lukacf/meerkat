@@ -1827,7 +1827,10 @@ auth_profile = "default_profile"
             lookup_from_pairs(&[
                 ("AZURE_OPENAI_API_KEY", "azure-key"),
                 ("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/"),
-                ("AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT", "gpt-image-2"),
+                (
+                    "AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT",
+                    "image-deployment-a",
+                ),
                 ("AZURE_OPENAI_IMAGE_GENERATION_API_VERSION", "preview"),
             ]),
         );
@@ -1841,7 +1844,7 @@ auth_profile = "default_profile"
         );
         assert_eq!(
             backend.options["image_generation_deployment"],
-            "gpt-image-2"
+            "image-deployment-a"
         );
         assert_eq!(backend.options["image_generation_api_version"], "preview");
         assert_eq!(auth.auth_method, "azure_api_key");
@@ -2001,7 +2004,7 @@ source = { kind = "managed_store" }
 [dev.binding.openai_oauth]
 backend_profile = "openai_chatgpt"
 auth_profile = "openai_oauth"
-default_model = "gpt-5.5"
+default_model = "test-openai-default"
 "#,
         );
         let preferred_realm = RealmId::parse("dev").unwrap();
@@ -2151,7 +2154,7 @@ source = { kind = "env", env = "OPENAI_API_KEY" }
 [binding.default_openai]
 backend_profile = "openai_default"
 auth_profile = "openai_api_key"
-default_model = "gpt-5.1"
+default_model = "test-openai-other"
 "#;
         let section: RealmConfigSection = toml::from_str(toml_input).unwrap();
         assert_eq!(section.backend.len(), 1);

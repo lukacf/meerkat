@@ -1,9 +1,10 @@
 //! meerkat-openai — OpenAI vertical.
 //!
 //! Owns the OpenAI LLM client, compatible client, live/realtime client,
-//! provider runtime, and ChatGPT OAuth backend wiring. Capability tables
-//! and profile rules live in `meerkat_core::model_profile` (Phase 1 of
-//! the B2 split).
+//! provider runtime, ChatGPT OAuth backend wiring, and OpenAI
+//! request-shaping helpers. Capability vocabulary lives in
+//! `meerkat_core::model_profile`; the capability data rows live in
+//! `meerkat-models`.
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -15,6 +16,7 @@ pub mod client_compatible;
 pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
+pub(crate) mod request_support;
 pub mod runtime;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;

@@ -1482,7 +1482,10 @@ mod tests {
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
         let (service, runtime_adapter) =
             build_runtime_backed_service(builder, active_session_capacity, persistence);
-        let config_store = Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_store = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
 
         McpRuntimeIngressContext::new(McpRuntimeIngressResources {
             service: Arc::new(service),

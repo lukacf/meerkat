@@ -7,6 +7,7 @@ printf '%s\n' \
   meerkat-machine-dsl-core \
   meerkat-agent-build-authority \
   meerkat-core \
+  meerkat-models \
   meerkat-capabilities \
   meerkat-machine-dsl \
   meerkat-machine-schema \

@@ -94,9 +94,14 @@ impl Config {
         self.limits.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
     }
 
-    /// Build the effective model registry for this config snapshot.
-    pub fn model_registry(&self) -> Result<crate::ModelRegistry, ConfigError> {
-        crate::ModelRegistry::from_config(self)
+    /// Build the effective model registry for this config snapshot and an
+    /// explicitly injected model catalog (canonically
+    /// `meerkat_models::canonical()`).
+    pub fn model_registry(
+        &self,
+        catalog: crate::model_profile::ModelCatalog,
+    ) -> Result<crate::ModelRegistry, ConfigError> {
+        crate::ModelRegistry::from_config(self, catalog)
     }
 
     /// Return the config template as TOML.
@@ -657,7 +662,9 @@ impl Config {
     /// - No `"*"` wildcards in allowlists
     /// - Every concrete provider key is present and non-empty
     /// - Resolved defaults are valid
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    /// - The effective model registry (custom + self-hosted entries merged
+    ///   over the injected catalog) constructs without conflicts
+    pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
         if self.max_tokens == 0 {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0".to_string(),
@@ -710,7 +717,7 @@ impl Config {
         // `config.providers.{base_urls,api_keys}` maps. Those maps stay
         // (scheduled for deletion in §6.10) and are consumed directly.
 
-        crate::model_registry::ModelRegistry::from_config(self)?;
+        crate::model_registry::ModelRegistry::from_config(self, catalog)?;
 
         Ok(())
     }
@@ -829,6 +836,10 @@ impl Default for AgentConfig {
 }
 
 /// Presentation defaults for surface-owned renderings.
+// Default is all-empty: empty per-provider defaults mean "inherit from the
+// injected model catalog". Core owns no provider data, so it cannot (and
+// must not) pre-populate these; surfaces resolve empty entries through the
+// catalog's per-provider defaults and global default at build time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct PresentationConfig {
@@ -865,7 +876,7 @@ pub struct HtmlTemplateConfig {
 
 /// Model defaults by provider, plus user-defined custom model registry
 /// entries (`[models.<id>]` tables).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ModelDefaults {
     pub anthropic: String,
@@ -879,23 +890,6 @@ pub struct ModelDefaults {
     /// inference, compaction scaling, capability gates, and call timeouts.
     #[serde(flatten)]
     pub custom: BTreeMap<String, CustomModelConfig>,
-}
-
-impl Default for ModelDefaults {
-    fn default() -> Self {
-        Self {
-            anthropic: crate::model_profile::catalog::default_model(crate::Provider::Anthropic)
-                .unwrap_or_default()
-                .to_string(),
-            openai: crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
-                .unwrap_or_default()
-                .to_string(),
-            gemini: crate::model_profile::catalog::default_model(crate::Provider::Gemini)
-                .unwrap_or_default()
-                .to_string(),
-            custom: BTreeMap::new(),
-        }
-    }
 }
 
 /// User-defined model registry entry (`[models.<id>]` in `config.toml` or a
@@ -2293,20 +2287,27 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.agent.model, "gpt-5.5");
+        assert!(
+            config.agent.model.is_empty(),
+            "core embeds no provider data: the default agent model is empty \
+             and resolves through the injected catalog at build time"
+        );
         assert_eq!(config.agent.max_tokens_per_turn, 16384);
         assert_eq!(config.retry.max_retries, 3);
         assert_eq!(config.max_sessions(), DEFAULT_MAX_SESSIONS);
     }
 
     #[test]
-    fn config_template_agent_model_tracks_openai_catalog_default() {
+    fn config_template_pins_no_model() {
         let config = Config::template().expect("template parses");
-        assert_eq!(
-            config.agent.model.as_str(),
-            crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
-                .expect("openai catalog default")
+        assert!(
+            config.agent.model.is_empty(),
+            "the core config template must not pin a provider model; defaults \
+             come from the injected catalog (meerkat-models)"
         );
+        assert!(config.models.anthropic.is_empty());
+        assert!(config.models.openai.is_empty());
+        assert!(config.models.gemini.is_empty());
     }
 
     #[test]
@@ -2327,7 +2328,7 @@ max_sessions = 7
     fn test_config_layering() {
         // 1. Test defaults
         let config = Config::default();
-        assert_eq!(config.agent.model, "gpt-5.5");
+        assert!(config.agent.model.is_empty());
         assert_eq!(config.budget.max_tokens, None);
 
         // 2. Test env override (secrets only)
@@ -2450,7 +2451,9 @@ family = "gemma-4"
 
         assert!(base.self_hosted.servers.contains_key("local"));
         assert!(base.self_hosted.models.contains_key("gemma-4-e2b"));
-        let registry = base.model_registry().expect("merged self-hosted registry");
+        let registry = base
+            .model_registry(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("merged self-hosted registry");
         assert_eq!(
             registry
                 .entry("gemma-4-e2b")
@@ -2532,7 +2535,7 @@ api_style = "responses"
         assert!(config.self_hosted.servers.contains_key("backup"));
         assert!(config.self_hosted.models.contains_key("gemma-4-e4b"));
         let registry = config
-            .model_registry()
+            .model_registry(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect("registry should remain valid");
         assert_eq!(
             registry
@@ -2745,7 +2748,7 @@ auto_compact_threshold = 100000
             ..Config::default()
         };
         let err = config
-            .validate()
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("min_turns_between_compactions=0 should be invalid");
         assert!(
             err.to_string()
@@ -2850,7 +2853,7 @@ api_style = "chat_completions"
             ..Config::default()
         };
         let err = config
-            .validate()
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("max_tokens=0 should be invalid");
         assert!(
             err.to_string()
@@ -2863,7 +2866,7 @@ api_style = "chat_completions"
         let mut config = Config::default();
         config.limits.max_sessions = Some(0);
         let err = config
-            .validate()
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("limits.max_sessions=0 should be invalid");
         assert!(err.to_string().contains("limits.max_sessions"));
     }
@@ -2873,7 +2876,7 @@ api_style = "chat_completions"
         let mut config = Config::default();
         config.agent.max_tokens_per_turn = 0;
         let err = config
-            .validate()
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("agent.max_tokens_per_turn=0 should be invalid");
         assert!(err.to_string().contains("agent.max_tokens_per_turn"));
     }
@@ -2893,39 +2896,6 @@ api_style = "chat_completions"
         assert_eq!(Provider::parse_strict("other"), None);
         assert_eq!(Provider::parse_strict("claude"), None);
         assert_eq!(Provider::parse_strict(""), None);
-    }
-
-    #[test]
-    fn test_provider_infer_from_model() {
-        assert_eq!(
-            Provider::infer_from_model("claude-opus-4-8"),
-            Some(Provider::Anthropic)
-        );
-        assert_eq!(
-            Provider::infer_from_model("claude-haiku-4-5-20251001"),
-            Some(Provider::Anthropic)
-        );
-        assert_eq!(
-            Provider::infer_from_model("claude-haiku-4-5"),
-            Some(Provider::Anthropic)
-        );
-        assert_eq!(
-            Provider::infer_from_model("gpt-5.4"),
-            Some(Provider::OpenAI)
-        );
-        assert_eq!(
-            Provider::infer_from_model("gpt-5.4-mini"),
-            Some(Provider::OpenAI)
-        );
-        assert_eq!(
-            Provider::infer_from_model("gemini-3.5-flash"),
-            Some(Provider::Gemini)
-        );
-        assert_eq!(Provider::infer_from_model("gpt-unknown-preview"), None);
-        assert_eq!(Provider::infer_from_model("claude-unknown-preview"), None);
-        assert_eq!(Provider::infer_from_model("gemini-unknown-preview"), None);
-        assert_eq!(Provider::infer_from_model("llama-3"), None);
-        assert_eq!(Provider::infer_from_model(""), None);
     }
 
     // === CommsAuthMode tests ===
@@ -3368,7 +3338,7 @@ model = "custom-model"
     fn test_malformed_provider_params_rejected_at_config_parse() {
         // Unknown key inside the typed override shape.
         let unknown_key = serde_json::json!({
-            "model": "claude-sonnet-4-6",
+            "model": "test-anthropic-default",
             "provider_params": { "not_a_known_knob": true }
         });
         assert!(
@@ -3378,7 +3348,7 @@ model = "custom-model"
 
         // Wrong type for a known knob.
         let wrong_type = serde_json::json!({
-            "model": "claude-sonnet-4-6",
+            "model": "test-anthropic-default",
             "provider_params": { "temperature": "hot" }
         });
         assert!(
@@ -3388,7 +3358,7 @@ model = "custom-model"
 
         // Well-formed typed shape parses.
         let typed = serde_json::json!({
-            "model": "claude-sonnet-4-6",
+            "model": "test-anthropic-default",
             "provider_params": {
                 "temperature": 0.2,
                 "provider_tag": { "provider": "anthropic", "effort": "high" }

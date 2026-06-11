@@ -129,6 +129,7 @@ pub use memory::{
     MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryResult,
     MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError, MessageRange,
 };
+pub use model_profile::{ModelCatalog, ModelProfile};
 pub use model_registry::{
     ModelCapability, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
     UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,

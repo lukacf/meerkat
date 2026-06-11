@@ -5,9 +5,11 @@
 //! feature pages (`effort`, `extended-thinking`, `adaptive-thinking`,
 //! `context-windows`, `compaction`, `structured-outputs`).
 
-use super::{BetaFeature, BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport};
-use crate::Provider;
-use crate::model_profile::catalog::ModelTier;
+use meerkat_core::Provider;
+use meerkat_core::model_profile::capabilities::{
+    BetaFeature, BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport,
+};
+use meerkat_core::model_profile::catalog::ModelTier;
 
 // ── Beta headers ──────────────────────────────────────────────────────────
 

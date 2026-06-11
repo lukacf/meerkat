@@ -1014,17 +1014,16 @@ fn provider_tool_defaults_for(
 ///
 /// 1. The configured global agent default (`config.agent.model`) when set —
 ///    this is the operator's explicit "default model" knob and outranks the
-///    per-provider entries, which [`ModelDefaults::default`] auto-populates from
-///    the catalog (so they are never empty and would otherwise mask the global
-///    default entirely).
+///    per-provider entries.
 /// 2. The configured per-provider default (`config.models.{provider}`) walked
 ///    in the catalog-owned [`provider_priority`] order — the first non-empty
-///    entry wins. This is the fallback for builds that pin providers but set no
-///    global default.
-/// 3. The catalog-owned [`global_default_model`] as the terminal fallback.
+///    entry wins. Core's [`ModelDefaults::default`] leaves these empty
+///    (core embeds no provider data); they are operator overrides.
+/// 3. The catalog-owned [`global_default_model`] as the terminal fallback —
+///    the common path when neither knob is set.
 ///
-/// [`provider_priority`]: meerkat_core::model_profile::catalog::provider_priority
-/// [`global_default_model`]: meerkat_core::model_profile::catalog::global_default_model
+/// [`provider_priority`]: meerkat_models::provider_priority
+/// [`global_default_model`]: meerkat_models::global_default_model
 /// [`ModelDefaults::default`]: meerkat_core::config::ModelDefaults
 #[must_use]
 pub fn resolve_create_session_default_model(config: &Config) -> String {
@@ -1044,11 +1043,11 @@ pub fn resolve_create_session_default_model(config: &Config) -> String {
 /// detection, which replaces a known-stale `config.agent.model` value). Every
 /// other caller should use [`resolve_create_session_default_model`].
 ///
-/// [`provider_priority`]: meerkat_core::model_profile::catalog::provider_priority
-/// [`global_default_model`]: meerkat_core::model_profile::catalog::global_default_model
+/// [`provider_priority`]: meerkat_models::provider_priority
+/// [`global_default_model`]: meerkat_models::global_default_model
 #[must_use]
 pub fn resolve_provider_catalog_default_model(config: &Config) -> String {
-    let from_provider_priority = meerkat_core::model_profile::catalog::provider_priority()
+    let from_provider_priority = meerkat_models::provider_priority()
         .iter()
         .find_map(|provider| {
             let configured = match provider {
@@ -1062,7 +1061,7 @@ pub fn resolve_provider_catalog_default_model(config: &Config) -> String {
     if let Some(model) = from_provider_priority {
         return model;
     }
-    meerkat_core::model_profile::catalog::global_default_model().to_string()
+    meerkat_models::global_default_model().to_string()
 }
 
 #[cfg(any(feature = "session-compaction", test))]
@@ -1420,16 +1419,11 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
         };
         let requested_model = match &request.target {
             ImageGenerationTargetPreference::Model { model, .. } => {
-                meerkat_core::model_profile::catalog::image_generation_model(
-                    target_provider,
-                    model.as_str(),
-                )
-                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?
+                meerkat_models::image_generation_model(target_provider, model.as_str())
+                    .ok_or(ImageOperationDenialReason::UnsupportedTarget)?
             }
-            _ => meerkat_core::model_profile::catalog::default_image_generation_model(
-                target_provider,
-            )
-            .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
+            _ => meerkat_models::default_image_generation_model(target_provider)
+                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
         };
 
         let resolution = profile.resolve_execution_plan(
@@ -1463,8 +1457,7 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
     }
 
     fn infer_provider_for_model(&self, model: &str) -> Option<meerkat_core::ProviderId> {
-        let provider =
-            meerkat_core::model_profile::catalog::image_generation_provider_for_model(model)?;
+        let provider = meerkat_models::image_generation_provider_for_model(model)?;
         self.profile_for_provider(provider)?;
         Some(meerkat_core::ProviderId::new(provider.as_str()))
     }
@@ -1495,7 +1488,7 @@ fn image_projection_messages(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn model_realtime_capable(provider: meerkat_core::Provider, model: &str) -> bool {
-    meerkat_core::model_profile::capabilities::capabilities_for(provider, model)
+    meerkat_models::capabilities_for(provider, model)
         .map(|caps| caps.realtime)
         .unwrap_or(false)
 }
@@ -1509,12 +1502,9 @@ fn model_realtime_capable(provider: meerkat_core::Provider, model: &str) -> bool
 /// `model_not_found`, so any session whose resolved model is
 /// realtime-capable must use the WebSocket text adapter.
 fn is_openai_realtime_capable(model: &str) -> bool {
-    meerkat_core::model_profile::capabilities::capabilities_for(
-        meerkat_core::Provider::OpenAI,
-        model,
-    )
-    .map(|caps| caps.realtime)
-    .unwrap_or(false)
+    meerkat_models::capabilities_for(meerkat_core::Provider::OpenAI, model)
+        .map(|caps| caps.realtime)
+        .unwrap_or(false)
 }
 
 /// Typed attachment state of the factory's persistent TokenStore.
@@ -2839,7 +2829,7 @@ impl AgentFactory {
         auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
         let registry = config
-            .model_registry()
+            .model_registry(meerkat_models::canonical())
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
@@ -2926,7 +2916,7 @@ impl AgentFactory {
         web_search: ToolCategoryOverride,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
         let registry = config
-            .model_registry()
+            .model_registry(meerkat_models::canonical())
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         let model_profile = registry.profile_for_provider(identity.provider, &identity.model);
         Ok(meerkat_core::SessionLlmRequestPolicy {
@@ -2943,7 +2933,7 @@ impl AgentFactory {
 
     fn model_registry(&self, config: &Config) -> Result<ModelRegistry, BuildAgentError> {
         config
-            .model_registry()
+            .model_registry(meerkat_models::canonical())
             .map_err(|err| BuildAgentError::Config(err.to_string()))
     }
 
@@ -3614,8 +3604,12 @@ impl AgentFactory {
         let registry = if build_config.custom_models.is_empty() {
             self.model_registry(config)?
         } else {
-            ModelRegistry::from_config_with_models(config, &build_config.custom_models)
-                .map_err(|err| BuildAgentError::Config(err.to_string()))?
+            ModelRegistry::from_config_with_models(
+                config,
+                &build_config.custom_models,
+                meerkat_models::canonical(),
+            )
+            .map_err(|err| BuildAgentError::Config(err.to_string()))?
         };
         #[cfg(not(target_arch = "wasm32"))]
         let image_generation_planner: Option<
@@ -5591,7 +5585,8 @@ mod tests {
 
     #[test]
     fn registry_backed_defaults_resolver_respects_provider_identity() {
-        let registry = ModelRegistry::from_config(&Config::default()).expect("registry");
+        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("registry");
         let resolver = RegistryBackedDefaultsResolver {
             registry: Arc::new(registry),
         };
@@ -5678,7 +5673,9 @@ mod tests {
     #[test]
     fn default_compaction_threshold_scales_with_large_context_model() {
         let config = Config::default();
-        let registry = config.model_registry().expect("registry");
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
 
         let compaction =
             model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
@@ -5688,20 +5685,22 @@ mod tests {
 
     #[test]
     fn create_session_default_model_resolves_to_catalog_seam() {
-        // A default config carries the operator-facing template default
-        // (`config.agent.model`, seeded from `config_template.toml`). The
-        // resolver must return THAT explicit global default — the SAME value
-        // every surface gets — in preference to the per-provider catalog fills
-        // (which `ModelDefaults::default` always populates and would otherwise
-        // mask the global default) and the terminal catalog global fallback.
+        // A default config pins no model anywhere (core embeds no provider
+        // data), so the resolver must terminate at the catalog-owned global
+        // default — the SAME value every surface gets. An operator-set
+        // `config.agent.model` outranks it (tier 1).
         let config = Config::default();
-        assert!(
-            !config.agent.model.is_empty(),
-            "the default template must seed a global agent model"
-        );
+        assert!(config.agent.model.is_empty());
         assert_eq!(
             resolve_create_session_default_model(&config),
-            config.agent.model,
+            meerkat_models::global_default_model(),
+        );
+
+        let mut pinned = Config::default();
+        pinned.agent.model = "operator-pinned-model".to_string();
+        assert_eq!(
+            resolve_create_session_default_model(&pinned),
+            "operator-pinned-model",
         );
     }
 
@@ -5716,7 +5715,7 @@ mod tests {
         config.agent.model = String::new();
         assert_eq!(
             resolve_create_session_default_model(&config),
-            meerkat_core::model_profile::catalog::global_default_model()
+            meerkat_models::global_default_model()
         );
     }
 
@@ -5724,7 +5723,9 @@ mod tests {
     fn explicit_compaction_threshold_is_preserved() {
         let mut config = Config::default();
         config.compaction.auto_compact_threshold = 42_000;
-        let registry = config.model_registry().expect("registry");
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
 
         let compaction =
             model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
@@ -5737,7 +5738,9 @@ mod tests {
         let mut config = Config::default();
         config.compaction.auto_compact_threshold = 100_000;
         config.compaction.auto_compact_threshold_explicit = true;
-        let registry = config.model_registry().expect("registry");
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
 
         let compaction =
             model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
@@ -8924,7 +8927,7 @@ mod tests {
 
     /// Regression for the dogma row "Image auto-routing loses session
     /// provider identity": a session on a `ModelRegistry`-owned custom model
-    /// (unknown to the built-in catalog, so `Provider::infer_from_model`
+    /// (unknown to the built-in catalog, so `ModelCatalog::infer_provider`
     /// returns `None`) must auto-plan against the session provider's
     /// registered image default WITHOUT any separate image-provider config.
     #[cfg(not(target_arch = "wasm32"))]
@@ -9013,7 +9016,7 @@ mod tests {
 
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(AutoTargetGeminiProfile)]);
         // "gemini-3.5-flash" IS in the built-in catalog; the old
-        // `Provider::infer_from_model` path would have resolved Gemini here.
+        // `ModelCatalog::infer_provider` path would have resolved Gemini here.
         let status = meerkat_core::SessionModelRoutingStatus::new(
             meerkat_core::lifecycle::run_primitive::ModelId::new("gemini-3.5-flash"),
             None,
@@ -9134,7 +9137,9 @@ mod tests {
         let mut config = Config::default();
         config.compaction.auto_compact_threshold = 42_000;
         config.compaction.auto_compact_threshold_explicit = true;
-        let registry = config.model_registry().expect("registry");
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
 
         let compaction = model_aware_compaction_config(
             &config,

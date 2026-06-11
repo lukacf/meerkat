@@ -27,6 +27,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-core = { workspace = true, features = ["jsonschema"] }
+meerkat-models = { workspace = true }
 # Direct dep needed for `ExternalAuthResolverHandle` trait + `ValidatedBinding`
 # so the WASM external-auth bridge (`external_auth::WasmExternalAuthResolver`)
 # can implement the trait the provider runtime registry looks up. §6.14

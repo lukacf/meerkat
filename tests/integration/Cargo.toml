@@ -12,6 +12,7 @@ meerkat-client.workspace = true
 meerkat-comms.workspace = true
 meerkat-providers.workspace = true
 meerkat-core.workspace = true
+meerkat-models = { workspace = true }
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 meerkat-machine-schema.workspace = true
 meerkat-mob.workspace = true

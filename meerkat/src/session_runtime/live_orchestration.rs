@@ -43,12 +43,9 @@ use crate::session_runtime::errors::LiveOpenPrecheckError;
 /// session branches of `precheck_live_open` so both paths enforce
 /// identical contracts.
 pub fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPrecheckError> {
-    let realtime_capable = meerkat_core::model_profile::capabilities::capabilities_for(
-        identity.provider,
-        &identity.model,
-    )
-    .map(|caps| caps.realtime)
-    .unwrap_or(false);
+    let realtime_capable = meerkat_models::capabilities_for(identity.provider, &identity.model)
+        .map(|caps| caps.realtime)
+        .unwrap_or(false);
     apply_precheck_gates(identity.provider, &identity.model, realtime_capable)
 }
 

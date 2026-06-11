@@ -20,7 +20,7 @@ impl SdkConfigStore {
         let mut config = Config::default();
         let _ = config.apply_env_overrides();
         Self {
-            store: Arc::new(MemoryConfigStore::new(config)),
+            store: Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical())),
         }
     }
 
@@ -29,14 +29,17 @@ impl SdkConfigStore {
         let mut config = config;
         let _ = config.apply_env_overrides();
         Self {
-            store: Arc::new(MemoryConfigStore::new(config)),
+            store: Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical())),
         }
     }
 
     /// Create a file-backed store for explicit persistence.
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
         Self {
-            store: Arc::new(FileConfigStore::new(path.into())),
+            store: Arc::new(FileConfigStore::new(
+                path.into(),
+                meerkat_models::canonical(),
+            )),
         }
     }
 

@@ -170,9 +170,11 @@ impl SessionRuntimeLlmReconfigureHost {
             Config::default()
         };
 
-        config.model_registry().map_err(|e| {
-            RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
-        })
+        config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|e| {
+                RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
+            })
     }
 
     /// Build the per-identity LLM adapter used by the hot-swap and live

@@ -3782,7 +3782,7 @@ describe("Capability status parse boundary (row 161)", () => {
 describe("Transport corrupted-frame fault (row 246)", () => {
   it("surfaces a typed PROTOCOL_ERROR to pending callers instead of silently dropping a corrupted frame", async () => {
     const client = new MeerkatClient();
-    client.process = { stdin: { write: () => {} } };
+    client.process = { stdin: { write: () => {}, destroy: () => {} }, kill: () => {} };
 
     // Register a pending request through the real request bookkeeping.
     const pending = client.registerRequest(client.requestId + 1);
@@ -3792,6 +3792,30 @@ describe("Transport corrupted-frame fault (row 246)", () => {
 
     await assert.rejects(
       () => pending,
+      (error) => error instanceof MeerkatError && error.code === "PROTOCOL_ERROR",
+    );
+  });
+
+  it("marks the client unusable after transport corruption: later calls reject with the recorded fault, process is torn down", async () => {
+    let killed = false;
+    const client = new MeerkatClient();
+    client.process = {
+      stdin: { write: () => {}, destroy: () => {} },
+      kill: () => {
+        killed = true;
+      },
+    };
+
+    client.handleLine("this is not json{");
+
+    // The condemned process must be torn down, not left writable.
+    assert.equal(killed, true);
+    assert.equal(client.process, null);
+
+    // A later SDK call must reject immediately with the recorded typed fault —
+    // never NOT_CONNECTED ambiguity, never a write into the dead stream.
+    await assert.rejects(
+      async () => client.request("ping", {}),
       (error) => error instanceof MeerkatError && error.code === "PROTOCOL_ERROR",
     );
   });

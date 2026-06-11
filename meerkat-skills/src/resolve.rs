@@ -13,9 +13,11 @@ use meerkat_core::skills::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills_config::GitRefType;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::skills_config::GitSkillRepoAuth;
 #[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
 use meerkat_core::skills_config::HttpSkillRepoAuth;
-use meerkat_core::skills_config::{GitSkillRepoAuth, SkillRepoTransport, SkillsConfig};
+use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
 
 use crate::source::composite::NamedSource;
 #[cfg(not(target_arch = "wasm32"))]

@@ -94,6 +94,22 @@ class TestStdoutDispatcher:
         await d.stop()
 
     @pytest.mark.asyncio
+    async def test_corrupted_frame_records_permanent_transport_fault(self):
+        reader = make_reader(["this is not json{"])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        pending = d.expect_response(1)
+        with pytest.raises(MeerkatError) as exc:
+            await asyncio.wait_for(pending, timeout=1.0)
+        assert exc.value.code == "PROTOCOL_ERROR"
+        # The fault is PERMANENT transport state: later callers must be able to
+        # fail closed on it instead of registering futures no read loop will
+        # ever resolve.
+        assert d.transport_fault is not None
+        assert d.transport_fault.code == "PROTOCOL_ERROR"
+        await d.stop()
+
+    @pytest.mark.asyncio
     async def test_large_response_line_within_rpc_stdout_limit(self):
         payload = "x" * (128 * 1024)
         reader = asyncio.StreamReader(limit=RPC_STDOUT_LIMIT_BYTES)

@@ -3269,6 +3269,13 @@ class MeerkatClient:
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self._process or not self._process.stdin or not self._dispatcher:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        fault = self._dispatcher.transport_fault
+        if fault is not None:
+            # The read loop has terminated the transport (corrupted frame /
+            # closed stream): fail closed with the recorded typed fault instead
+            # of writing into a condemned stream and awaiting a response no
+            # read loop will deliver.
+            raise fault
         self._request_id += 1
         request_id = self._request_id
         request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}

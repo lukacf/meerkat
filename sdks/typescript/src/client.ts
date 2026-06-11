@@ -389,6 +389,11 @@ function normalizeMobWireMembersBatchEdge(
 
 export class MeerkatClient {
   private process: ChildProcess | null = null;
+  // Permanent transport-failed state: once the JSONL framing is untrustworthy
+  // (corrupted frame), every subsequent call must reject with this recorded
+  // typed fault instead of writing into the condemned stream. Cleared only by
+  // a fresh connect() (new process, new stream).
+  private transportFault: MeerkatError | null = null;
   private processStderr = "";
   private requestId = 0;
   private _capabilities: Capability[] = [];
@@ -562,6 +567,8 @@ export class MeerkatClient {
     this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // Fresh process, fresh stream: clear any recorded transport fault.
+    this.transportFault = null;
     const child = this.process;
     this.processStderr = "";
     child.stderr?.on("data", (chunk: string | Buffer) => {
@@ -684,8 +691,27 @@ export class MeerkatClient {
    * hanging on a dropped response.
    */
   private failTransport(reason: unknown): void {
+    if (!this.transportFault) {
+      this.transportFault =
+        reason instanceof MeerkatError
+          ? reason
+          : new MeerkatError("PROTOCOL_ERROR", String(reason));
+    }
     this.rejectPendingRequests(reason);
     this.closeQueues();
+    // Fail closed: the stream is condemned, so the process goes with it —
+    // leaving it alive would let later calls write into framing we just
+    // classified as untrustworthy.
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+    const process = this.process;
+    this.process = null;
+    if (process) {
+      process.stdin?.destroy();
+      process.kill();
+    }
   }
 
   private closeQueues(): void {
@@ -3052,6 +3078,9 @@ export class MeerkatClient {
   }
 
   private request<T = Record<string, unknown>>(method: string, params: unknown): Promise<T> {
+    if (this.transportFault) {
+      throw this.transportFault;
+    }
     if (!this.process?.stdin) {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }

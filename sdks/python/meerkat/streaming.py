@@ -39,6 +39,11 @@ class _StdoutDispatcher:
         self._closed = False
         self._tool_handler: Any = None  # ToolRegistry, set lazily
         self._stdin_writer: asyncio.StreamWriter | None = None  # set on connect
+        # Permanent transport-failed state: once the read loop classifies the
+        # stream as untrustworthy (corrupted frame) or closed, later requests
+        # must fail immediately with this recorded typed fault — never register
+        # a future that no read loop will ever resolve.
+        self.transport_fault: MeerkatError | None = None
 
     def start(self) -> None:
         self._task = asyncio.get_running_loop().create_task(self._read_loop())
@@ -260,6 +265,8 @@ class _StdoutDispatcher:
                 pass  # Best-effort — process may have died.
 
     def _fail_all(self, code: str, message: str) -> None:
+        if self.transport_fault is None:
+            self.transport_fault = MeerkatError(code, message)
         for future in self._pending_responses.values():
             if not future.done():
                 future.set_exception(MeerkatError(code, message))

@@ -3782,7 +3782,8 @@ fn validate_claims_against(
     routes: Option<&BTreeSet<&str>>,
     scheduler_rules: Option<&BTreeSet<&str>>,
 ) -> Result<()> {
-    let kinds: [(&str, Vec<&str>, Option<&BTreeSet<&str>>); 5] = [
+    type KindRow<'a> = (&'a str, Vec<&'a str>, Option<&'a BTreeSet<&'a str>>);
+    let kinds: [KindRow<'_>; 5] = [
         (
             "transition",
             claims.transitions.iter().map(|id| id.as_str()).collect(),

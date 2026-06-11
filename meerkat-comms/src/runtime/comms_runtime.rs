@@ -291,6 +291,9 @@ fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> meerkat_core::comms:
     crate::router::peer_id_from_pubkey(pubkey)
 }
 
+// Only the native TCP listener path and test helpers parse raw addresses;
+// the wasm build has no listener surface.
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
     meerkat_core::comms::PeerAddress::parse(raw).map_err(|err| err.to_string())
 }

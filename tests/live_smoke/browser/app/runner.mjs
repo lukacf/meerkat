@@ -287,7 +287,7 @@ async function scenarioRawMob004({ wasm }) {
         JSON.stringify([
           {
             profile: 'worker',
-            meerkat_id: 'worker-1',
+            agent_identity: 'worker-1',
             runtime_mode: 'turn_driven',
           },
         ]),

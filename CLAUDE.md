@@ -462,11 +462,11 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 
 | Provider | Model Name |
 |----------|------------|
-| OpenAI | `gpt-5.5` or `gpt-5.4` |
-| Gemini | `gemini-3.5-flash` |
-| Anthropic | `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` |
+| OpenAI | `gpt-5.5` or `gpt-5.5-pro` or `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.3-codex` |
+| Gemini | `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
+| Anthropic | `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
-These are the exact text-model ids in the curated catalog (`meerkat-models/src/capabilities/`); models outside the catalog require a `ModelRegistry` entry.
+These are catalog text-model ids (`meerkat-models` is the source of truth; `rkat models` prints the live list); models outside the catalog require a config `[models.<id>]` entry.
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 

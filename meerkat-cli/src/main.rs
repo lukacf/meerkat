@@ -686,6 +686,7 @@ fn is_root_flag_with_value(arg: &str) -> bool {
             | "--state-root"
             | "--context-root"
             | "--user-config-root"
+            | "--default-model"
     )
 }
 
@@ -912,8 +913,20 @@ struct Cli {
     )]
     user_config_root: Option<PathBuf>,
 
+    /// Persist the default agent model into the scope-resolved config
+    /// (project/user/realm — same resolution as every other command), then
+    /// run the given command or exit. The model is validated against the
+    /// catalog and configured custom models.
+    #[arg(
+        long,
+        global = true,
+        value_name = "MODEL",
+        help_heading = "Config options"
+    )]
+    default_model: Option<String>,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2545,7 +2558,7 @@ impl From<CliMcpScope> for Option<McpScope> {
 }
 
 fn cli_enables_verbose_tracing(cli: &Cli) -> bool {
-    matches!(&cli.command, Commands::Run { verbose: true, .. })
+    matches!(&cli.command, Some(Commands::Run { verbose: true, .. }))
 }
 
 fn default_trace_filter(cli: &Cli) -> &'static str {
@@ -2570,7 +2583,7 @@ fn init_tracing(cli: &Cli) {
 #[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
-    let auth_config_realm = if matches!(&cli.command, Commands::Auth { .. }) {
+    let auth_config_realm = if matches!(&cli.command, Some(Commands::Auth { .. })) {
         cli.realm.clone()
     } else {
         None
@@ -2583,7 +2596,20 @@ async fn main() -> anyhow::Result<ExitCode> {
         resolve_runtime_scope(&cli)?
     };
 
-    let result = match cli.command {
+    if let Some(model) = cli.default_model.as_deref()
+        && let Err(e) = handle_set_default_model(model, &cli_scope).await
+    {
+        eprintln!("Error: {e}");
+        return Ok(ExitCode::from(EXIT_ERROR));
+    }
+    let Some(command) = cli.command else {
+        if cli.default_model.is_some() {
+            return Ok(ExitCode::from(EXIT_SUCCESS));
+        }
+        <Cli as clap::CommandFactory>::command().print_help().ok();
+        return Ok(ExitCode::from(EXIT_ERROR));
+    };
+    let result = match command {
         Commands::Init => init_project_config().await,
         Commands::Run {
             prompt,
@@ -3842,6 +3868,50 @@ async fn handle_config_set(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
     println!("generation={}", snapshot.generation);
+    Ok(())
+}
+
+/// `rkat --default-model <MODEL>`: validate the model against the injected
+/// catalog + configured custom models, then persist `agent.model` through the
+/// same scope-resolved config runtime every other command reads (project /
+/// user / realm resolution included).
+async fn handle_set_default_model(model: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(anyhow::anyhow!(
+            "--default-model requires a non-empty model id"
+        ));
+    }
+    let catalog = meerkat_models::canonical();
+    let (config, _) = load_config(scope).await?;
+    let provider = catalog
+        .infer_provider(model)
+        .or_else(|| config.models.custom.get(model).map(|custom| custom.provider))
+        .ok_or_else(|| {
+            let mut known: Vec<&str> = catalog.entries.iter().map(|entry| entry.id).collect();
+            let customs: Vec<&str> = config.models.custom.keys().map(String::as_str).collect();
+            known.extend(customs.iter());
+            anyhow::anyhow!(
+                "unknown model `{model}`. Known models: {}. Custom models are added under [models.<id>] in config with a `provider`.",
+                known.join(", ")
+            )
+        })?;
+
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    let snapshot = runtime
+        .patch(
+            ConfigDelta(serde_json::json!({"agent": {"model": model}})),
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to persist default model: {e}"))?;
+    println!(
+        "Default model set to {model} ({}) [generation {}]",
+        provider.as_str(),
+        snapshot.generation
+    );
     Ok(())
 }
 
@@ -15631,7 +15701,7 @@ default_model = "gemma"
         ])
         .expect("run should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 prompt,
                 tools,
@@ -15685,7 +15755,7 @@ default_model = "gemma"
         ])
         .expect("run html flags should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 output,
                 open_in_browser,
@@ -15734,7 +15804,7 @@ default_model = "gemma"
 
         let cli = Cli::try_parse_from(["rkat", "workgraph", "snapshot", "--json"])
             .expect("workgraph snapshot should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::WorkGraph {
                 command: WorkGraphCommands::Snapshot { json, .. },
             } => assert!(json),
@@ -15754,7 +15824,7 @@ default_model = "gemma"
             "1",
         ])
         .expect("workgraph goal-confirm should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::WorkGraph {
                 command: WorkGraphCommands::GoalConfirm { kind, .. },
             } => assert_eq!(kind, "host_confirmation"),
@@ -15817,7 +15887,7 @@ default_model = "gemma"
             "dev",
             "auth command --realm is a config selector and must not override RuntimeScope"
         );
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Auth {
                 command: AuthCommands::Test { binding_id },
             } => assert_eq!(binding_id, "google_oauth"),
@@ -15827,7 +15897,7 @@ default_model = "gemma"
         let cli = Cli::try_parse_from(["rkat", "auth", "test", "google_oauth"])
             .expect("auth test should parse with default config realm");
         assert!(cli.realm.is_none());
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Auth {
                 command: AuthCommands::Test { binding_id },
             } => assert_eq!(binding_id, "google_oauth"),
@@ -15845,7 +15915,7 @@ default_model = "gemma"
         // --keep-alive without --stdin lines
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive"])
             .expect("--keep-alive should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15861,7 +15931,7 @@ default_model = "gemma"
         // --stdin lines without --keep-alive
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--stdin", "lines"])
             .expect("--stdin lines should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15877,7 +15947,7 @@ default_model = "gemma"
         // Both together
         let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive", "--stdin", "lines"])
             .expect("both flags should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 keep_alive, stdin, ..
             } => {
@@ -15913,7 +15983,7 @@ default_model = "gemma"
             "ready",
         ])
         .expect("run comms target flags should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 comms_name,
                 comms_listen_tcp,
@@ -15959,7 +16029,7 @@ default_model = "gemma"
     fn test_run_parses_no_comms() {
         let cli = Cli::try_parse_from(["rkat", "run", "--no-comms", "hello"])
             .expect("--no-comms should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Run { no_comms, .. } => assert!(no_comms),
             _ => unreachable!(),
         }
@@ -15985,7 +16055,7 @@ default_model = "gemma"
             "legacy/skill",
         ])
         .expect("run --resume should parse");
-        match resume.command {
+        match resume.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 resume,
                 prompt,
@@ -16024,7 +16094,7 @@ default_model = "gemma"
         ])
         .expect("help command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Help {
                 question,
                 prompt,
@@ -16176,7 +16246,7 @@ default_model = "gemma"
             "rkat", "session", "list", "--limit", "10", "--label", "env=dev",
         ])
         .expect("session list should parse");
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Sessions {
                 command: SessionCommands::List { limit, labels, .. },
             } => {
@@ -16191,7 +16261,10 @@ default_model = "gemma"
     fn test_canonical_commands_parse() {
         let session_cli =
             Cli::try_parse_from(["rkat", "session", "list"]).expect("session should parse");
-        match session_cli.command {
+        match session_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Sessions {
                 command: SessionCommands::List { .. },
             } => {}
@@ -16199,7 +16272,10 @@ default_model = "gemma"
         }
 
         let realm_cli = Cli::try_parse_from(["rkat", "realm", "list"]).expect("realm should parse");
-        match realm_cli.command {
+        match realm_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Realms {
                 command: RealmCommands::List,
             } => {}
@@ -16207,7 +16283,10 @@ default_model = "gemma"
         }
 
         let models_cli = Cli::try_parse_from(["rkat", "models"]).expect("models should parse");
-        match models_cli.command {
+        match models_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Models => {}
             _ => unreachable!("expected models command"),
         }
@@ -16424,7 +16503,7 @@ default_model = "gemma"
         let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
             .expect("mob run-flow should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::RunFlow {
@@ -16459,7 +16538,7 @@ default_model = "gemma"
         ])
         .expect("mob pack command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Pack {
@@ -16536,7 +16615,7 @@ default_model = "gemma"
         ])
         .expect("mob deploy command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Deploy {
@@ -16577,7 +16656,7 @@ default_model = "gemma"
         ])
         .expect("mob deploy --surface should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command: MobCommands::Deploy { surface, .. },
             } => {
@@ -16606,7 +16685,7 @@ default_model = "gemma"
             ".",
         ])
         .expect("mcp add should parse");
-        match add.command {
+        match add.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16631,7 +16710,7 @@ default_model = "gemma"
         let remove =
             Cli::try_parse_from(["rkat", "mcp", "remove", "filesystem", "--scope", "project"])
                 .expect("mcp remove should parse");
-        match remove.command {
+        match remove.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command: McpCommands::Remove { name, scope },
             } => {
@@ -16654,7 +16733,10 @@ default_model = "gemma"
             "https://king-be.glean.com/mcp/default",
         ])
         .expect("mcp add name --url URL should parse");
-        match codex_style.command {
+        match codex_style
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16684,7 +16766,10 @@ default_model = "gemma"
             "https://king-be.glean.com/mcp/default",
         ])
         .expect("mcp add --transport http name URL should parse");
-        match claude_style.command {
+        match claude_style
+            .command
+            .expect("test invocation parses a subcommand")
+        {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
@@ -16706,7 +16791,7 @@ default_model = "gemma"
 
         let run = Cli::try_parse_from(["rkat", "run", "Hello world", "--mcp-auth", "interactive"])
             .expect("run prompt --mcp-auth interactive should parse");
-        match run.command {
+        match run.command.expect("test invocation parses a subcommand") {
             Commands::Run {
                 prompt, mcp_auth, ..
             } => {
@@ -16718,7 +16803,7 @@ default_model = "gemma"
 
         let login = Cli::try_parse_from(["rkat", "mcp", "login", "glean", "--scope", "project"])
             .expect("mcp login should parse");
-        match login.command {
+        match login.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
                 command: McpCommands::Login { name, scope },
             } => {
@@ -16936,7 +17021,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob wait-kickoff command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::WaitKickoff {
@@ -16975,7 +17060,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob deploy overrides should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Deploy {
@@ -17009,7 +17094,7 @@ url = "https://user.example/mcp"
         ])
         .expect("mob web build command should parse");
 
-        match cli.command {
+        match cli.command.expect("test invocation parses a subcommand") {
             Commands::Mob {
                 command:
                     MobCommands::Web {

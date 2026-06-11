@@ -195,7 +195,7 @@ fn claude_fable_5_in_catalog_without_changing_default_ladder() {
     // the Anthropic and global default even though Fable 5 is the more
     // capable (and more expensive) model.
     assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-4-8"));
-    assert_eq!(global_default_model(), "claude-opus-4-8");
+    assert_eq!(global_default_model(), "gpt-5.5");
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn openai_text_models_route_through_hosted_image_tool() {
 
 #[test]
 fn global_default_and_provider_priority_are_catalog_owned() {
-    assert_eq!(global_default_model(), "claude-opus-4-8");
+    assert_eq!(global_default_model(), "gpt-5.5");
 
     let priority = provider_priority();
     assert_eq!(

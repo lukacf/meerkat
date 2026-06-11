@@ -34,8 +34,15 @@ rkat [--realm <id>] [--isolated] [--instance <id>] \
   [--state-root <path>] \
   [--context-root <path>] \
   [--user-config-root <path>] \
+  [--default-model <model>] \
   <command>
 ```
+
+`--default-model <model>` persists the default agent model into the
+scope-resolved config (project/user/realm resolution included) and exits when
+given without a command — `rkat --default-model claude-fable-5` is the
+one-liner for switching what every future run talks to. The model is
+validated against the catalog and configured custom models.
 
 By default, CLI commands use the current directory as the context root, derive a
 stable workspace realm id from that path, and store realm state under

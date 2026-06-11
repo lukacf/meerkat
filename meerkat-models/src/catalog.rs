@@ -148,7 +148,9 @@ pub fn canonical() -> ModelCatalog {
         providers: CATALOG_PROVIDERS,
         default_models: DEFAULT_MODELS,
         image_generation_defaults: IMAGE_GENERATION_DEFAULTS,
-        global_default_model: DEFAULT_ANTHROPIC,
+        // Global default preserves the pre-extraction template behavior
+        // (fresh configs talked to gpt-5.5).
+        global_default_model: DEFAULT_OPENAI,
         provider_priority: PROVIDER_PRIORITY,
     }
 }

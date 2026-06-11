@@ -38,6 +38,17 @@ Global/realm options:
 --state-root <PATH>
 --context-root <PATH>
 --user-config-root <PATH>
+--default-model <MODEL>
+```
+
+`--default-model <MODEL>` persists the default agent model into the
+scope-resolved config (same project/user/realm resolution as every other
+command) and exits when given without a command, or applies first when
+combined with one. The model is validated against the catalog and any
+configured custom models:
+
+```bash
+rkat --default-model claude-fable-5
 ```
 
 Top-level commands:

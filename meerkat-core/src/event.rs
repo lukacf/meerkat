@@ -1232,9 +1232,9 @@ pub enum ToolConfigChangeDomain {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeferredCatalogDelta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub added_hidden_names: Vec<String>,
+    pub added_hidden_names: Vec<crate::types::ToolName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub removed_hidden_names: Vec<String>,
+    pub removed_hidden_names: Vec<crate::types::ToolName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_sources: Vec<String>,
 }

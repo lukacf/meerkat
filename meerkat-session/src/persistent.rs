@@ -8852,7 +8852,7 @@ mod tests {
                     ))
                 })?
                 .unwrap_or_default();
-            let requested_name = format!("requested:{}", call.name);
+            let requested_name = meerkat_core::ToolName::from(format!("requested:{}", call.name));
             state
                 .staged_requested_deferred_names
                 .insert(requested_name.clone());
@@ -15061,7 +15061,7 @@ mod tests {
 
         let mut start_req = start_turn_request("resume staged");
         start_req.runtime.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay {
-            allowed_tools: Some(vec!["blocked-before-run".to_string()]),
+            allowed_tools: Some(vec!["blocked-before-run".into()]),
             blocked_tools: None,
             dispatch_context: Default::default(),
         });

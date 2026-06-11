@@ -1359,8 +1359,18 @@ pub struct TurnToolOverlayInput {
 impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
     fn from(value: TurnToolOverlayInput) -> Self {
         Self {
-            allowed_tools: value.allowed_tools,
-            blocked_tools: value.blocked_tools,
+            allowed_tools: value.allowed_tools.map(|names| {
+                names
+                    .into_iter()
+                    .map(meerkat_core::ToolName::from)
+                    .collect()
+            }),
+            blocked_tools: value.blocked_tools.map(|names| {
+                names
+                    .into_iter()
+                    .map(meerkat_core::ToolName::from)
+                    .collect()
+            }),
             ..Default::default()
         }
     }

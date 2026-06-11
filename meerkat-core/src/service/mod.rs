@@ -1323,10 +1323,10 @@ pub enum AppendSystemContextStatus {
 pub struct TurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]
-    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_tools: Option<Vec<crate::types::ToolName>>,
     /// Optional deny-list for this turn.
     #[serde(default)]
-    pub blocked_tools: Option<Vec<String>>,
+    pub blocked_tools: Option<Vec<crate::types::ToolName>>,
     /// Tool-dispatch metadata visible only to dispatchers for this turn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     #[cfg_attr(feature = "schema", schemars(skip))]
@@ -1347,10 +1347,10 @@ impl TurnToolOverlay {
 pub struct PublicTurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]
-    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_tools: Option<Vec<crate::types::ToolName>>,
     /// Optional deny-list for this turn.
     #[serde(default)]
-    pub blocked_tools: Option<Vec<String>>,
+    pub blocked_tools: Option<Vec<crate::types::ToolName>>,
 }
 
 impl From<PublicTurnToolOverlay> for TurnToolOverlay {

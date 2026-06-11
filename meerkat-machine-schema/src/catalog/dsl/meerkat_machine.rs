@@ -166,12 +166,12 @@ pub struct SessionToolVisibilityState {
     pub inherited_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
-    pub active_requested_deferred_names: std::collections::BTreeSet<String>,
-    pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
+    pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub staged_requested_deferred_names: std::collections::BTreeSet<ToolName>,
     pub active_revision: u64,
     pub staged_revision: u64,
-    pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub requested_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub filter_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 /// Typed mirror of
@@ -219,8 +219,14 @@ pub struct SessionToolVisibilityDelta {
     pub revision_bumped: bool,
 }
 
+/// Canonical typed tool identity. This IS the domain type —
+/// [`meerkat_core::types::ToolName`] — carried directly through the machine
+/// (K8a fold: the tool-visibility name domain is `ToolName`-keyed end to end;
+/// no stringly bridge inside the machine).
+pub type ToolName = meerkat_core::types::ToolName;
+
 /// Typed mirror of [`meerkat_core::ToolFilter`] — closed 3-variant
-/// discriminant with a `BTreeSet<String>` name payload for
+/// discriminant with a `BTreeSet<ToolName>` name payload for
 /// `Allow`/`Deny` so the value is `Ord + Hash` and deterministic across
 /// iteration, matching the R3 `InputAbandonReason::MaxAttemptsExhausted {
 /// attempts }` pattern of carrying the discriminant's companion data in a
@@ -240,8 +246,8 @@ pub struct SessionToolVisibilityDelta {
 pub enum ToolFilter {
     #[default]
     All,
-    Allow(std::collections::BTreeSet<String>),
-    Deny(std::collections::BTreeSet<String>),
+    Allow(std::collections::BTreeSet<ToolName>),
+    Deny(std::collections::BTreeSet<ToolName>),
 }
 
 /// Typed mirror of [`meerkat_core::types::ToolSourceKind`] — closed
@@ -1599,18 +1605,17 @@ pub enum OperationStatus {
 }
 
 /// Typed discriminant mirror of
-/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] — replaces the
-/// former opaque JSON string carried in the DSL's `op_terminal_outcomes`
-/// map. Unit variants only; payload data (completion result, failure error,
-/// cancellation reason, terminated reason) rides on the companion
-/// `op_terminal_payload: Map<String, String>` field of the DSL state as
-/// JSON keyed to the same operation id, and is reconstructed in the shell
-/// by pairing the typed discriminant with the companion entry.
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`]. Unit variants
+/// only; the full typed payload (completion result, failure error,
+/// cancellation reason, terminated reason) is carried by the companion
+/// `op_terminal_payload: Map<String, OpTerminalPayload>` field, keyed by the
+/// same operation id. The machine guards that the payload variant matches
+/// the discriminant on every terminal transition.
 ///
 /// The DSL writes these variants directly on each terminal transition
 /// (`CompleteOp`, `FailOp`, `CancelOp`, `AbortOp`, `RetireCompletedOp`,
-/// `TerminateOp`); the shell reads them through the typed map and rebuilds
-/// the domain enum in `ShellState::terminal_outcome`.
+/// `TerminateOp`); the shell reads the typed payload map directly — no JSON
+/// codec, no string compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationTerminalOutcomeKind {
     #[default]
@@ -1621,6 +1626,17 @@ pub enum OperationTerminalOutcomeKind {
     Retired,
     Terminated,
 }
+
+/// Typed terminal payload carried by the ops-lifecycle authority. This IS the
+/// domain type — the machine state stores
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] directly, so the
+/// shell needs no codec in either direction (K8b fold: the former
+/// `Map<String, String>` opaque-JSON payload carrier is deleted).
+pub type OpTerminalPayload = meerkat_core::ops_lifecycle::OperationTerminalOutcome;
+
+/// Result payload for completed operations, referenced by the
+/// `OpTerminalPayload::Completed` structural variant binding.
+pub type OperationResult = meerkat_core::ops::OperationResult;
 
 /// Typed public result class for operation lifecycle projections. Shell/tool
 /// surfaces may format these classes, but the lifecycle machine owns the
@@ -2548,17 +2564,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             staged_filter: ToolFilter,
             active_visibility_revision: u64,
             staged_visibility_revision: u64,
-            active_deferred_names: Set<String>,
-            staged_deferred_names: Set<String>,
-            requested_visibility_witnesses: Map<String, ToolVisibilityWitness>,
-            filter_visibility_witnesses: Map<String, ToolVisibilityWitness>,
-            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            deferred_visibility_authority_catalog: Map<String, ToolVisibilityWitness>,
-            filter_visibility_authority_catalog: Map<String, ToolVisibilityWitness>,
+            active_deferred_names: Set<ToolName>,
+            staged_deferred_names: Set<ToolName>,
+            requested_visibility_witnesses: Map<ToolName, ToolVisibilityWitness>,
+            filter_visibility_witnesses: Map<ToolName, ToolVisibilityWitness>,
+            active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            deferred_visibility_authority_catalog: Map<ToolName, ToolVisibilityWitness>,
+            filter_visibility_authority_catalog: Map<ToolName, ToolVisibilityWitness>,
             turn_tool_overlay_allow_active: bool,
-            turn_tool_overlay_allow_names: Set<String>,
-            turn_tool_overlay_deny_names: Set<String>,
+            turn_tool_overlay_allow_names: Set<ToolName>,
+            turn_tool_overlay_deny_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             input_phases: Map<String, InputPhase>,
@@ -2609,19 +2625,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             completion_feed_sequences: Map<String, u64>,
             completion_feed_kinds: Map<String, Enum<OperationKind>>,
             completion_feed_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
-            completion_feed_terminal_payload: Map<String, String>,
-            // Terminal-outcome discriminant. Payload (result/error/reason)
-            // rides on the companion `op_terminal_payload` map as JSON.
-            // The machine OWNS the payload shape invariants: each terminal
-            // transition guards that the discriminant matches the transition
-            // (`outcome_matches_terminal`) and that the payload is non-empty
-            // for data-carrying kinds / empty for `Retired`
-            // (`payload_present_for_kind` / `payload_empty_for_retired`).
-            // The payload's inner content is wire-opaque pass-through (the
-            // `OperationResult` carries arbitrary tool/result JSON); the shell
-            // rehydrates it fail-closed at `terminal_outcome_from_parts`.
+            completion_feed_terminal_payload: Map<String, OpTerminalPayload>,
+            // Terminal-outcome discriminant. The full typed payload
+            // (result/error/reason) rides on the companion typed
+            // `op_terminal_payload` map. The machine OWNS the payload shape
+            // invariants: each terminal transition guards that the
+            // discriminant matches the transition (`outcome_matches_terminal`)
+            // and that the payload variant matches the terminal kind
+            // (`payload_variant_matches_kind`). The shell reads the typed
+            // payload directly — no JSON codec.
             op_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
-            op_terminal_payload: Map<String, String>,
+            op_terminal_payload: Map<String, OpTerminalPayload>,
             op_kinds: Map<String, Enum<OperationKind>>,
             op_sources: Map<String, OperationSource>,
             op_peer_ready: Map<String, bool>,
@@ -3236,14 +3250,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_promotion_busy: bool,
             },
             CancelAfterBoundary { reason: String },
-            StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
+            StagePersistentFilter { filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
                 active_filter: ToolFilter,
                 staged_filter: ToolFilter,
-                active_requested_deferred_names: Set<String>,
-                staged_requested_deferred_names: Set<String>,
-                active_deferred_authorities: Map<String, ToolVisibilityWitness>,
-                staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+                active_requested_deferred_names: Set<ToolName>,
+                staged_requested_deferred_names: Set<ToolName>,
+                active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+                staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
                 active_visibility_revision: u64,
                 staged_visibility_revision: u64,
             },
@@ -3682,15 +3696,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 max_concurrent: Option<u64>,
             },
             StartOp { operation_id: String },
-            CompleteOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
-            FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
-            CancelOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
-            AbortOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            CompleteOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
+            FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
+            CancelOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
+            AbortOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
             PeerReadyOp { operation_id: String },
             ProgressReportedOp { operation_id: String },
             RetireRequestedOp { operation_id: String },
-            RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
-            TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
+            TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
             ResolveOpLifecycleTransitionRejection {
                 operation_id: String,
                 action: Enum<OpLifecycleActionKind>,
@@ -3703,7 +3717,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 peer_ready: bool,
                 progress_count: u64,
                 terminal_outcome: Option<Enum<OperationTerminalOutcomeKind>>,
-                terminal_payload: Option<String>,
+                terminal_payload: Option<OpTerminalPayload>,
                 completion_sequence: Option<u64>,
             },
             ClassifyOperationTerminality {
@@ -3743,7 +3757,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: String,
                 kind: Enum<OperationKind>,
                 terminal_outcome: Enum<OperationTerminalOutcomeKind>,
-                terminal_payload: String,
+                terminal_payload: OpTerminalPayload,
                 completion_sequence: u64,
             },
             RecoverOpsCompletionCursor { next_completion_seq: u64 },
@@ -3878,18 +3892,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `next_staged_visibility_revision` in the transition's update.
             StageVisibilityFilter {
                 filter: ToolFilter,
-                witnesses: Map<String, ToolVisibilityWitness>,
+                witnesses: Map<ToolName, ToolVisibilityWitness>,
             },
-            ReplaceFilterToolAuthorityCatalog { catalog: Map<String, ToolVisibilityWitness> },
+            ReplaceFilterToolAuthorityCatalog { catalog: Map<ToolName, ToolVisibilityWitness> },
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
-            StageDeferredNames { names: Set<String> },
-            RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
-            ReplaceDeferredToolAuthorityCatalog { catalog: Map<String, ToolVisibilityWitness> },
-            CommitDeferredNames { authorities: Map<String, ToolVisibilityWitness> },
+            StageDeferredNames { names: Set<ToolName> },
+            RequestDeferredTools { authorities: Map<ToolName, ToolVisibilityWitness> },
+            ReplaceDeferredToolAuthorityCatalog { catalog: Map<ToolName, ToolVisibilityWitness> },
+            CommitDeferredNames { authorities: Map<ToolName, ToolVisibilityWitness> },
             SetTurnToolOverlay {
                 allow_active: bool,
-                allow_names: Set<String>,
-                deny_names: Set<String>,
+                allow_names: Set<ToolName>,
+                deny_names: Set<ToolName>,
             },
             ClearTurnToolOverlay,
             // Generated authority for full visibility-state replacement. The
@@ -3904,12 +3918,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_filter: ToolFilter,
                 active_revision: u64,
                 staged_revision: u64,
-                active_deferred_names: Set<String>,
-                staged_deferred_names: Set<String>,
-                requested_witnesses: Map<String, ToolVisibilityWitness>,
-                filter_witnesses: Map<String, ToolVisibilityWitness>,
-                active_deferred_authorities: Map<String, ToolVisibilityWitness>,
-                staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+                active_deferred_names: Set<ToolName>,
+                staged_deferred_names: Set<ToolName>,
+                requested_witnesses: Map<ToolName, ToolVisibilityWitness>,
+                filter_witnesses: Map<ToolName, ToolVisibilityWitness>,
+                active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+                staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
             },
             SurfaceRegister { surface_id: String },
             SurfaceSetRemovalTimeout { timeout_ms: u64 },
@@ -4437,7 +4451,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 seq: u64,
                 kind: Enum<OperationKind>,
                 terminal_outcome: Enum<OperationTerminalOutcomeKind>,
-                terminal_payload: String,
+                terminal_payload: OpTerminalPayload,
             },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
             AgentCompletionCursorAdvanced { cursor: u64 },
@@ -5041,18 +5055,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper deferred_authorities_have_identity(
-            names: Set<String>,
-            witnesses: Map<String, ToolVisibilityWitness>
+            names: Set<ToolName>,
+            witnesses: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(requested_name in names,
                 deferred_authority_has_identity(witnesses.get_cloned(requested_name).get("value")))
         }
 
-        helper meerkat_tool_visibility_filter_names(filter: ToolFilter) -> Set<String> {
+        helper meerkat_tool_visibility_filter_names(filter: ToolFilter) -> Set<ToolName> {
             if filter.is_unit_variant(ToolFilter::All) {
                 EmptySet
             } else {
-                if filter.is_tuple_variant(ToolFilter::Allow) {
+                if filter.is_data_variant(ToolFilter::Allow) {
                     filter.string_set_payload(ToolFilter::Allow, "names")
                 } else {
                     filter.string_set_payload(ToolFilter::Deny, "names")
@@ -5062,7 +5076,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         helper meerkat_tool_visibility_filter_has_identity_witnesses(
             filter: ToolFilter,
-            witnesses: Map<String, ToolVisibilityWitness>
+            witnesses: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(name in meerkat_tool_visibility_filter_names(filter),
                 witnesses.contains_key(name)
@@ -5070,9 +5084,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper meerkat_tool_visibility_authorities_match_names(
-            names: Set<String>,
-            witnesses: Map<String, ToolVisibilityWitness>,
-            authorities: Map<String, ToolVisibilityWitness>
+            names: Set<ToolName>,
+            witnesses: Map<ToolName, ToolVisibilityWitness>,
+            authorities: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             authorities.keys() == names
             && for_all(name in names,
@@ -5082,8 +5096,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper meerkat_tool_visibility_authorities_are_catalog_backed(
-            authorities: Map<String, ToolVisibilityWitness>,
-            authority_catalog: Map<String, ToolVisibilityWitness>
+            authorities: Map<ToolName, ToolVisibilityWitness>,
+            authority_catalog: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(name in authorities.keys(),
                 authority_catalog.contains_key(name)
@@ -5093,8 +5107,8 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         helper meerkat_tool_visibility_filter_has_catalog_witnesses(
             filter: ToolFilter,
-            witnesses: Map<String, ToolVisibilityWitness>,
-            authority_catalog: Map<String, ToolVisibilityWitness>
+            witnesses: Map<ToolName, ToolVisibilityWitness>,
+            authority_catalog: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(name in meerkat_tool_visibility_filter_names(filter),
                 witnesses.contains_key(name)
@@ -5104,8 +5118,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper meerkat_tool_visibility_filter_witnesses_are_catalog_backed(
-            witnesses: Map<String, ToolVisibilityWitness>,
-            authority_catalog: Map<String, ToolVisibilityWitness>
+            witnesses: Map<ToolName, ToolVisibilityWitness>,
+            authority_catalog: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(name in witnesses.keys(),
                 authority_catalog.contains_key(name)
@@ -5114,8 +5128,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper meerkat_tool_visibility_names_are_catalog_backed(
-            names: Set<String>,
-            authority_catalog: Map<String, ToolVisibilityWitness>
+            names: Set<ToolName>,
+            authority_catalog: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             for_all(name in names,
                 authority_catalog.contains_key(name)
@@ -5125,11 +5139,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         helper meerkat_tool_visibility_publish_matches_catalog(
             active_filter: ToolFilter,
             staged_filter: ToolFilter,
-            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            filter_witnesses: Map<String, ToolVisibilityWitness>,
-            deferred_authority_catalog: Map<String, ToolVisibilityWitness>,
-            filter_authority_catalog: Map<String, ToolVisibilityWitness>
+            active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            filter_witnesses: Map<ToolName, ToolVisibilityWitness>,
+            deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>,
+            filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>
         ) -> bool {
             meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, filter_witnesses, filter_authority_catalog)
             && meerkat_tool_visibility_filter_has_catalog_witnesses(staged_filter, filter_witnesses, filter_authority_catalog)
@@ -5141,14 +5155,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             inherited_base_filter: ToolFilter,
             active_filter: ToolFilter,
             staged_filter: ToolFilter,
-            active_requested_deferred_names: Set<String>,
-            staged_requested_deferred_names: Set<String>,
-            requested_witnesses: Map<String, ToolVisibilityWitness>,
-            filter_witnesses: Map<String, ToolVisibilityWitness>,
-            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
-            deferred_authority_catalog: Map<String, ToolVisibilityWitness>,
-            filter_authority_catalog: Map<String, ToolVisibilityWitness>,
+            active_requested_deferred_names: Set<ToolName>,
+            staged_requested_deferred_names: Set<ToolName>,
+            requested_witnesses: Map<ToolName, ToolVisibilityWitness>,
+            filter_witnesses: Map<ToolName, ToolVisibilityWitness>,
+            active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>,
+            deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>,
+            filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>,
             active_visibility_revision: u64,
             staged_visibility_revision: u64
         ) -> bool {
@@ -5172,8 +5186,10 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         helper meerkat_session_llm_filter_has_view_image_only(filter: ToolFilter) -> bool {
-            filter.string_set_payload(ToolFilter::Deny, "names").len() == 1
-            && filter.string_set_payload(ToolFilter::Deny, "names").contains("view_image")
+            filter.is_data_variant(ToolFilter::Deny)
+            && meerkat_tool_visibility_filter_names(filter).len() == 1
+            && exists(name in meerkat_tool_visibility_filter_names(filter),
+                name == "view_image")
         }
 
         helper meerkat_session_llm_capability_base_filter_matches(
@@ -5183,7 +5199,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             if target_capability_surface.image_tool_results {
                 next_capability_base_filter.is_unit_variant(ToolFilter::All)
             } else {
-                next_capability_base_filter.is_tuple_variant(ToolFilter::Deny)
+                next_capability_base_filter.is_data_variant(ToolFilter::Deny)
                 && meerkat_session_llm_filter_has_view_image_only(next_capability_base_filter)
             }
         }
@@ -5222,10 +5238,12 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         helper meerkat_session_llm_filter_allows_view_image(filter: ToolFilter) -> bool {
             filter.is_unit_variant(ToolFilter::All)
-            || (filter.is_tuple_variant(ToolFilter::Allow)
-                && filter.string_set_payload(ToolFilter::Allow, "names").contains("view_image"))
-            || (filter.is_tuple_variant(ToolFilter::Deny)
-                && !filter.string_set_payload(ToolFilter::Deny, "names").contains("view_image"))
+            || (filter.is_data_variant(ToolFilter::Allow)
+                && exists(name in meerkat_tool_visibility_filter_names(filter),
+                    name == "view_image"))
+            || (filter.is_data_variant(ToolFilter::Deny)
+                && !exists(name in meerkat_tool_visibility_filter_names(filter),
+                    name == "view_image"))
         }
 
         helper meerkat_session_llm_visibility_state_allows_view_image(
@@ -15730,7 +15748,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Completed }
-            guard "payload_present_for_kind" { payload != "" }
+            guard "payload_variant_matches_kind" { payload.is_data_variant(OpTerminalPayload::Completed) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Completed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15770,7 +15788,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Failed }
-            guard "payload_present_for_kind" { payload != "" }
+            guard "payload_variant_matches_kind" { payload.is_data_variant(OpTerminalPayload::Failed) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Failed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15806,7 +15824,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Cancelled }
-            guard "payload_present_for_kind" { payload != "" }
+            guard "payload_variant_matches_kind" { payload.is_data_variant(OpTerminalPayload::Cancelled) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Cancelled);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15843,7 +15861,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Aborted }
-            guard "payload_present_for_kind" { payload != "" }
+            guard "payload_variant_matches_kind" { payload.is_data_variant(OpTerminalPayload::Aborted) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Aborted);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15936,7 +15954,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Retired }
-            guard "payload_empty_for_retired" { payload == "" }
+            guard "payload_variant_matches_kind" { payload.is_unit_variant(OpTerminalPayload::Retired) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Retired);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15977,7 +15995,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
             guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Terminated }
-            guard "payload_present_for_kind" { payload != "" }
+            guard "payload_variant_matches_kind" { payload.is_data_variant(OpTerminalPayload::Terminated) }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Terminated);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -16048,6 +16066,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && terminal_outcome == Some(OperationTerminalOutcomeKind::Retired))
                 || (status == OperationStatus::Terminated
                     && terminal_outcome == Some(OperationTerminalOutcomeKind::Terminated))
+            }
+            guard "terminal_payload_variant_matches_status" {
+                (status == OperationStatus::Completed
+                    && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Completed))
+                || (status == OperationStatus::Failed
+                    && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Failed))
+                || (status == OperationStatus::Aborted
+                    && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Aborted))
+                || (status == OperationStatus::Cancelled
+                    && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Cancelled))
+                || (status == OperationStatus::Retired
+                    && terminal_payload.get("value").is_unit_variant(OpTerminalPayload::Retired))
+                || (status == OperationStatus::Terminated
+                    && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Terminated))
             }
             update {
                 self.op_statuses.insert(operation_id, status);
@@ -16407,6 +16439,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "feed_entry_absent" {
                 !self.completion_feed_sequences.contains_key(operation_id)
+            }
+            guard "terminal_payload_variant_matches_outcome" {
+                (terminal_outcome == OperationTerminalOutcomeKind::Completed
+                    && terminal_payload.is_data_variant(OpTerminalPayload::Completed))
+                || (terminal_outcome == OperationTerminalOutcomeKind::Failed
+                    && terminal_payload.is_data_variant(OpTerminalPayload::Failed))
+                || (terminal_outcome == OperationTerminalOutcomeKind::Aborted
+                    && terminal_payload.is_data_variant(OpTerminalPayload::Aborted))
+                || (terminal_outcome == OperationTerminalOutcomeKind::Cancelled
+                    && terminal_payload.is_data_variant(OpTerminalPayload::Cancelled))
+                || (terminal_outcome == OperationTerminalOutcomeKind::Retired
+                    && terminal_payload.is_unit_variant(OpTerminalPayload::Retired))
+                || (terminal_outcome == OperationTerminalOutcomeKind::Terminated
+                    && terminal_payload.is_data_variant(OpTerminalPayload::Terminated))
             }
             update {
                 self.completion_sequence_claims.insert(completion_sequence);

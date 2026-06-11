@@ -1271,7 +1271,7 @@ where
     /// Structured-output extraction state carried into RunResult.
     pub(crate) extraction_state: extraction::ExtractionState,
     /// Last published hidden deferred-catalog names.
-    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
+    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<crate::types::ToolName>,
     /// Last published pending catalog sources.
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
     /// Dispatch-time projection of the current turn input for contextual tools.

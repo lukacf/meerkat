@@ -153,8 +153,8 @@ fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
 
 fn hidden_deferred_catalog_names(
     catalog: &[crate::ToolCatalogEntry],
-    visible_names: &BTreeSet<String>,
-) -> BTreeSet<String> {
+    visible_names: &BTreeSet<crate::types::ToolName>,
+) -> BTreeSet<crate::types::ToolName> {
     catalog
         .iter()
         .filter(|entry| entry.plane == ToolPlaneClass::Session)
@@ -164,7 +164,7 @@ fn hidden_deferred_catalog_names(
                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
             )
         })
-        .map(|entry| entry.tool.name.to_string())
+        .map(|entry| entry.tool.name.clone())
         .filter(|name| !visible_names.contains(name))
         .collect()
 }
@@ -1594,7 +1594,7 @@ where
                                 let control_names = catalog
                                     .iter()
                                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                                    .map(|entry| entry.tool.name.to_string())
+                                    .map(|entry| entry.tool.name.clone())
                                     .collect::<std::collections::HashSet<_>>();
                                 let deferred_names = if !control_names.is_empty()
                                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -1610,7 +1610,7 @@ where
                                                         ToolCatalogDeferredEligibility::DeferredEligible { .. }
                                                     )
                                                 })
-                                                .map(|entry| entry.tool.name.to_string())
+                                                .map(|entry| entry.tool.name.clone())
                                                 .collect()
                                 } else {
                                     std::collections::HashSet::new()

@@ -8418,12 +8418,22 @@ fn build_flow_tool_overlay(
         allowed_tools: if allow_tools.is_empty() {
             None
         } else {
-            Some(allow_tools)
+            Some(
+                allow_tools
+                    .into_iter()
+                    .map(meerkat::ToolName::from)
+                    .collect(),
+            )
         },
         blocked_tools: if block_tools.is_empty() {
             None
         } else {
-            Some(block_tools)
+            Some(
+                block_tools
+                    .into_iter()
+                    .map(meerkat::ToolName::from)
+                    .collect(),
+            )
         },
         dispatch_context: Default::default(),
     })
@@ -16371,9 +16381,9 @@ default_model = "gemma"
         .expect("overlay should be present");
         assert_eq!(
             overlay.allowed_tools,
-            Some(vec!["search".to_string(), "read_file".to_string()])
+            Some(vec!["search".into(), "read_file".into()])
         );
-        assert_eq!(overlay.blocked_tools, Some(vec!["shell".to_string()]));
+        assert_eq!(overlay.blocked_tools, Some(vec!["shell".into()]));
     }
 
     #[cfg(feature = "comms")]

@@ -1317,13 +1317,13 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         applied_cursor: 17,
     };
     let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec!["alpha".to_string(), "beta".to_string()],
-        visible_names: vec!["beta".to_string()],
+        known_base_names: vec!["alpha".into(), "beta".into()],
+        visible_names: vec!["beta".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["alpha".to_string()].into_iter().collect(),
         ),
-        active_turn_allow: Some(vec!["beta".to_string()]),
+        active_turn_allow: Some(vec!["beta".into()]),
         active_turn_deny: Vec::new(),
         active_revision: meerkat_core::ToolScopeRevision(3),
         staged_external_filter: meerkat_core::ToolFilter::Deny(
@@ -1373,18 +1373,14 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         applied_cursor: 0,
     };
     let expected = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec![
-            "read_file".to_string(),
-            "search".to_string(),
-            "write_file".to_string(),
-        ],
-        visible_names: vec!["read_file".to_string(), "search".to_string()],
+        known_base_names: vec!["read_file".into(), "search".into(), "write_file".into()],
+        visible_names: vec!["read_file".into(), "search".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["write_file".to_string()].into_iter().collect(),
         ),
         active_turn_allow: None,
-        active_turn_deny: vec!["write_file".to_string()],
+        active_turn_deny: vec!["write_file".into()],
         active_revision: meerkat_core::ToolScopeRevision(4),
         staged_external_filter: meerkat_core::ToolFilter::Allow(
             ["read_file".to_string(), "search".to_string()]
@@ -1435,8 +1431,8 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         applied_cursor: 0,
     };
     let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
-        known_base_names: vec!["mcp__planner".to_string()],
-        visible_names: vec!["mcp__planner".to_string()],
+        known_base_names: vec!["mcp__planner".into()],
+        visible_names: vec!["mcp__planner".into()],
         base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::All,
         active_turn_allow: None,

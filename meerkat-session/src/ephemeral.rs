@@ -5819,7 +5819,7 @@ mod runtime_turn_metadata_tests {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         meerkat_core::types::HandlingMode::Queue,
                         Some(TurnToolOverlay {
-                            allowed_tools: Some(vec!["flow_tool".to_string()]),
+                            allowed_tools: Some(vec!["flow_tool".into()]),
                             blocked_tools: None,
                             dispatch_context: Default::default(),
                         }),

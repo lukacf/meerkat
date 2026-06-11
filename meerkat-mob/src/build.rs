@@ -1388,12 +1388,12 @@ mod tests {
             staged_filter: meerkat_core::tool_scope::ToolFilter::Allow(
                 ["staged_visible".to_string()].into_iter().collect(),
             ),
-            active_requested_deferred_names: BTreeSet::from(["deferred_active".to_string()]),
-            staged_requested_deferred_names: BTreeSet::from(["deferred_staged".to_string()]),
+            active_requested_deferred_names: BTreeSet::from(["deferred_active".into()]),
+            staged_requested_deferred_names: BTreeSet::from(["deferred_staged".into()]),
             active_revision: 7,
             staged_revision: 9,
             requested_witnesses: [(
-                "deferred_active".to_string(),
+                "deferred_active".into(),
                 meerkat_core::ToolVisibilityWitness {
                     last_seen_provenance: Some(meerkat_core::ToolProvenance {
                         kind: meerkat_core::ToolSourceKind::Callback,
@@ -1404,7 +1404,7 @@ mod tests {
             .into_iter()
             .collect(),
             filter_witnesses: [(
-                "active_secret".to_string(),
+                "active_secret".into(),
                 meerkat_core::ToolVisibilityWitness {
                     last_seen_provenance: Some(meerkat_core::ToolProvenance {
                         kind: meerkat_core::ToolSourceKind::Callback,

@@ -144,7 +144,7 @@ pub struct HydratedSessionLlmState {
     pub current_visibility_state: meerkat_core::SessionToolVisibilityState,
     pub current_capability_surface: Option<SessionLlmCapabilitySurface>,
     pub capability_surface_status: SessionLlmCapabilitySurfaceStatus,
-    pub base_tool_names: std::collections::BTreeSet<String>,
+    pub base_tool_names: std::collections::BTreeSet<meerkat_core::ToolName>,
 }
 
 #[derive(Debug, Clone)]
@@ -325,7 +325,8 @@ pub(crate) enum MeerkatMachineCommand {
     StagePersistentFilter {
         session_id: SessionId,
         filter: meerkat_core::ToolFilter,
-        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        witnesses:
+            std::collections::BTreeMap<meerkat_core::ToolName, meerkat_core::ToolVisibilityWitness>,
     },
     RequestDeferredTools {
         session_id: SessionId,

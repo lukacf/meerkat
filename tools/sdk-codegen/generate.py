@@ -312,6 +312,14 @@ SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES = [
     "SourceUuid",
 ]
 
+# K8a: canonical typed tool identity. `ToolName` is a transparent string
+# newtype on the wire; promote and alias it so `PublicTurnToolOverlay`
+# (and the deferred-catalog delta event payloads) keep `string`-shaped SDK
+# types instead of widening to `unknown[]` / `list[Any]`.
+TOOL_IDENTITY_ALIAS_TYPES = [
+    "ToolName",
+]
+
 MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
     [
         *MOB_RPC_CONTRACT_ALIAS_TYPES,
@@ -462,6 +470,7 @@ def _promote_nested_schema_def(name: str) -> bool:
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
         *SKILL_LIST_RPC_CONTRACT_HELPER_TYPES,
         *SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES,
+        *TOOL_IDENTITY_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_TYPES,
         *WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
@@ -1139,6 +1148,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES:
         append_python_alias(name, wire_schema, f"Wire payload for {name}.")
+    for name in TOOL_IDENTITY_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Canonical typed tool identity {name}.")
     for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
     for name in K20_CATALOG_CONTRACT_TYPES:
@@ -1656,6 +1667,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in MCP_LIVE_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     for name in SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in TOOL_IDENTITY_ALIAS_TYPES:
         append_typescript_alias(name, wire_schema)
     for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)

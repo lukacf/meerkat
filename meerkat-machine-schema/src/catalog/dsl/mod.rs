@@ -46,8 +46,8 @@ pub mod workgraph_lifecycle;
 
 use crate::identity::InputVariantId;
 use crate::{
-    MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumStructuralVariant,
-    TypePathStructField,
+    MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumPayloadField,
+    TypePathEnumStructuralVariant, TypePathStructField,
 };
 
 pub struct MachineSchemaMetadata {
@@ -651,6 +651,39 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Completed",
                     "Failed",
                     "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::type_path("OperationResult", "meerkat_core::ops::OperationResult"),
+            // K8b fold: the ops terminal payload is the domain type itself —
+            // `meerkat_core::ops_lifecycle::OperationTerminalOutcome` — carried
+            // typed through the machine (no JSON-string codec). The structural
+            // variant declarations give the model/oracle a faithful finite
+            // domain for variant-matches-kind guards.
+            NamedTypeBinding::type_path_enum_with_structural_variants(
+                "OpTerminalPayload",
+                "meerkat_core::ops_lifecycle::OperationTerminalOutcome",
+                &["Retired"],
+                vec![
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Completed",
+                        vec![TypePathEnumPayloadField::named("result", "OperationResult")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Failed",
+                        vec![TypePathEnumPayloadField::string("error")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Aborted",
+                        vec![TypePathEnumPayloadField::optional_string("reason")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Cancelled",
+                        vec![TypePathEnumPayloadField::optional_string("reason")],
+                    ),
+                    TypePathEnumStructuralVariant::with_fields(
+                        "Terminated",
+                        vec![TypePathEnumPayloadField::string("reason")],
+                    ),
                 ],
             ),
             NamedTypeBinding::string_enum("OperationCompletionFeedClass", &["Emit", "Suppress"]),
@@ -1478,10 +1511,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "crate::catalog::dsl::meerkat_machine::ToolFilter",
                 &["All"],
                 vec![
-                    TypePathEnumStructuralVariant::string_set("Allow", "names"),
-                    TypePathEnumStructuralVariant::string_set("Deny", "names"),
+                    TypePathEnumStructuralVariant::named_set("Allow", "names", "ToolName"),
+                    TypePathEnumStructuralVariant::named_set("Deny", "names", "ToolName"),
                 ],
             ),
+            // K8a fold: the tool-visibility name domain is the canonical
+            // `meerkat_core::types::ToolName` newtype, threaded through the
+            // machine as a named value domain (overlay sets, deferred name
+            // sets, witness/catalog map keys, and ToolFilter payloads).
+            NamedTypeBinding::type_path("ToolName", "meerkat_core::types::ToolName"),
             NamedTypeBinding::type_path_struct(
                 "ToolProvenance",
                 "crate::catalog::dsl::meerkat_machine::ToolProvenance",

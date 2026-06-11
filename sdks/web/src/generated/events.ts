@@ -136,9 +136,9 @@ export type ContentBlock = {
 export type ContentInput = string | ContentBlock[];
 
 export interface DeferredCatalogDelta {
-  added_hidden_names?: string[];
+  added_hidden_names?: ToolName[];
   pending_sources?: string[];
-  removed_hidden_names?: string[];
+  removed_hidden_names?: ToolName[];
 }
 
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
@@ -369,6 +369,8 @@ export type ToolConfigChangedPayload = {
   status_info: ToolConfigChangeStatus;
   target: string;
 };
+
+export type ToolName = string;
 
 export type TranscriptRevisionBody = {
   created_at: SystemTime;

@@ -803,10 +803,10 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     value: Box::new(expr),
                     enum_name,
                     variant,
-                    tuple_variant: false,
+                    data_variant: false,
                 };
             }
-            "is_tuple_variant" => {
+            "is_data_variant" => {
                 let paren;
                 syn::parenthesized!(paren in input);
                 let (enum_name, variant) = parse_enum_variant_ref(&paren)?;
@@ -814,7 +814,7 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     value: Box::new(expr),
                     enum_name,
                     variant,
-                    tuple_variant: true,
+                    data_variant: true,
                 };
             }
             "string_set_payload" => {

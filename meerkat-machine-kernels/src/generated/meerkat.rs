@@ -3765,6 +3765,7 @@ impl std::fmt::Display for OpRegistrationRejectReasonKind {
         f.write_str(self.as_str())
     }
 }
+pub type OpTerminalPayload = meerkat_core::ops_lifecycle::OperationTerminalOutcome;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -9401,6 +9402,7 @@ impl std::fmt::Display for TerminalCauseClass {
     }
 }
 pub type ToolFilter = meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolFilter;
+pub type ToolName = meerkat_core::types::ToolName;
 pub type ToolVisibilityWitness =
     meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolVisibilityWitness;
 #[allow(non_camel_case_types)]
@@ -10282,19 +10284,19 @@ pub struct State {
     pub staged_filter: ToolFilter,
     pub active_visibility_revision: u64,
     pub staged_visibility_revision: u64,
-    pub active_deferred_names: std::collections::BTreeSet<String>,
-    pub staged_deferred_names: std::collections::BTreeSet<String>,
-    pub requested_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub filter_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub active_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub staged_deferred_names: std::collections::BTreeSet<ToolName>,
+    pub requested_visibility_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub filter_visibility_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub active_deferred_authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+    pub staged_deferred_authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub deferred_visibility_authority_catalog:
-        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub filter_visibility_authority_catalog:
-        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     pub turn_tool_overlay_allow_active: bool,
-    pub turn_tool_overlay_allow_names: std::collections::BTreeSet<String>,
-    pub turn_tool_overlay_deny_names: std::collections::BTreeSet<String>,
+    pub turn_tool_overlay_allow_names: std::collections::BTreeSet<ToolName>,
+    pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
     pub input_phases: std::collections::BTreeMap<String, InputPhase>,
     pub input_terminal_kind: std::collections::BTreeMap<String, InputTerminalKind>,
     pub input_superseded_by: std::collections::BTreeMap<String, String>,
@@ -10326,9 +10328,9 @@ pub struct State {
     pub completion_feed_kinds: std::collections::BTreeMap<String, OperationKind>,
     pub completion_feed_terminal_outcomes:
         std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
-    pub completion_feed_terminal_payload: std::collections::BTreeMap<String, String>,
+    pub completion_feed_terminal_payload: std::collections::BTreeMap<String, OpTerminalPayload>,
     pub op_terminal_outcomes: std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
-    pub op_terminal_payload: std::collections::BTreeMap<String, String>,
+    pub op_terminal_payload: std::collections::BTreeMap<String, OpTerminalPayload>,
     pub op_kinds: std::collections::BTreeMap<String, OperationKind>,
     pub op_sources: std::collections::BTreeMap<String, OperationSource>,
     pub op_peer_ready: std::collections::BTreeMap<String, bool>,
@@ -10560,16 +10562,18 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StagePersistentFilter {
         pub filter: ToolFilter,
-        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishCommittedVisibleSet {
         pub active_filter: ToolFilter,
         pub staged_filter: ToolFilter,
-        pub active_requested_deferred_names: std::collections::BTreeSet<String>,
-        pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
-        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub staged_requested_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub active_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub staged_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
         pub active_visibility_revision: u64,
         pub staged_visibility_revision: u64,
     }
@@ -11294,25 +11298,25 @@ pub mod inputs {
     pub struct CompleteOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FailOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbortOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerReadyOp {
@@ -11330,13 +11334,13 @@ pub mod inputs {
     pub struct RetireCompletedOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TerminateOp {
         pub operation_id: String,
         pub outcome: OperationTerminalOutcomeKind,
-        pub payload: String,
+        pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveOpLifecycleTransitionRejection {
@@ -11352,7 +11356,7 @@ pub mod inputs {
         pub peer_ready: bool,
         pub progress_count: u64,
         pub terminal_outcome: Option<OperationTerminalOutcomeKind>,
-        pub terminal_payload: Option<String>,
+        pub terminal_payload: Option<OpTerminalPayload>,
         pub completion_sequence: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11400,7 +11404,7 @@ pub mod inputs {
         pub operation_id: String,
         pub kind: OperationKind,
         pub terminal_outcome: OperationTerminalOutcomeKind,
-        pub terminal_payload: String,
+        pub terminal_payload: OpTerminalPayload,
         pub completion_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11610,11 +11614,11 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageVisibilityFilter {
         pub filter: ToolFilter,
-        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceFilterToolAuthorityCatalog {
-        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitVisibilityFilter {
@@ -11623,25 +11627,25 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageDeferredNames {
-        pub names: std::collections::BTreeSet<String>,
+        pub names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestDeferredTools {
-        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceDeferredToolAuthorityCatalog {
-        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub catalog: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitDeferredNames {
-        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub authorities: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetTurnToolOverlay {
         pub allow_active: bool,
-        pub allow_names: std::collections::BTreeSet<String>,
-        pub deny_names: std::collections::BTreeSet<String>,
+        pub allow_names: std::collections::BTreeSet<ToolName>,
+        pub deny_names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearTurnToolOverlay {}
@@ -11653,12 +11657,14 @@ pub mod inputs {
         pub staged_filter: ToolFilter,
         pub active_revision: u64,
         pub staged_revision: u64,
-        pub active_deferred_names: std::collections::BTreeSet<String>,
-        pub staged_deferred_names: std::collections::BTreeSet<String>,
-        pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub active_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub staged_deferred_names: std::collections::BTreeSet<ToolName>,
+        pub requested_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub filter_witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub active_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
+        pub staged_deferred_authorities:
+            std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceRegister {
@@ -13291,7 +13297,7 @@ pub mod effects {
         pub seq: u64,
         pub kind: OperationKind,
         pub terminal_outcome: OperationTerminalOutcomeKind,
-        pub terminal_payload: String,
+        pub terminal_payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompletionProduced {

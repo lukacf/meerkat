@@ -543,7 +543,7 @@ impl AgentBuilder {
                 let control_names = catalog
                     .iter()
                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                    .map(|entry| entry.tool.name.to_string())
+                    .map(|entry| entry.tool.name.clone())
                     .collect::<std::collections::HashSet<_>>();
                 let deferred_names = if !control_names.is_empty()
                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -557,7 +557,7 @@ impl AgentBuilder {
                                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
                             )
                         })
-                        .map(|entry| entry.tool.name.to_string())
+                        .map(|entry| entry.tool.name.clone())
                         .collect()
                 } else {
                     std::collections::HashSet::new()
@@ -1210,7 +1210,7 @@ mod tests {
         fn stage_persistent_filter(
             &self,
             filter: ToolFilter,
-            witnesses: BTreeMap<String, crate::ToolVisibilityWitness>,
+            witnesses: BTreeMap<crate::ToolName, crate::ToolVisibilityWitness>,
         ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
             self.fallback_state
                 .stage_persistent_filter(filter, witnesses)
@@ -1218,7 +1218,7 @@ mod tests {
 
         fn stage_requested_deferred_names(
             &self,
-            names: BTreeSet<String>,
+            names: BTreeSet<crate::ToolName>,
         ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
             self.fallback_state.stage_requested_deferred_names(names)
         }
@@ -1232,7 +1232,7 @@ mod tests {
 
         fn replace_deferred_tool_authority_catalog(
             &self,
-            catalog: BTreeMap<String, crate::ToolVisibilityWitness>,
+            catalog: BTreeMap<crate::ToolName, crate::ToolVisibilityWitness>,
         ) -> Result<(), crate::ToolScopeApplyError> {
             self.fallback_state
                 .replace_deferred_tool_authority_catalog(catalog)
@@ -1720,7 +1720,7 @@ mod tests {
             staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
             active_revision: 3,
             staged_revision: 3,
-            filter_witnesses: [("secret".to_string(), secret_witness.clone())]
+            filter_witnesses: [(crate::ToolName::from("secret"), secret_witness.clone())]
                 .into_iter()
                 .collect(),
             ..Default::default()
@@ -1728,7 +1728,7 @@ mod tests {
         let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         owner
             .replace_filter_tool_authority_catalog(
-                [("secret".to_string(), secret_witness)]
+                [(crate::ToolName::from("secret"), secret_witness)]
                     .into_iter()
                     .collect(),
             )
@@ -1872,7 +1872,7 @@ mod tests {
                 AuthorizedSessionToolVisibilityState::from_generated_authority(
                     SessionToolVisibilityState {
                         inherited_base_filter: inherited_filter.clone(),
-                        filter_witnesses: [("secret".to_string(), secret_witness)]
+                        filter_witnesses: [(crate::ToolName::from("secret"), secret_witness)]
                             .into_iter()
                             .collect(),
                         ..Default::default()

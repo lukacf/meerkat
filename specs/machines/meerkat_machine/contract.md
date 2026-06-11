@@ -106,17 +106,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `staged_filter`: `ToolFilter`
 - `active_visibility_revision`: `u64`
 - `staged_visibility_revision`: `u64`
-- `active_deferred_names`: `Set<String>`
-- `staged_deferred_names`: `Set<String>`
-- `requested_visibility_witnesses`: `Map<String, ToolVisibilityWitness>`
-- `filter_visibility_witnesses`: `Map<String, ToolVisibilityWitness>`
-- `active_deferred_authorities`: `Map<String, ToolVisibilityWitness>`
-- `staged_deferred_authorities`: `Map<String, ToolVisibilityWitness>`
-- `deferred_visibility_authority_catalog`: `Map<String, ToolVisibilityWitness>`
-- `filter_visibility_authority_catalog`: `Map<String, ToolVisibilityWitness>`
+- `active_deferred_names`: `Set<ToolName>`
+- `staged_deferred_names`: `Set<ToolName>`
+- `requested_visibility_witnesses`: `Map<ToolName, ToolVisibilityWitness>`
+- `filter_visibility_witnesses`: `Map<ToolName, ToolVisibilityWitness>`
+- `active_deferred_authorities`: `Map<ToolName, ToolVisibilityWitness>`
+- `staged_deferred_authorities`: `Map<ToolName, ToolVisibilityWitness>`
+- `deferred_visibility_authority_catalog`: `Map<ToolName, ToolVisibilityWitness>`
+- `filter_visibility_authority_catalog`: `Map<ToolName, ToolVisibilityWitness>`
 - `turn_tool_overlay_allow_active`: `Bool`
-- `turn_tool_overlay_allow_names`: `Set<String>`
-- `turn_tool_overlay_deny_names`: `Set<String>`
+- `turn_tool_overlay_allow_names`: `Set<ToolName>`
+- `turn_tool_overlay_deny_names`: `Set<ToolName>`
 - `input_phases`: `Map<String, InputPhase>`
 - `input_terminal_kind`: `Map<String, InputTerminalKind>`
 - `input_superseded_by`: `Map<String, String>`
@@ -146,9 +146,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completion_feed_sequences`: `Map<String, u64>`
 - `completion_feed_kinds`: `Map<String, OperationKind>`
 - `completion_feed_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
-- `completion_feed_terminal_payload`: `Map<String, String>`
+- `completion_feed_terminal_payload`: `Map<String, OpTerminalPayload>`
 - `op_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
-- `op_terminal_payload`: `Map<String, String>`
+- `op_terminal_payload`: `Map<String, OpTerminalPayload>`
 - `op_kinds`: `Map<String, OperationKind>`
 - `op_sources`: `Map<String, OperationSource>`
 - `op_peer_ready`: `Map<String, Bool>`
@@ -274,8 +274,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `CancelAfterBoundary`(reason: String)
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
+- `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<ToolName>, staged_requested_deferred_names: Set<ToolName>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
 - `Retire`(session_id: SessionId)
 - `Reset`
@@ -307,7 +307,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
 - `ServiceTurnCommitted`(run_id: RunId)
-- `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -433,17 +433,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordBoundarySeq`(input_id: String, run_id: RunId)
 - `RegisterOp`(operation_id: String, kind: OperationKind, source: Option<OperationSource>, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)
-- `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `CancelOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `AbortOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `CancelOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `AbortOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `PeerReadyOp`(operation_id: String)
 - `ProgressReportedOp`(operation_id: String)
 - `RetireRequestedOp`(operation_id: String)
-- `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
-- `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `ResolveOpLifecycleTransitionRejection`(operation_id: String, action: OpLifecycleActionKind)
-- `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, source: Option<OperationSource>, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<String>, completion_sequence: Option<u64>)
+- `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, source: Option<OperationSource>, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<OpTerminalPayload>, completion_sequence: Option<u64>)
 - `ClassifyOperationTerminality`(operation_id: String, status: OperationStatus)
 - `ClassifyOperationPublicResult`(operation_id: String, status: OperationStatus)
 - `ClassifyOperationTransitionIdempotence`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
@@ -451,7 +451,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyOperationCompletionWake`(operation_id: String, kind: OperationKind)
 - `ClassifyOperationDurability`(operation_id: String, kind: OperationKind)
 - `ClassifyRecoveredOperationRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, terminal_outcome_present: Bool, terminal_payload_present: Bool, completion_sequence_present: Bool)
-- `RecoverCompletionFeedEntry`(operation_id: String, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: String, completion_sequence: u64)
+- `RecoverCompletionFeedEntry`(operation_id: String, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: OpTerminalPayload, completion_sequence: u64)
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
 - `RecoverCompletionConsumerCursors`(agent_applied_cursor: u64, runtime_observed_cursor: u64, runtime_injected_cursor: u64)
 - `AdvanceAgentCompletionCursor`(cursor: u64)
@@ -490,15 +490,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
-- `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `ReplaceFilterToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
+- `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
+- `ReplaceFilterToolAuthorityCatalog`(catalog: Map<ToolName, ToolVisibilityWitness>)
 - `CommitVisibilityFilter`(filter: ToolFilter, revision: u64)
-- `StageDeferredNames`(names: Set<String>)
-- `ReplaceDeferredToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
-- `CommitDeferredNames`(authorities: Map<String, ToolVisibilityWitness>)
-- `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<String>, deny_names: Set<String>)
+- `StageDeferredNames`(names: Set<ToolName>)
+- `ReplaceDeferredToolAuthorityCatalog`(catalog: Map<ToolName, ToolVisibilityWitness>)
+- `CommitDeferredNames`(authorities: Map<ToolName, ToolVisibilityWitness>)
+- `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<ToolName>, deny_names: Set<ToolName>)
 - `ClearTurnToolOverlay`
-- `SyncVisibilityRevisions`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<String>, staged_deferred_names: Set<String>, requested_witnesses: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>)
+- `SyncVisibilityRevisions`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SurfaceRegister`(surface_id: String)
 - `SurfaceSetRemovalTimeout`(timeout_ms: u64)
 - `SurfaceStageAdd`(surface_id: String, now_ms: u64)
@@ -644,7 +644,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OperationTransitionIdempotentSuccess`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
 - `OperationTransitionNotIdempotent`(operation_id: String, action: OpLifecycleActionKind, status: OperationStatus)
 - `EvictCompletedRecord`(operation_id: String)
-- `CompletionFeedEntryRecovered`(operation_id: String, seq: u64, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: String)
+- `CompletionFeedEntryRecovered`(operation_id: String, seq: u64, kind: OperationKind, terminal_outcome: OperationTerminalOutcomeKind, terminal_payload: OpTerminalPayload)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
 - `AgentCompletionCursorAdvanced`(cursor: u64)
 - `RuntimeObservedCompletionCursorAdvanced`(cursor: u64)
@@ -727,16 +727,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `operation_source_valid`(source: Option<OperationSource>) -> `Bool`
 - `op_lifecycle_transition_rejection_idempotent`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
 - `wait_operation_token_witness_valid`(operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>) -> `Bool`
-- `deferred_authorities_have_identity`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_names`(filter: ToolFilter) -> `Set<String>`
-- `meerkat_tool_visibility_filter_has_identity_witnesses`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_authorities_match_names`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>, authorities: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_authorities_are_catalog_backed`(authorities: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_has_catalog_witnesses`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_filter_witnesses_are_catalog_backed`(witnesses: Map<String, ToolVisibilityWitness>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_names_are_catalog_backed`(names: Set<String>, authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_publish_matches_catalog`(active_filter: ToolFilter, staged_filter: ToolFilter, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, deferred_authority_catalog: Map<String, ToolVisibilityWitness>, filter_authority_catalog: Map<String, ToolVisibilityWitness>) -> `Bool`
-- `meerkat_tool_visibility_state_replacement_matches`(inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, requested_witnesses: Map<String, ToolVisibilityWitness>, filter_witnesses: Map<String, ToolVisibilityWitness>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, deferred_authority_catalog: Map<String, ToolVisibilityWitness>, filter_authority_catalog: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64) -> `Bool`
+- `deferred_authorities_have_identity`(names: Set<ToolName>, witnesses: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_names`(filter: ToolFilter) -> `Set<ToolName>`
+- `meerkat_tool_visibility_filter_has_identity_witnesses`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_authorities_match_names`(names: Set<ToolName>, witnesses: Map<ToolName, ToolVisibilityWitness>, authorities: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_authorities_are_catalog_backed`(authorities: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_has_catalog_witnesses`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_filter_witnesses_are_catalog_backed`(witnesses: Map<ToolName, ToolVisibilityWitness>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_names_are_catalog_backed`(names: Set<ToolName>, authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_publish_matches_catalog`(active_filter: ToolFilter, staged_filter: ToolFilter, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>, filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>) -> `Bool`
+- `meerkat_tool_visibility_state_replacement_matches`(inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<ToolName>, staged_requested_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, deferred_authority_catalog: Map<ToolName, ToolVisibilityWitness>, filter_authority_catalog: Map<ToolName, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64) -> `Bool`
 - `meerkat_session_llm_filter_has_view_image_only`(filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_capability_base_filter_matches`(target_capability_surface: SessionLlmCapabilitySurface, next_capability_base_filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_hydrated_capability_base_filter_matches`(current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter) -> `Bool`
@@ -9691,7 +9691,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9702,7 +9702,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9713,7 +9713,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9724,7 +9724,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9735,7 +9735,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9746,7 +9746,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9757,7 +9757,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9768,7 +9768,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9779,7 +9779,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9790,7 +9790,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9801,7 +9801,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9812,7 +9812,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9823,7 +9823,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9834,7 +9834,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9845,7 +9845,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9856,7 +9856,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9867,7 +9867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9878,7 +9878,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9889,7 +9889,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9900,7 +9900,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -10056,7 +10056,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_empty_for_retired`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -10067,7 +10067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_empty_for_retired`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -10078,7 +10078,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_empty_for_retired`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -10089,7 +10089,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_empty_for_retired`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -10100,7 +10100,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_empty_for_retired`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -10111,7 +10111,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -10122,7 +10122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -10133,7 +10133,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -10144,7 +10144,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -10155,7 +10155,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
   - `outcome_matches_terminal`
-  - `payload_present_for_kind`
+  - `payload_variant_matches_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -10171,6 +10171,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Idle`
 
@@ -10186,6 +10187,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Attached`
 
@@ -10201,6 +10203,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Running`
 
@@ -10216,6 +10219,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Retired`
 
@@ -10231,6 +10235,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_source_valid`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
+  - `terminal_payload_variant_matches_status`
 - Emits: `RetainTerminalRecord`
 - To: `Stopped`
 
@@ -10390,6 +10395,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Idle`
 
@@ -10402,6 +10408,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Attached`
 
@@ -10414,6 +10421,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Running`
 
@@ -10426,6 +10434,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Retired`
 
@@ -10438,6 +10447,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_sequence_within_recovered_cursor`
   - `completion_sequence_unclaimed`
   - `feed_entry_absent`
+  - `terminal_payload_variant_matches_outcome`
 - Emits: `CompletionFeedEntryRecovered`
 - To: `Stopped`
 

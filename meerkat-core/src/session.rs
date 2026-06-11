@@ -23,7 +23,7 @@ use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
-    StopReason, ToolDef, ToolProvenance, ToolResult, Usage, UserMessage,
+    StopReason, ToolDef, ToolName, ToolProvenance, ToolResult, Usage, UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -1228,19 +1228,19 @@ impl ToolVisibilityWitness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeferredToolLoadAuthority {
-    pub name: String,
+    pub name: ToolName,
     pub witness: ToolVisibilityWitness,
 }
 
 impl DeferredToolLoadAuthority {
-    pub fn new(name: impl Into<String>, witness: ToolVisibilityWitness) -> Self {
+    pub fn new(name: impl Into<ToolName>, witness: ToolVisibilityWitness) -> Self {
         Self {
             name: name.into(),
             witness,
         }
     }
 
-    pub fn into_parts(self) -> (String, ToolVisibilityWitness) {
+    pub fn into_parts(self) -> (ToolName, ToolVisibilityWitness) {
         (self.name, self.witness)
     }
 }
@@ -1252,15 +1252,15 @@ impl DeferredToolLoadAuthority {
 pub struct WitnessedToolFilter {
     pub filter: ToolFilter,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl WitnessedToolFilter {
-    pub fn new(filter: ToolFilter, witnesses: BTreeMap<String, ToolVisibilityWitness>) -> Self {
+    pub fn new(filter: ToolFilter, witnesses: BTreeMap<ToolName, ToolVisibilityWitness>) -> Self {
         Self { filter, witnesses }
     }
 
-    pub fn into_parts(self) -> (ToolFilter, BTreeMap<String, ToolVisibilityWitness>) {
+    pub fn into_parts(self) -> (ToolFilter, BTreeMap<ToolName, ToolVisibilityWitness>) {
         (self.filter, self.witnesses)
     }
 }
@@ -1274,13 +1274,13 @@ impl WitnessedToolFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InheritedToolVisibilityAuthority {
     filter: ToolFilter,
-    witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 impl InheritedToolVisibilityAuthority {
     pub(crate) fn from_generated_composition_authority(
         filter: ToolFilter,
-        witnesses: BTreeMap<String, ToolVisibilityWitness>,
+        witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     ) -> Self {
         Self { filter, witnesses }
     }
@@ -1289,7 +1289,7 @@ impl InheritedToolVisibilityAuthority {
         &self.filter
     }
 
-    pub fn witnesses(&self) -> &BTreeMap<String, ToolVisibilityWitness> {
+    pub fn witnesses(&self) -> &BTreeMap<ToolName, ToolVisibilityWitness> {
         &self.witnesses
     }
 
@@ -1315,17 +1315,17 @@ pub struct SessionToolVisibilityState {
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
     pub staged_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub active_requested_deferred_names: BTreeSet<String>,
+    pub active_requested_deferred_names: BTreeSet<ToolName>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub staged_requested_deferred_names: BTreeSet<String>,
+    pub staged_requested_deferred_names: BTreeSet<ToolName>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub active_revision: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub staged_revision: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub requested_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub requested_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    pub filter_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
 }
 
 /// Generated-authority-approved durable tool visibility projection.

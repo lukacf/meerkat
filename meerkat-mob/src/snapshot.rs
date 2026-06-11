@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(
             err,
             ToolScopeStageError::MissingFilterWitnesses {
-                names: vec!["external_tool".to_string()]
+                names: vec!["external_tool".into()]
             }
         );
     }

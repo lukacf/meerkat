@@ -4659,7 +4659,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -4671,7 +4671,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -5381,6 +5381,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptEditRunningBehavior": {
         "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
@@ -6669,7 +6673,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -6681,7 +6685,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -7225,6 +7229,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15166,7 +15174,7 @@
             "default": null,
             "description": "Optional allow-list for this turn.",
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": [
               "array",
@@ -15177,7 +15185,7 @@
             "default": null,
             "description": "Optional deny-list for this turn.",
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": [
               "array",
@@ -15270,6 +15278,10 @@
           "key"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "WireAnthropicCompactionConfig": {
         "oneOf": [
@@ -16785,7 +16797,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           },
@@ -16797,7 +16809,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/ToolName"
             },
             "type": "array"
           }
@@ -17507,6 +17519,10 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
       },
       "TranscriptEditRunningBehavior": {
         "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",

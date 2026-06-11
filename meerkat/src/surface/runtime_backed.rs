@@ -965,7 +965,7 @@ mod tests {
             }),
             skill_references: Some(vec![skill]),
             flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
-                allowed_tools: Some(vec!["runtime_tool".to_string()]),
+                allowed_tools: Some(vec!["runtime_tool".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),
             }),

@@ -2534,7 +2534,7 @@
         "properties": {
           "added_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ToolName"
             },
             "type": "array"
           },
@@ -2546,7 +2546,7 @@
           },
           "removed_hidden_names": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ToolName"
             },
             "type": "array"
           }
@@ -4848,7 +4848,7 @@
             "default": null,
             "description": "Optional allow-list for this turn.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ToolName"
             },
             "type": [
               "array",
@@ -4859,7 +4859,7 @@
             "default": null,
             "description": "Optional deny-list for this turn.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ToolName"
             },
             "type": [
               "array",

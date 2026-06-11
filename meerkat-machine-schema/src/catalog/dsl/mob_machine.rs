@@ -96,6 +96,14 @@ macro_rules! mob_catalog_machine_dsl {
             // MobMachine. Projection code may surface the reason, but the
             // Broken/terminal classification comes from this map.
             member_restore_failures: Map<AgentIdentity, String>,
+            // Machine-owned revival obligation: members whose live
+            // materialization was observed missing while a durable session
+            // snapshot still exists. Inserted by the revivable arm of
+            // ClassifyMemberLiveMaterialization; cleared by the
+            // ResolveMemberRevival* resolutions and by every lifecycle
+            // transition that replaces or clears the member's restore
+            // classification. The session-registry cache never owns this fact.
+            member_revival_pending: Set<AgentIdentity>,
             // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
             // draining/retiring sub-state independently of the mob-level
             // lifecycle phase so generated SubmitWork authority can decide
@@ -293,6 +301,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
             member_restore_failures = EmptyMap,
+            member_revival_pending = EmptySet,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
@@ -814,6 +823,9 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
             RecoverOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
+            ClassifyMemberLiveMaterialization { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
+            ResolveMemberRevivalSucceeded { agent_identity: AgentIdentity },
+            ResolveMemberRevivalFailed { agent_identity: AgentIdentity, reason: String },
             AdmitDestroyCleanup,
             AdmitDestroyStorageFinalizing,
             MarkCompleted,
@@ -928,6 +940,7 @@ macro_rules! mob_catalog_machine_dsl {
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             OwnerBridgeSessionBound { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
+            MemberLiveMaterializationClassified { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, verdict: Enum<MemberRevivalVerdictKind>, reason: String },
             SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
             MemberWaitClassified { agent_identity: AgentIdentity, result: Enum<MemberWaitClassificationKind> },
             // Machine-owned flow topology edge admission verdict. The shell
@@ -1124,6 +1137,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition SpawnPolicyResolutionRecorded => local seam NoOwnerRealization,
         disposition OwnerBridgeSessionBound => local seam SurfaceResultAlignment,
         disposition RespawnTopologyRestoreResolved => local seam SurfaceResultAlignment,
+        disposition MemberLiveMaterializationClassified => local seam SurfaceResultAlignment,
         disposition SpawnManyFailureClassified => local seam SurfaceResultAlignment,
         disposition MemberWaitClassified => local seam SurfaceResultAlignment,
         disposition FlowDelegationEdgeAdmissionResolved => local seam SurfaceResultAlignment,
@@ -2363,6 +2377,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2416,6 +2431,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2468,6 +2484,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
                 self.spawn_profile_authority_material_digests.remove(agent_identity);
@@ -2567,6 +2584,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2588,6 +2606,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -2663,6 +2682,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2689,6 +2709,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2708,6 +2729,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -3755,6 +3777,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
             }
@@ -3792,6 +3815,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
             }
@@ -3823,6 +3847,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -3852,6 +3877,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Stopped
@@ -3892,6 +3918,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: session_id }
@@ -3921,6 +3948,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: session_id }
@@ -3959,6 +3987,79 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverMemberRestoreFailure { agent_identity, reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Running
+        }
+
+        // Post-discard member revival seam (#37). The shell observes "the
+        // member's current bridge session has no live materialization" at the
+        // dispatch boundary and feeds the raw observation (durable snapshot
+        // present or missing) here; MobMachine — never the session-registry
+        // cache — owns the verdict. A durable snapshot makes the member
+        // revivable: the machine records the revival obligation and authorizes
+        // exactly one shell materialization attempt via the emitted
+        // ReviveAuthorized verdict. A missing durable snapshot is a terminal
+        // restore failure (existing Broken classification). Resolution comes
+        // back as a typed signal: success clears the obligation; failure
+        // converts it into the Broken classification, whose `not_broken`
+        // guard below refuses any further revival authorization — fail-closed,
+        // no retry loop.
+        transition ClassifyMemberLiveMaterializationRevivable {
+            on signal ClassifyMemberLiveMaterialization { agent_identity, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
+            update {
+                self.member_revival_pending.insert(agent_identity);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::ReviveAuthorized,
+                reason: reason
+            }
+        }
+
+        transition ClassifyMemberLiveMaterializationTerminal {
+            on signal ClassifyMemberLiveMaterialization { agent_identity, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
+            update {
+                self.member_revival_pending.remove(agent_identity);
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::BrokenRecorded,
+                reason: reason
+            }
+        }
+
+        transition ResolveMemberRevivalSucceededRunning {
+            on signal ResolveMemberRevivalSucceeded { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            update {
+                self.member_revival_pending.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition ResolveMemberRevivalFailedRunning {
+            on signal ResolveMemberRevivalFailed { agent_identity, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            update {
+                self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
             }
             to Running
@@ -4039,6 +4140,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_revival_pending = EmptySet;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -4064,6 +4166,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_revival_pending = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
@@ -7120,6 +7223,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -7152,6 +7256,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -7180,6 +7285,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -7209,6 +7315,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -7298,6 +7405,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -7326,6 +7434,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -9080,6 +9189,27 @@ pub enum RespawnTopologyRestoreResultKind {
     #[default]
     Completed,
     TopologyRestoreFailed,
+}
+
+/// Typed shell observation of a member's live materialization at the dispatch
+/// boundary: the member's current bridge session has no live runtime, and the
+/// durable session snapshot is either still present (revivable) or gone
+/// (terminal). The shell observes; MobMachine owns the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    DurableSnapshotPresent,
+    DurableSnapshotMissing,
+}
+
+/// Machine-owned verdict for a member live-materialization observation:
+/// authorize exactly one shell revival attempt, or record the terminal Broken
+/// classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    ReviveAuthorized,
+    BrokenRecorded,
 }
 
 /// Typed shell observation for a per-row `mob/spawn_many` failure.

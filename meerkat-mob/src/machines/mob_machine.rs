@@ -846,6 +846,27 @@ pub enum RespawnTopologyRestoreResultKind {
     TopologyRestoreFailed,
 }
 
+/// Typed shell observation of a member's live materialization at the dispatch
+/// boundary: the member's current bridge session has no live runtime, and the
+/// durable session snapshot is either still present (revivable) or gone
+/// (terminal). The shell observes; MobMachine owns the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLiveMaterializationObservationKind {
+    #[default]
+    DurableSnapshotPresent,
+    DurableSnapshotMissing,
+}
+
+/// Machine-owned verdict for a member live-materialization observation:
+/// authorize exactly one shell revival attempt, or record the terminal Broken
+/// classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRevivalVerdictKind {
+    #[default]
+    ReviveAuthorized,
+    BrokenRecorded,
+}
+
 /// Typed shell observation for a per-row `mob/spawn_many` failure.
 /// MobMachine maps this observation to the public failure cause before any
 /// surface can serialize the row.

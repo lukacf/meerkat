@@ -90,6 +90,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_kickoff_cancelled`: `Set<AgentIdentity>`
 - `member_kickoff_error`: `Map<AgentIdentity, String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
+- `member_revival_pending`: `Set<AgentIdentity>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
@@ -298,6 +299,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
 - `RecoverOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
+- `ClassifyMemberLiveMaterialization`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, reason: String)
+- `ResolveMemberRevivalSucceeded`(agent_identity: AgentIdentity)
+- `ResolveMemberRevivalFailed`(agent_identity: AgentIdentity, reason: String)
 - `AdmitDestroyCleanup`
 - `AdmitDestroyStorageFinalizing`
 - `MarkCompleted`
@@ -369,6 +373,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `OwnerBridgeSessionBound`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
+- `MemberLiveMaterializationClassified`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, verdict: MemberRevivalVerdictKind, reason: String)
 - `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
 - `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
 - `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
@@ -3832,6 +3837,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RecoverMemberRestoreFailureRunning`
 - From: `Running`
 - On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Running`
+
+### `ClassifyMemberLiveMaterializationRevivable`
+- From: `Running`
+- On: `ClassifyMemberLiveMaterialization`(agent_identity, observation, reason)
+- Guards:
+  - `identity_present`
+  - `session_binding_present`
+  - `not_broken`
+  - `durable_snapshot_present`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ClassifyMemberLiveMaterializationTerminal`
+- From: `Running`
+- On: `ClassifyMemberLiveMaterialization`(agent_identity, observation, reason)
+- Guards:
+  - `identity_present`
+  - `session_binding_present`
+  - `not_broken`
+  - `durable_snapshot_missing`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ResolveMemberRevivalSucceededRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalSucceeded`(agent_identity)
+- Guards:
+  - `revival_pending`
+- To: `Running`
+
+### `ResolveMemberRevivalFailedRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalFailed`(agent_identity, reason)
+- Guards:
+  - `revival_pending`
 - To: `Running`
 
 ### `AdmitDestroyCleanup`

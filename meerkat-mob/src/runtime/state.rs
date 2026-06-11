@@ -157,6 +157,10 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    // #37: machine-owned revival obligation for members whose live
+    // materialization is gone while a durable snapshot remains.
+    pub member_revival_pending:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
     // `MobMachineAuthority.state.member_session_bindings`. Used by the
     // runtime-parity snapshot to expose the DSL's realtime binding map to

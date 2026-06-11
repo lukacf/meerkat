@@ -1263,6 +1263,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverMemberRestoreFailureRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyMemberLiveMaterializationRevivable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyMemberLiveMaterializationTerminal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberRevivalSucceededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberRevivalFailedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitDestroyCleanup`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2169,6 +2181,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RespawnTopologyRestoreResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberLiveMaterializationClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SpawnManyFailureClassified`

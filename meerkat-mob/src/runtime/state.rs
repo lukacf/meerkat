@@ -118,6 +118,9 @@ pub(crate) struct MobDslT2Snapshot {
         Option<crate::machines::mob_machine::SupervisorProtocolVersion>,
     pub supervisor_pending_authority_accepted_peer_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::PeerId>,
+    // Dogma row R044: machine-owned trust-install-before-terminality
+    // obligation window for supervisor-bridge recipients.
+    pub pending_recipient_trust: std::collections::BTreeSet<crate::machines::mob_machine::PeerId>,
     pub member_state_markers: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentRuntimeId,
         crate::machines::mob_machine::MobMemberState,

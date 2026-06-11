@@ -1,6 +1,9 @@
 # WASM Runtime API Surface
 
-## wasm_bindgen Exports (current as of 0.6.23)
+## wasm_bindgen Exports
+
+(Verify against `meerkat-web-runtime/src/lib.rs` for the current tree; names
+below are the exact JS-visible identifiers.)
 
 The `meerkat-web-runtime` crate exposes the browser bootstrap, session, mob,
 auth, and subscription functions below via `#[wasm_bindgen]`. Names listed below
@@ -45,7 +48,7 @@ resolver source, the registered resolver is invoked (see auth section).
 | `mob_status` | mob_id | JSON | async |
 | `mob_list` | — | MobSummary[] JSON | async |
 | `mob_lifecycle` | mob_id, action string | `()` | async; stop/resume/complete/destroy |
-| `mob_events` | mob_id, after_cursor (u32), limit (u32) | MobEvent[] JSON | async |
+| `mob_events` | mob_id, after_cursor (string), limit (u32) | MobEvent[] JSON | async |
 | `mob_spawn` | mob_id, specs JSON | result JSON | async, batch spawn |
 | `mob_retire` | mob_id, agent_identity | `()` | async |
 | `mob_respawn` | mob_id, agent_identity, initial_message? | result JSON | async, retire + re-spawn same profile |
@@ -55,9 +58,7 @@ resolver source, the registered resolver is invoked (see auth section).
 | `mob_list_members` | mob_id | RosterEntry[] JSON | async |
 | `mob_append_system_context` | mob_id, agent_identity, request JSON | result JSON | async, append context to a member's system prompt |
 | `mob_wire` / `mob_unwire` | mob_id, a, b | `()` | async, identity-keyed wiring |
-| `mob_wire_target` / `mob_unwire_target` | mob_id, local, target JSON | `()` | async, wire to a structured peer/target descriptor |
-| `mob_wire_peer` / `mob_unwire_peer` | mob_id, member, peer JSON | `()` | async, peer-form wiring |
-| `wire_cross_mob` | mob_a, identity_a, mob_b, identity_b | `()` | async, cross-mob comms wiring |
+| `mob_wire_peer` / `mob_unwire_peer` | mob_id, member, peer JSON | `()` | async, canonical member/peer wiring (structured peer descriptor). There are no `mob_wire_target` / `wire_cross_mob` exports. |
 | `mob_spawn_helper` | mob_id, request JSON | result JSON | async, helper spawn with auto-wait |
 | `mob_fork_helper` | mob_id, request JSON | result JSON | async, fork-from-source helper spawn |
 | `mob_run_flow` | mob_id, flow_id, params JSON | run_id string | async |
@@ -68,10 +69,10 @@ resolver source, the registered resolver is invoked (see auth section).
 
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `mob_member_subscribe` | mob_id, agent_identity | handle (u32) | async, per-member broadcast subscription |
-| `mob_subscribe_events` | mob_id | handle (u32) | async, mob-wide attributed event stream |
-| `poll_subscription` | handle | JSON | Drain events from subscription |
-| `close_subscription` | handle | `()` | Close subscription handle |
+| `mob_member_subscribe` | mob_id, agent_identity | stream_id (string) | async, per-member broadcast subscription |
+| `mob_subscribe_events` | mob_id | stream_id (string) | async, mob-wide attributed event stream |
+| `poll_subscription` | stream_id (string) | JSON | Drain events from subscription |
+| `close_subscription` | stream_id (string) | `()` | Close subscription handle |
 
 ### Inspection
 
@@ -322,6 +323,6 @@ session.destroy();
 - `mob_create` and `mob_run_flow` return plain strings (not JSON-wrapped)
 - `SpawnResult` is identity-native: `mob_id`, `agent_identity`, `member_ref`
 - `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
-- `MobStatus` uses `status`; `state` is a deprecated compatibility projection in `@rkat/web`
+- `MobStatus` carries `mob_id` + `status` only; the deprecated `state` compatibility projection was deleted
 - Per-session `apiKey` / `baseUrl` fields were removed; use runtime init-time provider keys/proxy URLs and/or `registerExternalAuthResolver` plus `authBinding`
 - `start_turn` now takes only `(handle, prompt)`; the legacy options-JSON third argument was removed

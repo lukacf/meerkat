@@ -1186,9 +1186,14 @@ mod tests {
             call: ToolCallView<'_>,
             context: &crate::ToolDispatchContext,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            let saw_context_image = context
+                .current_turn()
+                .and_then(|turn| turn.image_ref(0))
+                .and_then(|image_ref| context.current_turn_image(image_ref))
+                .is_some();
             Ok(ToolResult::new(
                 call.id.to_string(),
-                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                json!({"saw_context_image": saw_context_image}).to_string(),
                 false,
             )
             .into())

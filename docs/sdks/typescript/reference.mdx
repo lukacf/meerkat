@@ -34,7 +34,6 @@ import type {
   SessionOptions,
   LiveChannelOptions,
   LiveOpenResult,
-  LiveRefreshResult,
   LiveStatusResult,
   LiveInputChunkWire,
   ContentBlock,
@@ -92,7 +91,9 @@ interface RunResult {
   readonly turns: number;
   readonly toolCalls: number;
   readonly usage: Usage;
+  readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly structuredOutput?: unknown;
+  readonly extractionError?: ExtractionError;
   readonly schemaWarnings?: readonly SchemaWarning[];
   readonly skillDiagnostics?: SkillRuntimeDiagnostics;
 }
@@ -106,7 +107,9 @@ interface RunResult {
 | `turns` | `number` | Number of LLM turns in this run |
 | `toolCalls` | `number` | Total tool calls executed in this run |
 | `usage` | `Usage` | Token usage for this run |
+| `terminalCauseKind` | `TurnTerminalCauseKind \| undefined` | Machine-owned terminal cause when success carries a typed terminal condition (e.g. budget exhaustion) |
 | `structuredOutput` | `unknown \| undefined` | Parsed structured output when `outputSchema` was provided |
+| `extractionError` | `ExtractionError \| undefined` | Extraction failure details (`lastOutput`, `attempts`, `reason`) when schema extraction failed after a completed main run |
 | `schemaWarnings` | `SchemaWarning[] \| undefined` | Warnings emitted when structured output didn't fully match the schema |
 | `skillDiagnostics` | `SkillRuntimeDiagnostics \| undefined` | Runtime diagnostics from the skill subsystem |
 
@@ -156,7 +159,7 @@ const opened: LiveOpenResult = await channel.open();
 await channel.sendInputText("hello");
 await channel.commitInput("text");
 const status: LiveStatusResult = await channel.status();
-const refresh: LiveRefreshResult = await channel.refresh();
+const refresh = await channel.refresh();
 await channel.close();
 ```
 
@@ -193,6 +196,7 @@ interface SessionInfo {
   readonly model?: string;
   readonly provider?: string;
   readonly lastAssistantText?: string;
+  readonly resolvedCapabilities?: ResolvedModelCapabilities;
   readonly labels: Readonly<Record<string, string>>;
 }
 ```
@@ -364,6 +368,8 @@ All events are discriminated on the `type` field (snake_case, matching the wire 
 type AgentEvent =
   | RunStartedEvent
   | RunCompletedEvent
+  | ExtractionSucceededEvent
+  | ExtractionFailedEvent
   | RunFailedEvent
   | TurnStartedEvent
   | TextDeltaEvent
@@ -390,17 +396,47 @@ type AgentEvent =
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
+  | TranscriptRewriteCommittedEvent
+  | MalformedEvent
   | UnknownEvent;
 ```
 
-Unknown event types are surfaced as `UnknownEvent` for forward-compatibility.
+Event parsing fails closed: a `type` outside the generated `KNOWN_AGENT_EVENT_TYPES` inventory throws a `MeerkatError` with code `UNKNOWN_EVENT_TYPE`. A known type without a parser case in this SDK version is surfaced as `UnknownEvent` for forward-compatibility, and a known type with a malformed payload is preserved as a `MalformedEvent` (`type: "malformed_event"`).
 
 ### Session lifecycle events
 
 ```typescript
-interface RunStartedEvent   { type: "run_started";   sessionId: string; prompt: string }
-interface RunCompletedEvent { type: "run_completed";  sessionId: string; result: string; usage: Usage }
-interface RunFailedEvent    { type: "run_failed";     sessionId: string; error: string }
+interface RunStartedEvent   { type: "run_started";   sessionId: string; prompt: ContentInput }
+interface RunCompletedEvent {
+  type: "run_completed";
+  sessionId: string;
+  result: string;
+  structuredOutput?: unknown;
+  extractionRequired?: boolean;
+  usage: Usage;
+  terminalCauseKind?: TurnTerminalCauseKind;
+}
+interface ExtractionSucceededEvent {
+  type: "extraction_succeeded";
+  sessionId: string;
+  structuredOutput: unknown;
+  schemaWarnings?: readonly SchemaWarning[];
+}
+interface ExtractionFailedEvent {
+  type: "extraction_failed";
+  sessionId: string;
+  lastOutput: string;
+  attempts: number;
+  reason: string;
+}
+interface RunFailedEvent {
+  type: "run_failed";
+  sessionId: string;
+  errorClass: string;
+  error: string;
+  terminalCauseKind?: TurnTerminalCauseKind;
+  errorReport?: AgentErrorReport | null;
+}
 ```
 
 ### Turn and LLM events
@@ -409,9 +445,9 @@ interface RunFailedEvent    { type: "run_failed";     sessionId: string; error: 
 interface TurnStartedEvent        { type: "turn_started";         turnNumber: number }
 interface TextDeltaEvent          { type: "text_delta";            delta: string }
 interface TextCompleteEvent       { type: "text_complete";         content: string }
-interface ToolCallRequestedEvent  { type: "tool_call_requested";   id: string; name: string; args: unknown }
-interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; content: ContentBlock[]; isError: boolean }
-interface TurnCompletedEvent      { type: "turn_completed";        stopReason: StopReason; usage: Usage }
+interface ToolCallRequestedEvent  { type: "tool_call_requested";   id: string; name: string; args: ToolCallArguments }
+interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; content: readonly ContentBlock[]; isError?: boolean }
+interface TurnCompletedEvent      { type: "turn_completed";        stopReason?: StopReason; usage: Usage }
 ```
 
 ```typescript
@@ -428,7 +464,7 @@ type StopReason =
 
 ```typescript
 interface ToolExecutionStartedEvent   { type: "tool_execution_started";    id: string; name: string }
-interface ToolExecutionCompletedEvent { type: "tool_execution_completed";   id: string; name: string; result: string; content: ContentBlock[]; isError: boolean; durationMs: number }
+interface ToolExecutionCompletedEvent { type: "tool_execution_completed";   id: string; name: string; content: readonly ContentBlock[]; isError?: boolean; durationMs?: number }
 interface ToolExecutionTimedOutEvent  { type: "tool_execution_timed_out";   id: string; name: string; timeoutMs: number }
 ```
 
@@ -437,7 +473,8 @@ interface ToolExecutionTimedOutEvent  { type: "tool_execution_timed_out";   id: 
 ```typescript
 interface CompactionStartedEvent   { type: "compaction_started";   inputTokens: number; estimatedHistoryTokens: number; messageCount: number }
 interface CompactionCompletedEvent { type: "compaction_completed";  summaryTokens: number; messagesBefore: number; messagesAfter: number }
-interface CompactionFailedEvent    { type: "compaction_failed";     error: string }
+// `reason` mirrors the Rust CompactionFailureReason tagged enum ({ kind, ... }).
+interface CompactionFailedEvent    { type: "compaction_failed";     reason: Record<string, unknown> }
 ```
 
 ### Budget events
@@ -473,13 +510,18 @@ interface HookDeniedEvent         { type: "hook_denied";           hookId: strin
 
 ```typescript
 interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly SkillKey[]; injectionBytes: number }
-interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; skillKey?: SkillKey; reason: SkillResolutionFailureReason; reference: string; error: string }
+interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; skillKey?: SkillKey; reason?: SkillResolutionFailureReason }
 ```
+
+`SkillResolutionFailureReason` is a typed union discriminated on `reasonType`
+(`not_found`, `capability_unavailable`, `load`, `parse`, `source_uuid_collision`,
+`source_uuid_mutation_without_lineage`, `missing_skill_remaps`,
+`remap_without_lineage`, `unknown_skill_alias`, `remap_cycle`, `unknown`).
 
 ### Comms events
 
 ```typescript
-interface InteractionCompleteEvent { type: "interaction_complete"; interactionId: string; result: string }
+interface InteractionCompleteEvent { type: "interaction_complete"; interactionId: string; result: string; structuredOutput?: unknown }
 interface InteractionFailedEvent   { type: "interaction_failed";   interactionId: string; error: string }
 ```
 
@@ -488,18 +530,18 @@ interface InteractionFailedEvent   { type: "interaction_failed";   interactionId
 ```typescript
 interface ToolConfigChangedEvent { type: "tool_config_changed"; payload: ToolConfigChangedPayload }
 
+// Payload keys intentionally remain wire-shaped (snake_case).
 interface ToolConfigChangedPayload {
-  operation: "add" | "remove" | "reload";
-  target: string;
-  status: string;
-  statusInfo?: ToolConfigChangeStatus;
-  persisted: boolean;
-  appliedAtTurn?: number;
+  operation?: "add" | "remove" | "reload";
+  target?: string;
+  status_info?: ToolConfigChangeStatus;
+  persisted?: boolean;
+  applied_at_turn?: number;
 }
 
 type ToolConfigChangeStatus =
-  | { kind: "boundary_applied"; baseChanged: boolean; visibleChanged: boolean; revision: number }
-  | { kind: "deferred_catalog_delta"; addedHiddenCount: number; removedHiddenCount: number; pendingSourceCount: number }
+  | { kind: "boundary_applied"; base_changed: boolean; visible_changed: boolean; revision: number }
+  | { kind: "deferred_catalog_delta"; added_hidden_count: number; removed_hidden_count: number; pending_source_count: number }
   | { kind: "warning_failed_closed"; error: string }
   | { kind: "external_tool_delta"; phase: "pending" | "applied" | "draining" | "forced" | "failed"; detail?: string };
 ```
@@ -520,17 +562,26 @@ interface BackgroundJobCompletedEvent {
   jobId: string;
   displayName: string;
   terminalStatus: BackgroundJobTerminalStatus;
-  legacyStatus?: string;
   detail: string;
 }
 ```
 
-`terminalStatus` is the semantic status. `legacyStatus` is the optional wire `status` display mirror.
+`terminalStatus` is the typed semantic status; `detail` is the human-readable description.
 
 ### Stream management
 
 ```typescript
 interface StreamTruncatedEvent { type: "stream_truncated"; reason: string }
+```
+
+### Transcript rewrite events
+
+```typescript
+interface TranscriptRewriteCommittedEvent {
+  type: "transcript_rewrite_committed";
+  sessionId: string;
+  record: Record<string, unknown>;
+}
 ```
 
 ### Type guard utilities
@@ -612,6 +663,7 @@ class SkillNotFoundError extends MeerkatError {}
 | `CLIENT_CLOSED` | Method called after `close()` |
 | `STREAM_NOT_CONSUMED` | `stream.result` accessed before iteration completed |
 | `BINARY_NOT_FOUND` | `rkat-rpc` not found and auto-download failed |
+| `UNKNOWN_EVENT_TYPE` | Streamed event `type` not in the generated known-event inventory |
 
 ---
 

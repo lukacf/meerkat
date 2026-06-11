@@ -164,6 +164,11 @@ fn test_peer_input_candidate_from_interaction(
     let admission =
         meerkat_core::handles::PeerCommsHandle::classify_external_envelope(handle.as_ref(), facts)
             .expect("generated peer-comms authority should classify test interaction");
+    // R084: the admitted sender identity comes from the machine-echoed
+    // canonical peer id on the classification effect, not the local input.
+    let canonical_from_peer_id = admission
+        .from_peer_id
+        .expect("generated envelope classification should echo the canonical sender peer id");
     let classification = admission.classification;
     let convention = match &interaction.content {
         InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
@@ -203,7 +208,7 @@ fn test_peer_input_candidate_from_interaction(
         classification.class,
         classification.kind,
         Some(classification.auth),
-        PeerIngressIdentity::new(peer_id, interaction.from.clone(), convention),
+        PeerIngressIdentity::new(canonical_from_peer_id, interaction.from.clone(), convention),
     );
     let mut candidate = meerkat_core::interaction::PeerInputCandidate::new(
         interaction,
@@ -211,6 +216,13 @@ fn test_peer_input_candidate_from_interaction(
         admission.lifecycle_peer,
     );
     candidate.response_terminality = classification.response_terminality;
+    // R084: the canonical sender id propagates ingress facts -> machine
+    // signal -> classification effect -> admitted candidate unchanged.
+    assert_eq!(
+        candidate.from_peer_id(),
+        Some(peer_id),
+        "canonical sender peer id must survive ingress -> signal -> effect -> candidate"
+    );
     candidate
 }
 

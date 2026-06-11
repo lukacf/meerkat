@@ -295,6 +295,9 @@ jobs:
       - name: Verify SDK codegen freshness
         run: make verify-sdk-codegen-freshness
 
+      - name: Verify RPC surface alignment
+        run: make verify-rpc-surface-alignment
+
       - name: Select native lanes
         id: lanes
         shell: bash

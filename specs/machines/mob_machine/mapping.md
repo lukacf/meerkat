@@ -1461,6 +1461,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordSupervisorPendingRotationCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordPendingRecipientTrustRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPendingRecipientTrustStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPendingRecipientTrustCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPendingRecipientTrustDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePendingRecipientTrustRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePendingRecipientTrustStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePendingRecipientTrustCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePendingRecipientTrustDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackPendingRecipientTrustRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackPendingRecipientTrustStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackPendingRecipientTrustCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackPendingRecipientTrustDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitSupervisorRotationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

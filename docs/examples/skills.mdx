@@ -118,9 +118,9 @@ View the full body and metadata of a specific skill by canonical key.
         SourceUuid::parse("00000000-0000-4b11-8111-000000000001")?,
         SkillName::parse("task-workflow")?,
     );
-    let doc = skill_runtime
-        .load_from_source(&key, Some("00000000-0000-4b11-8111-000000000001"))
-        .await?;
+    // The SkillKey already pins the source UUID; the optional second
+    // argument filters by repository *name*.
+    let doc = skill_runtime.load_from_source(&key, None).await?;
     println!("{}", doc.body);
     ```
   </Tab>
@@ -362,29 +362,39 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
   </Tab>
   <Tab title="Rust">
     ```rust
-    let request = CreateSessionRequest {
+    // Embedded Rust has no create-time `skill_refs` field. Create the
+    // session deferred, then run the first turn with per-turn skill
+    // references carried in `RuntimeTurnMetadata`.
+    let created = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
-        prompt: "Extract emails".into(),
-        system_prompt: None,
+        prompt: "".into(),
+        system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
-        render_metadata: None,
-        skill_references: Some(vec![
-            SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                skill_name: SkillName::parse("email-extractor")?,
-            },
-            SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                skill_name: SkillName::parse("markdown-formatter")?,
-            },
-        ]),
-        initial_turn: InitialTurnPolicy::RunImmediately,
+        initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
-    };
-    let result = service.create_session(request).await?;
+    }).await?;
+
+    let result = service.start_turn(&created.session_id, StartTurnRequest {
+        prompt: "Extract emails".into(),
+        system_prompt: None,
+        event_tx: None,
+        runtime: StartTurnRuntimeSemantics::runtime_metadata(RuntimeTurnMetadata {
+            skill_references: Some(vec![
+                SkillKey::new(
+                    SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                    SkillName::parse("email-extractor")?,
+                ),
+                SkillKey::new(
+                    SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                    SkillName::parse("markdown-formatter")?,
+                ),
+            ]),
+            ..Default::default()
+        }),
+    }).await?;
     ```
   </Tab>
 </Tabs>
@@ -486,17 +496,13 @@ Inject skills into a specific turn on an existing session. The skill content is 
         prompt: "Now format the output".into(),
         system_prompt: None,
         event_tx: None,
-        runtime: StartTurnRuntimeSemantics::new(
-            None,
-            HandlingMode::Queue,
-            Some(vec![SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                skill_name: SkillName::parse("markdown-formatter")?,
-            }]),
-            None,
-            Vec::new(),
-            None,
-        ),
+        runtime: StartTurnRuntimeSemantics::runtime_metadata(RuntimeTurnMetadata {
+            skill_references: Some(vec![SkillKey::new(
+                SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                SkillName::parse("markdown-formatter")?,
+            )]),
+            ..Default::default()
+        }),
     }).await?;
     ```
   </Tab>

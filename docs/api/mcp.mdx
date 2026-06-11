@@ -70,6 +70,7 @@ source of truth for tool names and availability.
 | `meerkat_mob_retire` | Retire a mob member (mob feature) |
 | `meerkat_mob_respawn` | Respawn a mob member with topology restore (mob feature) |
 | `meerkat_mob_wire` | Wire two mob members or an external peer (mob feature) |
+| `meerkat_mob_wire_members_batch` | Wire multiple mob member pairs in one call (mob feature) |
 | `meerkat_mob_unwire` | Remove mob comms wiring (mob feature) |
 | `meerkat_mob_member_send` | Deliver host-owned work to a specific mob member (mob feature) |
 | `meerkat_mob_append_system_context` | Stage system context for a member session (mob feature) |
@@ -611,7 +612,7 @@ Response includes config envelope fields:
 - `realm_id`
 - `instance_id`
 - `backend`
-- `resolved_paths`
+- `resolved_paths` (only when the server runs with `--expose-paths`)
 
 ### meerkat_capabilities
 

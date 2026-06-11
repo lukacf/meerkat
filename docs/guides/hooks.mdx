@@ -42,7 +42,8 @@ Classification is determined by the `is_pre()` and `is_post()` methods on `HookP
 |----------------|---------|
 | `Observe` | Read-only logging and metrics |
 | `Guardrail` | Can issue `Deny` decisions to block execution |
-| `Rewrite` | Retired compatibility label; semantic patch authority is removed |
+
+The former `Rewrite` capability is deleted entirely; semantic patch authority is removed.
 
 ## Execution modes
 
@@ -55,7 +56,7 @@ Classification is determined by the `is_pre()` and `is_post()` methods on `HookP
 **Pre-point background hooks must be observe-only.** A background hook on a `is_pre()` point with any capability other than `Observe` is rejected with `HookEngineError::InvalidConfiguration`.
 </Warning>
 
-Semantic patch publication is retired. Legacy non-empty patch payloads fail closed during runtime response deserialization.
+Semantic patch publication is retired. `RuntimeHookResponse` rejects unknown fields, so a runtime response carrying any legacy `patches` field fails closed during deserialization.
 
 ## How to add a hook
 
@@ -88,8 +89,10 @@ The docs below show run-scoped hook overrides conceptually, but the current CLI 
     Calls a registered Rust closure. Config:
 
     ```json
-    { "type": "in_process", "name": "my-handler" }
+    { "type": "in_process", "handler": "my-handler" }
     ```
+
+    (`name` is accepted as a legacy alias for `handler`.)
 
     The handler is registered at engine construction time via `DefaultHookEngine::with_in_process_handler()` or `register_in_process_handler()`. The handler type is:
 
@@ -156,7 +159,7 @@ pub enum HookDecision {
 </Accordion>
 
 <Accordion title="Retired patch payloads">
-`HookPatch` no longer has valid variants. Older payloads such as `llm_request`, `assistant_text`, `tool_args`, `tool_result`, and `run_result` fail closed during deserialization instead of being ignored or applied.
+The `HookPatch` type is deleted entirely. Older payloads such as `llm_request`, `assistant_text`, `tool_args`, `tool_result`, and `run_result` fail closed during deserialization instead of being ignored or applied.
 
 Hooks can observe typed projections and return `Allow` or `Deny`. Canonical provider parameters, assistant text, tool arguments, tool results, and final run text are owned by the runtime and tool execution path.
 </Accordion>
@@ -171,7 +174,7 @@ All three runtimes return the same `RuntimeHookResponse` structure:
 }
 ```
 
-`decision` is optional. The compatibility `patches` field may be empty, but non-empty legacy semantic patch payloads are rejected.
+`decision` is optional and is the only field. The struct is declared with `deny_unknown_fields`, so any legacy `patches` field -- even an empty one -- is rejected at deserialization.
 
 ## Invocation payload
 
@@ -182,21 +185,24 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 | `point` | `HookPoint` | Always |
 | `session_id` | `SessionId` | Always |
 | `turn_number` | `Option<u32>` | Most points |
-| `prompt` | `Option<String>` | `RunStarted` |
-| `error` | `Option<String>` | `RunFailed` |
+| `prompt_input` | `Option<RunInput>` | `RunStarted` |
+| `error_report` | `Option<AgentErrorReport>` | `RunFailed` |
+| `error_class` | `Option<AgentErrorClass>` | `RunFailed` |
 | `llm_request` | `Option<HookLlmRequest>` | `PreLlmRequest` |
 | `llm_response` | `Option<HookLlmResponse>` | `PostLlmResponse` |
 | `tool_call` | `Option<HookToolCall>` | `PreToolExecution` |
 | `tool_result` | `Option<HookToolResult>` | `PostToolExecution` |
 
+For command and HTTP hooks, the serialized wire payload additionally carries `prompt` and `error` strings. These are serialize-only projections of `prompt_input` and `error_report`; they are never stored fields and are never deserialized back as authority.
+
 <Accordion title="Supporting types">
 - **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
 - **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
 - **`HookToolCall`**: `tool_use_id`, `name`, `args`
-- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `content_blocks`, `is_error`
+- **`HookToolResult`**: `tool_use_id`, `name`, `content_blocks`, `is_error` (the wire payload adds a serialize-only `content` text projection)
 </Accordion>
 
-`HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. `HookToolResult.content` remains as a legacy text projection for existing hooks. Both fields are observational projections and cannot be returned as a rewrite.
+`HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. The wire payload also serializes a `content` string -- a text projection derived from `content_blocks` for external command/HTTP hooks; in Rust, use `HookToolResult::text_projection()`. Both are observational projections and cannot be returned as a rewrite.
 
 ## Priority ordering and deny short-circuiting
 
@@ -310,9 +316,9 @@ The hook engine emits `AgentEvent` variants during execution:
 
 <Accordion title="Registering an in-process hook">
 ```rust
-use meerkat_hooks::{DefaultHookEngine, InProcessHookHandler, RuntimeHookResponse};
+use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
 use meerkat_core::{HooksConfig, HookEntryConfig, HookId, HookPoint,
-                   HookCapability, HookRuntimeConfig, HookRuntimeKind};
+                   HookCapability, HookAdapterConfig};
 use std::sync::Arc;
 
 let mut config = HooksConfig::default();
@@ -321,10 +327,7 @@ config.entries.push(HookEntryConfig {
     point: HookPoint::PreToolExecution,
     capability: HookCapability::Guardrail,
     priority: 10,
-    runtime: HookRuntimeConfig::new(
-        HookRuntimeKind::InProcess,
-        Some(serde_json::json!({"name": "my-handler"})),
-    )?,
+    runtime: HookAdapterConfig::in_process("my-handler"),
     ..Default::default()
 });
 

@@ -275,8 +275,10 @@ Create and run a new session.
   The user prompt to send to the agent.
 </ParamField>
 
-<ParamField body="system_prompt" type="string | null" default="null">
-  Override the system prompt for this session.
+<ParamField body="system_prompt" type="SystemPromptOverride" default="inherit">
+  Typed per-request system-prompt policy: omit/`null` to inherit, a string to
+  set an explicit prompt, or `{"action": "disable"}` to suppress every prompt
+  source.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="config default">

@@ -52310,6 +52310,17 @@
       "ImageOperationId": {
         "type": "string"
       },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "ScopedModelOverrideId": {
         "type": "string"
       },
@@ -52811,6 +52822,17 @@
             "type": "null"
           }
         ]
+      },
+      "session_provider": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Provider"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Typed provider of the session's current LLM identity, projected from\nthe machine-owned `current_session_llm_identity`\n(`SessionLlmIdentity.provider`). This is the single owner of the\n\"which provider is this session on\" fact at planning time — it is\nhydrated at session construction and recommitted by the live\nidentity hot-swap transition, so consumers (e.g. the image\nauto-planner) must read it instead of re-deriving a provider from\nthe effective model string through the built-in catalog (which\nsilently disagrees for `ModelRegistry`-owned custom models).\n\n`None` means the machine has no hydrated session LLM identity yet\n(pre-hydration); it is not a fallback signal to re-derive one."
       }
     },
     "required": [

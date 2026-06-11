@@ -1625,6 +1625,15 @@ fn project_model_routing_status(
             .clone()
             .unwrap_or_default(),
     );
+    // The session's typed provider identity is owned by the machine's
+    // `current_session_llm_identity` (hydrated at construction, recommitted
+    // by the generated live-reconfigure transition). Project it as-is —
+    // `None` faithfully reports "not hydrated"; downstream consumers must
+    // not re-derive a provider from any model string.
+    let session_provider = state
+        .current_session_llm_identity
+        .as_ref()
+        .map(|identity| meerkat_core::Provider::from(identity.provider));
     let topology_epoch = TopologyEpoch(state.model_routing_topology_epoch);
     let active_turn_override = state
         .model_routing_turn_override_id
@@ -1719,6 +1728,7 @@ fn project_model_routing_status(
         active_operation_override,
         pending_switch_turn,
     )
+    .with_session_provider(session_provider)
 }
 
 #[cfg(test)]
@@ -1792,5 +1802,70 @@ mod tests {
                 "expected a typed InvalidState{{state}} for the unbound session, got {other:?}"
             ),
         }
+    }
+
+    /// The model-routing status projection must carry the session's typed
+    /// provider identity from the machine-owned `current_session_llm_identity`
+    /// — `None` before hydration, the hydrated provider after, and the
+    /// SWAPPED provider after the identity is recommitted (the same machine
+    /// fact the live `ReconfigureSessionLlmIdentity` transition writes).
+    /// Consumers (the image auto-planner) read this instead of re-deriving a
+    /// provider from the effective model string through the built-in catalog,
+    /// which has no row for `ModelRegistry`-owned custom models.
+    #[test]
+    fn model_routing_status_projects_session_provider_from_generated_identity() {
+        use crate::meerkat_machine::dsl as mm_dsl;
+
+        let mut authority = crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "initialize projection-test authority",
+        );
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            mm_dsl::MeerkatMachineInput::RegisterSession {
+                session_id: mm_dsl::SessionId::from("projection-session"),
+            },
+        )
+        .expect("register session");
+
+        // Pre-hydration: the machine holds no identity, so the projection
+        // reports None rather than minting a provider from the model string.
+        assert_eq!(
+            project_model_routing_status(authority.state()).session_provider,
+            None
+        );
+
+        let hydrate =
+            |provider: mm_dsl::Provider| mm_dsl::MeerkatMachineInput::HydrateSessionLlmState {
+                current_identity: mm_dsl::SessionLlmIdentity {
+                    // Deliberately NOT a built-in catalog model: the projected
+                    // provider must come from the typed identity, never from
+                    // model-name inference.
+                    model: "my-custom-model".to_string(),
+                    provider,
+                    self_hosted_server_id: None,
+                    provider_params_repr: None,
+                    auth_binding: None,
+                },
+                current_capability_surface: None,
+                current_capability_surface_status:
+                    mm_dsl::SessionLlmCapabilitySurfaceStatus::Unresolved,
+                current_capability_base_filter: mm_dsl::ToolFilter::All,
+            };
+
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, hydrate(mm_dsl::Provider::Gemini))
+            .expect("hydrate session llm identity");
+        assert_eq!(
+            project_model_routing_status(authority.state()).session_provider,
+            Some(meerkat_core::Provider::Gemini)
+        );
+
+        // Identity swap: once the machine recommits a new current identity,
+        // the projection follows the swapped provider.
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, hydrate(mm_dsl::Provider::OpenAI))
+            .expect("re-hydrate swapped session llm identity");
+        assert_eq!(
+            project_model_routing_status(authority.state()).session_provider,
+            Some(meerkat_core::Provider::OpenAI)
+        );
     }
 }

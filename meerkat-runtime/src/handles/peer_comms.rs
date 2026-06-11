@@ -284,6 +284,7 @@ fn external_envelope_signal(
     Ok(mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
         item_id: facts.item_id.clone(),
         from_peer: facts.from_peer.clone(),
+        from_peer_id: mm_dsl::PeerId(facts.from_peer_id.to_string()),
         envelope_kind,
         request_intent,
         request_intent_class,
@@ -299,6 +300,7 @@ struct PeerIngressClassifiedEffect {
     actionable: bool,
     kind: mm_dsl::PeerIngressAdmittedKind,
     auth: mm_dsl::PeerIngressAuthClass,
+    from_peer_id: Option<mm_dsl::PeerId>,
     lifecycle_kind: Option<mm_dsl::PeerIngressLifecycleClass>,
     lifecycle_peer: Option<String>,
     request_id: Option<String>,
@@ -317,6 +319,7 @@ fn classified_effect(
                 actionable,
                 kind,
                 auth,
+                from_peer_id,
                 lifecycle_kind,
                 lifecycle_peer,
                 request_id,
@@ -326,6 +329,7 @@ fn classified_effect(
                 actionable,
                 kind,
                 auth,
+                from_peer_id,
                 lifecycle_kind,
                 lifecycle_peer,
                 request_id,
@@ -339,6 +343,24 @@ fn classified_effect(
                 "machine transition did not emit PeerIngressClassified",
             )
         })
+}
+
+/// Convert the machine-echoed canonical sender peer id back to the core
+/// domain `PeerId`, fail-closed on malformed output.
+fn canonical_peer_id_from_effect(
+    from_peer_id: Option<&mm_dsl::PeerId>,
+    context: &'static str,
+) -> Result<Option<meerkat_core::comms::PeerId>, DslTransitionError> {
+    from_peer_id
+        .map(|peer_id| {
+            meerkat_core::comms::PeerId::parse(peer_id.0.as_str()).map_err(|error| {
+                DslTransitionError::guard_rejected(
+                    context,
+                    format!("machine emitted malformed canonical sender peer id: {error}"),
+                )
+            })
+        })
+        .transpose()
 }
 
 struct PeerIngressReceiveResolvedEffect {
@@ -457,9 +479,20 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
             .apply_signal_with_effects(external_envelope_signal(&facts)?, context)?;
         let effect = classified_effect(effects, context)?;
         let classification = classification_from_effect(&effect);
+        // R084: the canonical sender peer id on the admission is the
+        // machine-echoed effect fact, never the shell-local input copy.
+        // Envelope classification must echo it; fail closed otherwise.
+        let from_peer_id = canonical_peer_id_from_effect(effect.from_peer_id.as_ref(), context)?
+            .ok_or_else(|| {
+                DslTransitionError::guard_rejected(
+                    context,
+                    "machine classification did not echo the canonical sender peer id",
+                )
+            })?;
         Ok(PeerIngressAdmission {
             rendered_text: meerkat_core::render_peer_ingress_admitted_text(&facts, &classification),
             classification,
+            from_peer_id: Some(from_peer_id),
             // #96/#106: the machine owns the typed `Option<PeerId>` lifecycle
             // subject; project it to the display-string carried by the core
             // admission fact at this single boundary (the downstream comms layer
@@ -483,6 +516,9 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         let effect = classified_effect(effects, context)?;
         Ok(PeerIngressAdmission {
             classification: classification_from_effect(&effect),
+            // Plain events have no peer sender identity; the machine emits
+            // `None` on its plain-event classification transitions.
+            from_peer_id: canonical_peer_id_from_effect(effect.from_peer_id.as_ref(), context)?,
             lifecycle_peer: effect.lifecycle_peer,
             request_id: effect.request_id,
             rendered_text: meerkat_core::interaction::format_external_event_projection(
@@ -765,11 +801,12 @@ mod tests {
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
 
+        let sender_peer_id = meerkat_core::comms::PeerId::new();
         let admission = handle
             .classify_external_envelope(PeerIngressEnvelopeFacts {
                 item_id: "request-1".to_string(),
                 from_peer: "peer-1".to_string(),
-                from_peer_id: meerkat_core::comms::PeerId::new(),
+                from_peer_id: sender_peer_id,
                 kind: meerkat_core::PeerIngressEnvelopeKind::Request {
                     intent: "probe.silent".to_string(),
                     params: serde_json::json!({}),
@@ -786,6 +823,13 @@ mod tests {
             meerkat_core::PeerIngressAuthDecision::Required
         );
         assert_eq!(admission.request_id.as_deref(), Some("request-1"));
+        // R084: the machine echoes the canonical sender peer id on its
+        // classification effect; the admission carries the machine fact.
+        assert_eq!(
+            admission.from_peer_id,
+            Some(sender_peer_id),
+            "machine classification must echo the canonical sender peer id"
+        );
     }
 
     #[test]

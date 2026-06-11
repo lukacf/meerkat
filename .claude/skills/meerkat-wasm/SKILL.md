@@ -73,7 +73,8 @@ The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around t
 **Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `clearExternalAuthResolver`, `withAuthBinding`, `Auth` types).
 
 Current release-line notes: `runtime_version()` and package compatibility
-should match `0.6.23`; browser-facing examples should use the current catalog
+should match the workspace `Cargo.toml` version (latest published release line
+is `0.6.x`; do not hardcode a stale pin); browser-facing examples should use the current catalog
 defaults (`gpt-5.5`, `claude-opus-4-8`, `gemini-3.5-flash`) unless a test is
 deliberately pinning another model. WASM mob flows use the same current
 identity-first mob runtime, including helper/fork/respawn controls and

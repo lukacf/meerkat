@@ -33,11 +33,11 @@ This page is intentionally browser/WASM-specific rather than a cross-surface tab
 ## Initialize runtime
 
 Use init-time credentials and provider base URLs to seed the browser runtime's
-realm config. The `@rkat/web` `RuntimeConfig` still exposes `apiKey`/`baseUrl`
-compatibility fields for older callers, but the current runtime contract is
-provider-specific: `anthropicApiKey`, `openaiApiKey`, `geminiApiKey`, and the
-matching provider base URL fields. `SessionConfig` does not accept per-session
-`apiKey` or `baseUrl`.
+realm config. The `@rkat/web` `RuntimeConfig` is provider-specific:
+`anthropicApiKey`, `openaiApiKey`, `geminiApiKey`, and the matching provider
+base URL fields (`anthropicBaseUrl`, `openaiBaseUrl`, `geminiBaseUrl`). The old
+generic `apiKey`/`baseUrl` compatibility fields are deleted, and
+`SessionConfig` does not accept per-session `apiKey` or `baseUrl`.
 
 ```typescript
 import { MeerkatRuntime } from "@rkat/web";
@@ -145,16 +145,17 @@ sub.close();
 
 ## Cross-mob comms
 
-Wire ambassadors across mobs for inter-faction communication. `MeerkatRuntime.wireCrossMob()` establishes trust between members in different mobs so they can exchange messages via the comms system.
+Wire ambassadors across mobs for inter-faction communication. `mob.wire()` accepts either a local member name or an external peer target, so trust between members of different mobs is established by wiring each ambassador to the other side's peer identity (comms name, address, Ed25519 public key).
 
 ```typescript
-// Wire ambassadors between two mobs
-await runtime.wireCrossMob(
-  northMob.mobId,
-  "ambassador-north",
-  southMob.mobId,
-  "ambassador-south",
-);
+// Wire an ambassador to a peer in another mob
+await northMob.wire("ambassador-north", {
+  external: {
+    name: "ambassador-south",
+    address: southAddress,
+    identity: { kind: "ed25519_public_key", public_key: southPublicKey },
+  },
+});
 
 // Send work to a member through the canonical member path
 await northMob

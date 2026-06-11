@@ -174,7 +174,7 @@ await channel.close();
 | `mob.wire(a, b)` | Wire two members |
 | `mob.unwire(a, b)` | Remove wiring |
 | `mob.listMembers()` | List mob members |
-| `mob.member(agentIdentity).send(content, handlingMode?)` | Send work to a member |
+| `mob.member(agentIdentity).send(content, options?)` | Send work to a member |
 | `mob.readEvents(options?)` | Read mob event history (`mob/events`) |
 | `mob.listFlows()` | List available flows |
 | `mob.runFlow(flowId, params)` | Start a flow run |
@@ -213,6 +213,8 @@ export interface ConnectOptions {
   contextRoot?: string;
   userConfigRoot?: string;
   liveWs?: boolean;
+  liveWebrtc?: boolean;
+  liveToolTimeoutMs?: number;
 }
 ```
 
@@ -282,7 +284,11 @@ interface SessionOptions {
   enableBuiltins?: boolean;
   enableShell?: boolean;
   enableMemory?: boolean;
+  enableSchedule?: boolean;
+  enableWorkGraph?: boolean;
   enableMob?: boolean;
+  enableWebSearch?: boolean;
+  toolFilter?: WireToolFilter;
   keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
@@ -486,9 +492,12 @@ client.requireCapability("skills");  // throws CapabilityUnavailableError if not
 | `shell` | Shell tool |
 | `comms` | Inter-agent communication |
 | `memory_store` | Semantic memory |
+| `schedule` | Durable scheduler |
+| `work_graph` | WorkGraph goal/attention surfaces |
 | `session_store` | Session persistence |
 | `session_compaction` | Context compaction |
 | `skills` | Skill loading |
+| `mcp_live` | Live MCP server controls |
 </Accordion>
 
 ---

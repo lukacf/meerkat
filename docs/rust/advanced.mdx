@@ -60,14 +60,17 @@ let mut agent = AgentBuilder::new()
 <Accordion title="All builder methods">
 | Method | Description | Default |
 |--------|-------------|---------|
-| `model(name)` | Set the model identifier | `"claude-opus-4-8"` |
-| `system_prompt(prompt)` | Set the system prompt | None |
-| `max_tokens_per_turn(n)` | Max tokens per LLM call | 8192 |
+| `model(name)` | Set the model identifier | Config default (`config.agent.model`); `build(client, ...)` falls back to `client.model()` |
+| `provider(provider)` | Set an explicit typed provider | Resolved from the model registry |
+| `system_prompt(prompt)` | Set an explicit per-request prompt (`SystemPromptOverride::Set`) | Inherit (config/AGENTS.md/default chain) |
+| `disable_system_prompt()` | Suppress every prompt source (`SystemPromptOverride::Disable`) | Inherit |
+| `max_tokens_per_turn(n)` | Max tokens per LLM call | Config `max_tokens` |
 | `temperature(t)` | Sampling temperature (0.0-1.0) | None (model default) |
 | `budget(limits)` | Set resource limits | Unlimited |
 | `retry_policy(policy)` | Configure retry behavior | 3 retries with backoff |
 | `resume_session(session)` | Resume from existing session | New session |
-| `provider_params(json)` | Provider-specific parameters | None |
+| `provider_params(params)` | Typed `ProviderParamsOverride` for this build | None |
+| `output_schema(schema)` / `structured_output_retries(n)` | Structured-output extraction settings | None / canonical default |
 | `with_hook_engine(engine)` | Attach a hook engine | None |
 | `with_hook_run_overrides(overrides)` | Run-scoped hook overrides | Empty |
 </Accordion>
@@ -84,7 +87,6 @@ Built-in clients for major LLM providers:
     use meerkat::AnthropicClient;
 
     let client = AnthropicClient::new("sk-ant-...".to_string())?;
-    let client = AnthropicClient::from_env()?;
     let client = AnthropicClient::new("key".to_string())?
         .with_base_url("https://my-proxy.example.com".to_string());
     ```
@@ -94,7 +96,6 @@ Built-in clients for major LLM providers:
     use meerkat::OpenAiClient;
 
     let client = OpenAiClient::new("sk-...".to_string());
-    let client = OpenAiClient::from_env()?;
     let client = OpenAiClient::new("key".to_string())
         .with_base_url("https://my-deployment.openai.azure.com".to_string());
     ```
@@ -104,35 +105,28 @@ Built-in clients for major LLM providers:
     use meerkat::GeminiClient;
 
     let client = GeminiClient::new("...".to_string());
-    let client = GeminiClient::from_env()?;
+    let client = GeminiClient::new("key".to_string())
+        .with_base_url("https://my-proxy.example.com".to_string());
     ```
   </Tab>
 </Tabs>
 
 ### Provider parameters
 
-Pass provider-specific options via `AgentBuildConfig`:
+Pass provider parameter overrides via `AgentBuildConfig`. The JSON bag is retired:
+`provider_params` is the typed `ProviderParamsOverride` (temperature, `top_p`,
+`max_output_tokens`, reasoning mode, `thinking_budget_tokens`, and an optional
+provider-specific `provider_tag`), parsed fail-closed at each surface ingress.
 
-<Tabs>
-  <Tab title="Anthropic">
-    ```rust
-    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
-    build_config.provider_params = Some(json!({"thinking_budget": 10000}));
-    ```
-  </Tab>
-  <Tab title="OpenAI">
-    ```rust
-    let mut build_config = AgentBuildConfig::new("gpt-5.5".into());
-    build_config.provider_params = Some(json!({"reasoning_effort": "high", "seed": 42}));
-    ```
-  </Tab>
-  <Tab title="Gemini">
-    ```rust
-    let mut build_config = AgentBuildConfig::new("gemini-3.5-flash".into());
-    build_config.provider_params = Some(json!({"thinking_budget": 8000, "top_k": 40}));
-    ```
-  </Tab>
-</Tabs>
+```rust
+use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
+build_config.provider_params = Some(ProviderParamsOverride {
+    thinking_budget_tokens: Some(10_000),
+    ..Default::default()
+});
+```
 
 <Accordion title="Implementing a custom LLM client">
 
@@ -140,7 +134,8 @@ Pass provider-specific options via `AgentBuildConfig`:
 use async_trait::async_trait;
 use meerkat::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef, StopReason, Usage};
 use meerkat::AssistantBlock;
-use serde_json::Value;
+use meerkat_core::Provider;
+use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use std::sync::Arc;
 
 struct MyCustomClient { api_key: String }
@@ -153,7 +148,7 @@ impl AgentLlmClient for MyCustomClient {
         tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
-        provider_params: Option<&Value>,
+        provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
         // Call your LLM API here
         Ok(LlmStreamResult::new(
@@ -163,7 +158,7 @@ impl AgentLlmClient for MyCustomClient {
         ))
     }
 
-    fn provider(&self) -> &'static str { "my-provider" }
+    fn provider(&self) -> Provider { Provider::Other }
     fn model(&self) -> &str { "my-model" }
 }
 ```
@@ -183,7 +178,7 @@ let budget = BudgetLimits::default()
     .with_max_tool_calls(50);
 
 let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
-build_config.budget = Some(budget);
+build_config.budget_limits = Some(budget);
 ```
 
 ## Retry configuration
@@ -197,6 +192,8 @@ let retry = RetryPolicy {
     initial_delay: Duration::from_millis(500),
     max_delay: Duration::from_secs(30),
     multiplier: 2.0,
+    // Hard per-call LLM timeout; `None` inherits the model-profile default.
+    call_timeout: None,
 };
 ```
 
@@ -222,8 +219,10 @@ use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
 let config = meerkat::Config::load().await?;
 let cwd = std::env::current_dir()?;
 
-// Called internally by AgentFactory::build_agent()
-let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
+// Called internally by AgentFactory::build_agent().
+// Layers user-root hooks under project (context-root) hooks.
+let layered_hooks = resolve_layered_hooks_config(Some(&cwd), None, &config).await;
+// Returns None when no hooks are configured.
 let hook_engine = create_default_hook_engine(layered_hooks);
 ```
 
@@ -231,10 +230,10 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 
 ## Comms delivery and observation
 
-Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues a runtime-backed external event for later admission.
+Public comms injection is a delivery API. `event_injector()` gives you an `Arc<dyn EventInjector>`, and `inject()` queues a runtime-backed external event for later admission.
 
 ```rust
-use meerkat::{EventInjector, PlainEventSource};
+use meerkat_core::{EventInjector, HandlingMode, PlainEventSource};
 
 let injector = service.event_injector(&session_id).await
     .expect("comms must be enabled");
@@ -242,6 +241,8 @@ let injector = service.event_injector(&session_id).await
 injector.inject(
     "review PR #42".into(),
     PlainEventSource::Rpc,
+    HandlingMode::Queue,
+    None, // render metadata
 )?;
 ```
 
@@ -273,7 +274,7 @@ async fn handle_chat(
 ) -> impl IntoResponse {
     let injector = service.event_injector(&session_id).await.unwrap();
     let mut events = session_events.subscribe();
-    injector.inject(user_msg, PlainEventSource::Rpc)?;
+    injector.inject(user_msg.into(), PlainEventSource::Rpc, HandlingMode::Queue, None)?;
 
     Sse::new(async_stream::stream! {
         while let Ok(session_event) = events.recv().await {
@@ -303,7 +304,7 @@ async fn handle_chat(
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat::{
     CreateSessionRequest, DeferredPromptPolicy, SessionService,
-    StartTurnRequest, StartTurnRuntimeSemantics,
+    StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
 use meerkat_core::service::InitialTurnPolicy;
 
@@ -316,11 +317,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "What is 25 * 17?".into(),
-        render_metadata: None,
-        system_prompt: Some("You are a helpful math assistant.".into()),
+        system_prompt: SystemPromptOverride::Set("You are a helpful math assistant.".into()),
         max_tokens: Some(2048),
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,

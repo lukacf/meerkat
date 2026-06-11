@@ -507,13 +507,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.6.23"
+meerkat = "0.6"  # track the latest 0.6.x release
 
 # Single provider, minimal
-meerkat = { version = "0.6.23", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "0.6.23", features = [
+meerkat = { version = "0.6", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live"

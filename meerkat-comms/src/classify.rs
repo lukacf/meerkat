@@ -191,6 +191,15 @@ impl IngressClassificationContext {
                     },
                 };
                 let admission = self.machine_classify_external_envelope(facts)?;
+                // R084: the admitted sender identity is the machine-echoed
+                // canonical peer id from the classification effect, not the
+                // shell-local transport copy. Fail closed if it is missing.
+                let Some(canonical_from_peer_id) = admission.from_peer_id else {
+                    tracing::warn!(
+                        "machine classified peer envelope without canonical sender peer id; rejecting ingress"
+                    );
+                    return None;
+                };
                 let request_id = parse_admission_interaction_id(admission.request_id.as_deref());
                 let classification = admission.classification;
                 let lifecycle_peer = admission.lifecycle_peer.clone();
@@ -245,7 +254,7 @@ impl IngressClassificationContext {
                     classification.class,
                     classification.kind,
                     Some(classification.auth),
-                    PeerIngressIdentity::new(from_peer_id, from_name.clone(), convention)
+                    PeerIngressIdentity::new(canonical_from_peer_id, from_name.clone(), convention)
                         .with_signing_pubkey(envelope.from.0),
                 );
 

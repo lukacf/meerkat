@@ -20,7 +20,7 @@ The canonical registry is `canonical_machine_schemas()` in
 | `MobMachine` | `meerkat-mob` | Mob lifecycle, roster, member runtime bindings, wiring, flows, tasks, and supervisor handoffs. |
 | `AuthMachine` | `meerkat-runtime` auth handles | Per-binding auth lease and OAuth flow lifecycle. |
 | `ApprovalLifecycleMachine` | `meerkat-core` | Approval request and decision lifecycle and gating. |
-| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, and pending-continuation lifecycle. |
+| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, pending-continuation lifecycle, and the session lifecycle terminal fact for all profiles. |
 | `SessionTurnAdmissionMachine` | `meerkat-session` | Per-turn input admission and classification lifecycle. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule` | Claimed occurrence delivery and terminal outcomes. |
@@ -97,6 +97,7 @@ make machine-codegen
 make machine-check-drift
 make machine-verify
 make seam-inventory
+make rmat-audit
 ```
 
 `make agent-gate` and CI run the relevant gates for normal development. Use the

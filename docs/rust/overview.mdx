@@ -18,7 +18,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
 | | `service.start_turn(id, req)` | Continue an existing session |
 | | `service.read(id)` | Read session state |
-| | `service.list()` | List active sessions |
+| | `service.list(query)` | List active sessions |
 | | `service.archive(id)` | Remove a session |
 | **Agent** | `agent.run(prompt)` | Run agent with a prompt |
 | | `agent.run_with_events(prompt, tx)` | Run with event streaming |
@@ -78,6 +78,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | `memory-store-session` | Semantic memory indexing | No |
 | `comms` | Ed25519 inter-agent messaging | No |
 | `mcp` | MCP protocol client and tool routing | No |
+| `schedule` | Durable scheduler surfaces | No |
 | `workgraph` | WorkGraph goal and attention surfaces | No |
 | `live` | Live-channel orchestration and realtime adapter helpers | No |
 | `skills` | Composable knowledge packs | No |
@@ -94,7 +95,7 @@ For the main production embedding path, use the runtime-backed persistent flow:
 ```rust
 use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService,
-    build_persistent_service, open_realm_persistence_in,
+    SystemPromptOverride, build_persistent_service, open_realm_persistence_in,
     DeferredPromptPolicy,
 };
 use meerkat_core::service::InitialTurnPolicy;
@@ -116,11 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "What is the capital of France?".into(),
-        render_metadata: None,
-        system_prompt: Some("You are a helpful assistant.".into()),
+        system_prompt: SystemPromptOverride::Set("You are a helpful assistant.".into()),
         max_tokens: Some(1024),
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
@@ -146,7 +145,7 @@ For **testing or embedded use** where runtime semantics are intentionally not ne
 ```rust
 use meerkat::{
     CreateSessionRequest, DeferredPromptPolicy, SessionService,
-    StartTurnRequest, StartTurnRuntimeSemantics,
+    StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
 use meerkat_core::service::InitialTurnPolicy;
 
@@ -154,11 +153,9 @@ use meerkat_core::service::InitialTurnPolicy;
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "My name is Alice.".into(),
-    render_metadata: None,
-    system_prompt: Some("You are a helpful assistant with memory.".into()),
+    system_prompt: SystemPromptOverride::Set("You are a helpful assistant with memory.".into()),
     max_tokens: None,
     event_tx: None,
-    skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     deferred_prompt_policy: DeferredPromptPolicy::Discard,
     build: None,
@@ -188,18 +185,16 @@ service.archive(&session_id).await?;
 ```rust
 use meerkat::{
     CreateSessionRequest, DeferredPromptPolicy, SessionService,
-    StartTurnRequest, StartTurnRuntimeSemantics,
+    StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
 use meerkat_core::service::InitialTurnPolicy;
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "Let's wait before we run.".into(),
-    render_metadata: None,
-    system_prompt: Some("You are the original prompt.".into()),
+    system_prompt: SystemPromptOverride::Set("You are the original prompt.".into()),
     max_tokens: None,
     event_tx: None,
-    skill_references: None,
     initial_turn: InitialTurnPolicy::Defer,
     deferred_prompt_policy: DeferredPromptPolicy::Stage,
     build: None,
@@ -292,7 +287,9 @@ use meerkat::AgentError;
 
 match agent.run("prompt".into()).await {
     Ok(result) => println!("Success: {}", result.text),
-    Err(AgentError::LlmError(msg)) => println!("LLM error: {}", msg),
+    Err(AgentError::Llm { provider, message, .. }) => {
+        println!("LLM error ({}): {}", provider, message);
+    }
     Err(AgentError::TokenBudgetExceeded { used, limit }) => {
         println!("Token budget exceeded: {} / {}", used, limit);
     }
@@ -310,14 +307,18 @@ use meerkat::AgentEvent;
 
 match event {
     // Session lifecycle
-    AgentEvent::RunStarted { session_id, prompt } => {}
-    AgentEvent::RunCompleted { session_id, result, usage } => {}
-    AgentEvent::RunFailed { session_id, error } => {}
+    AgentEvent::RunStarted { session_id, input } => {}
+    AgentEvent::RunCompleted { session_id, result, structured_output, extraction_required, usage, .. } => {}
+    AgentEvent::RunFailed { session_id, error_report, .. } => {}
+
+    // Structured-output extraction (after a completed main run)
+    AgentEvent::ExtractionSucceeded { session_id, structured_output, schema_warnings } => {}
+    AgentEvent::ExtractionFailed { session_id, last_output, attempts, reason } => {}
 
     // Hook lifecycle
     AgentEvent::HookStarted { hook_id, point } => {}
     AgentEvent::HookCompleted { hook_id, point, duration_ms } => {}
-    AgentEvent::HookFailed { hook_id, point, error } => {}
+    AgentEvent::HookFailed { hook_id, point, reason } => {}
     AgentEvent::HookDenied { hook_id, point, reason_code, message, .. } => {}
 
     // LLM interaction
@@ -326,37 +327,44 @@ match event {
     AgentEvent::ReasoningComplete { content } => {}
     AgentEvent::TextDelta { delta } => {}
     AgentEvent::TextComplete { content } => {}
+    AgentEvent::ServerToolContent { id, kind, content } => {}
+    AgentEvent::AssistantImageAppended { image } => {}
     AgentEvent::ToolCallRequested { id, name, args } => {}
     AgentEvent::ToolResultReceived { id, name, content, is_error } => {}
     AgentEvent::TurnCompleted { stop_reason, usage } => {}
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
-    AgentEvent::ToolExecutionCompleted { id, name, result, content, is_error, duration_ms } => {}
+    AgentEvent::ToolExecutionCompleted { id, name, content, is_error, duration_ms } => {}
     AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
 
     // Compaction
     AgentEvent::CompactionStarted { input_tokens, estimated_history_tokens, message_count } => {}
     AgentEvent::CompactionCompleted { summary_tokens, messages_before, messages_after } => {}
-    AgentEvent::CompactionFailed { error } => {}
+    AgentEvent::CompactionFailed { reason } => {}
 
     // Budget
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
 
-    // Retry
-    AgentEvent::Retrying { attempt, max_attempts, error, delay_ms } => {}
+    // Retry (typed LlmRetrySchedule owns failure kind + attempt/delay plan)
+    AgentEvent::Retrying { retry } => {}
 
     // Skills
     AgentEvent::SkillsResolved { skills, injection_bytes } => {}
-    AgentEvent::SkillResolutionFailed { skill_key, reason, reference, error } => {}
+    AgentEvent::SkillResolutionFailed { skill_key, reason } => {}
 
     // Comms interaction lifecycle
-    AgentEvent::InteractionComplete { interaction_id, result } => {}
-    AgentEvent::InteractionFailed { interaction_id, error } => {}
+    AgentEvent::InteractionComplete { interaction_id, result, .. } => {}
+    AgentEvent::InteractionCallbackPending { interaction_id, tool_name, args } => {}
+    AgentEvent::InteractionFailed { interaction_id, reason } => {}
     AgentEvent::StreamTruncated { reason } => {}
 
     // Tool config changes
     AgentEvent::ToolConfigChanged { payload } => {}
+
+    // Background jobs and transcript rewrites
+    AgentEvent::BackgroundJobCompleted { job_id, display_name, terminal_status, detail } => {}
+    AgentEvent::TranscriptRewriteCommitted { session_id, record } => {}
 
     _ => {} // non_exhaustive: forward compatibility
 }
@@ -371,23 +379,21 @@ match event {
 
 ```rust
 use meerkat::{Message, UserMessage, BlockAssistantMessage, SystemMessage, ToolResult};
-use meerkat::ContentBlock;
+use meerkat_core::{ContentBlock, ImageData};
 
-let system = Message::System(SystemMessage { content: "You are helpful.".to_string() });
+let system = Message::System(SystemMessage::new("You are helpful."));
 
 // Text-only user message (convenience)
 let user = Message::User(UserMessage::text("Hello!"));
 
 // Multimodal user message with text and image
-let user = Message::User(UserMessage {
-    content: vec![
-        ContentBlock::Text { text: "What is in this image?".to_string() },
-        ContentBlock::Image {
-            media_type: "image/png".to_string(),
-            data: ImageData::Inline { data: base64_data },
-        },
-    ],
-});
+let user = Message::User(UserMessage::with_blocks(vec![
+    ContentBlock::Text { text: "What is in this image?".to_string() },
+    ContentBlock::Image {
+        media_type: "image/png".to_string(),
+        data: ImageData::Inline { data: base64_data },
+    },
+]));
 ```
 
 ### ContentInput
@@ -395,7 +401,7 @@ let user = Message::User(UserMessage {
 `ContentInput` is the prompt type accepted by `CreateSessionRequest` and `StartTurnRequest`. It supports both text-only and multimodal prompts:
 
 ```rust
-use meerkat::ContentInput;
+use meerkat_core::ContentInput;
 
 // Text-only (most common) — implements From<&str> and From<String>
 let prompt: ContentInput = "What is Rust?".into();

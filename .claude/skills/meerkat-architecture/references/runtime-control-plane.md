@@ -12,7 +12,7 @@ All semantic state mutations route through the DSL authority via `dsl_apply(inpu
 
 Runtime-backed surfaces (CLI, REST, RPC, MCP) obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)` and pass them through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`. Standalone paths (WASM, tests, embedded) use `RuntimeBuildMode::StandaloneEphemeral`.
 
-`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle. In 0.6.23 it carries identity, ops/completion state, the machine-owned tool visibility projection, and all session-owned DSL handles that share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)` — handle method calls and dispatch-driven transitions land on the same underlying state.
+`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle. It carries identity, ops/completion state, the machine-owned tool visibility projection, and all session-owned DSL handles that share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)` — handle method calls and dispatch-driven transitions land on the same underlying state.
 
 Identity:
 
@@ -60,7 +60,7 @@ When you add a new handle field, `prepare_bindings()` and the factory's `Session
 
 - `ingest(session_id, input)` — admit an input through policy resolution
 - `retire(session_id)` — graceful drain (process queue, reject new input)
-- `respawn(...)` — helper convenience: retire old runtime binding, spawn fresh with same identity/spec/wiring, advance runtime incarnation + fence token (not machine-owned)
+- `respawn(...)` — retire old runtime binding, spawn fresh with same identity/spec/wiring, advance runtime incarnation + fence token (sequencing is shell convenience; restore/revival lifecycle facts are machine-owned — see Respawn semantics below)
 - `reset(session_id)` — abandon pending, return to Idle
 - `recover(session_id)` — replay from store for crash recovery
 - `destroy(session_id)` — terminal state, no recovery
@@ -97,7 +97,7 @@ Idle keep-alive wake from background shell completions is runtime-owned. Termina
 
 ## Respawn semantics
 
-Helper convenience (not a machine-owned primitive). Same `AgentIdentity`, spec, and peer wiring; new runtime incarnation and fence token. Old bridge binding is archived. Used for "agent is confused, restart it" recovery.
+Runtime-level respawn orchestration is shell convenience: same `AgentIdentity`, spec, and peer wiring; new runtime incarnation and fence token; old bridge binding is archived. Used for "agent is confused, restart it" recovery. The mob-side lifecycle facts behind it are machine-owned: restore failures (`member_restore_failures`) and post-discard revival (`member_revival_pending`, observe → classify → realize with `Broken` terminal) live in MobMachine DSL — see the mob-orchestration reference.
 
 ## Agent loop state machine
 

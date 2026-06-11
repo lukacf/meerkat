@@ -82,18 +82,19 @@ impl AgentToolDispatcher for MyToolDispatcher {
 }
 ```
 
-<Accordion title="ToolRegistry (dynamic registration)">
+<Accordion title="ToolIdentityRegistry (dynamic registration)">
 For dynamic tool registration:
 
 ```rust
-use meerkat::ToolRegistry;
+use meerkat_tools::registry::ToolIdentityRegistry;
+use std::sync::Arc;
 
-let mut registry = ToolRegistry::new();
+let mut registry = ToolIdentityRegistry::new();
 
-registry.register(tool_def);
+registry.register(Arc::new(tool_def));
 
 let weather = registry.get("get_weather");
-let tools = registry.list();
+let tools: Vec<_> = registry.iter().collect();
 ```
 </Accordion>
 
@@ -184,6 +185,16 @@ impl SessionStore for BigQueryStore {
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         Ok(())
     }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        // Compare-and-delete for derived projections; return false when the
+        // stored revision no longer matches.
+        Ok(false)
+    }
 }
 
 // Use as a custom store implementation boundary
@@ -233,10 +244,10 @@ let config = McpServerConfig::streamable_http(
 );
 router.add_server(config).await?;
 
-// List all available tools
-let tools = router.list_tools().await?;
+// List all available tools (synchronous snapshot)
+let tools = router.list_tools();
 
-// Call a tool
+// Call a tool (returns the result content blocks)
 let result = router.call_tool("tool_name", &args).await?;
 
 // Graceful shutdown

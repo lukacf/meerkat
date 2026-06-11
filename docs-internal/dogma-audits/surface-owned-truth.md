@@ -6,6 +6,8 @@ icon: "magnifying-glass"
 
 # Dogma Audit: Surface-Owned Truth (Rule 6 / Surface Priesthood)
 
+> **Postscript 2026-06-11:** point-in-time audit record (PR #754 head). Open/confirmed findings below were re-adjudicated and closed by the PR #759 campaign — see [`PR759-final-ledger.md`](PR759-final-ledger.md) (close-out: open set zero).
+
 **Audit target:** PR #754 head `worktree-dogma-stringy` @ `32b4d13b0`
 **Date:** 2026-06-05
 **Dogma:** Rule 6 — *Surfaces Are Thin Over The Shared Runtime*; pattern *Surface Priesthood*.

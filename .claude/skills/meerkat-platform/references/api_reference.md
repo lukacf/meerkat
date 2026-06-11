@@ -651,7 +651,7 @@ Mob methods:
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)` — identity-keyed
 - `Mob.listMembers()` / `Mob.sendMessage(agentIdentity, message)`
 - `Mob.listFlows()` / `Mob.runFlow(flowId, params)` / `Mob.flowStatus(runId)` / `Mob.cancelFlow(runId)`
-- `Mob.subscribeMemberEvents(meerkatId)` → `EventSubscription<AgentEventEnvelope>`
+- `Mob.subscribeMemberEvents(agentIdentity)` → `EventSubscription<AgentEventEnvelope>`
 - `Mob.subscribeEvents()` → `EventSubscription<AttributedMobEvent>`
 
 `getConfig()` / `patchConfig()` return the config envelope.

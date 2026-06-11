@@ -21,7 +21,7 @@ This page is structured from common product usage to advanced extension work:
 
 ## Enable built-in tools
 
-Built-in tool categories: builtins, shell, semantic memory, and mob orchestration. On the CLI, these are selected with tool presets. Other surfaces expose per-category booleans such as `enable_builtins`, `enable_shell`, `enable_memory`, and `enable_mob`.
+Built-in tool categories: builtins, shell, semantic memory, WorkGraph, and mob orchestration. On the CLI, these are selected with tool presets. Other surfaces expose per-category booleans such as `enable_builtins`, `enable_shell`, `enable_memory`, `enable_workgraph`, and `enable_mob`.
 
 <Tabs>
   <Tab title="CLI">
@@ -114,11 +114,9 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "List files in /tmp".into(),
-        render_metadata: None,
-        system_prompt: None,
+        system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,

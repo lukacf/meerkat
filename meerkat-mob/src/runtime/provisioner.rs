@@ -2698,11 +2698,15 @@ impl MultiBackendProvisioner {
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         // Transport requires the recipient be trusted before the request can be
         // routed (see comms admission), so trust is installed before the send.
-        // The invariant is enforced by rolling the trust back on every path
-        // where this `peer` is not a CONFIRMED, ACCEPTED supervisor: an
-        // `AuthorizeSupervisor` rejection or send failure must leave NO
-        // installed recipient trust (fail closed).
-        self.supervisor_bridge.trust_recipient(peer).await?;
+        // The invariant is enforced by rolling trust newly installed by THIS
+        // attempt back on every path where this `peer` is not a CONFIRMED,
+        // ACCEPTED supervisor (fail closed). Trust that pre-existed the call
+        // was established by an earlier confirmed terminality and is left in
+        // place. The corresponding MobMachine `pending_recipient_trust`
+        // obligation is owned by the actor around external provisioning — the
+        // provisioner cannot reach MobMachine authority (see
+        // `clear_pending_supervisor_acceptance_for_peer_ids`).
+        let install = self.supervisor_bridge.trust_recipient(peer).await?;
         // 60s (not 30s): the requester must tolerate the same async
         // trust/peer-registration propagation lag the live peer waits out
         // before replying (see `spawn_live_external_peer`, 60s). It bounds only
@@ -2717,7 +2721,7 @@ impl MultiBackendProvisioner {
             Ok(value) => value,
             Err(send_error) => {
                 return Err(self
-                    .rollback_supervisor_recipient_trust(peer, send_error)
+                    .rollback_supervisor_recipient_trust(peer, install, send_error)
                     .await);
             }
         };
@@ -2739,9 +2743,13 @@ impl MultiBackendProvisioner {
                     Self::peer_only_spec_from_parts(peer_id, &expected_address, pubkey)?;
                 let Some(rebind_authority) = rebind_authority else {
                     // No rebind authority yet: hoist the observation so the
-                    // machine-owning caller can classify and re-attempt. The
-                    // rejected recipient must not retain trust between attempts.
-                    if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await
+                    // machine-owning caller can classify and re-attempt. Trust
+                    // newly installed for this rejected attempt must not
+                    // survive between attempts; pre-existing confirmed trust
+                    // is left in place.
+                    if install == super::supervisor_bridge::RecipientTrustInstall::NewlyInstalled
+                        && let Err(untrust_error) =
+                            self.supervisor_bridge.untrust_recipient(peer).await
                     {
                         return Err(MobError::WiringError(format!(
                             "AuthorizeSupervisor rejection for '{peer_id}' could not roll back rejected recipient trust: {untrust_error}"
@@ -2768,7 +2776,7 @@ impl MultiBackendProvisioner {
                         "peer-only rebind authority for '{peer_id}' does not match MobMachine member peer endpoint"
                     ));
                     return Err(self
-                        .rollback_supervisor_recipient_trust(peer, mismatch)
+                        .rollback_supervisor_recipient_trust(peer, install, mismatch)
                         .await);
                 }
                 // Re-bind the same peer (the bind re-establishes its own
@@ -2781,7 +2789,7 @@ impl MultiBackendProvisioner {
                     Ok(bind) => bind,
                     Err(bind_error) => {
                         return Err(self
-                            .rollback_supervisor_recipient_trust(peer, bind_error)
+                            .rollback_supervisor_recipient_trust(peer, install, bind_error)
                             .await);
                     }
                 };
@@ -2803,7 +2811,11 @@ impl MultiBackendProvisioner {
                 });
             }
             return Err(self
-                .rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))
+                .rollback_supervisor_recipient_trust(
+                    peer,
+                    install,
+                    Self::bridge_rejection_error(rejection),
+                )
                 .await);
         }
         let _ack = match super::bridge_protocol::decode_bridge_ack(
@@ -2814,7 +2826,7 @@ impl MultiBackendProvisioner {
             Ok(ack) => ack,
             Err(decode_error) => {
                 return Err(self
-                    .rollback_supervisor_recipient_trust(peer, decode_error)
+                    .rollback_supervisor_recipient_trust(peer, install, decode_error)
                     .await);
             }
         };
@@ -2827,15 +2839,20 @@ impl MultiBackendProvisioner {
     /// Fail-closed rollback for supervisor recipient trust installed ahead of an
     /// `AuthorizeSupervisor` send. The recipient was trusted only so the bridge
     /// request could be routed; if authorization did not terminate in a
-    /// confirmed accept, the trust must not survive. The authorization
+    /// confirmed accept, trust newly installed by this attempt must not
+    /// survive. Trust that pre-existed the attempt was established by an
+    /// earlier confirmed terminality and is left in place. The authorization
     /// `original_error` is preserved; an untrust failure is folded into a typed
     /// `MobError` rather than silently dropped.
     async fn rollback_supervisor_recipient_trust(
         &self,
         peer: &TrustedPeerDescriptor,
+        install: super::supervisor_bridge::RecipientTrustInstall,
         original_error: MobError,
     ) -> MobError {
-        if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await {
+        if install == super::supervisor_bridge::RecipientTrustInstall::NewlyInstalled
+            && let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await
+        {
             return MobError::WiringError(format!(
                 "supervisor authorization failed ({original_error}); additionally failed to roll back installed recipient trust: {untrust_error}"
             ));
@@ -2860,15 +2877,42 @@ impl MultiBackendProvisioner {
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
     ) -> Result<R, MobError> {
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        // Trust is installed ahead of the routed send (comms admission).
+        // Every non-confirmed outcome — send failure, terminal rejection,
+        // decode failure — rolls trust newly installed by THIS call back
+        // fail-closed, mirroring the actor's `ensure_supervisor_authorized`;
+        // pre-existing confirmed trust is left in place. The MobMachine
+        // `pending_recipient_trust` obligation for this window is owned by
+        // the actor around external provisioning (the provisioner cannot
+        // reach MobMachine authority).
+        let install = self.supervisor_bridge.trust_recipient(peer).await?;
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(send_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, install, send_error)
+                    .await);
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+            return Err(self
+                .rollback_supervisor_recipient_trust(
+                    peer,
+                    install,
+                    Self::bridge_rejection_error(rejection),
+                )
+                .await);
         }
-        super::bridge_protocol::decode_bridge_payload(command, value, "command")
+        match super::bridge_protocol::decode_bridge_payload(command, value, "command") {
+            Ok(payload) => Ok(payload),
+            Err(decode_error) => Err(self
+                .rollback_supervisor_recipient_trust(peer, install, decode_error)
+                .await),
+        }
     }
 
     async fn bind_peer_only_member(

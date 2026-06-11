@@ -6,6 +6,8 @@ icon: "magnifying-glass"
 
 # Dogma Audit: Split Commit / Atomicity Gaps (Rules 1 / 2 / 8)
 
+> **Postscript 2026-06-11:** point-in-time audit record. Open/residual findings below were re-adjudicated and closed by the PR #759 campaign — see [`PR759-final-ledger.md`](PR759-final-ledger.md) (close-out: open set zero).
+
 **Audit target:** detached `origin/main` @ `a1ec8de86` (includes merged R4/R6/R7 fixes)
 **Date:** 2026-06-06
 **Dogma:** cross-cuts Rule 1 (Authority Is Singular), Rule 2 (no semantic effects outside the owning transition),

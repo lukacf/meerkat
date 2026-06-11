@@ -149,7 +149,7 @@ The compaction cycle emits events into the session stream:
 // CompactionFailed -- session is not mutated on failure
 {
   "type": "compaction_failed",
-  "error": "LLM returned empty summary"
+  "reason": { "kind": "empty_summary" }
 }
 ```
 
@@ -275,15 +275,27 @@ When consumption nears a limit, a warning event is emitted before the budget is 
 
 ## Retry policy
 
-Transient LLM errors (rate limits, network timeouts) trigger automatic retries with exponential backoff. Each retry attempt emits an event:
+Transient LLM errors (rate limits, network timeouts) trigger automatic retries with exponential backoff. Each retry attempt emits an event carrying the typed failure and the scheduled retry plan:
 
 ```json
 {
   "type": "retrying",
-  "attempt": 2,
-  "max_attempts": 5,
-  "error": "rate_limit_exceeded",
-  "delay_ms": 4000
+  "retry": {
+    "failure": {
+      "provider": "anthropic",
+      "kind": "rate_limited",
+      "retry_after_ms": 4000,
+      "message": "rate limit exceeded"
+    },
+    "plan": {
+      "attempt": 2,
+      "max_retries": 5,
+      "computed_delay_ms": 2000,
+      "selected_delay_ms": 4000,
+      "rate_limit_floor_applied": true,
+      "budget_capped": false
+    }
+  }
 }
 ```
 

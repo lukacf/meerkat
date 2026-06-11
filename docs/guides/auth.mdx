@@ -215,6 +215,7 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Google    | `vertex_ai`         | `api_key_express`       | Vertex API Express key |
 | Google    | `vertex_ai`         | `adc`, `compute_adc`    | ADC / compute metadata |
 | Google    | `google_code_assist` | `google_oauth`         | Gemini Code Assist OAuth |
+| Self-hosted | `self_hosted`, `openai_compatible` | `none`, `api_key`, `static_bearer` | Realm-bound credentials for configured `self_hosted` servers |
 
 External commands (`CredentialSourceSpec::Command`) and file
 descriptors (`CredentialSourceSpec::FileDescriptor`) let host
@@ -229,7 +230,7 @@ come from.
 |------|-------------|
 | `InlineSecret { secret }` | Secret stored inline in the TOML (use only for dev/local) |
 | `Env { env, fallback }` | Read env var at resolve time via `ResolverEnvironment::env_lookup` |
-| `ManagedStore { profile }` | Resolve via the `TokenStore`; in current provider runtimes, persisted lookup is tied to the active auth-profile identity/binding path |
+| `ManagedStore` | Resolve via the `TokenStore`; the storage key is the resolved typed binding identity (`realm`, `binding`) |
 | `PlatformDefault` | Use the host platform's default credential chain where supported |
 | `ExternalResolver { handle }` | Host-registered JS callback (WASM) or Rust resolver (embedded) |
 | `Command { program, args, ... }` | Run an external binary; cache stdout for `refresh_interval_ms` |
@@ -299,8 +300,9 @@ wire boundary.
 Refresh semantics are owned by the `AuthMachine` DSL (one instance
 per `<realm>:<binding>`). On resolve, the runtime:
 
-1. Checks `expires_at`. If present and within 80% of TTL, marks the
-   lease `Expiring` via the DSL.
+1. Checks `expires_at`. If present and within the refresh window
+   (`AUTH_LEASE_TTL_REFRESH_WINDOW_SECS`, 60 seconds before expiry),
+   marks the lease `Expiring` via the DSL.
 2. Under `Expiring`, the next resolve triggers `BeginRefresh`.
    In-process dedup ensures only one refresh HTTP call per binding
    even under concurrent resolves; cross-process dedup via filesystem

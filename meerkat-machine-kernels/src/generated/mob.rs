@@ -4269,6 +4269,7 @@ pub struct State {
     pub supervisor_pending_authority_epoch: Option<u64>,
     pub supervisor_pending_authority_protocol_version: Option<SupervisorProtocolVersion>,
     pub supervisor_pending_authority_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    pub pending_recipient_trust: std::collections::BTreeSet<PeerId>,
     pub owner_bridge_session_id: Option<SessionId>,
     pub owner_bridge_destroy_on_archive: bool,
     pub implicit_delegation_mob: bool,
@@ -4726,6 +4727,18 @@ pub mod inputs {
         pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordPendingRecipientTrust {
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePendingRecipientTrust {
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RollbackPendingRecipientTrust {
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionIngressDetachedForMobDestroy {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
@@ -5048,6 +5061,9 @@ pub enum Input {
     RestoreSupervisorAuthorityAfterDestroyRollback(
         inputs::RestoreSupervisorAuthorityAfterDestroyRollback,
     ),
+    RecordPendingRecipientTrust(inputs::RecordPendingRecipientTrust),
+    ResolvePendingRecipientTrust(inputs::ResolvePendingRecipientTrust),
+    RollbackPendingRecipientTrust(inputs::RollbackPendingRecipientTrust),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
     SubmitWork(inputs::SubmitWork),
@@ -5185,6 +5201,9 @@ impl Input {
             Self::RestoreSupervisorAuthorityAfterDestroyRollback(_) => {
                 InputKind::RestoreSupervisorAuthorityAfterDestroyRollback
             }
+            Self::RecordPendingRecipientTrust(_) => InputKind::RecordPendingRecipientTrust,
+            Self::ResolvePendingRecipientTrust(_) => InputKind::ResolvePendingRecipientTrust,
+            Self::RollbackPendingRecipientTrust(_) => InputKind::RollbackPendingRecipientTrust,
             Self::SessionIngressDetachedForMobDestroy(_) => {
                 InputKind::SessionIngressDetachedForMobDestroy
             }
@@ -5319,6 +5338,9 @@ pub enum InputKind {
     CommitSupervisorRotation,
     ClearSupervisorAuthorityForDestroy,
     RestoreSupervisorAuthorityAfterDestroyRollback,
+    RecordPendingRecipientTrust,
+    ResolvePendingRecipientTrust,
+    RollbackPendingRecipientTrust,
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
@@ -6950,6 +6972,18 @@ pub enum TransitionId {
     RecordSupervisorPendingRotationRunning,
     RecordSupervisorPendingRotationStopped,
     RecordSupervisorPendingRotationCompleted,
+    RecordPendingRecipientTrustRunning,
+    RecordPendingRecipientTrustStopped,
+    RecordPendingRecipientTrustCompleted,
+    RecordPendingRecipientTrustDestroyed,
+    ResolvePendingRecipientTrustRunning,
+    ResolvePendingRecipientTrustStopped,
+    ResolvePendingRecipientTrustCompleted,
+    ResolvePendingRecipientTrustDestroyed,
+    RollbackPendingRecipientTrustRunning,
+    RollbackPendingRecipientTrustStopped,
+    RollbackPendingRecipientTrustCompleted,
+    RollbackPendingRecipientTrustDestroyed,
     CommitSupervisorRotationRunning,
     CommitSupervisorRotationStopped,
     CommitSupervisorRotationCompleted,
@@ -7314,6 +7348,7 @@ pub fn initial_state() -> State {
         supervisor_pending_authority_epoch: None,
         supervisor_pending_authority_protocol_version: None,
         supervisor_pending_authority_accepted_peer_ids: Default::default(),
+        pending_recipient_trust: Default::default(),
         owner_bridge_session_id: None,
         owner_bridge_destroy_on_archive: false,
         implicit_delegation_mob: false,

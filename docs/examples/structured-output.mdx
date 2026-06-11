@@ -131,11 +131,9 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "Tell me about Tokyo".into(),
-        render_metadata: None,
-        system_prompt: None,
+        system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(SessionBuildOptions {
@@ -238,16 +236,14 @@ When validation fails, the agent retries the extraction turn with error feedback
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "Extract entities".into(),
-        render_metadata: None,
-        system_prompt: None,
+        system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(SessionBuildOptions {
             output_schema: Some(schema),
-            structured_output_retries: 5,
+            structured_output_retries: Some(5),
             ..Default::default()
         }),
         labels: None,

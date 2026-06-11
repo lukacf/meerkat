@@ -254,12 +254,18 @@ async fn prepare_token_commit_unlocked(
     })
 }
 
+/// Acquire-first token commit (the MCP OAuth shape, `meerkat-auth-core`
+/// `publish_login_tokens_via_lease`): the AuthMachine lease acquisition is
+/// recorded FIRST (an in-memory DSL transition, no durable I/O), the durable
+/// lifecycle marker is stamped from that transition, and only then does the
+/// single durable `TokenStore::save` run. No unmarked token bytes ever reach
+/// the store — on a crash the durable record either carries the
+/// proof-of-acquisition marker or does not exist.
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
-    mark_for_rehydration: bool,
 ) -> Result<TokenCommitSnapshot, (StatusCode, String)> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
@@ -271,35 +277,18 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
             format!("TokenStore load failed: {e}"),
         )
     })?;
-    token_store.save(&key, tokens).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("TokenStore save failed: {e}"),
-        )
-    })?;
-    let transition = match meerkat_core::publish_token_lifecycle_acquired(
-        auth_lease,
-        auth_binding,
-        tokens,
-    ) {
-        Ok(transition) => transition,
-        Err(e) => {
-            if let Err(rollback_error) =
-                restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
-            {
-                return Err((
+    // Acquire FIRST. A rejected acquisition mutates nothing — no token bytes
+    // were persisted and the lease is unchanged — so the error propagates
+    // without compensation.
+    let transition =
+        meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens).map_err(
+            |e| {
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                    ),
-                ));
-            }
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("AuthMachine lifecycle acquire failed: {e}"),
-            ));
-        }
-    };
+                    format!("AuthMachine lifecycle acquire failed: {e}"),
+                )
+            },
+        )?;
     let commit = TokenCommitSnapshot {
         key,
         lease_key,
@@ -308,18 +297,22 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
-    if mark_for_rehydration {
-        mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
-            .await?;
-    }
+    save_marked_token_commit_unlocked(token_store, auth_lease, &commit, tokens, "").await?;
     Ok(commit)
 }
 
-async fn mark_token_commit_lifecycle_published_unlocked(
+/// Stamp the durable lifecycle marker from the already-acquired AuthMachine
+/// transition and perform the single durable token write. If the marker
+/// handoff or the durable save fails, the freshly acquired lease is rolled
+/// back via [`rollback_token_commit`] (release + previous credential/lifecycle
+/// restore) so no half-state survives: durable truth keeps the previous
+/// credential and the lease projection matches it.
+async fn save_marked_token_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
+    failure_context: &str,
 ) -> Result<(), (StatusCode, String)> {
     let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
         &commit.key,
@@ -330,10 +323,10 @@ async fn mark_token_commit_lifecycle_published_unlocked(
         Err(e) => {
             let message = match rollback_token_commit(token_store, auth_lease, commit).await {
                 Ok(()) => format!(
-                    "AuthMachine lifecycle marker handoff failed: {e}; token commit rolled back"
+                    "AuthMachine lifecycle marker handoff failed{failure_context}: {e}; acquired lease rolled back"
                 ),
                 Err(rollback_error) => format!(
-                    "AuthMachine lifecycle marker handoff failed: {e}; token commit rollback failed: {rollback_error}"
+                    "AuthMachine lifecycle marker handoff failed{failure_context}: {e}; acquired lease rollback failed: {rollback_error}"
                 ),
             };
             return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
@@ -342,11 +335,11 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, commit).await {
             Ok(()) => {
-                format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
+                format!("TokenStore save failed{failure_context}: {e}; acquired lease rolled back")
             }
             Err(rollback_error) => {
                 format!(
-                    "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+                    "TokenStore save failed{failure_context}: {e}; acquired lease rollback failed: {rollback_error}"
                 )
             }
         };
@@ -363,17 +356,19 @@ async fn save_tokens_and_publish_lifecycle(
 ) -> Result<(), (StatusCode, String)> {
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_tokens_and_publish_lifecycle_commit_unlocked(
-        token_store,
-        auth_lease,
-        auth_binding,
-        tokens,
-        true,
-    )
-    .await
-    .map(|_| ())
+    save_tokens_and_publish_lifecycle_commit_unlocked(token_store, auth_lease, auth_binding, tokens)
+        .await
+        .map(|_| ())
 }
 
+/// Release the lease acquired by an acquire-first token commit and restore the
+/// previous credential + lifecycle. With acquire-first ordering the durable
+/// store still holds the previous bytes when this runs (the failed step is the
+/// marker handoff or the single marked save), so the durable writes here
+/// re-assert the previous record and re-stamp its marker from the restored
+/// transition so the durable marker stays aligned with the restored lease
+/// generation. The lease release always runs first: even if the durable
+/// restore fails, no freshly acquired lease survives a failed commit.
 async fn rollback_token_commit(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -442,15 +437,14 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
         auth_lease.capture_auth_lifecycle_restore_snapshot(&prepared.lease_key);
     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let transition =
-        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
-            Ok(transition) => transition,
-            Err(e) => {
-                return Err((
+        meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens).map_err(
+            |e| {
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("AuthMachine lifecycle acquire failed after OAuth consume: {e}"),
-                ));
-            }
-        };
+                )
+            },
+        )?;
     let commit = TokenCommitSnapshot {
         key: prepared.key,
         lease_key: prepared.lease_key,
@@ -459,40 +453,14 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
         previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
-    let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
-        &commit.key,
+    save_marked_token_commit_unlocked(
+        token_store,
+        auth_lease,
+        &commit,
         tokens,
-        &commit.lifecycle_transition,
-    ) {
-        Ok(committed_tokens) => committed_tokens,
-        Err(e) => {
-            let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
-                Ok(()) => format!(
-                    "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
-                ),
-                Err(rollback_error) => format!(
-                    "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
-                ),
-            };
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
-        }
-    };
-    if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
-        let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
-            Ok(()) => {
-                format!(
-                    "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
-                )
-            }
-            Err(rollback_error) => {
-                format!(
-                    "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
-                )
-            }
-        };
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
-    }
-    Ok(())
+        " after OAuth consume",
+    )
+    .await
 }
 
 async fn save_tokens_and_consume_device_flow_unlocked(
@@ -601,17 +569,6 @@ async fn save_tokens_and_consume_browser_flow(
         flow,
     )
     .await
-}
-
-async fn restore_tokens_after_lifecycle_failure(
-    token_store: &dyn TokenStore,
-    key: &TokenKey,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-    match previous {
-        Some(tokens) => token_store.save(key, tokens).await,
-        None => token_store.clear(key).await,
-    }
 }
 
 async fn clear_tokens_and_publish_lifecycle(
@@ -2131,6 +2088,49 @@ mod tests {
         }
     }
 
+    /// Store whose durable save always fails while load/clear succeed —
+    /// exercises the acquire-first crash shape (lease acquired, durable
+    /// commit refused).
+    struct SaveFailingTokenStore;
+
+    #[async_trait::async_trait]
+    impl TokenStore for SaveFailingTokenStore {
+        async fn load(
+            &self,
+            _key: &TokenKey,
+        ) -> Result<Option<PersistedTokens>, meerkat_providers::auth_store::TokenStoreError>
+        {
+            Ok(None)
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            _tokens: &PersistedTokens,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            Err(meerkat_providers::auth_store::TokenStoreError::Io(
+                "durable save refused".into(),
+            ))
+        }
+
+        async fn clear(
+            &self,
+            _key: &TokenKey,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<Vec<TokenKey>, meerkat_providers::auth_store::TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "save_failing"
+        }
+    }
+
     fn config_with_openai_managed_store_binding() -> meerkat_core::Config {
         let mut config = meerkat_core::Config::default();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -3030,6 +3030,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_token_commit_is_single_marked_save() {
+        // Acquire-first vault property: exactly one durable write, and that
+        // write already carries the lifecycle marker. No unmarked token bytes
+        // ever reach the store.
+        let store = SaveCountingTokenStore::new();
+        let auth_lease =
+            generated_auth_lease_handle_for_test(Arc::new(RuntimeAuthLeaseHandle::new()));
+        let auth_binding = managed_auth_binding();
+        let key = TokenKey::from_auth_binding(&auth_binding);
+
+        save_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding, &api_key_tokens())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.save_count(),
+            1,
+            "acquire-first commit must persist the credential in a single marked save"
+        );
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert!(
+            meerkat_core::tokens_lifecycle_published(&stored),
+            "the only durable write must already carry the proof-of-acquisition marker"
+        );
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+    }
+
+    #[tokio::test]
+    async fn rest_save_failure_after_acquire_releases_lease() {
+        // Acquire-first crash shape: the AuthMachine lease acquisition
+        // succeeds, the durable save fails, the surface returns the error and
+        // the acquired lease is rolled back — no half-state survives.
+        let store = SaveFailingTokenStore;
+        let auth_lease =
+            generated_auth_lease_handle_for_test(Arc::new(RuntimeAuthLeaseHandle::new()));
+        let auth_binding = managed_auth_binding();
+
+        let err = save_tokens_and_publish_lifecycle(
+            &store,
+            &auth_lease,
+            &auth_binding,
+            &api_key_tokens(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("TokenStore save failed"), "{}", err.1);
+        assert!(err.1.contains("acquired lease rolled back"), "{}", err.1);
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
+        assert_eq!(
+            snapshot.phase, None,
+            "save failure after acquire must release the freshly acquired lease"
+        );
+        assert!(!snapshot.credential_present);
+    }
+
+    #[tokio::test]
+    async fn rest_orphan_unmarked_token_is_rejected_on_rehydration() {
+        // Orphan-token recovery: a token persisted WITHOUT the durable
+        // lifecycle marker (the on-disk shape an interrupted save-then-acquire
+        // commit used to leave behind) is dead data — restart rehydration
+        // refuses to restore a lease from it.
+        let store = EphemeralTokenStore::new();
+        let auth_lease =
+            generated_auth_lease_handle_for_test(Arc::new(RuntimeAuthLeaseHandle::new()));
+        let auth_binding = managed_auth_binding();
+        let key = TokenKey::from_auth_binding(&auth_binding);
+        let orphan = chatgpt_oauth_tokens_with_secret("orphan-access");
+        assert!(!meerkat_core::tokens_lifecycle_published(&orphan));
+        store.save(&key, &orphan).await.unwrap();
+
+        let restored = meerkat_core::rehydrate_marked_tokens_for_status(
+            &store,
+            &auth_lease,
+            &auth_binding,
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            restored.is_none(),
+            "unmarked durable tokens must be rejected on rehydration"
+        );
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
+        assert_eq!(snapshot.phase, None);
+        assert!(!snapshot.credential_present);
+    }
+
+    #[tokio::test]
     async fn rest_ready_device_consume_failure_does_not_commit_token() {
         let store = EphemeralTokenStore::new();
         let auth_lease =
@@ -3313,7 +3406,6 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
-            true,
         )
         .await
         .unwrap();
@@ -3396,7 +3488,6 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
-            true,
         )
         .await
         .unwrap();

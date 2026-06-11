@@ -3938,6 +3938,10 @@ struct LiveExternalPeerHarness {
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
     fail_authorize_countdown: Arc<AtomicUsize>,
     fail_next_bind: Arc<AtomicBool>,
+    /// When set, the next `BindMember` reply is well-formed JSON that is
+    /// neither a `BridgeReply` payload nor a typed rejection, forcing the
+    /// supervisor-side decode path to fail after trust was installed.
+    garble_next_bind: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -4047,6 +4051,10 @@ impl LiveExternalPeerHarness {
         self.fail_next_bind.store(true, Ordering::Relaxed);
     }
 
+    fn garble_next_bind_reply(&self) {
+        self.garble_next_bind.store(true, Ordering::Relaxed);
+    }
+
     async fn override_next_bind_peer_id(&self, peer_id: String) {
         *self.bind_peer_id_override.write().await = Some(peer_id);
     }
@@ -4141,6 +4149,8 @@ async fn spawn_live_external_peer_with_transport(
     let responder_fail_authorize_countdown = fail_authorize_countdown.clone();
     let fail_next_bind = Arc::new(AtomicBool::new(false));
     let responder_fail_next_bind = fail_next_bind.clone();
+    let garble_next_bind = Arc::new(AtomicBool::new(false));
+    let responder_garble_next_bind = garble_next_bind.clone();
     let responder_runtime_address = runtime_address.clone();
     let task = tokio::spawn(async move {
         let mut state = super::bridge_protocol::BridgeMemberRuntimeState::Idle;
@@ -4200,6 +4210,16 @@ async fn spawn_live_external_peer_with_transport(
                                             },
                                         )
                                         .expect("bind rejection")
+                                    } else if responder_garble_next_bind
+                                        .swap(false, Ordering::Relaxed)
+                                    {
+                                        // Well-formed JSON that is neither a typed
+                                        // rejection nor a decodable BridgeReply:
+                                        // exercises the supervisor-side decode
+                                        // failure after trust was installed.
+                                        serde_json::json!({
+                                            "r044": "garbled bind reply for decode-failure tests"
+                                        })
                                     } else {
                                         // Mirror generated BindMember admission: unbound state
                                         // allows bootstrap; bound state only accepts an exact
@@ -4792,6 +4812,7 @@ async fn spawn_live_external_peer_with_transport(
         bind_peer_id_override,
         fail_authorize_countdown,
         fail_next_bind,
+        garble_next_bind,
         task,
     }
 }
@@ -7723,6 +7744,408 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         }
         other => panic!("expected stale supervisor rejection, got {other:?}"),
     }
+}
+
+/// Build the supervisor-side peer descriptor for a live external binding,
+/// mirroring `MultiBackendProvisioner::peer_only_spec_from_parts`.
+fn external_peer_descriptor_for_binding(
+    binding: &crate::RuntimeBinding,
+) -> meerkat_core::comms::TrustedPeerDescriptor {
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token: _,
+        pubkey,
+    } = binding
+    else {
+        panic!("live external peer must expose external binding");
+    };
+    let peer_name = address
+        .strip_prefix("inproc://")
+        .map(|value| value.split('?').next().unwrap_or(value).to_string())
+        .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        peer_name,
+        peer_id.clone(),
+        *pubkey,
+        address.clone(),
+    )
+    .expect("peer spec")
+}
+
+/// Peer ids currently trusted by the mob's live supervisor bridge runtime —
+/// the behavioral trust surface (comms admission), not source text.
+async fn supervisor_bridge_trusted_peer_ids(handle: &MobHandle) -> Vec<String> {
+    handle
+        .supervisor_bridge
+        .runtime()
+        .await
+        .peers()
+        .await
+        .into_iter()
+        .map(|entry| entry.peer_id.to_string())
+        .collect()
+}
+
+/// Snapshot of the MobMachine `pending_recipient_trust` obligation set.
+fn pending_recipient_trust_snapshot(handle: &MobHandle) -> Vec<String> {
+    handle
+        .machine_state_watch_rx
+        .borrow()
+        .pending_recipient_trust
+        .iter()
+        .map(|peer_id| peer_id.0.clone())
+        .collect()
+}
+
+/// Dogma row R044 (actor path): a terminal `AuthorizeSupervisor` rejection
+/// must leave NO trust that the authorization attempt itself installed, and
+/// the machine-owned `pending_recipient_trust` obligation must be closed.
+#[tokio::test]
+async fn test_authorize_rejection_rolls_back_newly_installed_recipient_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "authorize-reject-rollback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+    let peer = external_peer_descriptor_for_binding(&external.binding());
+    let peer_id = peer.peer_id.to_string();
+    assert!(
+        supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "bind during spawn must have installed recipient trust"
+    );
+
+    // Remove the bind-installed trust through the canonical removal seam so
+    // the next authorization attempt newly installs trust itself.
+    handle
+        .supervisor_bridge
+        .untrust_recipient(&peer)
+        .await
+        .expect("untrust recipient ahead of rejected authorize attempt");
+    assert!(
+        !supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "precondition: peer must be untrusted before the rejected attempt"
+    );
+
+    external.fail_next_authorize();
+    let turn = handle
+        .member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("after-rejected-authorize".to_string()))
+        .await;
+    assert!(
+        turn.is_err(),
+        "turn must fail when supervisor authorization is rejected"
+    );
+
+    assert!(
+        !supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "rejected authorization must roll back the trust it installed"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be closed after failure terminality"
+    );
+}
+
+/// Dogma row R044 (prior-trust scope): a rejected re-authorization of a peer
+/// that was ALREADY trusted before the attempt must not rip out the
+/// previously confirmed trust — rollback is scoped to trust installed by the
+/// failing attempt only.
+#[tokio::test]
+async fn test_authorize_rejection_preserves_preexisting_recipient_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "authorize-reject-preserve",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+    let peer = external_peer_descriptor_for_binding(&external.binding());
+    let peer_id = peer.peer_id.to_string();
+    assert!(
+        supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "bind during spawn must have installed recipient trust"
+    );
+
+    external.fail_next_authorize();
+    let turn = handle
+        .member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("after-rejected-authorize".to_string()))
+        .await;
+    assert!(
+        turn.is_err(),
+        "turn must fail when supervisor authorization is rejected"
+    );
+
+    assert!(
+        supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "trust confirmed by the earlier bind must survive a later rejected re-authorization"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be closed after failure terminality"
+    );
+}
+
+/// Dogma row R044 (provisioner path, terminal rejection): a rejected
+/// `BindMember` during external provisioning must leave NO recipient trust
+/// installed and must close the machine-owned obligation window.
+#[tokio::test]
+async fn test_bind_rejection_rolls_back_provisioner_recipient_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "bind-reject-rollback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let peer = external_peer_descriptor_for_binding(&external.binding());
+    let peer_id = peer.peer_id.to_string();
+
+    external.fail_next_bind();
+    let spawn = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await;
+    assert!(spawn.is_err(), "spawn must fail when the bind is rejected");
+
+    assert!(
+        !supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "rejected bind must roll back the recipient trust it installed"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be closed after the failed provision"
+    );
+}
+
+/// Dogma row R044 (provisioner path, send failure): a bind send that cannot
+/// reach the peer must leave NO recipient trust installed and must close the
+/// machine-owned obligation window.
+#[tokio::test]
+async fn test_bind_send_failure_rolls_back_provisioner_recipient_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "bind-send-failure-rollback",
+    );
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    // A well-formed external binding whose peer is not registered anywhere:
+    // the inproc transport fails the send immediately after trust install.
+    let ghost_keypair = meerkat_comms::Keypair::generate();
+    let ghost_binding = crate::RuntimeBinding::External {
+        peer_id: ghost_keypair.public_key().to_peer_id().to_string(),
+        address: format!(
+            "inproc://ghost-peer-{}",
+            meerkat_core::time_compat::new_uuid_v7()
+        ),
+        bootstrap_token: Some("ghost-bootstrap-token".to_string().into()),
+        pubkey: *ghost_keypair.public_key().as_bytes(),
+    };
+    let ghost_peer_id = ghost_keypair.public_key().to_peer_id().to_string();
+
+    let spawn = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ghost"),
+            None,
+            ghost_binding,
+        )
+        .await;
+    assert!(
+        spawn.is_err(),
+        "spawn must fail when the bind cannot reach the peer"
+    );
+
+    assert!(
+        !supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&ghost_peer_id),
+        "failed bind send must roll back the recipient trust it installed"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be closed after the failed provision"
+    );
+}
+
+/// Dogma row R044 (provisioner path, decode failure): a bind reply that is
+/// neither a typed rejection nor a decodable response must leave NO recipient
+/// trust installed and must close the machine-owned obligation window.
+#[tokio::test]
+async fn test_bind_decode_failure_rolls_back_provisioner_recipient_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "bind-decode-failure-rollback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let peer = external_peer_descriptor_for_binding(&external.binding());
+    let peer_id = peer.peer_id.to_string();
+
+    external.garble_next_bind_reply();
+    let spawn = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await;
+    assert!(
+        spawn.is_err(),
+        "spawn must fail when the bind reply cannot be decoded"
+    );
+
+    assert!(
+        !supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "undecodable bind reply must roll back the recipient trust it installed"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be closed after the failed provision"
+    );
+}
+
+/// Dogma row R044 (obligation lifecycle, success): a successful external
+/// spawn plus an authorized turn leaves the peer trusted and the
+/// `pending_recipient_trust` obligation set empty — the window is recorded
+/// and resolved, never leaked.
+#[tokio::test]
+async fn test_pending_recipient_trust_obligation_resolves_on_success() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "pending-trust-success",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+    let peer = external_peer_descriptor_for_binding(&external.binding());
+    let peer_id = peer.peer_id.to_string();
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be resolved after a successful provision"
+    );
+
+    handle
+        .member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("after-authorized-spawn".to_string()))
+        .await
+        .expect("authorized supervisor should control the live peer-only member");
+    assert_eq!(external.delivered_input_ids().await.len(), 1);
+
+    assert!(
+        supervisor_bridge_trusted_peer_ids(&handle)
+            .await
+            .contains(&peer_id),
+        "confirmed authorization must leave the peer trusted"
+    );
+    assert!(
+        pending_recipient_trust_snapshot(&handle).is_empty(),
+        "pending_recipient_trust obligation must be empty after success terminality"
+    );
 }
 
 #[tokio::test]
@@ -33323,8 +33746,13 @@ impl AgentToolDispatcher for ContextRecordingDispatcher {
         call: ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
+        let saw_context_image = context
+            .current_turn()
+            .and_then(|turn| turn.image_ref(0))
+            .and_then(|image_ref| context.current_turn_image(image_ref))
+            .is_some();
         self.saw_context_image
-            .store(context.current_turn_image(0).is_some(), Ordering::SeqCst);
+            .store(saw_context_image, Ordering::SeqCst);
         self.dispatch(call).await
     }
 }
@@ -37758,6 +38186,9 @@ struct MobRuntimeParitySnapshotSummary {
     supervisor_pending_authority_epoch: Option<u64>,
     supervisor_pending_authority_protocol_version: Option<String>,
     supervisor_pending_authority_accepted_peer_ids: BTreeSet<String>,
+    // Dogma row R044: machine-owned trust-install-before-terminality
+    // obligation window for supervisor-bridge recipients.
+    pending_recipient_trust: BTreeSet<String>,
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
@@ -38557,6 +38988,7 @@ async fn mob_runtime_parity_snapshot_summary(
         supervisor_pending_authority_epoch,
         supervisor_pending_authority_protocol_version,
         supervisor_pending_authority_accepted_peer_ids,
+        pending_recipient_trust,
         member_session_bindings,
         member_profile_names,
         member_runtime_modes,
@@ -38646,6 +39078,10 @@ async fn mob_runtime_parity_snapshot_summary(
                 snap.supervisor_pending_authority_protocol_version
                     .map(|protocol_version| format!("{protocol_version:?}")),
                 snap.supervisor_pending_authority_accepted_peer_ids
+                    .into_iter()
+                    .map(|peer_id| format!("{peer_id:?}"))
+                    .collect::<BTreeSet<_>>(),
+                snap.pending_recipient_trust
                     .into_iter()
                     .map(|peer_id| format!("{peer_id:?}"))
                     .collect::<BTreeSet<_>>(),
@@ -38763,6 +39199,7 @@ async fn mob_runtime_parity_snapshot_summary(
                 None,
                 None,
                 BTreeSet::new(),
+                BTreeSet::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -38846,6 +39283,7 @@ async fn mob_runtime_parity_snapshot_summary(
         supervisor_pending_authority_epoch,
         supervisor_pending_authority_protocol_version,
         supervisor_pending_authority_accepted_peer_ids,
+        pending_recipient_trust,
         member_session_bindings,
         member_profile_names,
         member_runtime_modes,
@@ -39028,6 +39466,9 @@ fn mob_runtime_parity_field_value(
             snapshot
                 .supervisor_pending_authority_accepted_peer_ids
                 .clone(),
+        )),
+        "pending_recipient_trust" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.pending_recipient_trust.clone(),
         )),
         "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot

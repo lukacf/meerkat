@@ -72,6 +72,7 @@ Common tensions have standard resolutions:
 | Optional feature wants shared discovery | Put feature skills, hooks, routes, and schemas in a global package | Keep assets in the owning feature crate/package; let globals mechanically discover declarations |
 | A task failed after emitting partial evidence; caller expects success | Return success and log the failure | Model or surface the partial failure truth through the canonical terminal path |
 | A shell can observe something the machine cannot | Let the shell update semantic state | Convert the observation into a typed input or declare the machine incomplete |
+| A legacy shape looks deliberate; review wants to bless it "by design" | Accept intent (comments, pinning tests, age) as justification | Require a functional retention category: durable-format stability, wire-opaqueness, external protocol, divergence-free projection, or fail-closed rejection machinery. Deliberate is not valid; pre-1.0 self-compat never justifies retention |
 
 ## Chapter 1: Authority Is Singular
 

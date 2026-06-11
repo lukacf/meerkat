@@ -60,6 +60,19 @@ terminality, identity, provenance, trust, capability, policy, defaults,
 durability, schema version, async operation truth, peer wiring truth, or public
 result class.
 
+## By-Design Adjudication
+
+Deliberate is not valid. A "by design" or "intentional" defense must name a
+functional retention category from the dogma's Interpretation section:
+durable-format stability, wire-opaqueness, external protocol we do not own,
+divergence-free projection, or fail-closed rejection machinery (rejection code
+plus its negative tests is sanctioned disposal of legacy shapes, not retention
+debt). Comments, pinning tests, and age prove deliberateness only. Pre-1.0
+self-compatibility never justifies retention. Re-adjudicate by-design claims
+adversarially with violation as the default verdict; when a finding is claimed
+"already fixed", sibling-grep the same shape across the whole crate before
+accepting it.
+
 Use subagents only when the user explicitly asks for multi-agent work or
 delegation. Split them by dogma rule, subsystem, row range, or independent
 semantic fact. Require concrete file/line evidence and one of:
@@ -115,6 +128,11 @@ Use the primary rule names in findings:
 
 When symptoms span rules, group by the deepest missing owner or seam. Prefer one
 root diagnosis with multiple evidence rows over scattered surface complaints.
+
+Older audits and ledgers cite legacy rule numbers (#1–#20) from the archived
+runtime doctrine. The canonical dogma doc's "Legacy Rule Numbering" appendix is
+the authoritative mapping from legacy numbers to the nine primary rules — use
+it instead of guessing.
 
 ## Output Shape
 

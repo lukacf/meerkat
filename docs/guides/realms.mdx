@@ -145,8 +145,9 @@ The first open of a realm writes `realm_manifest.json` and pins the backend.
 rkat --realm audit --realm-backend sqlite run "start audit"
 ```
 
-After the manifest exists, `--realm-backend` is ignored for that realm. The
-stored manifest wins so every surface opens the same backend.
+After the manifest exists, a conflicting `--realm-backend` fails with a
+backend-mismatch error (a matching value is a no-op). The stored manifest wins
+so every surface opens the same backend.
 
 ## Common Surprises
 
@@ -155,7 +156,7 @@ stored manifest wins so every surface opens the same backend.
 | A subdirectory does not see parent sessions | CLI defaults `context_root` to the current directory | Pass `--context-root <parent>` or an explicit shared `--realm` |
 | A command creates a new `.rkat/realms` directory | No state root was supplied, so CLI used `<context-root>/.rkat/realms` | Pass `--state-root <path>` |
 | CLI and RPC do not share state | RPC defaults to an isolated opaque realm | Pass the same `--realm` to both |
-| `--realm-backend` does not switch an existing realm | Backend is pinned in `realm_manifest.json` | Create a new realm or migrate state intentionally |
+| `--realm-backend` errors on an existing realm | Backend is pinned in `realm_manifest.json`; a conflicting hint is rejected | Create a new realm or migrate state intentionally |
 
 ## Recommended Defaults
 

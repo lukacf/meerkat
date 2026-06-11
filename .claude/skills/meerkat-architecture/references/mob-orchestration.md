@@ -61,9 +61,12 @@ Operator capabilities are runtime-injected through `MobToolAuthorityContext`. `c
 
 - `retire_member(id)` — archive session, remove from roster
 - `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
-- `respawn(id, initial_message)` — helper convenience: retire old bridge/runtime binding → enqueue spawn with same identity/profile/wiring/labels → new runtime incarnation/fence (not machine-owned)
-- `member_status(id)` → `MobMemberSnapshot` (status, agent_runtime_id, fence_token, output_preview, error, tokens_used, is_final, peer_connectivity, kickoff)
+- `respawn(id, initial_message)` — retire old bridge/runtime binding → enqueue spawn with same identity/profile/wiring/labels → new runtime incarnation/fence. Restore/respawn failure classification fans out over MobMachine-owned restore edges (`member_restore_failures: Map<AgentIdentity, String>` in the DSL); the orchestration sequencing is shell convenience, the lifecycle facts are machine-owned.
+- `member_status(id)` → `MobMemberSnapshot`. Public fields: status, output_preview, error, tokens_used, is_final, current_session_id, peer_connectivity, kickoff, external_member, resolved_capabilities. Binding atoms (agent_identity, agent_runtime_id, fence_token, current_bridge_session_id) are `pub(crate)` + `#[serde(skip)]` — bridge-internal, not app-facing.
 - `wait_one(id)`, `wait_all(ids)`, `collect_completed()`
+- `MobHandle::member(identity)` → `MemberHandle` — per-member handle. `MemberHandle::internal_turn(content)` is the in-process direct turn write (no peer comms, no handling-mode selection); it is distinct from `mob/turn_start` (RPC turn with overrides via the bridge session) and `mob/member_send` (peer delivery over comms into the member's inbox). Keep the three delivery paths separate.
+
+**Machine-authorized revival**: post-discard member revival is MobMachine-owned, not a shell retry loop. Live-session discard creates a `member_revival_pending: Set<AgentIdentity>` obligation; revival flows observe → classify → realize: the shell reports a `MemberLiveMaterializationClassified { observation, verdict, reason }` input, the machine issues the verdict (`MemberRevivalVerdictKind`), and the shell realizes only machine-authorized revivals (`ResolveMemberRevivalSucceeded` / `ResolveMemberRevivalFailed`). `Broken` is a terminal lifecycle classification: its `not_broken` guard refuses any further revival/retry, and `member()` access to a Broken member surfaces a typed `MobError::MemberRestoreFailed` instead of handing out a dead handle.
 
 ## Provisioning
 
@@ -75,13 +78,15 @@ Operator capabilities are runtime-injected through `MobToolAuthorityContext`. `c
 
 **External member identity**: `BackendPeer.peer_id` is the real external process comms key, not the placeholder session's key. The bridge session still exists for lifecycle transport. `trusted_peer_spec()` uses the bridge key (from `comms.public_key()`, passed as `fallback_peer_id`) for transport trust, keeping identity and transport separate.
 
-**Member kickoff state** lives in MobMachine DSL (`member_kickoff: Map<MeerkatId, KickoffPhase>`). `MobActor` drives `MarkPending`/`MarkStarting`/`ResolveOutcome`/`CancelRequested` transitions directly via `self.dsl_authority.apply(mob_dsl::MobMachineInput::…)` (in-crate access; no cross-crate handle needed). Persistence flows through `MobEventKind::MemberKickoffUpdated` emitted from the DSL effect handler.
+**Member kickoff state** lives in MobMachine DSL as a multi-field decomposition keyed on `AgentIdentity`: `member_kickoff_pending` / `member_kickoff_starting` / `member_kickoff_callback_pending` / `member_kickoff_started` / `member_kickoff_failed` / `member_kickoff_cancelled` (Sets) plus `member_kickoff_error: Map<AgentIdentity, String>`. `MobActor` drives `KickoffMarkPending`/`KickoffMarkStarting`/`KickoffResolveStarted`/`KickoffCancelRequested` transitions directly via `self.dsl_authority.apply(mob_dsl::MobMachineInput::…)` (in-crate access; no cross-crate handle needed). Persistence flows through `MobEventKind::MemberKickoffUpdated` emitted from the DSL effect handler.
 
 ## Wiring
 
 Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobActor` computes wiring targets and establishes bidirectional trust via comms.
 
 `delegate` auto-wiring is capability-based, not a promise. Report actual wired/not-wired results and never claim bidirectional comms unless both trust edges were established.
+
+Recipient-side trust is a machine-owned obligation, not fire-and-forget: MobMachine tracks `pending_recipient_trust: Set<PeerId>` so an unacknowledged recipient trust edge stays an explicit pending fact until resolved. Trust entries themselves are `PeerId`-keyed via `TrustStore` (meerkat-comms/src/trust.rs); duplicate `PeerId` inserts are structurally rejected.
 
 `mob_wire` / `mob_unwire` agent tools: create and remove peer-to-peer comms trust between mob members. For local members (both in roster), wiring is bidirectional. For external members, the supervisor bridge binds against the external runtime using the typed bootstrap token and signed comms identity. A remote `rkat run --comms-listen-tcp ... --comms-binding-out <path>` process can now supply the binding directly; `rkat-rpc --tcp` remains JSON-RPC host transport and is not the peer/comms listener.
 

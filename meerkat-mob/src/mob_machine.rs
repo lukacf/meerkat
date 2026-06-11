@@ -679,6 +679,20 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::RestoreSupervisorAuthorityAfterDestroyRollback,
         reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
     },
+    // Dogma row R044: machine-owned trust-install-before-authorization-
+    // terminality obligation window for supervisor-bridge recipients.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordPendingRecipientTrust,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePendingRecipientTrust,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RollbackPendingRecipientTrust,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordCoordinationWorkIntent,
         reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,

@@ -104,6 +104,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_pending_authority_epoch`: `Option<u64>`
 - `supervisor_pending_authority_protocol_version`: `Option<SupervisorProtocolVersion>`
 - `supervisor_pending_authority_accepted_peer_ids`: `Set<PeerId>`
+- `pending_recipient_trust`: `Set<PeerId>`
 - `owner_bridge_session_id`: `Option<SessionId>`
 - `owner_bridge_destroy_on_archive`: `Bool`
 - `implicit_delegation_mob`: `Bool`
@@ -243,6 +244,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
 - `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
 - `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `RecordPendingRecipientTrust`(peer_id: PeerId)
+- `ResolvePendingRecipientTrust`(peer_id: PeerId)
+- `RollbackPendingRecipientTrust`(peer_id: PeerId)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
@@ -4396,6 +4400,66 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `pending_authority_changes_peer`
 - Emits: `PersistSupervisorAuthority`
 - To: `Completed`
+
+### `RecordPendingRecipientTrustRunning`
+- From: `Running`
+- On: `RecordPendingRecipientTrust`(peer_id)
+- To: `Running`
+
+### `RecordPendingRecipientTrustStopped`
+- From: `Stopped`
+- On: `RecordPendingRecipientTrust`(peer_id)
+- To: `Stopped`
+
+### `RecordPendingRecipientTrustCompleted`
+- From: `Completed`
+- On: `RecordPendingRecipientTrust`(peer_id)
+- To: `Completed`
+
+### `RecordPendingRecipientTrustDestroyed`
+- From: `Destroyed`
+- On: `RecordPendingRecipientTrust`(peer_id)
+- To: `Destroyed`
+
+### `ResolvePendingRecipientTrustRunning`
+- From: `Running`
+- On: `ResolvePendingRecipientTrust`(peer_id)
+- To: `Running`
+
+### `ResolvePendingRecipientTrustStopped`
+- From: `Stopped`
+- On: `ResolvePendingRecipientTrust`(peer_id)
+- To: `Stopped`
+
+### `ResolvePendingRecipientTrustCompleted`
+- From: `Completed`
+- On: `ResolvePendingRecipientTrust`(peer_id)
+- To: `Completed`
+
+### `ResolvePendingRecipientTrustDestroyed`
+- From: `Destroyed`
+- On: `ResolvePendingRecipientTrust`(peer_id)
+- To: `Destroyed`
+
+### `RollbackPendingRecipientTrustRunning`
+- From: `Running`
+- On: `RollbackPendingRecipientTrust`(peer_id)
+- To: `Running`
+
+### `RollbackPendingRecipientTrustStopped`
+- From: `Stopped`
+- On: `RollbackPendingRecipientTrust`(peer_id)
+- To: `Stopped`
+
+### `RollbackPendingRecipientTrustCompleted`
+- From: `Completed`
+- On: `RollbackPendingRecipientTrust`(peer_id)
+- To: `Completed`
+
+### `RollbackPendingRecipientTrustDestroyed`
+- From: `Destroyed`
+- On: `RollbackPendingRecipientTrust`(peer_id)
+- To: `Destroyed`
 
 ### `CommitSupervisorRotationRunning`
 - From: `Running`

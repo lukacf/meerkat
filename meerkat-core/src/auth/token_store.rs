@@ -222,6 +222,29 @@ impl From<serde_json::Error> for TokenStoreError {
 }
 
 /// Cross-process-safe persistence for tokens.
+///
+/// # Vault property: the durable lifecycle marker is the proof-of-acquisition
+///
+/// `TokenStore` persists credential *material*; the AuthMachine lease owns the
+/// credential *lifecycle*. The bridge between the two is the durable lifecycle
+/// marker embedded in [`PersistedTokens::metadata`] by
+/// `mark_tokens_lifecycle_published_for_transition`: it is stamped from an
+/// AuthMachine acquisition transition and is the only durable proof that the
+/// machine recorded the acquisition.
+///
+/// Writers MUST follow acquire-first ordering: acquire the AuthMachine lease
+/// (`publish_token_lifecycle_acquired`), stamp the marker from the returned
+/// transition, then perform a single `save` of the marked tokens. Unmarked
+/// token bytes must never be persisted — on a crash the durable record either
+/// carries the marker or does not exist, so no orphan window is
+/// representable.
+///
+/// Readers MUST only use persisted tokens after marker validation through the
+/// lifecycle restore path (`restore_marked_token_lifecycle` /
+/// `rehydrate_marked_tokens_for_status`) and the AuthMachine admission gate
+/// (`resolve_credential_use_admission` in the resolver). A persisted token
+/// without a valid marker is dead data: no acquisition was recorded for it,
+/// and it must be rejected, never silently adopted.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TokenStore: Send + Sync {

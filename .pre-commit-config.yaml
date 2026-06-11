@@ -39,6 +39,20 @@ repos:
         files: '^(docs/architecture/meerkat-dogma(-commentary)?\.md|\.claude/skills/meerkat-dogma-inquisition/references/meerkat-dogma(-commentary)?\.md|scripts/sync-meerkat-dogma-skill-docs\.sh)$'
         pass_filenames: false
 
+  # On push: dogma doctrine mirror gate. The pre-commit hook above is a
+  # path-scoped auto-fix convenience; this verify-only rerun-and-diff check
+  # runs on every push so a stale skill mirror cannot be pushed even when the
+  # canonical docs were changed outside a commit that touched the watched
+  # paths (e.g. merges, --no-verify commits).
+  - repo: local
+    hooks:
+      - id: sync-meerkat-dogma-skill-docs-check
+        name: Meerkat dogma skill docs mirror (verify-only)
+        entry: scripts/sync-meerkat-dogma-skill-docs.sh --check
+        language: script
+        pass_filenames: false
+        stages: [pre-push]
+
   # Manual: changed-crate deterministic validation when you want a local preflight.
   - repo: local
     hooks:

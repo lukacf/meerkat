@@ -15,6 +15,7 @@ Meerkat publishes one source project across several consumer surfaces:
 | `rkat-mcp` | MCP host integrations | GitHub Release binary |
 | Python SDK | Python applications | `meerkat-sdk` on PyPI |
 | TypeScript SDK | Node applications | `@rkat/sdk` on npm |
+| Web SDK | Browser applications | `@rkat/web` on npm |
 
 The public release path is GitHub Actions. BuildBuddy release lanes are an
 owner-only acceleration path and use the same Make-level contract.
@@ -97,7 +98,7 @@ embedding a separate runtime implementation.
 3. Create the GitHub release and upload binary assets.
 4. Update the Homebrew tap formula.
 5. Publish Rust crates.
-6. Publish Python and TypeScript packages.
+6. Publish Python, TypeScript, and Web SDK packages.
 7. Run install smoke checks for at least one platform.
 
 Manual release dispatch supports dry-run registry validation. Locally, use:

@@ -590,6 +590,12 @@ pub struct PeerIngressPlainEventFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressAdmission {
     pub classification: PeerIngressClassification,
+    /// Canonical sender peer id echoed by the machine classification effect
+    /// (the `from_peer_id` fact on `ClassifyExternalEnvelope`). `None` only
+    /// for plain-event classification, which has no peer sender identity.
+    /// Consumers must build the admitted sender identity from this fact, not
+    /// from a shell-local copy of the transport input.
+    pub from_peer_id: Option<PeerId>,
     pub lifecycle_peer: Option<String>,
     pub request_id: Option<String>,
     pub rendered_text: String,
@@ -726,6 +732,16 @@ impl PeerInputCandidate {
 
     pub fn auth(&self) -> Option<PeerIngressAuthDecision> {
         self.ingress.auth
+    }
+
+    /// Canonical sender peer id admitted at ingress.
+    ///
+    /// Delegates to the single owner on the admitted ingress fact
+    /// (`PeerIngressFact::canonical_peer_id`), which runtime-backed ingress
+    /// populates from the machine-echoed `PeerIngressClassified` effect.
+    /// `None` only for plain events, which have no peer sender identity.
+    pub fn from_peer_id(&self) -> Option<PeerId> {
+        self.ingress.canonical_peer_id
     }
 }
 

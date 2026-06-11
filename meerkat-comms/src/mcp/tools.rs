@@ -20,7 +20,6 @@ use meerkat_contracts::{
     CommsSendResult,
 };
 use meerkat_core::BlobId;
-use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource,
@@ -29,10 +28,11 @@ use meerkat_core::comms::{
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
 use meerkat_core::types::{ContentBlock, HandlingMode, ImageData};
+use meerkat_core::{CurrentTurnImageRef, ToolDispatchContext};
 
 const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
 
-const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"current_turn\",\"index\":0} refers only to an image attached to the current admitted user input turn.\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- Do not use source=current_turn for generated images; generated images must be sent with source=blob, blob_id, and media_type.";
+const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"current_turn\",\"index\":0} refers only to an image attached to the current admitted user input turn. The index counts only the turn's image blocks (0 = the first image, skipping non-image blocks).\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- Do not use source=current_turn for generated images; generated images must be sent with source=blob, blob_id, and media_type.";
 
 const SEND_REQUEST_CONTRACTS_DESCRIPTION: &str = "\n\nSupported request contracts:\n- checksum_token: Use for a simple correlated check/ack/review. params must be {\"subject\":\"<subject>\"}. The responder should send_response with status completed and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject>\",\"token\":\"<token or checksum>\"}.\n- supervisor.bridge: Use for supervisor bridge control. params include the bridge command payload, for example command observe_member with supervisor, epoch, and protocol_version fields.";
 
@@ -122,10 +122,13 @@ pub enum CommsToolContentBlock {
     ImageRef {
         /// Source collection for the image reference.
         source: CommsToolImageReferenceSource,
-        /// Zero-based image index within the current admitted turn. Required for
-        /// source=current_turn; forbidden for source=blob.
+        /// Zero-based index into the current admitted turn's image blocks
+        /// (the filtered image stream: index 0 is the turn's first image,
+        /// skipping non-image blocks). Required for source=current_turn;
+        /// forbidden for source=blob. Wire shape is a bare integer.
         #[serde(default)]
-        index: Option<usize>,
+        #[schemars(with = "Option<usize>")]
+        index: Option<CurrentTurnImageRef>,
         /// Blob ID for a generated or otherwise blob-backed image. Required for
         /// source=blob; forbidden for source=current_turn.
         #[serde(default)]
@@ -411,7 +414,7 @@ fn resolve_tool_block(
 
 fn resolve_image_ref(
     source: CommsToolImageReferenceSource,
-    index: Option<usize>,
+    index: Option<CurrentTurnImageRef>,
     blob_id: Option<BlobId>,
     media_type: Option<String>,
     dispatch_context: &ToolDispatchContext,

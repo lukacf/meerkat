@@ -89,9 +89,10 @@ pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient,
     AgentLlmClientDecorator, AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome,
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime,
-    CurrentTurnContent, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError, SystemContextStateError,
-    ToolDispatchContext, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    CurrentTurnContent, CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities,
+    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError,
+    SystemContextStateError, ToolDispatchContext, select_tool_catalog_mode,
+    should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,

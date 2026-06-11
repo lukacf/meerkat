@@ -255,10 +255,37 @@ impl ToolDispatchContext {
         self.current_turn.as_ref()
     }
 
-    pub fn current_turn_image(&self, index: usize) -> Option<&crate::types::ContentBlock> {
+    pub fn current_turn_image(
+        &self,
+        image_ref: CurrentTurnImageRef,
+    ) -> Option<&crate::types::ContentBlock> {
         self.current_turn
             .as_ref()
-            .and_then(|current_turn| current_turn.image(index))
+            .and_then(|current_turn| current_turn.image(image_ref))
+    }
+}
+
+/// Typed reference to an image in the current admitted turn.
+///
+/// The wrapped index addresses the turn's *filtered image stream*, not the
+/// raw block list: ref `N` designates the `(N + 1)`-th image block of the
+/// current turn, skipping non-image blocks (so ref `0` is the first image
+/// even when text blocks precede it).
+///
+/// The field is private. In-process code mints refs only via
+/// [`CurrentTurnContent::image_ref`], which returns a ref only when the
+/// referenced image exists. Wire ingress (e.g. the comms `image_ref` tool
+/// input) deserializes a bare JSON integer directly into this type via
+/// `#[serde(transparent)]` — that is the sanctioned parse-at-ingress path,
+/// and resolution through [`CurrentTurnContent::image`] still validates
+/// existence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CurrentTurnImageRef(usize);
+
+impl std::fmt::Display for CurrentTurnImageRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -277,11 +304,21 @@ impl CurrentTurnContent {
         &self.blocks
     }
 
-    pub fn image(&self, index: usize) -> Option<&crate::types::ContentBlock> {
+    /// Mint a typed reference to the `n`-th image of this turn's filtered
+    /// image stream. Returns `Some` only when that image exists, so every
+    /// in-process [`CurrentTurnImageRef`] is resolvable at mint time.
+    pub fn image_ref(&self, n: usize) -> Option<CurrentTurnImageRef> {
+        self.images().nth(n).map(|_| CurrentTurnImageRef(n))
+    }
+
+    pub fn image(&self, image_ref: CurrentTurnImageRef) -> Option<&crate::types::ContentBlock> {
+        self.images().nth(image_ref.0)
+    }
+
+    fn images(&self) -> impl Iterator<Item = &crate::types::ContentBlock> {
         self.blocks
             .iter()
             .filter(|block| matches!(block, crate::types::ContentBlock::Image { .. }))
-            .nth(index)
     }
 }
 
@@ -1314,9 +1351,14 @@ mod tests {
             call: ToolCallView<'_>,
             context: &ToolDispatchContext,
         ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            let saw_context_image = context
+                .current_turn()
+                .and_then(|turn| turn.image_ref(0))
+                .and_then(|image_ref| context.current_turn_image(image_ref))
+                .is_some();
             Ok(ToolResult::new(
                 call.id.to_string(),
-                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                json!({"saw_context_image": saw_context_image}).to_string(),
                 false,
             )
             .into())

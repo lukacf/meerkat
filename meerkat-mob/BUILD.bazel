@@ -101,6 +101,7 @@ rust_library(
         "//meerkat-machine-codegen:__pkg__",
         "//meerkat-mcp-server:__pkg__",
         "//meerkat-mob:__pkg__",
+        "//meerkat-mob-adaptive:__pkg__",
         "//meerkat-mob-mcp:__pkg__",
         "//meerkat-mob-pack:__pkg__",
         "//meerkat-rest:__pkg__",

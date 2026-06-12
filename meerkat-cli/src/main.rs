@@ -2389,6 +2389,27 @@ enum MobCommands {
         #[arg(long, value_enum, default_value = "cli")]
         surface: DeploySurfaceArg,
     },
+    /// Invoke a mobpack or installed mob as a typed callable run.
+    Run {
+        target: String,
+        /// Flow id to invoke. Defaults to `main`, or the only declared flow.
+        #[arg(long = "flow")]
+        flow: Option<String>,
+        /// Bind an input parameter as key=value. Values parse as JSON when possible.
+        #[arg(long = "param")]
+        params: Vec<String>,
+        /// Sugar for --param prompt=<text>.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Return immediately with the run id instead of waiting for the result.
+        #[arg(long)]
+        detach: bool,
+        /// Output a machine-readable result envelope.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_enum)]
+        trust_policy: Option<TrustPolicyArg>,
+    },
     /// Start a flow run and print the run_id.
     RunFlow {
         mob_id: String,
@@ -2405,6 +2426,45 @@ enum MobCommands {
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
+    /// List run resources for an installed mob.
+    Runs {
+        mob_id: String,
+        /// Filter to one flow id.
+        #[arg(long = "flow")]
+        flow: Option<String>,
+        /// Output a machine-readable run list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show status for one run resource.
+    Status {
+        mob_id: String,
+        run_id: String,
+        /// Output only the typed status projection.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read mob event history for run diagnostics.
+    Logs {
+        mob_id: String,
+        /// First cursor to read after.
+        #[arg(long, default_value_t = 0)]
+        after_cursor: u64,
+        /// Maximum events to return.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Output machine-readable events.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for a detached run and print its typed result envelope.
+    Attach {
+        mob_id: String,
+        run_id: String,
+        /// Output a machine-readable result envelope.
+        #[arg(long)]
+        json: bool,
+    },
     /// Spawn a short-lived helper member, wait for it to finish, and print the result.
     SpawnHelper {
         /// Mob ID to spawn into
@@ -11795,6 +11855,187 @@ async fn wait_for_terminal_flow_run(
 }
 
 #[cfg(feature = "mob")]
+fn parse_mob_run_params(
+    raw_params: &[String],
+    prompt: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    if let Some(prompt) = prompt {
+        params.insert(
+            "prompt".to_string(),
+            serde_json::Value::String(prompt.to_string()),
+        );
+    }
+    for raw in raw_params {
+        let Some((key, value)) = raw.split_once('=') else {
+            return Err(anyhow::anyhow!(
+                "invalid --param '{raw}'; expected key=value"
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(anyhow::anyhow!(
+                "invalid --param '{raw}'; key must not be empty"
+            ));
+        }
+        let parsed_value = serde_json::from_str::<serde_json::Value>(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+        params.insert(key.to_string(), parsed_value);
+    }
+    Ok(serde_json::Value::Object(params))
+}
+
+#[cfg(feature = "mob")]
+fn validate_mobpack_input_params(
+    archive: &MobpackArchive,
+    params: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(schema_bytes) = archive.schemas.get("schemas/main-input.json") else {
+        return Ok(());
+    };
+    let schema: serde_json::Value = serde_json::from_slice(schema_bytes)
+        .map_err(|err| anyhow::anyhow!("invalid schemas/main-input.json: {err}"))?;
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|err| anyhow::anyhow!("invalid schemas/main-input.json: {err}"))?;
+    if validator.is_valid(params) {
+        return Ok(());
+    }
+    let errors = validator
+        .iter_errors(params)
+        .map(|err| err.to_string())
+        .collect::<Vec<_>>();
+    Err(anyhow::anyhow!(
+        "mob run input failed schemas/main-input.json validation: {}",
+        errors.join("; ")
+    ))
+}
+
+#[cfg(feature = "mob")]
+fn choose_mobpack_flow(
+    archive: &MobpackArchive,
+    requested: Option<&str>,
+) -> anyhow::Result<Option<FlowId>> {
+    if let Some(flow) = requested {
+        let flow_id = FlowId::from(flow);
+        if archive.definition.flows.contains_key(&flow_id) {
+            return Ok(Some(flow_id));
+        }
+        return Err(anyhow::anyhow!("mob run failed: flow '{flow}' not found"));
+    }
+    let main = FlowId::from("main");
+    if archive.definition.flows.contains_key(&main) {
+        return Ok(Some(main));
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "mob")]
+fn mob_run_status_text(status: &meerkat_mob::MobRunStatus) -> &'static str {
+    match status {
+        meerkat_mob::MobRunStatus::Pending => "pending",
+        meerkat_mob::MobRunStatus::Running => "running",
+        meerkat_mob::MobRunStatus::Completed => "completed",
+        meerkat_mob::MobRunStatus::Failed => "failed",
+        meerkat_mob::MobRunStatus::Canceled => "canceled",
+    }
+}
+
+#[cfg(feature = "mob")]
+fn render_mob_run_envelope(run: &meerkat_mob::MobRun, json: bool) -> anyhow::Result<String> {
+    let envelope = run
+        .public_result_value()
+        .map_err(|err| anyhow::anyhow!("failed to project mob run result: {err}"))?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&envelope)?);
+    }
+    let result = envelope.result.unwrap_or(serde_json::Value::Null);
+    Ok(format!(
+        "run\tmob={}\tflow={}\trun_id={}\tstatus={}\nresult\t{}",
+        envelope.mob_id,
+        envelope.flow_id,
+        envelope.run_id,
+        mob_run_status_text(&run.status),
+        serde_json::to_string(&result)?
+    ))
+}
+
+#[cfg(feature = "mob")]
+fn parse_cli_run_id(run_id: &str) -> anyhow::Result<RunId> {
+    run_id
+        .parse::<RunId>()
+        .map_err(|e| anyhow::anyhow!("invalid run_id '{run_id}': {e}"))
+}
+
+#[cfg(feature = "mob")]
+fn render_mob_runs(runs: Vec<meerkat_mob::MobRun>, json: bool) -> anyhow::Result<String> {
+    let envelopes: Vec<_> = runs
+        .iter()
+        .map(meerkat_mob::MobRun::public_result_value)
+        .collect::<Result<_, _>>()
+        .map_err(|err| anyhow::anyhow!("failed to project mob runs: {err}"))?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "runs": envelopes
+        }))?);
+    }
+    if envelopes.is_empty() {
+        return Ok("runs\tcount=0".to_string());
+    }
+    let mut lines = Vec::with_capacity(envelopes.len() + 1);
+    lines.push(format!("runs\tcount={}", envelopes.len()));
+    for run in envelopes {
+        let status = serde_json::to_string(&run.status)?
+            .trim_matches('"')
+            .to_string();
+        lines.push(format!(
+            "run\tmob={}\tflow={}\trun_id={}\tstatus={}",
+            run.mob_id, run.flow_id, run.run_id, status
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(feature = "mob")]
+fn render_mob_events(events: Vec<meerkat_mob::MobEvent>, json: bool) -> anyhow::Result<String> {
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "events": events
+        }))?);
+    }
+    if events.is_empty() {
+        return Ok("logs\tcount=0".to_string());
+    }
+    let mut lines = Vec::with_capacity(events.len() + 1);
+    lines.push(format!("logs\tcount={}", events.len()));
+    for event in events {
+        lines.push(format!(
+            "event\tcursor={}\tkind={:?}",
+            event.cursor, event.kind
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(feature = "mob")]
+async fn await_pack_flow_terminal(
+    mob: &meerkat_mob::MobHandle,
+    run_id: RunId,
+) -> anyhow::Result<meerkat_mob::MobRun> {
+    loop {
+        if let Some(run) = mob
+            .flow_status(run_id.clone())
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?
+            && mob_machine_run_status_is_terminal(&run_id, &run.status)
+                .map_err(|err| anyhow::anyhow!("{err}"))?
+        {
+            return Ok(run);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(feature = "mob")]
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     if let MobCommands::Pack {
         dir,
@@ -11861,6 +12102,36 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 *trust_policy,
                 *surface,
                 deploy_overrides,
+            ))
+            .await?
+        );
+        return Ok(());
+    }
+
+    if let MobCommands::Run {
+        target,
+        flow,
+        params,
+        prompt,
+        detach,
+        json,
+        trust_policy,
+    } = &command
+        && std::path::Path::new(target).exists()
+    {
+        println!(
+            "{}",
+            Box::pin(execute_mob_run_pack(
+                scope,
+                MobRunPackInvocation {
+                    pack: std::path::Path::new(target),
+                    flow: flow.as_deref(),
+                    prompt: prompt.as_deref(),
+                    raw_params: params,
+                    detach: *detach,
+                    json: *json,
+                    cli_trust_policy: *trust_policy,
+                },
             ))
             .await?
         );
@@ -11950,15 +12221,109 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             println!("{run_id}");
             Ok(())
         }
+        MobCommands::Run {
+            target,
+            flow,
+            params,
+            prompt,
+            detach,
+            json,
+            trust_policy: _,
+        } => {
+            let activation_params = parse_mob_run_params(&params, prompt.as_deref())?;
+            let flow_id = FlowId::from(flow.as_deref().unwrap_or("main"));
+            let mob_id = meerkat_mob::MobId::from(target.clone());
+            let run_id = state
+                .mob_run_flow(&mob_id, flow_id.clone(), activation_params)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if detach {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "mob_id": target,
+                            "flow_id": flow_id.as_str(),
+                            "run_id": run_id.to_string(),
+                            "status": "running"
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "run\tmob={target}\tflow={}\trun_id={run_id}",
+                        flow_id.as_str()
+                    );
+                }
+            } else {
+                let run = wait_for_terminal_flow_run(state.as_ref(), &target, &run_id).await?;
+                println!("{}", render_mob_run_envelope(&run, json)?);
+            }
+            Ok(())
+        }
         MobCommands::FlowStatus { mob_id, run_id } => {
-            let parsed_run_id = run_id
-                .parse::<RunId>()
-                .map_err(|e| anyhow::anyhow!("invalid run_id '{run_id}': {e}"))?;
+            let parsed_run_id = parse_cli_run_id(&run_id)?;
             let resolved = state
                 .mob_flow_status(&meerkat_mob::MobId::from(mob_id.clone()), parsed_run_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{}", render_flow_status_json(resolved)?);
+            Ok(())
+        }
+        MobCommands::Runs { mob_id, flow, json } => {
+            let flow_id = flow.as_deref().map(FlowId::from);
+            let runs = state
+                .mob_list_runs(&meerkat_mob::MobId::from(mob_id), flow_id.as_ref())
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", render_mob_runs(runs, json)?);
+            Ok(())
+        }
+        MobCommands::Status {
+            mob_id,
+            run_id,
+            json,
+        } => {
+            let parsed_run_id = parse_cli_run_id(&run_id)?;
+            let resolved = state
+                .mob_flow_status(&meerkat_mob::MobId::from(mob_id), parsed_run_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!("{}", render_flow_status_json(resolved)?);
+            } else if let Some(run) = resolved {
+                println!(
+                    "run\tmob={}\tflow={}\trun_id={}\tstatus={}",
+                    run.mob_id,
+                    run.flow_id,
+                    run.run_id,
+                    mob_run_status_text(&run.status)
+                );
+            } else {
+                println!("run\tnot_found\trun_id={run_id}");
+            }
+            Ok(())
+        }
+        MobCommands::Logs {
+            mob_id,
+            after_cursor,
+            limit,
+            json,
+        } => {
+            let events = state
+                .mob_events(&meerkat_mob::MobId::from(mob_id), after_cursor, limit)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", render_mob_events(events, json)?);
+            Ok(())
+        }
+        MobCommands::Attach {
+            mob_id,
+            run_id,
+            json,
+        } => {
+            let parsed_run_id = parse_cli_run_id(&run_id)?;
+            let run = wait_for_terminal_flow_run(state.as_ref(), &mob_id, &parsed_run_id).await?;
+            println!("{}", render_mob_run_envelope(&run, json)?);
             Ok(())
         }
         MobCommands::SpawnHelper {
@@ -12386,6 +12751,195 @@ async fn execute_mob_deploy(
 }
 
 #[cfg(feature = "mob")]
+struct MobRunPackInvocation<'a> {
+    pack: &'a std::path::Path,
+    flow: Option<&'a str>,
+    prompt: Option<&'a str>,
+    raw_params: &'a [String],
+    detach: bool,
+    json: bool,
+    cli_trust_policy: Option<TrustPolicyArg>,
+}
+
+#[cfg(feature = "mob")]
+async fn execute_mob_run_pack(
+    scope: &RuntimeScope,
+    invocation: MobRunPackInvocation<'_>,
+) -> anyhow::Result<String> {
+    let VerifiedMobpack {
+        archive,
+        trust_warnings: warnings,
+        ..
+    } = load_verified_mobpack(
+        scope,
+        invocation.pack,
+        invocation.cli_trust_policy,
+        "mob run failed",
+    )
+    .await?;
+    validate_required_capabilities(
+        &archive.manifest,
+        &runtime_capabilities(DeploySurfaceArg::Cli),
+    )
+    .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+
+    let params = parse_mob_run_params(invocation.raw_params, invocation.prompt)?;
+    validate_mobpack_input_params(&archive, &params)?;
+    let mut effective_config = load_deploy_runtime_config(scope, CliOverrides::default())?;
+    apply_pack_deploy_policy(
+        &mut effective_config,
+        &archive.manifest,
+        &archive.deploy_policy,
+        DeploySurfaceArg::Cli,
+    )?;
+    let flow_id = choose_mobpack_flow(&archive, invocation.flow)?;
+
+    if invocation.detach {
+        let Some(flow_id) = flow_id else {
+            return Err(anyhow::anyhow!(
+                "mob run --detach requires a mobpack with a callable flow"
+            ));
+        };
+        let (manifest, persistence) = create_persistence_bundle(scope).await?;
+        let surface = get_or_create_cli_persistent_surface_from_bundle(
+            scope,
+            effective_config,
+            manifest,
+            persistence,
+        )
+        .await?;
+        let state = hydrate_cli_mob_state_cached(
+            scope,
+            Arc::clone(&surface.service),
+            Arc::clone(&surface.runtime_adapter),
+            Arc::clone(&surface.mob_state_cache),
+        )
+        .await?;
+        let mob_id = state
+            .mob_create_from_mobpack(archive.definition.clone(), archive.skills.clone())
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        let run_id = state
+            .mob_run_flow(&mob_id, flow_id.clone(), params)
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        let rendered = if invocation.json {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mob_id": mob_id.to_string(),
+                "flow_id": flow_id.as_str(),
+                "run_id": run_id.to_string(),
+                "status": "running"
+            }))?
+        } else {
+            format!(
+                "run\tmob={}\tflow={}\trun_id={run_id}",
+                mob_id,
+                flow_id.as_str()
+            )
+        };
+        return render_mob_run_pack_with_warnings(rendered, warnings);
+    }
+
+    let session_service = build_deploy_mob_session_service(scope, effective_config).await?;
+    let run_spec = archive.mob_run_spec();
+    let mut builder = meerkat_mob::MobBuilder::from_mobpack(
+        run_spec.definition().clone(),
+        run_spec.packed_skills().clone(),
+        meerkat_mob::MobStorage::in_memory(),
+    )
+    .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?
+    .with_session_service(session_service.clone());
+    if let Some(adapter) = session_service.runtime_adapter() {
+        builder = builder.with_runtime_adapter(adapter);
+    }
+    let handle = builder
+        .create()
+        .await
+        .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+
+    let rendered = if let Some(flow_id) = flow_id {
+        let run_id = handle
+            .run_flow(flow_id, params)
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        let run = await_pack_flow_terminal(&handle, run_id)
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        render_mob_run_envelope(&run, invocation.json)?
+    } else {
+        let objective = invocation
+            .prompt
+            .map(str::to_string)
+            .unwrap_or_else(|| params.to_string());
+        if run_spec.is_callable() {
+            let outcome = meerkat_mob::run_mobpack_callable(
+                &run_spec,
+                handle,
+                session_service.clone(),
+                &objective,
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            if invocation.json {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "mob_id": archive.definition.id.to_string(),
+                    "run_id": outcome.run_id,
+                    "status": "completed",
+                    "result": outcome.final_result,
+                    "result_digest": outcome.final_result_digest,
+                }))?
+            } else {
+                let result = outcome.final_result.unwrap_or(serde_json::Value::Null);
+                format!(
+                    "run\tmob={}\trun_id={}\tstatus=completed\nresult\t{}",
+                    archive.definition.id,
+                    outcome.run_id,
+                    serde_json::to_string(&result)?
+                )
+            }
+        } else if archive.definition.flows.len() == 1 {
+            let flow_id = archive
+                .definition
+                .flows
+                .keys()
+                .next()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("mob run failed: pack has no callable flow"))?;
+            let run_id = handle
+                .run_flow(flow_id, params)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            let run = await_pack_flow_terminal(&handle, run_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            render_mob_run_envelope(&run, invocation.json)?
+        } else {
+            return Err(anyhow::anyhow!(
+                "mob run failed: pack has no unambiguous callable flow; pass --flow"
+            ));
+        }
+    };
+
+    render_mob_run_pack_with_warnings(rendered, warnings)
+}
+
+#[cfg(feature = "mob")]
+fn render_mob_run_pack_with_warnings(
+    rendered: String,
+    warnings: Vec<String>,
+) -> anyhow::Result<String> {
+    if warnings.is_empty() {
+        Ok(rendered)
+    } else {
+        let mut out = rendered;
+        for warning in warnings {
+            out.push_str(&format!("\nwarning\t{warning}"));
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "mob")]
 type RpcDeployIo = (
     Box<dyn AsyncBufRead + Send + Unpin>,
     Box<dyn AsyncWrite + Send + Unpin>,
@@ -12402,6 +12956,12 @@ struct DeployInvocation {
 }
 
 #[cfg(feature = "mob")]
+struct RpcSurfaceDeployResult {
+    mob_id: String,
+    result_render: Option<String>,
+}
+
+#[cfg(feature = "mob")]
 async fn execute_mob_deploy_internal(
     scope: &RuntimeScope,
     pack: &std::path::Path,
@@ -12410,7 +12970,7 @@ async fn execute_mob_deploy_internal(
 ) -> anyhow::Result<String> {
     let VerifiedMobpack {
         archive,
-        trust_warnings: warnings,
+        trust_warnings: mut warnings,
         ..
     } = load_verified_mobpack(
         scope,
@@ -12432,14 +12992,14 @@ async fn execute_mob_deploy_internal(
         observer(&effective_config);
     }
 
-    let deployed_mob_id = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
+    let (deployed_mob_id, result_render) = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
         let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
             (
                 Box::new(BufReader::new(tokio::io::stdin())),
                 Box::new(tokio::io::stdout()),
             )
         });
-        Box::pin(run_rpc_surface(
+        let result = Box::pin(run_rpc_surface(
             scope,
             effective_config,
             &archive,
@@ -12447,7 +13007,8 @@ async fn execute_mob_deploy_internal(
             reader,
             writer,
         ))
-        .await?
+        .await?;
+        (result.mob_id, result.result_render)
     } else {
         let session_service =
             build_deploy_mob_session_service(scope, effective_config.clone()).await?;
@@ -12466,7 +13027,8 @@ async fn execute_mob_deploy_internal(
             .await
             .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
 
-        if let Some(orchestrator) = &archive.definition.orchestrator {
+        let deployed_mob_id = handle.mob_id().to_string();
+        let result_render = if let Some(orchestrator) = &archive.definition.orchestrator {
             let roster = handle.roster().await;
             if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
                 handle
@@ -12477,9 +13039,16 @@ async fn execute_mob_deploy_internal(
                     .await
                     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
             }
-        }
+            None
+        } else {
+            warnings.push(
+                "no orchestrator: prompt not delivered, flows not started; use `rkat mob run` to invoke a callable flow"
+                    .to_string(),
+            );
+            None
+        };
 
-        handle.mob_id().to_string()
+        (deployed_mob_id, result_render)
     };
 
     let mut rendered = format!(
@@ -12493,6 +13062,10 @@ async fn execute_mob_deploy_internal(
     );
     for warning in warnings {
         rendered.push_str(&format!("\nwarning\t{warning}"));
+    }
+    if let Some(result_render) = result_render {
+        rendered.push('\n');
+        rendered.push_str(&result_render);
     }
     Ok(rendered)
 }
@@ -12787,7 +13360,7 @@ async fn run_rpc_surface<R, W>(
     prompt: &str,
     reader: R,
     writer: W,
-) -> anyhow::Result<String>
+) -> anyhow::Result<RpcSurfaceDeployResult>
 where
     R: AsyncBufRead + Unpin,
     // RPC-host: deploy_mob inline-hosts an RpcServer for the deployed mob session.
@@ -13003,7 +13576,10 @@ where
         .run()
         .await
         .map_err(|err| anyhow::anyhow!("rpc server failed: {err}"))?;
-    Ok(deployed_mob_id)
+    Ok(RpcSurfaceDeployResult {
+        mob_id: deployed_mob_id,
+        result_render: None,
+    })
 }
 
 /// LLM Provider selection
@@ -16554,6 +17130,89 @@ default_model = "gemma"
 
     #[cfg(feature = "mob")]
     #[test]
+    fn test_cli_mob_run_resource_commands_parse() {
+        let runs =
+            Cli::try_parse_from(["rkat", "mob", "runs", "mob-1", "--flow", "main", "--json"])
+                .expect("mob runs should parse");
+        match runs.command {
+            Some(Commands::Mob {
+                command: MobCommands::Runs { mob_id, flow, json },
+            }) => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(flow.as_deref(), Some("main"));
+                assert!(json);
+            }
+            _ => unreachable!("expected mob runs command"),
+        }
+
+        let status = Cli::try_parse_from(["rkat", "mob", "status", "mob-1", "run-id", "--json"])
+            .expect("mob status should parse");
+        match status.command {
+            Some(Commands::Mob {
+                command:
+                    MobCommands::Status {
+                        mob_id,
+                        run_id,
+                        json,
+                    },
+            }) => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(run_id, "run-id");
+                assert!(json);
+            }
+            _ => unreachable!("expected mob status command"),
+        }
+
+        let logs = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "logs",
+            "mob-1",
+            "--after-cursor",
+            "7",
+            "--limit",
+            "20",
+        ])
+        .expect("mob logs should parse");
+        match logs.command {
+            Some(Commands::Mob {
+                command:
+                    MobCommands::Logs {
+                        mob_id,
+                        after_cursor,
+                        limit,
+                        json,
+                    },
+            }) => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(after_cursor, 7);
+                assert_eq!(limit, 20);
+                assert!(!json);
+            }
+            _ => unreachable!("expected mob logs command"),
+        }
+
+        let attach = Cli::try_parse_from(["rkat", "mob", "attach", "mob-1", "run-id"])
+            .expect("mob attach should parse");
+        match attach.command {
+            Some(Commands::Mob {
+                command:
+                    MobCommands::Attach {
+                        mob_id,
+                        run_id,
+                        json,
+                    },
+            }) => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(run_id, "run-id");
+                assert!(!json);
+            }
+            _ => unreachable!("expected mob attach command"),
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
     fn test_cli_mob_pack_command_parses() {
         let cli = Cli::try_parse_from([
             "rkat",
@@ -16671,6 +17330,61 @@ default_model = "gemma"
             }
             _ => unreachable!("expected mob deploy command"),
         }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_cli_mob_run_command_parses_prompt_and_params() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "run",
+            "./fixture.mobpack",
+            "--prompt",
+            "hello",
+            "--param",
+            "count=3",
+            "--json",
+        ])
+        .expect("mob run command should parse");
+
+        match cli.command {
+            Some(Commands::Mob {
+                command:
+                    MobCommands::Run {
+                        target,
+                        prompt,
+                        params,
+                        json,
+                        ..
+                    },
+            }) => {
+                assert_eq!(target, "./fixture.mobpack");
+                assert_eq!(prompt.as_deref(), Some("hello"));
+                assert_eq!(params, vec!["count=3"]);
+                assert!(json);
+            }
+            _ => unreachable!("expected mob run command"),
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_mob_run_params_bind_prompt_and_json_values() {
+        let params = parse_mob_run_params(
+            &["count=3".to_string(), "label=hello".to_string()],
+            Some("Bonjour"),
+        )
+        .expect("params parse");
+
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "prompt": "Bonjour",
+                "count": 3,
+                "label": "hello"
+            })
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -17647,6 +18361,33 @@ capabilities = ["definitely_missing_capability"]
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn test_deploy_without_orchestrator_warns_prompt_not_delivered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let mob_dir = create_orchestratorless_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("orchestratorless.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Permissive),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("deploy should succeed with warning");
+        assert!(
+            output.contains("warning\tno orchestrator: prompt not delivered, flows not started"),
+            "orchestrator-less deploy must not silently imply execution: {output}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn test_deploy_surfaces_missing_packed_skill_path_error() {
         let temp = tempfile::tempdir().expect("tempdir");
         let scope = test_scope_with_context(temp.path().to_path_buf());
@@ -18460,6 +19201,34 @@ capabilities = ["definitely_missing_capability"]
             "#!/bin/sh\necho run\n",
         )
         .expect("write hook");
+        mob_dir
+    }
+
+    fn create_orchestratorless_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
+        let mob_dir = base.join("fixture-mob-no-orchestrator");
+        std::fs::create_dir_all(&mob_dir).expect("create mob dir");
+        std::fs::write(
+            mob_dir.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            mob_dir.join("definition.json"),
+            br#"{
+  "id":"fixture-mob-no-orchestrator",
+  "profiles":{
+    "worker":{
+      "model":"claude-sonnet-4-5",
+      "skills":[],
+      "tools":{"comms":true},
+      "peer_description":"Worker",
+      "external_addressable":true
+    }
+  },
+  "skills":{}
+}"#,
+        )
+        .expect("write definition");
         mob_dir
     }
 

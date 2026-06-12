@@ -329,6 +329,9 @@ pub(super) enum MobCommand {
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         reply_tx: oneshot::Sender<Result<RunId, MobError>>,
     },
+    PreviewRunFlowAdmission {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     CancelFlow {
         run_id: RunId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -530,6 +533,7 @@ impl MobCommand {
             #[cfg(feature = "runtime-adapter")]
             Self::KickoffOutcomeResolved { .. } => "KickoffOutcomeResolved",
             Self::RunFlow { .. } => "RunFlow",
+            Self::PreviewRunFlowAdmission { .. } => "PreviewRunFlowAdmission",
             Self::CancelFlow { .. } => "CancelFlow",
             Self::FlowStatus { .. } => "FlowStatus",
             Self::CommitFlowRunCommand { .. } => "CommitFlowRunCommand",

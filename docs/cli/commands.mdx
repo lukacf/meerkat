@@ -319,16 +319,23 @@ uses persisted tokens only.
 
 ## mob
 
-`rkat mob` is the artifact and deployment surface, not a manual runtime-control console.
+`rkat mob` is the artifact, typed callable run, and operational run-resource
+surface. Runtime semantics still live in the shared mob runtime; the CLI only
+binds to it.
 
 ```bash
 rkat mob pack <DIR> -o <OUT.mobpack> [--sign <KEY_FILE> --signer-id <ID>]
 rkat mob inspect <PACK.mobpack>
 rkat mob validate <PACK.mobpack>
+rkat mob run <PACK.mobpack|MOB_ID> [--flow <FLOW_ID>] [--param <KEY=VALUE>...] [--prompt <TEXT>] [--detach] [--json]
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
 rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <RUNTIME_BG_WASM>
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
+rkat mob runs <MOB_ID> [--flow <FLOW_ID>] [--json]
+rkat mob status <MOB_ID> <RUN_ID> [--json]
+rkat mob logs <MOB_ID> [--after-cursor <CURSOR>] [--limit <N>] [--json]
+rkat mob attach <MOB_ID> <RUN_ID> [--json]
 rkat mob spawn-helper <MOB_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--json]
 rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
 rkat mob member-status <MOB_ID> <AGENT_IDENTITY> [--json]
@@ -343,7 +350,9 @@ Examples:
 rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 rkat mob inspect dist/release-triage.mobpack
 rkat mob validate dist/release-triage.mobpack
-rkat mob deploy dist/release-triage.mobpack "triage the latest release regressions"
+rkat mob run dist/release-triage.mobpack --prompt "triage the latest release regressions"
+rkat mob run release-triage --flow main --param severity='"high"' --detach
+rkat mob attach release-triage <RUN_ID>
 rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm runtime_bg.wasm
 ```
 

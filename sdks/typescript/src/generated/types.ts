@@ -460,6 +460,15 @@ export interface WireMobRun {
   status: "pending" | "running" | "completed" | "failed" | "canceled";
 }
 
+export interface WireMobRunResultEnvelope {
+  flow_id: string;
+  mob_id: string;
+  outputs?: Record<string, unknown>;
+  result?: unknown;
+  run_id: string;
+  status: "pending" | "running" | "completed" | "failed" | "canceled";
+}
+
 export interface WireMobRunStatus {
 }
 
@@ -618,6 +627,13 @@ export interface MobFlowsResult {
   mob_id: string;
 }
 
+export interface MobRunParams {
+  flow_id?: string;
+  mob_id: string;
+  params?: unknown;
+  prompt?: string;
+}
+
 export interface MobFlowRunParams {
   flow_id: string;
   mob_id: string;
@@ -634,6 +650,15 @@ export interface MobFlowStatusParams {
 }
 
 export interface MobFlowStatusResult {
+  run?: Record<string, unknown>;
+}
+
+export interface MobRunResultParams {
+  mob_id: string;
+  run_id: string;
+}
+
+export interface MobRunResult {
   run?: Record<string, unknown>;
 }
 

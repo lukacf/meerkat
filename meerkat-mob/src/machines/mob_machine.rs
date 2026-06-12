@@ -7,6 +7,8 @@
 
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    AdaptiveDecisionKind, AdaptiveLayerAdmissionKind, AdaptiveLayerDispositionKind,
+    AdaptiveLayerPhase, AdaptiveLayerSetupFaultKind, AdaptiveRunPhase, AdaptiveStopReason,
     ExternalMemberRebindCapability, FlowFrameReducerCommandKind, FlowRunPublicResultClassKind,
     FlowRunReducerCommandKind, LoopIterationReducerCommandKind, MemberAdmissionVerdictKind,
     MobLifecycleJournalKind, PolicyDecision, StepFaultDispositionKind, StepOutputFaultKind,
@@ -78,6 +80,48 @@ impl<T: Into<String>> From<T> for RespawnTopologyPeerId {
 pub struct AgentRuntimeId(pub String);
 
 impl<T: Into<String>> From<T> for AgentRuntimeId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for adaptive run identity.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveRunId(pub String);
+
+impl<T: Into<String>> From<T> for AdaptiveRunId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for adaptive layer identity.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveLayerId(pub String);
+
+impl<T: Into<String>> From<T> for AdaptiveLayerId {
     fn from(s: T) -> Self {
         Self(s.into())
     }

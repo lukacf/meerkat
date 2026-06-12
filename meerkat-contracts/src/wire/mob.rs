@@ -1737,6 +1737,23 @@ pub struct MobFlowRunParams {
     pub params: Value,
 }
 
+/// Request payload for `mob/run`.
+///
+/// Starts the pack's callable flow. `flow_id` defaults to `main`; `prompt` is
+/// sugar for `params.prompt` when the caller does not provide that key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRunParams {
+    pub mob_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub params: Value,
+}
+
 /// Response payload for `mob/flow_run`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1795,6 +1812,40 @@ pub struct WireMobRun {
 pub struct MobFlowStatusResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<WireMobRun>,
+}
+
+/// Request payload for `mob/run_result`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRunResultParams {
+    pub mob_id: String,
+    pub run_id: String,
+}
+
+/// Typed output envelope for a completed or in-flight mob flow run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobRunResultEnvelope {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub status: WireMobRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, Value>,
+}
+
+/// Response payload for `mob/run_result`.
+///
+/// `run` is `None` when the requested run id has no persisted run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRunResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<WireMobRunResultEnvelope>,
 }
 
 /// Request payload for `mob/flow_cancel`.

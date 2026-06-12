@@ -71,6 +71,8 @@ pub struct MobpackManifest {
     pub profiles: BTreeMap<String, ProfileSection>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub surfaces: BTreeSet<SurfaceSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<AdaptiveManifestSection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +87,18 @@ pub struct MobpackSection {
 pub struct RequiresSection {
     #[serde(default)]
     pub capabilities: Vec<MobpackCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveManifestSection {
+    pub flowmaster_profile: String,
+    pub objective_class: String,
+    pub policy_digest: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_schemas: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub target_surfaces: BTreeSet<SurfaceSelector>,
 }
 
 impl RequiresSection {
@@ -159,11 +173,36 @@ mod tests {
             models,
             profiles,
             surfaces: BTreeSet::from([SurfaceSelector::Cli, SurfaceSelector::Rpc]),
+            adaptive: Some(AdaptiveManifestSection {
+                flowmaster_profile: "lead".to_string(),
+                objective_class: "code-review".to_string(),
+                policy_digest: "sha256:abc123".to_string(),
+                required_schemas: vec!["finding-set".to_string()],
+                target_surfaces: BTreeSet::from([SurfaceSelector::Cli]),
+            }),
         };
 
         let encoded = toml::to_string(&manifest).unwrap();
         let decoded: MobpackManifest = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn test_manifest_rejects_unknown_adaptive_fields() {
+        let err = toml::from_str::<MobpackManifest>(
+            r#"
+[mobpack]
+name = "x"
+version = "1.0.0"
+
+[adaptive]
+flowmaster_profile = "flowmaster"
+objective_class = "audit"
+policy_digest = "sha256:abc123"
+unknown = true
+"#,
+        );
+        assert!(err.is_err());
     }
 
     #[test]

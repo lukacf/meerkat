@@ -9,6 +9,7 @@ import type {
   MobLifecycleAction,
   MobMember,
   MobMemberRef,
+  MobRunResult,
   MobWireMembersBatchEdgeInput,
   MobWireMembersBatchResult,
   ResolvedModelCapabilities,
@@ -250,8 +251,19 @@ export class Mob {
     return this.client.runMobFlow(this.mobId, flowId, params);
   }
 
+  async run(
+    params: Record<string, unknown> = {},
+    options: { prompt?: string; flowId?: string } = {},
+  ): Promise<string> {
+    return this.client.runMob(this.mobId, params, options);
+  }
+
   async flowStatus(runId: string): Promise<MobFlowStatus | null> {
     return this.client.getMobFlowStatus(this.mobId, runId);
+  }
+
+  async runResult(runId: string): Promise<MobRunResult | null> {
+    return this.client.getMobRunResult(this.mobId, runId);
   }
 
   async cancelFlow(runId: string): Promise<void> {

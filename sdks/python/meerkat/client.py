@@ -62,6 +62,10 @@ from .generated.types import (
     LiveRefreshStatus,
     McpServerConfig,
     MobDefinitionInput,
+    MobFlowRunResult,
+    MobRunParams,
+    MobRunResult,
+    MobRunResultParams,
     MobSpawnManyFailedResult,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
@@ -2517,9 +2521,38 @@ class MeerkatClient:
         result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
         return str(result.get("run_id", ""))
 
+    async def run_mob(
+        self,
+        mob_id: str,
+        params: dict[str, Any] | None = None,
+        *,
+        prompt: str | None = None,
+        flow_id: str | None = None,
+    ) -> str:
+        payload = MobRunParams(
+            mob_id=mob_id,
+            params=params or {},
+            prompt=prompt,
+            flow_id=flow_id,
+        )
+        result: MobFlowRunResult | dict[str, Any] = await self._request(
+            "mob/run",
+            _wire_params(payload),
+        )
+        if isinstance(result, dict):
+            return str(result.get("run_id", ""))
+        return result.run_id
+
     async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
         result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
         return result.get("run")
+
+    async def get_mob_run_result(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
+        params = MobRunResultParams(mob_id=mob_id, run_id=run_id)
+        result: MobRunResult | dict[str, Any] = await self._request("mob/run_result", _wire_params(params))
+        if isinstance(result, dict):
+            return result.get("run")
+        return result.run
 
     async def cancel_mob_flow(self, mob_id: str, run_id: str) -> None:
         await self._request("mob/flow_cancel", {"mob_id": mob_id, "run_id": run_id})

@@ -226,6 +226,49 @@ macro_rules! mob_catalog_machine_dsl {
             desired_members: Set<AgentIdentity>,
             members_to_spawn: Set<AgentIdentity>,
             members_to_retire: Set<AgentIdentity>,
+            adaptive_active_run: Option<AdaptiveRunId>,
+            adaptive_run_phase: Map<AdaptiveRunId, Enum<AdaptiveRunPhase>>,
+            adaptive_stop_reason: Map<AdaptiveRunId, Enum<AdaptiveStopReason>>,
+            adaptive_limit_max_depth: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_total_decisions: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_repair_attempts: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_layer_failures: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_attempts_per_layer: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_members_per_layer: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_total_spawned_members: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_active_members: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_retained_layer_mobs: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_aggregate_tokens: Map<AdaptiveRunId, u64>,
+            adaptive_limit_max_aggregate_tool_calls: Map<AdaptiveRunId, u64>,
+            adaptive_limit_allowed_model_classes: Map<AdaptiveRunId, Set<String>>,
+            adaptive_limit_allowed_tool_classes: Map<AdaptiveRunId, Set<String>>,
+            adaptive_limit_allowed_skill_identities: Map<AdaptiveRunId, Set<String>>,
+            adaptive_limit_allowed_auth_binding_refs: Map<AdaptiveRunId, Set<String>>,
+            adaptive_deadline_ms: Map<AdaptiveRunId, u64>,
+            adaptive_depth: Map<AdaptiveRunId, u64>,
+            adaptive_total_decisions: Map<AdaptiveRunId, u64>,
+            adaptive_repair_attempts: Map<AdaptiveRunId, u64>,
+            adaptive_layer_failures: Map<AdaptiveRunId, u64>,
+            adaptive_total_spawned_members: Map<AdaptiveRunId, u64>,
+            adaptive_active_members: Map<AdaptiveRunId, u64>,
+            adaptive_retained_layer_mobs: Map<AdaptiveRunId, u64>,
+            adaptive_aggregate_token_reserved: Map<AdaptiveRunId, u64>,
+            adaptive_aggregate_token_actual: Map<AdaptiveRunId, u64>,
+            adaptive_aggregate_tool_call_reserved: Map<AdaptiveRunId, u64>,
+            adaptive_aggregate_tool_call_actual: Map<AdaptiveRunId, u64>,
+            adaptive_active_layer: Map<AdaptiveRunId, AdaptiveLayerId>,
+            adaptive_layer_phase: Map<AdaptiveLayerId, Enum<AdaptiveLayerPhase>>,
+            adaptive_layer_attempt: Map<AdaptiveLayerId, u64>,
+            adaptive_layer_member_count: Map<AdaptiveLayerId, u64>,
+            adaptive_layer_plan_digest: Map<AdaptiveLayerId, String>,
+            adaptive_layer_child_mob_id: Map<AdaptiveLayerId, MobId>,
+            adaptive_layer_token_reservation: Map<AdaptiveLayerId, u64>,
+            adaptive_layer_tool_call_reservation: Map<AdaptiveLayerId, u64>,
+            adaptive_layer_run_id: Map<AdaptiveLayerId, RunId>,
+            adaptive_layer_result_digest: Map<AdaptiveLayerId, String>,
+            adaptive_layer_fault: Map<AdaptiveLayerId, Enum<AdaptiveLayerSetupFaultKind>>,
+            adaptive_layer_disposition: Map<AdaptiveLayerId, Enum<AdaptiveLayerDispositionKind>>,
+            adaptive_missing_body_digest: Map<AdaptiveRunId, String>,
         }
 
         init(Running) {
@@ -370,6 +413,49 @@ macro_rules! mob_catalog_machine_dsl {
             desired_members = EmptySet,
             members_to_spawn = EmptySet,
             members_to_retire = EmptySet,
+            adaptive_active_run = None,
+            adaptive_run_phase = EmptyMap,
+            adaptive_stop_reason = EmptyMap,
+            adaptive_limit_max_depth = EmptyMap,
+            adaptive_limit_max_total_decisions = EmptyMap,
+            adaptive_limit_max_repair_attempts = EmptyMap,
+            adaptive_limit_max_layer_failures = EmptyMap,
+            adaptive_limit_max_attempts_per_layer = EmptyMap,
+            adaptive_limit_max_members_per_layer = EmptyMap,
+            adaptive_limit_max_total_spawned_members = EmptyMap,
+            adaptive_limit_max_active_members = EmptyMap,
+            adaptive_limit_max_retained_layer_mobs = EmptyMap,
+            adaptive_limit_max_aggregate_tokens = EmptyMap,
+            adaptive_limit_max_aggregate_tool_calls = EmptyMap,
+            adaptive_limit_allowed_model_classes = EmptyMap,
+            adaptive_limit_allowed_tool_classes = EmptyMap,
+            adaptive_limit_allowed_skill_identities = EmptyMap,
+            adaptive_limit_allowed_auth_binding_refs = EmptyMap,
+            adaptive_deadline_ms = EmptyMap,
+            adaptive_depth = EmptyMap,
+            adaptive_total_decisions = EmptyMap,
+            adaptive_repair_attempts = EmptyMap,
+            adaptive_layer_failures = EmptyMap,
+            adaptive_total_spawned_members = EmptyMap,
+            adaptive_active_members = EmptyMap,
+            adaptive_retained_layer_mobs = EmptyMap,
+            adaptive_aggregate_token_reserved = EmptyMap,
+            adaptive_aggregate_token_actual = EmptyMap,
+            adaptive_aggregate_tool_call_reserved = EmptyMap,
+            adaptive_aggregate_tool_call_actual = EmptyMap,
+            adaptive_active_layer = EmptyMap,
+            adaptive_layer_phase = EmptyMap,
+            adaptive_layer_attempt = EmptyMap,
+            adaptive_layer_member_count = EmptyMap,
+            adaptive_layer_plan_digest = EmptyMap,
+            adaptive_layer_child_mob_id = EmptyMap,
+            adaptive_layer_token_reservation = EmptyMap,
+            adaptive_layer_tool_call_reservation = EmptyMap,
+            adaptive_layer_run_id = EmptyMap,
+            adaptive_layer_result_digest = EmptyMap,
+            adaptive_layer_fault = EmptyMap,
+            adaptive_layer_disposition = EmptyMap,
+            adaptive_missing_body_digest = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -806,6 +892,105 @@ macro_rules! mob_catalog_machine_dsl {
                 now_ms: u64,
                 candidate_overlap_ids: Seq<ResourceClaimId>,
             },
+            InitializeAdaptiveRun {
+                adaptive_run_id: AdaptiveRunId,
+                max_depth: u64,
+                max_total_decisions: u64,
+                max_repair_attempts: u64,
+                max_layer_failures: u64,
+                max_attempts_per_layer: u64,
+                max_members_per_layer: u64,
+                max_total_spawned_members: u64,
+                max_active_members: u64,
+                max_retained_layer_mobs: u64,
+                max_aggregate_tokens: u64,
+                max_aggregate_tool_calls: u64,
+                allowed_model_classes: Set<String>,
+                allowed_tool_classes: Set<String>,
+                allowed_skill_identities: Set<String>,
+                allowed_auth_binding_refs: Set<String>,
+                deadline_ms: u64,
+            },
+            RecordPlanningDecision {
+                adaptive_run_id: AdaptiveRunId,
+                decision_kind: Enum<AdaptiveDecisionKind>,
+            },
+            RecordPlanRejected {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+            },
+            ResolveLayerAdmission {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                plan_digest: String,
+                child_mob_id: MobId,
+                member_count: u64,
+                token_reservation: u64,
+                tool_call_reservation: u64,
+                used_model_classes: Set<String>,
+                used_tool_classes: Set<String>,
+                used_skill_identities: Set<String>,
+                used_auth_binding_refs: Set<String>,
+                observed_at_ms: u64,
+            },
+            RecordLayerProvisioned {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+            },
+            RecordLayerRunStarted {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                child_run_id: RunId,
+            },
+            IngestLayerTerminal {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                result_class: Enum<FlowRunPublicResultClassKind>,
+                actual_tokens: u64,
+                actual_tool_calls: u64,
+            },
+            RecordLayerSetupFault {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                fault: Enum<AdaptiveLayerSetupFaultKind>,
+                spawned_members: u64,
+                requested_members: u64,
+            },
+            RecordLayerResultValidated {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                result_digest: String,
+            },
+            RecordLayerResultInvalid {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+            },
+            RecordLayerMobDestroyed {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+            },
+            RecordLayerMobRetained {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+                disposition: Enum<AdaptiveLayerDispositionKind>,
+            },
+            RecordCleanupResolved { adaptive_run_id: AdaptiveRunId },
+            RecordBodyEvidenceMissing { adaptive_run_id: AdaptiveRunId, missing_digest: String },
+            ResolveAdaptiveFinish {
+                adaptive_run_id: AdaptiveRunId,
+                final_result_digest: String,
+            },
+            RequestAdaptiveCancel { adaptive_run_id: AdaptiveRunId },
+            RecordDeadlineObserved { adaptive_run_id: AdaptiveRunId, observed_at_ms: u64 },
         }
 
         surface_only [
@@ -1111,6 +1296,20 @@ macro_rules! mob_catalog_machine_dsl {
                 event_kind: Enum<MobCoordinationEventKind>,
                 sequence: u64,
             },
+            AdaptiveRunInitialized { adaptive_run_id: AdaptiveRunId },
+            AdaptivePlanningDecisionRecorded { adaptive_run_id: AdaptiveRunId, decision_kind: Enum<AdaptiveDecisionKind> },
+            AdaptivePlanRejected { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId },
+            AdaptiveLayerAdmissionResolved { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, admission: Enum<AdaptiveLayerAdmissionKind> },
+            AdaptiveLayerProvisioned { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64 },
+            AdaptiveLayerRunStarted { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId },
+            AdaptiveLayerTerminalIngested { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_class: Enum<FlowRunPublicResultClassKind> },
+            AdaptiveLayerSetupFaultRecorded { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, fault: Enum<AdaptiveLayerSetupFaultKind> },
+            AdaptiveLayerResultValidated { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_digest: String },
+            AdaptiveLayerResultInvalid { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId },
+            AdaptiveLayerCleanupObserved { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, disposition: Enum<AdaptiveLayerDispositionKind> },
+            AdaptiveCleanupResolved { adaptive_run_id: AdaptiveRunId },
+            AdaptiveBodyEvidenceMissing { adaptive_run_id: AdaptiveRunId, missing_digest: String },
+            AdaptiveRunTerminalized { adaptive_run_id: AdaptiveRunId, reason: Enum<AdaptiveStopReason> },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
@@ -1206,6 +1405,20 @@ macro_rules! mob_catalog_machine_dsl {
         disposition WorkIntentStatusChanged => local seam NoOwnerRealization,
         disposition ResourceClaimStatusChanged => local seam NoOwnerRealization,
         disposition ResourceClaimOverlapObserved => local seam NoOwnerRealization,
+        disposition AdaptiveRunInitialized => local seam NoOwnerRealization,
+        disposition AdaptivePlanningDecisionRecorded => local seam NoOwnerRealization,
+        disposition AdaptivePlanRejected => local seam NoOwnerRealization,
+        disposition AdaptiveLayerAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition AdaptiveLayerProvisioned => local seam NoOwnerRealization,
+        disposition AdaptiveLayerRunStarted => local seam NoOwnerRealization,
+        disposition AdaptiveLayerTerminalIngested => local seam NoOwnerRealization,
+        disposition AdaptiveLayerSetupFaultRecorded => local seam NoOwnerRealization,
+        disposition AdaptiveLayerResultValidated => local seam NoOwnerRealization,
+        disposition AdaptiveLayerResultInvalid => local seam NoOwnerRealization,
+        disposition AdaptiveLayerCleanupObserved => local seam NoOwnerRealization,
+        disposition AdaptiveCleanupResolved => local seam NoOwnerRealization,
+        disposition AdaptiveBodyEvidenceMissing => local seam NoOwnerRealization,
+        disposition AdaptiveRunTerminalized => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -1873,6 +2086,631 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit CreateMobAdmissionResolved { admission: MobCreateMobAdmissionKind::Denied }
+        }
+
+        transition InitializeAdaptiveRunRunning {
+            per_phase [Running]
+            on input InitializeAdaptiveRun {
+                adaptive_run_id,
+                max_depth,
+                max_total_decisions,
+                max_repair_attempts,
+                max_layer_failures,
+                max_attempts_per_layer,
+                max_members_per_layer,
+                max_total_spawned_members,
+                max_active_members,
+                max_retained_layer_mobs,
+                max_aggregate_tokens,
+                max_aggregate_tool_calls,
+                allowed_model_classes,
+                allowed_tool_classes,
+                allowed_skill_identities,
+                allowed_auth_binding_refs,
+                deadline_ms
+            }
+            guard "no_active_adaptive_run" { self.adaptive_active_run == None }
+            guard "limits_complete" {
+                max_depth > 0
+                && max_total_decisions > 0
+                && max_repair_attempts > 0
+                && max_layer_failures > 0
+                && max_attempts_per_layer > 0
+                && max_members_per_layer > 0
+                && max_total_spawned_members > 0
+                && max_active_members > 0
+                && max_retained_layer_mobs > 0
+                && max_aggregate_tokens > 0
+                && max_aggregate_tool_calls > 0
+                && deadline_ms > 0
+            }
+            update {
+                self.adaptive_active_run = Some(adaptive_run_id);
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Active);
+                self.adaptive_limit_max_depth.insert(adaptive_run_id, max_depth);
+                self.adaptive_limit_max_total_decisions.insert(adaptive_run_id, max_total_decisions);
+                self.adaptive_limit_max_repair_attempts.insert(adaptive_run_id, max_repair_attempts);
+                self.adaptive_limit_max_layer_failures.insert(adaptive_run_id, max_layer_failures);
+                self.adaptive_limit_max_attempts_per_layer.insert(adaptive_run_id, max_attempts_per_layer);
+                self.adaptive_limit_max_members_per_layer.insert(adaptive_run_id, max_members_per_layer);
+                self.adaptive_limit_max_total_spawned_members.insert(adaptive_run_id, max_total_spawned_members);
+                self.adaptive_limit_max_active_members.insert(adaptive_run_id, max_active_members);
+                self.adaptive_limit_max_retained_layer_mobs.insert(adaptive_run_id, max_retained_layer_mobs);
+                self.adaptive_limit_max_aggregate_tokens.insert(adaptive_run_id, max_aggregate_tokens);
+                self.adaptive_limit_max_aggregate_tool_calls.insert(adaptive_run_id, max_aggregate_tool_calls);
+                self.adaptive_limit_allowed_model_classes.insert(adaptive_run_id, allowed_model_classes);
+                self.adaptive_limit_allowed_tool_classes.insert(adaptive_run_id, allowed_tool_classes);
+                self.adaptive_limit_allowed_skill_identities.insert(adaptive_run_id, allowed_skill_identities);
+                self.adaptive_limit_allowed_auth_binding_refs.insert(adaptive_run_id, allowed_auth_binding_refs);
+                self.adaptive_deadline_ms.insert(adaptive_run_id, deadline_ms);
+                self.adaptive_depth.insert(adaptive_run_id, 0);
+                self.adaptive_total_decisions.insert(adaptive_run_id, 0);
+                self.adaptive_repair_attempts.insert(adaptive_run_id, 0);
+                self.adaptive_layer_failures.insert(adaptive_run_id, 0);
+                self.adaptive_total_spawned_members.insert(adaptive_run_id, 0);
+                self.adaptive_active_members.insert(adaptive_run_id, 0);
+                self.adaptive_retained_layer_mobs.insert(adaptive_run_id, 0);
+                self.adaptive_aggregate_token_reserved.insert(adaptive_run_id, 0);
+                self.adaptive_aggregate_token_actual.insert(adaptive_run_id, 0);
+                self.adaptive_aggregate_tool_call_reserved.insert(adaptive_run_id, 0);
+                self.adaptive_aggregate_tool_call_actual.insert(adaptive_run_id, 0);
+            }
+            to Running
+            emit AdaptiveRunInitialized { adaptive_run_id: adaptive_run_id }
+        }
+
+        transition RecordAdaptivePlanningDecisionActive {
+            per_phase [Running]
+            on input RecordPlanningDecision { adaptive_run_id, decision_kind }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "decision_limit_available" {
+                self.adaptive_total_decisions.get_cloned(adaptive_run_id).get("value")
+                < self.adaptive_limit_max_total_decisions.get_cloned(adaptive_run_id).get("value")
+            }
+            update {
+                self.adaptive_total_decisions.insert(
+                    adaptive_run_id,
+                    self.adaptive_total_decisions.get_cloned(adaptive_run_id).get("value") + 1
+                );
+            }
+            to Running
+            emit AdaptivePlanningDecisionRecorded { adaptive_run_id: adaptive_run_id, decision_kind: decision_kind }
+        }
+
+        transition RecordAdaptivePlanningDecisionPlanLimit {
+            per_phase [Running]
+            on input RecordPlanningDecision { adaptive_run_id, decision_kind }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "decision_limit_exhausted" {
+                self.adaptive_total_decisions.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_limit_max_total_decisions.get_cloned(adaptive_run_id).get("value")
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Failed);
+                self.adaptive_stop_reason.insert(adaptive_run_id, AdaptiveStopReason::PlanLimit);
+                self.adaptive_active_run = None;
+            }
+            to Running
+            emit AdaptiveRunTerminalized { adaptive_run_id: adaptive_run_id, reason: AdaptiveStopReason::PlanLimit }
+        }
+
+        transition RecordAdaptivePlanRejectedActive {
+            per_phase [Running]
+            on input RecordPlanRejected { adaptive_run_id, layer_id }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "repair_limit_available" {
+                self.adaptive_repair_attempts.get_cloned(adaptive_run_id).get("value")
+                < self.adaptive_limit_max_repair_attempts.get_cloned(adaptive_run_id).get("value")
+            }
+            update {
+                self.adaptive_repair_attempts.insert(
+                    adaptive_run_id,
+                    self.adaptive_repair_attempts.get_cloned(adaptive_run_id).get("value") + 1
+                );
+            }
+            to Running
+            emit AdaptivePlanRejected { adaptive_run_id: adaptive_run_id, layer_id: layer_id }
+        }
+
+        transition RecordAdaptivePlanRejectedRepairLimit {
+            per_phase [Running]
+            on input RecordPlanRejected { adaptive_run_id, layer_id }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "repair_limit_exhausted" {
+                self.adaptive_repair_attempts.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_limit_max_repair_attempts.get_cloned(adaptive_run_id).get("value")
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Failed);
+                self.adaptive_stop_reason.insert(adaptive_run_id, AdaptiveStopReason::RepairLimit);
+                self.adaptive_active_run = None;
+            }
+            to Running
+            emit AdaptiveRunTerminalized { adaptive_run_id: adaptive_run_id, reason: AdaptiveStopReason::RepairLimit }
+        }
+
+        transition ResolveAdaptiveLayerAdmissionAllowed {
+            per_phase [Running]
+            on input ResolveLayerAdmission {
+                adaptive_run_id,
+                layer_id,
+                attempt,
+                plan_digest,
+                child_mob_id,
+                member_count,
+                token_reservation,
+                tool_call_reservation,
+                used_model_classes,
+                used_tool_classes,
+                used_skill_identities,
+                used_auth_binding_refs,
+                observed_at_ms
+            }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "deadline_available" {
+                observed_at_ms <= self.adaptive_deadline_ms.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "depth_available" {
+                self.adaptive_depth.get_cloned(adaptive_run_id).get("value")
+                < self.adaptive_limit_max_depth.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "failure_limit_available" {
+                self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value")
+                < self.adaptive_limit_max_layer_failures.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "member_count_available" {
+                member_count <= self.adaptive_limit_max_members_per_layer.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "total_spawn_available" {
+                self.adaptive_total_spawned_members.get_cloned(adaptive_run_id).get("value") + member_count
+                <= self.adaptive_limit_max_total_spawned_members.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "active_member_capacity_available" {
+                self.adaptive_active_members.get_cloned(adaptive_run_id).get("value") + member_count
+                <= self.adaptive_limit_max_active_members.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "token_reservation_available" {
+                self.adaptive_aggregate_token_reserved.get_cloned(adaptive_run_id).get("value") + token_reservation
+                <= self.adaptive_limit_max_aggregate_tokens.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "tool_call_reservation_available" {
+                self.adaptive_aggregate_tool_call_reserved.get_cloned(adaptive_run_id).get("value") + tool_call_reservation
+                <= self.adaptive_limit_max_aggregate_tool_calls.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "model_classes_allowed" {
+                for_all(class in used_model_classes, self.adaptive_limit_allowed_model_classes.get_cloned(adaptive_run_id).get("value").contains(class))
+            }
+            guard "tool_classes_allowed" {
+                for_all(class in used_tool_classes, self.adaptive_limit_allowed_tool_classes.get_cloned(adaptive_run_id).get("value").contains(class))
+            }
+            guard "skill_identities_allowed" {
+                for_all(skill in used_skill_identities, self.adaptive_limit_allowed_skill_identities.get_cloned(adaptive_run_id).get("value").contains(skill))
+            }
+            guard "auth_bindings_allowed" {
+                for_all(auth in used_auth_binding_refs, self.adaptive_limit_allowed_auth_binding_refs.get_cloned(adaptive_run_id).get("value").contains(auth))
+            }
+            guard "no_active_layer" {
+                self.adaptive_active_layer.get_cloned(adaptive_run_id) == None
+            }
+            guard "layer_not_previously_admitted" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == None
+            }
+            update {
+                self.adaptive_depth.insert(
+                    adaptive_run_id,
+                    self.adaptive_depth.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_total_spawned_members.insert(
+                    adaptive_run_id,
+                    self.adaptive_total_spawned_members.get_cloned(adaptive_run_id).get("value") + member_count
+                );
+                self.adaptive_active_members.insert(
+                    adaptive_run_id,
+                    self.adaptive_active_members.get_cloned(adaptive_run_id).get("value") + member_count
+                );
+                self.adaptive_aggregate_token_reserved.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_token_reserved.get_cloned(adaptive_run_id).get("value") + token_reservation
+                );
+                self.adaptive_aggregate_tool_call_reserved.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_tool_call_reserved.get_cloned(adaptive_run_id).get("value") + tool_call_reservation
+                );
+                self.adaptive_active_layer.insert(adaptive_run_id, layer_id);
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Admitted);
+                self.adaptive_layer_attempt.insert(layer_id, attempt);
+                self.adaptive_layer_member_count.insert(layer_id, member_count);
+                self.adaptive_layer_plan_digest.insert(layer_id, plan_digest);
+                self.adaptive_layer_child_mob_id.insert(layer_id, child_mob_id);
+                self.adaptive_layer_token_reservation.insert(layer_id, token_reservation);
+                self.adaptive_layer_tool_call_reservation.insert(layer_id, tool_call_reservation);
+            }
+            to Running
+            emit AdaptiveLayerAdmissionResolved { adaptive_run_id: adaptive_run_id, layer_id: layer_id, admission: AdaptiveLayerAdmissionKind::Allowed }
+        }
+
+        transition ResolveAdaptiveLayerAdmissionRejected {
+            per_phase [Running]
+            on input ResolveLayerAdmission {
+                adaptive_run_id,
+                layer_id,
+                attempt,
+                plan_digest,
+                child_mob_id,
+                member_count,
+                token_reservation,
+                tool_call_reservation,
+                used_model_classes,
+                used_tool_classes,
+                used_skill_identities,
+                used_auth_binding_refs,
+                observed_at_ms
+            }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "limit_exceeded" {
+                observed_at_ms > self.adaptive_deadline_ms.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_depth.get_cloned(adaptive_run_id).get("value") >= self.adaptive_limit_max_depth.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value") >= self.adaptive_limit_max_layer_failures.get_cloned(adaptive_run_id).get("value")
+                || member_count > self.adaptive_limit_max_members_per_layer.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_total_spawned_members.get_cloned(adaptive_run_id).get("value") + member_count > self.adaptive_limit_max_total_spawned_members.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_active_members.get_cloned(adaptive_run_id).get("value") + member_count > self.adaptive_limit_max_active_members.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_aggregate_token_reserved.get_cloned(adaptive_run_id).get("value") + token_reservation > self.adaptive_limit_max_aggregate_tokens.get_cloned(adaptive_run_id).get("value")
+                || self.adaptive_aggregate_tool_call_reserved.get_cloned(adaptive_run_id).get("value") + tool_call_reservation > self.adaptive_limit_max_aggregate_tool_calls.get_cloned(adaptive_run_id).get("value")
+                || for_all(class in used_model_classes, self.adaptive_limit_allowed_model_classes.get_cloned(adaptive_run_id).get("value").contains(class)) == false
+                || for_all(class in used_tool_classes, self.adaptive_limit_allowed_tool_classes.get_cloned(adaptive_run_id).get("value").contains(class)) == false
+                || for_all(skill in used_skill_identities, self.adaptive_limit_allowed_skill_identities.get_cloned(adaptive_run_id).get("value").contains(skill)) == false
+                || for_all(auth in used_auth_binding_refs, self.adaptive_limit_allowed_auth_binding_refs.get_cloned(adaptive_run_id).get("value").contains(auth)) == false
+                || self.adaptive_active_layer.get_cloned(adaptive_run_id) != None
+            }
+            update {
+                self.adaptive_repair_attempts.insert(
+                    adaptive_run_id,
+                    self.adaptive_repair_attempts.get_cloned(adaptive_run_id).get("value") + 1
+                );
+            }
+            to Running
+            emit AdaptiveLayerAdmissionResolved { adaptive_run_id: adaptive_run_id, layer_id: layer_id, admission: AdaptiveLayerAdmissionKind::Denied }
+        }
+
+        transition RecordAdaptiveLayerProvisioned {
+            per_phase [Running]
+            on input RecordLayerProvisioned { adaptive_run_id, layer_id, attempt }
+            guard "layer_admitted" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Admitted)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Provisioning);
+            }
+            to Running
+            emit AdaptiveLayerProvisioned { adaptive_run_id: adaptive_run_id, layer_id: layer_id, attempt: attempt }
+        }
+
+        transition RecordAdaptiveLayerRunStarted {
+            per_phase [Running]
+            on input RecordLayerRunStarted { adaptive_run_id, layer_id, attempt, child_run_id }
+            guard "layer_provisioning" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Provisioning)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Running);
+                self.adaptive_layer_run_id.insert(layer_id, child_run_id);
+            }
+            to Running
+            emit AdaptiveLayerRunStarted { adaptive_run_id: adaptive_run_id, layer_id: layer_id, attempt: attempt, child_run_id: child_run_id }
+        }
+
+        transition IngestAdaptiveLayerTerminalSuccess {
+            per_phase [Running]
+            on input IngestLayerTerminal { adaptive_run_id, layer_id, attempt, result_class, actual_tokens, actual_tool_calls }
+            guard "layer_running" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Running)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "result_success" { result_class == FlowRunPublicResultClassKind::Success }
+            update {
+                self.adaptive_aggregate_token_actual.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_token_actual.get_cloned(adaptive_run_id).get("value") + actual_tokens
+                );
+                self.adaptive_aggregate_tool_call_actual.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_tool_call_actual.get_cloned(adaptive_run_id).get("value") + actual_tool_calls
+                );
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Collecting);
+            }
+            to Running
+            emit AdaptiveLayerTerminalIngested { adaptive_run_id: adaptive_run_id, layer_id: layer_id, result_class: result_class }
+        }
+
+        transition IngestAdaptiveLayerTerminalFailure {
+            per_phase [Running]
+            on input IngestLayerTerminal { adaptive_run_id, layer_id, attempt, result_class, actual_tokens, actual_tool_calls }
+            guard "layer_running" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Running)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "result_failure" { result_class == FlowRunPublicResultClassKind::Failure }
+            update {
+                self.adaptive_aggregate_token_actual.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_token_actual.get_cloned(adaptive_run_id).get("value") + actual_tokens
+                );
+                self.adaptive_aggregate_tool_call_actual.insert(
+                    adaptive_run_id,
+                    self.adaptive_aggregate_tool_call_actual.get_cloned(adaptive_run_id).get("value") + actual_tool_calls
+                );
+                self.adaptive_layer_failures.insert(
+                    adaptive_run_id,
+                    self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::RunFailed);
+                self.adaptive_active_layer.remove(adaptive_run_id);
+            }
+            to Running
+            emit AdaptiveLayerTerminalIngested { adaptive_run_id: adaptive_run_id, layer_id: layer_id, result_class: result_class }
+        }
+
+        transition RecordAdaptiveLayerSetupFault {
+            per_phase [Running]
+            on input RecordLayerSetupFault { adaptive_run_id, layer_id, attempt, fault, spawned_members, requested_members }
+            guard "layer_admitted_or_provisioning" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Admitted)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Provisioning)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "setup_counts_valid" {
+                requested_members == self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+                && spawned_members <= requested_members
+            }
+            update {
+                self.adaptive_layer_failures.insert(
+                    adaptive_run_id,
+                    self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::SetupFailed);
+                self.adaptive_layer_fault.insert(layer_id, fault);
+                self.adaptive_active_layer.remove(adaptive_run_id);
+            }
+            to Running
+            emit AdaptiveLayerSetupFaultRecorded { adaptive_run_id: adaptive_run_id, layer_id: layer_id, fault: fault }
+        }
+
+        transition RecordAdaptiveLayerResultValidated {
+            per_phase [Running]
+            on input RecordLayerResultValidated { adaptive_run_id, layer_id, attempt, result_digest }
+            guard "layer_collecting" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Collecting)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Completed);
+                self.adaptive_layer_result_digest.insert(layer_id, result_digest);
+                self.adaptive_active_layer.remove(adaptive_run_id);
+            }
+            to Running
+            emit AdaptiveLayerResultValidated { adaptive_run_id: adaptive_run_id, layer_id: layer_id, result_digest: result_digest }
+        }
+
+        transition RecordAdaptiveLayerResultInvalid {
+            per_phase [Running]
+            on input RecordLayerResultInvalid { adaptive_run_id, layer_id, attempt }
+            guard "layer_collecting" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Collecting)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {
+                self.adaptive_layer_failures.insert(
+                    adaptive_run_id,
+                    self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::ResultInvalid);
+                self.adaptive_active_layer.remove(adaptive_run_id);
+            }
+            to Running
+            emit AdaptiveLayerResultInvalid { adaptive_run_id: adaptive_run_id, layer_id: layer_id }
+        }
+
+        transition RecordAdaptiveLayerMobDestroyed {
+            per_phase [Running]
+            on input RecordLayerMobDestroyed { adaptive_run_id, layer_id, attempt }
+            guard "layer_terminal" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Completed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::SetupFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::RunFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::ResultInvalid)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Canceled)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "active_member_debit_present" {
+                self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+            }
+            update {
+                self.adaptive_active_members.insert(
+                    adaptive_run_id,
+                    self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                    - self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+                );
+                self.adaptive_layer_disposition.insert(layer_id, AdaptiveLayerDispositionKind::Destroyed);
+            }
+            to Running
+            emit AdaptiveLayerCleanupObserved { adaptive_run_id: adaptive_run_id, layer_id: layer_id, disposition: AdaptiveLayerDispositionKind::Destroyed }
+        }
+
+        transition RecordAdaptiveLayerMobRetained {
+            per_phase [Running]
+            on input RecordLayerMobRetained { adaptive_run_id, layer_id, attempt, disposition }
+            guard "layer_terminal" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Completed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::SetupFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::RunFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::ResultInvalid)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Canceled)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "retention_capacity_available" {
+                self.adaptive_retained_layer_mobs.get_cloned(adaptive_run_id).get("value")
+                < self.adaptive_limit_max_retained_layer_mobs.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "active_member_debit_present" {
+                self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+            }
+            update {
+                self.adaptive_active_members.insert(
+                    adaptive_run_id,
+                    self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                    - self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+                );
+                self.adaptive_retained_layer_mobs.insert(
+                    adaptive_run_id,
+                    self.adaptive_retained_layer_mobs.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_layer_disposition.insert(layer_id, disposition);
+            }
+            to Running
+            emit AdaptiveLayerCleanupObserved { adaptive_run_id: adaptive_run_id, layer_id: layer_id, disposition: disposition }
+        }
+
+        transition RecordAdaptiveLayerMobRetainedCleanupRequired {
+            per_phase [Running]
+            on input RecordLayerMobRetained { adaptive_run_id, layer_id, attempt, disposition }
+            guard "layer_terminal" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Completed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::SetupFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::RunFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::ResultInvalid)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Canceled)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            guard "retention_capacity_exhausted" {
+                self.adaptive_retained_layer_mobs.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_limit_max_retained_layer_mobs.get_cloned(adaptive_run_id).get("value")
+            }
+            guard "active_member_debit_present" {
+                self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                >= self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+            }
+            update {
+                self.adaptive_active_members.insert(
+                    adaptive_run_id,
+                    self.adaptive_active_members.get_cloned(adaptive_run_id).get("value")
+                    - self.adaptive_layer_member_count.get_cloned(layer_id).get("value")
+                );
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::CleanupRequired);
+                self.adaptive_layer_disposition.insert(layer_id, disposition);
+            }
+            to Running
+            emit AdaptiveLayerCleanupObserved { adaptive_run_id: adaptive_run_id, layer_id: layer_id, disposition: disposition }
+        }
+
+        transition RecordAdaptiveCleanupResolved {
+            per_phase [Running]
+            on input RecordCleanupResolved { adaptive_run_id }
+            guard "cleanup_pause_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::CleanupRequired)
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Active);
+            }
+            to Running
+            emit AdaptiveCleanupResolved { adaptive_run_id: adaptive_run_id }
+        }
+
+        transition RecordAdaptiveBodyEvidenceMissing {
+            per_phase [Running]
+            on input RecordBodyEvidenceMissing { adaptive_run_id, missing_digest }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::EvidenceMissing);
+                self.adaptive_missing_body_digest.insert(adaptive_run_id, missing_digest);
+            }
+            to Running
+            emit AdaptiveBodyEvidenceMissing { adaptive_run_id: adaptive_run_id, missing_digest: missing_digest }
+        }
+
+        transition ResolveAdaptiveFinishRunning {
+            per_phase [Running]
+            on input ResolveAdaptiveFinish { adaptive_run_id, final_result_digest }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Finished);
+                self.adaptive_stop_reason.insert(adaptive_run_id, AdaptiveStopReason::FinishDecision);
+                self.adaptive_active_run = None;
+            }
+            to Running
+            emit AdaptiveRunTerminalized { adaptive_run_id: adaptive_run_id, reason: AdaptiveStopReason::FinishDecision }
+        }
+
+        transition RequestAdaptiveCancelRunning {
+            per_phase [Running]
+            on input RequestAdaptiveCancel { adaptive_run_id }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Canceled);
+                self.adaptive_stop_reason.insert(adaptive_run_id, AdaptiveStopReason::HostCancel);
+                self.adaptive_active_run = None;
+            }
+            to Running
+            emit AdaptiveRunTerminalized { adaptive_run_id: adaptive_run_id, reason: AdaptiveStopReason::HostCancel }
+        }
+
+        transition RecordAdaptiveDeadlineObservedExpired {
+            per_phase [Running]
+            on input RecordDeadlineObserved { adaptive_run_id, observed_at_ms }
+            guard "run_active" {
+                self.adaptive_run_phase.get_cloned(adaptive_run_id) == Some(AdaptiveRunPhase::Active)
+            }
+            guard "deadline_expired" {
+                observed_at_ms > self.adaptive_deadline_ms.get_cloned(adaptive_run_id).get("value")
+            }
+            update {
+                self.adaptive_run_phase.insert(adaptive_run_id, AdaptiveRunPhase::Failed);
+                self.adaptive_stop_reason.insert(adaptive_run_id, AdaptiveStopReason::DeadlineExceeded);
+                self.adaptive_active_run = None;
+            }
+            to Running
+            emit AdaptiveRunTerminalized { adaptive_run_id: adaptive_run_id, reason: AdaptiveStopReason::DeadlineExceeded }
         }
 
         // --- Operator profile-mutation admission ---
@@ -8983,6 +9821,48 @@ impl SessionId {
     }
 }
 
+/// Bridging type for adaptive run identity.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveRunId(pub String);
+
+impl<T: Into<String>> From<T> for AdaptiveRunId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for adaptive layer identity.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct AdaptiveLayerId(pub String);
+
+impl<T: Into<String>> From<T> for AdaptiveLayerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Projection helpers: domain types → bridging types
 // ---------------------------------------------------------------------------
@@ -9016,6 +9896,77 @@ pub enum CollectionPolicyKind {
 }
 
 /// Canonical flow-run lifecycle state once run-local semantics are absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveRunPhase {
+    #[default]
+    Active,
+    CleanupRequired,
+    EvidenceMissing,
+    Finished,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveStopReason {
+    #[default]
+    FinishDecision,
+    DepthLimit,
+    PlanLimit,
+    RepairLimit,
+    FailureLimit,
+    BudgetExhausted,
+    DeadlineExceeded,
+    HostCancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveDecisionKind {
+    #[default]
+    RunLayer,
+    Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveLayerPhase {
+    #[default]
+    Validating,
+    Admitted,
+    Provisioning,
+    Running,
+    Collecting,
+    Completed,
+    SetupFailed,
+    RunFailed,
+    ResultInvalid,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveLayerAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveLayerSetupFaultKind {
+    #[default]
+    MobCreateFailed,
+    SpawnFailed,
+    WiringFailed,
+    CanceledDuringSetup,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdaptiveLayerDispositionKind {
+    #[default]
+    Destroyed,
+    Retained,
+    RetainedAsEvidence,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum FlowRunStatus {
     #[default]

@@ -668,6 +668,49 @@ impl MobMcpState {
         self.mob_create_definition_inner(definition, None).await
     }
 
+    pub async fn mob_create_from_mobpack(
+        &self,
+        definition: MobDefinition,
+        packed_skills: BTreeMap<String, Vec<u8>>,
+    ) -> Result<MobId, MobError> {
+        let mob_id = definition.id.clone();
+        self.ensure_restored().await?;
+        if self.mobs.read().await.contains_key(&mob_id) {
+            return Ok(mob_id);
+        }
+        let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
+        let handle = self
+            .configure_builder(MobBuilder::from_mobpack(
+                definition,
+                packed_skills,
+                storage,
+            )?)
+            .create()
+            .await?;
+        match self.mobs.write().await.entry(mob_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(ManagedMob {
+                    handle,
+                    storage_path,
+                });
+                Ok(mob_id)
+            }
+            Entry::Occupied(_) => {
+                if let Err(error) = handle.destroy().await {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        error = %error,
+                        "duplicate mobpack create cleanup failed"
+                    );
+                }
+                if let Err(error) = Self::remove_storage_files(storage_path.as_deref()).await {
+                    tracing::error!(error = %error, "duplicate mobpack storage cleanup failed");
+                }
+                Ok(mob_id)
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub async fn mob_create_definition_with_owner_bridge_session(
         &self,
@@ -1360,6 +1403,14 @@ impl MobMcpState {
         run_id: RunId,
     ) -> Result<Option<meerkat_mob::MobRun>, MobError> {
         self.handle_for(mob_id).await?.flow_status(run_id).await
+    }
+
+    pub async fn mob_list_runs(
+        &self,
+        mob_id: &MobId,
+        flow_id: Option<&FlowId>,
+    ) -> Result<Vec<meerkat_mob::MobRun>, MobError> {
+        self.handle_for(mob_id).await?.list_runs(flow_id).await
     }
 
     pub async fn mob_cancel_flow(&self, mob_id: &MobId, run_id: RunId) -> Result<(), MobError> {

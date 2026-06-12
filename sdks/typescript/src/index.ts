@@ -98,6 +98,7 @@ export type {
   MobProfileBinding,
   MobProfileDeleteResult,
   MobProfileLookupResult,
+  MobRunResult,
   MobStatus,
   MobSummary,
   MobTurnStartOptions,

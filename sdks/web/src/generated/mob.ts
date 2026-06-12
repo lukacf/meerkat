@@ -35,6 +35,10 @@ export interface MobFlowStatusResult {
   run?: Record<string, unknown>;
 }
 
+export interface MobRunResult {
+  run?: Record<string, unknown>;
+}
+
 export interface MobHelperResult {
   agent_identity: string;
   member_ref: WireMemberRef;

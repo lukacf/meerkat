@@ -146,12 +146,15 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
     assert!(
         wrapper.contains("machine-verify --all --skip-cargo-tests")
             && wrapper.contains("--skip-tlc-composition meerkat_mob_seam")
+            && wrapper.contains("--skip-tlc-composition adaptive_mob_bundle")
+            && wrapper.contains("ci.cfg structural-invariant contract")
             && wrapper.contains("export RUSTFMT"),
-        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify with broad-seam TLC skip"
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify with guarded broad-composition TLC skips"
     );
     assert!(
         doctor.contains("machine_verify_all_tlc_test")
             && doctor.contains("machine-verify --all")
+            && doctor.contains("broad-composition structural guards")
             && doctor.contains("hermetic rustfmt"),
         "buildbuddy-doctor must guard the machine-authority TLC mapping and rustfmt runfiles"
     );
@@ -850,6 +853,25 @@ fn generated_header_truthfulness_is_clean() {
     assert!(
         violations.is_empty(),
         "generated header audit violations: {violations:?}"
+    );
+}
+
+#[test]
+fn buildbuddy_external_repo_cache_repair_catches_replanting_symlink_failures() {
+    let root = repo_root();
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let doctor = read(root.join("scripts/buildbuddy-doctor"));
+
+    assert!(
+        launcher.contains("--repo_contents_cache=")
+            && launcher.contains("fetch_corruption_signature")
+            && launcher.contains("error replanting symlinks in repo")
+            && launcher.contains("clean --expunge"),
+        "BuildBuddy launcher must repair Bazel external-repo symlink replanting failures"
+    );
+    assert!(
+        doctor.contains("error replanting symlinks in repo"),
+        "buildbuddy-doctor must guard the Bazel external-repo replanting signature"
     );
 }
 

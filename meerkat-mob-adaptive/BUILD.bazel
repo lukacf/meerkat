@@ -1,0 +1,141 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_mob_adaptive",
+    aliases = aliases(package_name = "meerkat-mob-adaptive"),
+    crate_name = "meerkat_mob_adaptive",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.0",
+        "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-mob:meerkat_mob",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_mob_adaptive_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-mob-adaptive"),
+    crate_name = "meerkat_mob_adaptive",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat-mob-adaptive:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.0",
+        "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_mob_adaptive_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-mob-adaptive",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_mob_adaptive",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.0",
+        "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-adaptive",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":meerkat_mob_adaptive_unit_test",
+    ],
+)

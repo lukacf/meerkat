@@ -31,6 +31,7 @@ use std::sync::Arc;
 /// surface instead of each `MobHandle` method hand-sending actor commands.
 #[derive(CommandManifest)]
 pub(crate) enum MobMachineCommand {
+    PreviewRunFlowAdmission,
     RunFlow {
         flow_id: FlowId,
         activation_params: serde_json::Value,
@@ -309,12 +310,17 @@ impl MobMachineCommandVariant {
             | Self::LifecycleSnapshot
             | Self::LifecycleNotificationBurst
             | Self::DslT2Snapshot
+            | Self::PreviewRunFlowAdmission
             | Self::ListMembersMatching
             | Self::Wire
             | Self::WireMembersBatch
             | Self::Unwire => None,
             #[cfg(not(test))]
-            Self::ListMembersMatching | Self::Wire | Self::WireMembersBatch | Self::Unwire => None,
+            Self::PreviewRunFlowAdmission
+            | Self::ListMembersMatching
+            | Self::Wire
+            | Self::WireMembersBatch
+            | Self::Unwire => None,
             Self::RunFlow => Some(MobMachineCatalogInput::RunFlow),
             Self::CancelFlow => Some(MobMachineCatalogInput::CancelFlow),
             Self::FlowStatus => Some(MobMachineCatalogInput::FlowStatus),
@@ -358,6 +364,7 @@ impl MobMachineCommandVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobMachineShellMechanicReason {
     TestInspection,
+    AdmissionPreflight,
     FilteredRosterProjection,
     ProducerWiringBridge,
 }
@@ -379,6 +386,7 @@ pub enum MobMachineRuntimeInternalReason {
     SupervisorAuthority,
     TrustHandoffAuthority,
     CoordinationBoardAuthority,
+    AdaptiveFlowAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -778,6 +786,74 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::SeedOrphanBudget,
         reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::InitializeAdaptiveRun,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordPlanningDecision,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordPlanRejected,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveLayerAdmission,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerProvisioned,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerRunStarted,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::IngestLayerTerminal,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerSetupFault,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerResultValidated,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerResultInvalid,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerMobDestroyed,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerMobRetained,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordCleanupResolved,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordBodyEvidenceMissing,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveAdaptiveFinish,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RequestAdaptiveCancel,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordDeadlineObserved,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
 ];
 
 #[doc(hidden)]
@@ -813,6 +889,11 @@ const fn mob_machine_command_classification(
         | MobMachineCommandVariant::DslT2Snapshot => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::TestInspection,
+            )
+        }
+        MobMachineCommandVariant::PreviewRunFlowAdmission => {
+            MobMachineCommandClassification::ShellMechanic(
+                MobMachineShellMechanicReason::AdmissionPreflight,
             )
         }
         MobMachineCommandVariant::ListMembersMatching => {

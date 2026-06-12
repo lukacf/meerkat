@@ -961,6 +961,7 @@ fetch_corruption_signature() {
     -e "No MODULE.bazel file found in" \
     -e "BUILD file not found in directory '' of external repository" \
     -e "Error loading '@@.*must have a corresponding package" \
+    -e "error replanting symlinks in repo" \
     "${log}"; then
     return 0
   fi

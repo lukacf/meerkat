@@ -6510,6 +6510,7 @@ mod tests {
             crate::service::OpaquePrincipalToken::new("opaque-principal"),
             false,
             false,
+            false,
             std::collections::BTreeSet::from(["mob-a".to_string()]),
             std::collections::BTreeMap::new(),
             None,
@@ -6538,6 +6539,7 @@ mod tests {
         let mut session = Session::new();
         let authority = MobToolAuthorityContext::generated_for_test(
             crate::service::OpaquePrincipalToken::new("opaque-principal"),
+            false,
             false,
             false,
             std::collections::BTreeSet::from(["mob-a".to_string()]),

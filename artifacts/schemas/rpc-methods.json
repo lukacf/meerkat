@@ -584,10 +584,22 @@
       "result_type": "MobFlowRunResult"
     },
     {
+      "description": "Invoke a mob as a typed callable run",
+      "name": "mob/run",
+      "params_type": "MobRunParams",
+      "result_type": "MobFlowRunResult"
+    },
+    {
       "description": "Get status for a mob flow run",
       "name": "mob/flow_status",
       "params_type": "MobFlowStatusParams",
       "result_type": "MobFlowStatusResult"
+    },
+    {
+      "description": "Get the typed output envelope for a mob run",
+      "name": "mob/run_result",
+      "params_type": "MobRunResultParams",
+      "result_type": "MobRunResult"
     },
     {
       "description": "Cancel a mob flow run",

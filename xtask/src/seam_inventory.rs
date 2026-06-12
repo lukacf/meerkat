@@ -377,6 +377,9 @@ fn collect_routed_realizations(
             let producer_name = producer.machine.as_str();
             let effect_variant = disposition.effect_variant.as_str();
             for composition in compositions {
+                if !composition.closed_world {
+                    continue;
+                }
                 // Does this composition bind the producer machine?
                 let producer_instance = composition
                     .machines

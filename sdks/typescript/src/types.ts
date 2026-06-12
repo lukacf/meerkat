@@ -562,6 +562,10 @@ export interface MobFlowStatus {
   readonly run?: Record<string, unknown> | null;
 }
 
+export interface MobRunResult {
+  readonly run?: Record<string, unknown> | null;
+}
+
 type MobTurnStartWireOptions = Omit<
   MobTurnStartParams,
   "mob_id" | "agent_identity" | "prompt"

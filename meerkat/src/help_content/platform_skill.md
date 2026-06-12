@@ -126,7 +126,7 @@ Notes:
 - Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The previous exclusive-handle mob store has been removed.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
-- Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
+- Portable mob artifacts are available through mobpack (`rkat mob pack/inspect/validate/run/deploy`) and browser deployment (`rkat mob web build`).
 - Live (audio/video) channels are exposed through the live-adapter MVP surface, not the previous attachment-status family. Capability detection still uses `ModelCapabilities.realtime` to decide whether a model can back a live channel; channel lifecycle is caller-initiated through the `live/*` JSON-RPC methods (and SDK equivalents) below. The previous `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`, `realtime/open_info`, and `RealtimeAttachmentStatus` enum have been removed.
 ### Live channels (audio/video)
 
@@ -166,6 +166,11 @@ rkat mob fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--
 rkat mob member-status <mob_id> <agent_identity> [--json]
 rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--initial-message <msg>]
+rkat mob run <pack_or_mob_id> [--flow <flow_id>] [--param key=value ...] [--prompt <text>] [--detach] [--json]
+rkat mob runs <mob_id> [--flow <flow_id>] [--json]
+rkat mob status <mob_id> <run_id> [--json]
+rkat mob logs <mob_id> [--after-cursor N] [--limit N] [--json]
+rkat mob attach <mob_id> <run_id> [--json]
 rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>] [-s|--stream] [--no-stream]
 rkat mob flow-status <mob_id> <run_id>
 rkat mob wait-kickoff <mob_id> [--member <agent_identity>...] [--timeout-ms N] [--json]
@@ -180,8 +185,8 @@ rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
 
-# Deploy with trust policy
-rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
+# Invoke as a typed callable run
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --trust-policy strict
 
 # Browser bundle
 cargo install wasm-pack
@@ -236,9 +241,12 @@ Browser scope: filesystem, shell, MCP client (rmcp), and network comms (TCP/UDS)
 ```bash
 rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"k":"v"}']
 rkat mob flow-status <mob_id> <run_id>
+rkat mob runs <mob_id> [--flow <flow_id>] [--json]
+rkat mob status <mob_id> <run_id> [--json]
+rkat mob attach <mob_id> <run_id> [--json]
 ```
 
-Flow model: declarative DAG (`depends_on`, `depends_on_mode = all|any`), dispatch modes (`one_to_one`, `fan_out`, `fan_in`), optional `branch` + `condition`, topology rules (`strict|permissive`, `"*"` wildcard), persisted `MobRun` snapshots with `step_ledger`/`failure_ledger`. Frame-based v2 flows add nested `FlowSpec.root: FrameSpec` and `repeat_until` loop nodes (`until`, `max_iterations`, nested `body`). `run-flow` blocks until terminal and persists the terminal snapshot; `flow-status` checks live state then falls back to the snapshot. Per-flow limits live under mob `limits` (`max_flow_duration_ms`, `max_step_retries`, `cancel_grace_timeout_ms`, `max_orphaned_turns`).
+Flow model: declarative DAG (`depends_on`, `depends_on_mode = all|any`), dispatch modes (`one_to_one`, `fan_out`, `fan_in`), optional `branch` + `condition`, topology rules (`strict|permissive`, `"*"` wildcard), persisted `MobRun` snapshots with `step_ledger`/`failure_ledger` and typed output envelopes. Frame-based v2 flows add nested `FlowSpec.root: FrameSpec` and `repeat_until` loop nodes (`until`, `max_iterations`, nested `body`). `run` invokes a mobpack or installed mob as a typed callable; `--prompt` binds `params.prompt`; `--detach` returns a run id; `runs`/`status`/`logs`/`attach` operate on the same run resources. Per-flow limits live under mob `limits` (`max_flow_duration_ms`, `max_step_retries`, `cancel_grace_timeout_ms`, `max_orphaned_turns`).
 
 Don't conflate **mob tool availability** (surface behavior — `mob_*` tools and `rkat mob` lifecycle) with **realm backend** (`sqlite`/`jsonl` in `realm_manifest.json`).
 

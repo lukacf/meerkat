@@ -112,7 +112,7 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
 
 <Tabs>
   <Tab title="CLI">
-    The CLI currently exposes helper-oriented mob commands such as `spawn-helper`, `fork-helper`, `run-flow`, `member-status`, `respawn`, and `wait-kickoff`. It does not expose the raw host-side `mob/spawn` lifecycle directly.
+    The CLI exposes helper, callable-run, and run-resource commands such as `spawn-helper`, `fork-helper`, `run`, `runs`, `status`, `logs`, `attach`, `run-flow`, `member-status`, `respawn`, and `wait-kickoff`. It does not expose the raw host-side `mob/spawn` lifecycle directly.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -320,7 +320,8 @@ member send responses.
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat mob run-flow release-triage --flow triage --params '{"severity":"high"}'
+    rkat mob run release-triage --flow triage --param severity='"high"'
+    rkat mob runs release-triage
     rkat mob run-flow release-triage --flow triage --stream
     ```
   </Tab>
@@ -342,6 +343,7 @@ member send responses.
     ```python
     run_id = await mob.run_flow("triage", {"severity": "high"})
     status = await mob.flow_status(run_id)
+    result = await mob.run_result(run_id)
     ```
   </Tab>
   <Tab title="TypeScript">
@@ -354,6 +356,7 @@ member send responses.
     ```rust
     let run_id = handle.run_flow("triage".into(), json!({"severity": "high"})).await?;
     let status = handle.flow_status(run_id).await?;
+    let runs = handle.list_runs(None).await?;
     ```
   </Tab>
 </Tabs>

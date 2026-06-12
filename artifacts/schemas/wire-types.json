@@ -27507,6 +27507,86 @@
     "title": "MobRotateSupervisorResult",
     "type": "object"
   },
+  "MobRunResult": {
+    "$defs": {
+      "WireMobRunResultEnvelope": {
+        "additionalProperties": false,
+        "description": "Typed output envelope for a completed or in-flight mob flow run.",
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "outputs": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "result": true,
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/WireMobRunStatus"
+          }
+        },
+        "required": [
+          "run_id",
+          "mob_id",
+          "flow_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WireMobRunStatus": {
+        "description": "Lifecycle status of a flow run on the wire. Mirrors\n`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than\nre-deriving meaning from a free-form status string.",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/run_result`.\n\n`run` is `None` when the requested run id has no persisted run.",
+    "properties": {
+      "run": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobRunResultEnvelope"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "title": "MobRunResult",
+    "type": "object"
+  },
+  "MobRunResultParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/run_result`.",
+    "properties": {
+      "mob_id": {
+        "type": "string"
+      },
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "run_id"
+    ],
+    "title": "MobRunResultParams",
+    "type": "object"
+  },
   "MobSnapshotResult": {
     "$defs": {
       "MobMemberListEntryWire": {
@@ -46781,6 +46861,51 @@
       "status"
     ],
     "title": "WireMobRun",
+    "type": "object"
+  },
+  "WireMobRunResultEnvelope": {
+    "$defs": {
+      "WireMobRunStatus": {
+        "description": "Lifecycle status of a flow run on the wire. Mirrors\n`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than\nre-deriving meaning from a free-form status string.",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Typed output envelope for a completed or in-flight mob flow run.",
+    "properties": {
+      "flow_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "outputs": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "result": true,
+      "run_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/WireMobRunStatus"
+      }
+    },
+    "required": [
+      "run_id",
+      "mob_id",
+      "flow_id",
+      "status"
+    ],
+    "title": "WireMobRunResultEnvelope",
     "type": "object"
   },
   "WireMobRunStatus": {

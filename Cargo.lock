@@ -3346,6 +3346,7 @@ dependencies = [
  "notify",
  "reqwest",
  "rusqlite",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3358,6 +3359,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "meerkat-mob-adaptive"
+version = "0.7.0"
+dependencies = [
+ "meerkat-mob",
 ]
 
 [[package]]
@@ -4795,6 +4803,7 @@ dependencies = [
  "dirs",
  "futures",
  "humantime",
+ "jsonschema",
  "meerkat",
  "meerkat-anthropic",
  "meerkat-auth-core",
@@ -4819,6 +4828,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

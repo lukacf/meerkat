@@ -38,12 +38,310 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
+fn sanitize_flow_member_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "member".to_string()
+    } else {
+        out
+    }
+}
+
 /// Machine-decided spawn-member operator admission verdict, mirrored by tool
 /// surfaces. `Denied` maps to a tool `access_denied` error; `Allowed` proceeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMemberAdmission {
     Allowed,
     Denied,
+}
+
+/// Opaque capability minted when a MobMachine accepts
+/// `InitializeAdaptiveRun`.
+///
+/// The private field makes this unforgeable outside `meerkat-mob`; adaptive
+/// driver code can hold and pass it back to the narrow adaptive seam, but it
+/// cannot manufacture one or write raw machine inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveDriverCapability {
+    adaptive_run_id: String,
+    _private: (),
+}
+
+impl AdaptiveDriverCapability {
+    #[must_use]
+    pub fn adaptive_run_id(&self) -> &str {
+        &self.adaptive_run_id
+    }
+}
+
+/// Complete numeric limit record currently owned by the landed adaptive
+/// MobMachine kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveRunLimits {
+    pub max_depth: u64,
+    pub max_total_decisions: u64,
+    pub max_repair_attempts: u64,
+    pub max_layer_failures: u64,
+    pub max_attempts_per_layer: u64,
+    pub max_members_per_layer: u64,
+    pub max_total_spawned_members: u64,
+    pub max_active_members: u64,
+    pub max_retained_layer_mobs: u64,
+    pub max_aggregate_tokens: u64,
+    pub max_aggregate_tool_calls: u64,
+    pub allowed_model_classes: BTreeSet<String>,
+    pub allowed_tool_classes: BTreeSet<String>,
+    pub allowed_skill_identities: BTreeSet<String>,
+    pub allowed_auth_binding_refs: BTreeSet<String>,
+    pub deadline_ms: u64,
+}
+
+/// Initialization payload for the adaptive run kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializeAdaptiveRunRequest {
+    pub adaptive_run_id: String,
+    pub limits: AdaptiveRunLimits,
+}
+
+/// FlowMaster decision kind recorded by the adaptive kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptivePlanningDecisionKind {
+    RunLayer,
+    Finish,
+}
+
+impl From<AdaptivePlanningDecisionKind> for mob_dsl::AdaptiveDecisionKind {
+    fn from(value: AdaptivePlanningDecisionKind) -> Self {
+        match value {
+            AdaptivePlanningDecisionKind::RunLayer => Self::RunLayer,
+            AdaptivePlanningDecisionKind::Finish => Self::Finish,
+        }
+    }
+}
+
+/// Kernel admission verdict for one adaptive layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveLayerAdmission {
+    Allowed,
+    Denied,
+}
+
+impl From<mob_dsl::AdaptiveLayerAdmissionKind> for AdaptiveLayerAdmission {
+    fn from(value: mob_dsl::AdaptiveLayerAdmissionKind) -> Self {
+        match value {
+            mob_dsl::AdaptiveLayerAdmissionKind::Allowed => Self::Allowed,
+            mob_dsl::AdaptiveLayerAdmissionKind::Denied => Self::Denied,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveRunPhaseView {
+    Active,
+    CleanupRequired,
+    EvidenceMissing,
+    Finished,
+    Failed,
+    Canceled,
+}
+
+impl From<mob_dsl::AdaptiveRunPhase> for AdaptiveRunPhaseView {
+    fn from(value: mob_dsl::AdaptiveRunPhase) -> Self {
+        match value {
+            mob_dsl::AdaptiveRunPhase::Active => Self::Active,
+            mob_dsl::AdaptiveRunPhase::CleanupRequired => Self::CleanupRequired,
+            mob_dsl::AdaptiveRunPhase::EvidenceMissing => Self::EvidenceMissing,
+            mob_dsl::AdaptiveRunPhase::Finished => Self::Finished,
+            mob_dsl::AdaptiveRunPhase::Failed => Self::Failed,
+            mob_dsl::AdaptiveRunPhase::Canceled => Self::Canceled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveStopReasonView {
+    FinishDecision,
+    DepthLimit,
+    PlanLimit,
+    RepairLimit,
+    FailureLimit,
+    BudgetExhausted,
+    DeadlineExceeded,
+    HostCancel,
+}
+
+impl From<mob_dsl::AdaptiveStopReason> for AdaptiveStopReasonView {
+    fn from(value: mob_dsl::AdaptiveStopReason) -> Self {
+        match value {
+            mob_dsl::AdaptiveStopReason::FinishDecision => Self::FinishDecision,
+            mob_dsl::AdaptiveStopReason::DepthLimit => Self::DepthLimit,
+            mob_dsl::AdaptiveStopReason::PlanLimit => Self::PlanLimit,
+            mob_dsl::AdaptiveStopReason::RepairLimit => Self::RepairLimit,
+            mob_dsl::AdaptiveStopReason::FailureLimit => Self::FailureLimit,
+            mob_dsl::AdaptiveStopReason::BudgetExhausted => Self::BudgetExhausted,
+            mob_dsl::AdaptiveStopReason::DeadlineExceeded => Self::DeadlineExceeded,
+            mob_dsl::AdaptiveStopReason::HostCancel => Self::HostCancel,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveLayerPhaseView {
+    Validating,
+    Admitted,
+    Provisioning,
+    Running,
+    Collecting,
+    Completed,
+    SetupFailed,
+    RunFailed,
+    ResultInvalid,
+    Canceled,
+}
+
+impl From<mob_dsl::AdaptiveLayerPhase> for AdaptiveLayerPhaseView {
+    fn from(value: mob_dsl::AdaptiveLayerPhase) -> Self {
+        match value {
+            mob_dsl::AdaptiveLayerPhase::Validating => Self::Validating,
+            mob_dsl::AdaptiveLayerPhase::Admitted => Self::Admitted,
+            mob_dsl::AdaptiveLayerPhase::Provisioning => Self::Provisioning,
+            mob_dsl::AdaptiveLayerPhase::Running => Self::Running,
+            mob_dsl::AdaptiveLayerPhase::Collecting => Self::Collecting,
+            mob_dsl::AdaptiveLayerPhase::Completed => Self::Completed,
+            mob_dsl::AdaptiveLayerPhase::SetupFailed => Self::SetupFailed,
+            mob_dsl::AdaptiveLayerPhase::RunFailed => Self::RunFailed,
+            mob_dsl::AdaptiveLayerPhase::ResultInvalid => Self::ResultInvalid,
+            mob_dsl::AdaptiveLayerPhase::Canceled => Self::Canceled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerAdmissionRequest {
+    pub layer_id: String,
+    pub attempt: u64,
+    pub plan_digest: String,
+    pub child_mob_id: String,
+    pub member_count: u64,
+    pub token_reservation: u64,
+    pub tool_call_reservation: u64,
+    pub used_model_classes: BTreeSet<String>,
+    pub used_tool_classes: BTreeSet<String>,
+    pub used_skill_identities: BTreeSet<String>,
+    pub used_auth_binding_refs: BTreeSet<String>,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerAttempt {
+    pub layer_id: String,
+    pub attempt: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerRunStart {
+    pub layer_id: String,
+    pub attempt: u64,
+    pub child_run_id: RunId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerResultDigest {
+    pub layer_id: String,
+    pub attempt: u64,
+    pub result_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveLayerSetupFault {
+    MobCreateFailed,
+    SpawnFailed,
+    WiringFailed,
+    CanceledDuringSetup,
+    Interrupted,
+}
+
+impl From<AdaptiveLayerSetupFault> for mob_dsl::AdaptiveLayerSetupFaultKind {
+    fn from(value: AdaptiveLayerSetupFault) -> Self {
+        match value {
+            AdaptiveLayerSetupFault::MobCreateFailed => Self::MobCreateFailed,
+            AdaptiveLayerSetupFault::SpawnFailed => Self::SpawnFailed,
+            AdaptiveLayerSetupFault::WiringFailed => Self::WiringFailed,
+            AdaptiveLayerSetupFault::CanceledDuringSetup => Self::CanceledDuringSetup,
+            AdaptiveLayerSetupFault::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerSetupFaultObservation {
+    pub layer_id: String,
+    pub attempt: u64,
+    pub fault: AdaptiveLayerSetupFault,
+    pub spawned_members: u64,
+    pub requested_members: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveLayerDisposition {
+    Destroyed,
+    Retained,
+    RetainedAsEvidence,
+}
+
+impl From<AdaptiveLayerDisposition> for mob_dsl::AdaptiveLayerDispositionKind {
+    fn from(value: AdaptiveLayerDisposition) -> Self {
+        match value {
+            AdaptiveLayerDisposition::Destroyed => Self::Destroyed,
+            AdaptiveLayerDisposition::Retained => Self::Retained,
+            AdaptiveLayerDisposition::RetainedAsEvidence => Self::RetainedAsEvidence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerRetention {
+    pub layer_id: String,
+    pub attempt: u64,
+    pub disposition: AdaptiveLayerDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveLayerSnapshot {
+    pub layer_id: String,
+    pub phase: AdaptiveLayerPhaseView,
+    pub attempt: u64,
+    pub child_run_id: Option<RunId>,
+    pub result_digest: Option<String>,
+    pub plan_digest: Option<String>,
+    pub child_mob_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveRunSnapshot {
+    pub adaptive_run_id: String,
+    pub phase: Option<AdaptiveRunPhaseView>,
+    pub stop_reason: Option<AdaptiveStopReasonView>,
+    pub depth: u64,
+    pub total_decisions: u64,
+    pub repair_attempts: u64,
+    pub layer_failures: u64,
+    pub total_spawned_members: u64,
+    pub active_members: u64,
+    pub retained_layer_mobs: u64,
+    pub aggregate_token_reserved: u64,
+    pub aggregate_token_actual: u64,
+    pub aggregate_tool_call_reserved: u64,
+    pub aggregate_tool_call_actual: u64,
+    pub missing_body_digest: Option<String>,
+    pub layers: BTreeMap<String, AdaptiveLayerSnapshot>,
 }
 
 /// Raw, atomic spawn-member admission observations a tool surface extracts and
@@ -1539,6 +1837,8 @@ pub struct SpawnMemberSpec {
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// How to split budget from the orchestrator to this member.
     pub budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
+    /// Hard resource caps for the spawned member session.
+    pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
     pub auto_wire_parent: bool,
     /// Additional instruction sections appended to the system prompt for this member.
@@ -1585,6 +1885,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("launch_mode", &self.launch_mode)
             .field("tool_access_policy", &self.tool_access_policy)
             .field("budget_split_policy", &self.budget_split_policy)
+            .field("budget_limits", &self.budget_limits)
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("additional_instructions", &self.additional_instructions)
             .field("shell_env", &self.shell_env)
@@ -1612,6 +1913,7 @@ impl SpawnMemberSpec {
             launch_mode: crate::launch::MemberLaunchMode::Fresh,
             tool_access_policy: None,
             budget_split_policy: None,
+            budget_limits: None,
             auto_wire_parent: false,
             additional_instructions: None,
             shell_env: None,
@@ -1694,6 +1996,11 @@ impl SpawnMemberSpec {
 
     pub fn with_budget_split_policy(mut self, policy: crate::launch::BudgetSplitPolicy) -> Self {
         self.budget_split_policy = Some(policy);
+        self
+    }
+
+    pub fn with_budget_limits(mut self, limits: meerkat_core::BudgetLimits) -> Self {
+        self.budget_limits = Some(limits);
         self
     }
 
@@ -2011,6 +2318,13 @@ impl MobHandle {
         command: MobMachineCommand,
     ) -> Result<MobMachineCommandResult, MobError> {
         match command {
+            MobMachineCommand::PreviewRunFlowAdmission => {
+                self.send_actor_command(|reply_tx| MobCommand::PreviewRunFlowAdmission {
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
+            }
             MobMachineCommand::RunFlow {
                 flow_id,
                 activation_params,
@@ -3481,6 +3795,9 @@ impl MobHandle {
         params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
+        self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
+            .await?;
+        self.ensure_flow_targets_provisioned(&flow_id).await?;
         match self
             .execute_machine_command(MobMachineCommand::RunFlow {
                 flow_id,
@@ -3494,6 +3811,41 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    async fn ensure_flow_targets_provisioned(&self, flow_id: &FlowId) -> Result<(), MobError> {
+        let Some(flow) = self.definition.flows.get(flow_id) else {
+            return Err(MobError::FlowNotFound(flow_id.clone()));
+        };
+        let mut required_roles = BTreeSet::new();
+        for step in flow.steps.values() {
+            required_roles.insert(step.role.clone());
+        }
+
+        for role in required_roles {
+            let has_runnable_target = self
+                .list_runnable_members()
+                .await
+                .into_iter()
+                .any(|entry| entry.role == role);
+            if has_runnable_target {
+                continue;
+            }
+            let identity = AgentIdentity::from(format!(
+                "__flow_{}_{}",
+                sanitize_flow_member_segment(role.as_str()),
+                sanitize_flow_member_segment(flow_id.as_str())
+            ));
+            if self.get_member(&identity).await?.is_some() {
+                continue;
+            }
+            self.spawn_spec(
+                SpawnMemberSpec::new(role, identity)
+                    .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Request cancellation of an in-flight flow run.
@@ -5528,6 +5880,451 @@ impl MobHandle {
             reply_tx,
         })
         .await?
+    }
+
+    /// Initialize an AdaptiveRun and mint the per-run driver capability.
+    ///
+    /// This is the only public minting path for [`AdaptiveDriverCapability`].
+    pub async fn initialize_adaptive_run(
+        &self,
+        request: InitializeAdaptiveRunRequest,
+    ) -> Result<AdaptiveDriverCapability, MobError> {
+        let InitializeAdaptiveRunRequest {
+            adaptive_run_id,
+            limits,
+        } = request;
+        let dsl_run_id = mob_dsl::AdaptiveRunId(adaptive_run_id.clone());
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::InitializeAdaptiveRun {
+                adaptive_run_id: dsl_run_id.clone(),
+                max_depth: limits.max_depth,
+                max_total_decisions: limits.max_total_decisions,
+                max_repair_attempts: limits.max_repair_attempts,
+                max_layer_failures: limits.max_layer_failures,
+                max_attempts_per_layer: limits.max_attempts_per_layer,
+                max_members_per_layer: limits.max_members_per_layer,
+                max_total_spawned_members: limits.max_total_spawned_members,
+                max_active_members: limits.max_active_members,
+                max_retained_layer_mobs: limits.max_retained_layer_mobs,
+                max_aggregate_tokens: limits.max_aggregate_tokens,
+                max_aggregate_tool_calls: limits.max_aggregate_tool_calls,
+                allowed_model_classes: limits.allowed_model_classes,
+                allowed_tool_classes: limits.allowed_tool_classes,
+                allowed_skill_identities: limits.allowed_skill_identities,
+                allowed_auth_binding_refs: limits.allowed_auth_binding_refs,
+                deadline_ms: limits.deadline_ms,
+            })
+            .await?;
+        let initialized = effects.into_iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::AdaptiveRunInitialized { adaptive_run_id }
+                    if adaptive_run_id == dsl_run_id
+            )
+        });
+        if !initialized {
+            return Err(MobError::Internal(
+                "MobMachine accepted InitializeAdaptiveRun but emitted no adaptive capability evidence"
+                    .into(),
+            ));
+        }
+        Ok(AdaptiveDriverCapability {
+            adaptive_run_id,
+            _private: (),
+        })
+    }
+
+    pub async fn adaptive_run_snapshot(
+        &self,
+        capability: &AdaptiveDriverCapability,
+    ) -> Result<AdaptiveRunSnapshot, MobError> {
+        self.adaptive_run_snapshot_by_id(&capability.adaptive_run_id)
+            .await
+    }
+
+    /// Read-only projection of adaptive kernel state for public status surfaces.
+    ///
+    /// Mutation of the adaptive kernel remains gated by
+    /// `AdaptiveDriverCapability`; status surfaces need to project by the
+    /// caller-visible AdaptiveRun id without minting a driver capability.
+    pub async fn adaptive_run_snapshot_by_id(
+        &self,
+        adaptive_run_id: &str,
+    ) -> Result<AdaptiveRunSnapshot, MobError> {
+        let run_id = mob_dsl::AdaptiveRunId(adaptive_run_id.to_string());
+        let state = self.query_machine_state().await?;
+        let phase = state
+            .adaptive_run_phase
+            .get(&run_id)
+            .copied()
+            .map(Into::into);
+        let stop_reason = state
+            .adaptive_stop_reason
+            .get(&run_id)
+            .copied()
+            .map(Into::into);
+        let mut layers = BTreeMap::new();
+        let layer_prefix = format!("{adaptive_run_id}-");
+        for (layer_id, phase) in &state.adaptive_layer_phase {
+            let layer_key = layer_id.0.clone();
+            if !layer_key.starts_with(&layer_prefix) {
+                continue;
+            }
+            layers.insert(
+                layer_key.clone(),
+                AdaptiveLayerSnapshot {
+                    layer_id: layer_key,
+                    phase: (*phase).into(),
+                    attempt: state
+                        .adaptive_layer_attempt
+                        .get(layer_id)
+                        .copied()
+                        .unwrap_or_default(),
+                    child_run_id: state
+                        .adaptive_layer_run_id
+                        .get(layer_id)
+                        .and_then(|run_id| run_id.0.parse::<RunId>().ok()),
+                    result_digest: state.adaptive_layer_result_digest.get(layer_id).cloned(),
+                    plan_digest: state.adaptive_layer_plan_digest.get(layer_id).cloned(),
+                    child_mob_id: state
+                        .adaptive_layer_child_mob_id
+                        .get(layer_id)
+                        .map(|mob_id| mob_id.0.clone()),
+                },
+            );
+        }
+        Ok(AdaptiveRunSnapshot {
+            adaptive_run_id: adaptive_run_id.to_string(),
+            phase,
+            stop_reason,
+            depth: state
+                .adaptive_depth
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            total_decisions: state
+                .adaptive_total_decisions
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            repair_attempts: state
+                .adaptive_repair_attempts
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            layer_failures: state
+                .adaptive_layer_failures
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            total_spawned_members: state
+                .adaptive_total_spawned_members
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            active_members: state
+                .adaptive_active_members
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            retained_layer_mobs: state
+                .adaptive_retained_layer_mobs
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            aggregate_token_reserved: state
+                .adaptive_aggregate_token_reserved
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            aggregate_token_actual: state
+                .adaptive_aggregate_token_actual
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            aggregate_tool_call_reserved: state
+                .adaptive_aggregate_tool_call_reserved
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            aggregate_tool_call_actual: state
+                .adaptive_aggregate_tool_call_actual
+                .get(&run_id)
+                .copied()
+                .unwrap_or_default(),
+            missing_body_digest: state.adaptive_missing_body_digest.get(&run_id).cloned(),
+            layers,
+        })
+    }
+
+    pub async fn record_adaptive_planning_decision(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        decision_kind: AdaptivePlanningDecisionKind,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordPlanningDecision {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            decision_kind: decision_kind.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_plan_rejected(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        layer_id: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordPlanRejected {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(layer_id.into()),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn resolve_adaptive_layer_admission(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        request: AdaptiveLayerAdmissionRequest,
+    ) -> Result<AdaptiveLayerAdmission, MobError> {
+        let dsl_run_id = mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone());
+        let dsl_layer_id = mob_dsl::AdaptiveLayerId(request.layer_id);
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveLayerAdmission {
+                adaptive_run_id: dsl_run_id.clone(),
+                layer_id: dsl_layer_id.clone(),
+                attempt: request.attempt,
+                plan_digest: request.plan_digest,
+                child_mob_id: mob_dsl::MobId(request.child_mob_id),
+                member_count: request.member_count,
+                token_reservation: request.token_reservation,
+                tool_call_reservation: request.tool_call_reservation,
+                used_model_classes: request.used_model_classes,
+                used_tool_classes: request.used_tool_classes,
+                used_skill_identities: request.used_skill_identities,
+                used_auth_binding_refs: request.used_auth_binding_refs,
+                observed_at_ms: request.observed_at_ms,
+            })
+            .await?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::AdaptiveLayerAdmissionResolved {
+                    adaptive_run_id,
+                    layer_id,
+                    admission,
+                } if adaptive_run_id == dsl_run_id && layer_id == dsl_layer_id => {
+                    Some(AdaptiveLayerAdmission::from(admission))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted ResolveLayerAdmission but emitted no adaptive admission verdict"
+                        .into(),
+                )
+            })
+    }
+
+    pub async fn record_adaptive_layer_provisioned(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        attempt: AdaptiveLayerAttempt,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerProvisioned {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),
+            attempt: attempt.attempt,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_run_started(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        start: AdaptiveLayerRunStart,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerRunStarted {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(start.layer_id),
+            attempt: start.attempt,
+            child_run_id: mob_dsl::RunId::from(start.child_run_id.to_string()),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn ingest_adaptive_layer_terminal(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        attempt: AdaptiveLayerAttempt,
+        child_run: &MobRun,
+    ) -> Result<(), MobError> {
+        if !crate::run::mob_machine_run_status_is_terminal(&child_run.run_id, &child_run.status)? {
+            return Err(MobError::Internal(format!(
+                "cannot ingest non-terminal adaptive layer run '{}'",
+                child_run.run_id
+            )));
+        }
+        let result_class = match crate::run::mob_machine_run_public_result_class(
+            &child_run.run_id,
+            &child_run.status,
+        )? {
+            crate::run::MobFlowRunPublicResultClass::Success => {
+                mob_dsl::FlowRunPublicResultClassKind::Success
+            }
+            crate::run::MobFlowRunPublicResultClass::Error => {
+                mob_dsl::FlowRunPublicResultClassKind::Failure
+            }
+        };
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::IngestLayerTerminal {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),
+            attempt: attempt.attempt,
+            result_class,
+            actual_tokens: 0,
+            actual_tool_calls: 0,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_setup_fault(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        observation: AdaptiveLayerSetupFaultObservation,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerSetupFault {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(observation.layer_id),
+            attempt: observation.attempt,
+            fault: observation.fault.into(),
+            spawned_members: observation.spawned_members,
+            requested_members: observation.requested_members,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_result_validated(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        result: AdaptiveLayerResultDigest,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerResultValidated {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(result.layer_id),
+            attempt: result.attempt,
+            result_digest: result.result_digest,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_result_invalid(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        attempt: AdaptiveLayerAttempt,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerResultInvalid {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),
+            attempt: attempt.attempt,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_mob_destroyed(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        attempt: AdaptiveLayerAttempt,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerMobDestroyed {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),
+            attempt: attempt.attempt,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_mob_retained(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        retention: AdaptiveLayerRetention,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerMobRetained {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(retention.layer_id),
+            attempt: retention.attempt,
+            disposition: retention.disposition.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_cleanup_resolved(
+        &self,
+        capability: &AdaptiveDriverCapability,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordCleanupResolved {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_body_evidence_missing(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        missing_digest: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordBodyEvidenceMissing {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            missing_digest: missing_digest.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn resolve_adaptive_finish(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        final_result_digest: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveAdaptiveFinish {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            final_result_digest: final_result_digest.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn request_adaptive_cancel(
+        &self,
+        capability: &AdaptiveDriverCapability,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RequestAdaptiveCancel {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_deadline_observed(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        observed_at_ms: u64,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordDeadlineObserved {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            observed_at_ms,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Resolve the composite spawn-member operator admission verdict.

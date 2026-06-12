@@ -713,10 +713,22 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobFlowRunResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/run",
+                "Invoke a mob as a typed callable run",
+                "MobRunParams",
+                "MobFlowRunResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/flow_status",
                 "Get status for a mob flow run",
                 "MobFlowStatusParams",
                 "MobFlowStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/run_result",
+                "Get the typed output envelope for a mob run",
+                "MobRunResultParams",
+                "MobRunResult",
             ),
             RpcMethodDescriptor::typed(
                 "mob/flow_cancel",
@@ -1420,10 +1432,16 @@ mod tests {
                 Some("MobFlowRunParams"),
                 Some("MobFlowRunResult"),
             ),
+            ("mob/run", Some("MobRunParams"), Some("MobFlowRunResult")),
             (
                 "mob/flow_status",
                 Some("MobFlowStatusParams"),
                 Some("MobFlowStatusResult"),
+            ),
+            (
+                "mob/run_result",
+                Some("MobRunResultParams"),
+                Some("MobRunResult"),
             ),
             (
                 "mob/flow_cancel",

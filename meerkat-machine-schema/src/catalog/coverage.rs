@@ -13,9 +13,9 @@ use crate::{CompositionSchema, MachineSchema, SchedulerRule};
 
 use super::{
     compositions::{
-        auth_lease_bundle_composition, meerkat_mob_seam_composition, schedule_bundle_composition,
-        schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
-        workgraph_attention_bundle_composition,
+        adaptive_mob_bundle_composition, auth_lease_bundle_composition,
+        meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
+        schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
     },
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine,
@@ -2116,6 +2116,30 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                         .routes(&["revision_supersede_enters_occurrence_authority"]),
                 ),
             ],
+        ),
+        composition_manifest_from_schema(
+            &adaptive_mob_bundle_composition(),
+            &[
+                machine_anchor(
+                    "adaptive_mob_bundle_kernel",
+                    "MobMachine",
+                    "meerkat-mob/src/runtime/handle.rs",
+                    "adaptive Mobpack control mob owns the adaptive run kernel while layer mobs publish terminal classifications through the driver seam",
+                    CoverageClaims::none(),
+                ),
+                machine_anchor(
+                    "adaptive_mob_bundle_driver",
+                    "MobMachine",
+                    "meerkat-mob/src/generated/adaptive_mob_bundle.rs",
+                    "generated adaptive bundle driver watches layer terminal classification and dispatches typed terminal feedback into the control mob adaptive kernel",
+                    CoverageClaims::none(),
+                ),
+            ],
+            &[scenario(
+                "layer-terminal-feedback",
+                "a terminal child layer mob is observed by the adaptive bundle driver and fed back to the control mob adaptive kernel without a direct static route",
+                CoverageClaims::none(),
+            )],
         ),
         composition_manifest_from_schema(
             &auth_lease_bundle_composition(),

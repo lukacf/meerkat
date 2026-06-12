@@ -499,6 +499,7 @@ mod tests {
             crate::service::OpaquePrincipalToken::new("generated-effect-test"),
             true,
             true,
+            false,
             std::collections::BTreeSet::from(["test-mob".to_string()]),
             std::collections::BTreeMap::new(),
             None,

@@ -9,12 +9,12 @@
 //! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
+use meerkat_core::{AgentToolDispatcher, ToolUnavailableReason};
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
     SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
@@ -233,12 +233,17 @@ impl AgentMobToolSurface {
             &snapshot_context,
             meerkat_core::service::MobToolSnapshotContext::ParentOwned(_)
         );
-        let has_generated_authority = effective_authority
+        let authority_snapshot = effective_authority
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_generated_authority_context();
+            .clone();
+        let has_generated_authority = authority_snapshot.is_generated_authority_context();
         let tools = if has_generated_authority {
-            build_tool_defs_with_profile_support(has_profile_store, has_snapshot_provider)
+            build_tool_defs_with_profile_support(
+                has_profile_store,
+                has_snapshot_provider,
+                authority_snapshot.can_run_adaptive_packs(),
+            )
         } else {
             Arc::<[Arc<ToolDef>]>::from([])
         };
@@ -1522,12 +1527,13 @@ fn typed_schema<T: JsonSchema>() -> Value {
 
 #[cfg(test)]
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
-    build_tool_defs_with_profile_support(false, false)
+    build_tool_defs_with_profile_support(false, false, false)
 }
 
 fn build_tool_defs_with_profile_support(
     has_profile_store: bool,
     has_snapshot_provider: bool,
+    _can_run_adaptive_packs: bool,
 ) -> Arc<[Arc<ToolDef>]> {
     let mut defs = vec![
         tool_def(
@@ -3132,7 +3138,7 @@ mod tests {
     /// surface (15 tools) is exercised so every tool_def call is covered.
     #[test]
     fn agent_mob_tool_schemas_are_typed_not_handwritten() {
-        let defs = build_tool_defs_with_profile_support(true, true);
+        let defs = build_tool_defs_with_profile_support(true, true, false);
         for def in defs.iter() {
             assert!(
                 def.input_schema
@@ -4284,7 +4290,7 @@ mod tests {
 
     #[test]
     fn test_profile_tools_present_when_store_available() {
-        let defs = build_tool_defs_with_profile_support(true, false);
+        let defs = build_tool_defs_with_profile_support(true, false, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mob_profile_create"));
         assert!(names.contains(&"mob_profile_get"));
@@ -4297,7 +4303,7 @@ mod tests {
 
     #[test]
     fn test_profile_tools_absent_without_store() {
-        let defs = build_tool_defs_with_profile_support(false, false);
+        let defs = build_tool_defs_with_profile_support(false, false, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(!names.contains(&"mob_profile_create"));
         assert!(!names.contains(&"mob_profile_list_sources"));
@@ -4305,9 +4311,31 @@ mod tests {
 
     #[test]
     fn test_list_sources_tool_present_when_both_store_and_provider() {
-        let defs = build_tool_defs_with_profile_support(true, true);
+        let defs = build_tool_defs_with_profile_support(true, true, false);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mob_profile_list_sources"));
+    }
+
+    #[test]
+    fn test_adaptive_authority_does_not_expose_adaptive_named_agent_tools() {
+        let without = build_tool_defs_with_profile_support(false, false, false);
+        let without_names: Vec<&str> = without.iter().map(|d| d.name.as_str()).collect();
+        assert!(!without_names.contains(&"adaptive_flow_start"));
+
+        let with = build_tool_defs_with_profile_support(false, false, true);
+        assert!(
+            with.iter()
+                .all(|tool| !tool.name.as_str().contains("adaptive")),
+            "agent tools must expose mob run capabilities without adaptive implementation names"
+        );
+        assert!(
+            with.iter().all(|tool| {
+                tool.provenance
+                    .as_ref()
+                    .is_none_or(|provenance| provenance.source_id.as_str() != "mob-adaptive")
+            }),
+            "agent tool provenance must not expose the adaptive implementation crate"
+        );
     }
 
     #[tokio::test]

@@ -138,6 +138,39 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
+#[test]
+fn skipped_composition_tlc_still_requires_ci_structural_invariants() {
+    let schema = meerkat_machine_schema::canonical_composition_schemas()
+        .into_iter()
+        .find(|schema| schema.name.as_str() == "adaptive_mob_bundle")
+        .expect("adaptive composition exists");
+    let slug = composition_slug(&schema.name);
+    let dir = tempdir().expect("tempdir");
+    let composition_dir = dir.path().join("specs/compositions").join(&slug);
+    fs::create_dir_all(&composition_dir).expect("create composition dir");
+
+    fs::write(
+        composition_dir.join("ci.cfg"),
+        "SPECIFICATION Spec\nINVARIANTS\n  TRUE\n",
+    )
+    .expect("write incomplete cfg");
+    let err = ensure_composition_ci_structural_invariants(dir.path(), &slug, &schema)
+        .expect_err("missing structural invariants should fail closed");
+    assert!(
+        err.to_string().contains("omits structural invariants"),
+        "unexpected error: {err:#}"
+    );
+
+    fs::write(
+        composition_dir.join("ci.cfg"),
+        render_composition_ci_cfg(&schema, false),
+    )
+    .expect("write generated cfg");
+    ensure_composition_ci_structural_invariants(dir.path(), &slug, &schema)
+        .expect("generated ci.cfg should include structural invariants");
+}
+
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {
     for mismatch in mismatches {
         let Some((_, rest)) = mismatch.split_once("coverage anchor ") else {

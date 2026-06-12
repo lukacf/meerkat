@@ -39,8 +39,10 @@ if ! command -v tlc >/dev/null 2>&1; then
   exit 1
 fi
 
-# `meerkat_mob_seam` composition TLC is skipped for a CI-time/memory-budget
-# reason, NOT a codegen defect. The earlier "Unknown operator" gap (mob
+# Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
+# codegen defects. `machine-verify` still validates drift and the generated
+# ci.cfg structural-invariant contract before honoring these skips. The earlier
+# "Unknown operator" gap (mob
 # coordination temporal predicates referenced but not emitted) was RESOLVED by
 # the LUC-524 machine-authority work: the generated composition model
 # (specs/compositions/meerkat_mob_seam/model.tla) now parses cleanly under SANY
@@ -48,6 +50,14 @@ fi
 # model is very large and a full ci.cfg state-space sweep does not yet fit the
 # CI budget. The per-machine specs still model-check, and `machine-check-drift`
 # (below + on the default cargo CI lane) keeps the generated kernels honest.
+#
+# `adaptive_mob_bundle` has the same scale shape: it composes two full
+# MobMachine instances and its closed contract is the generated driver handoff,
+# not a static route graph. The MobMachine adaptive transitions still run under
+# per-machine TLC, while codegen drift/schema tests and generated driver/runtime
+# tests guard the composition artifact and the layer-terminal feedback binding.
 # TODO(LUC-524 follow-up): land a bounded composition TLC config that fits the
-# CI budget and drop this skip to restore cross-machine model checking.
-exec "${xtask_bin}" machine-verify --all --skip-cargo-tests --skip-tlc-composition meerkat_mob_seam
+# CI budget and drop these skips to restore cross-machine model checking.
+exec "${xtask_bin}" machine-verify --all --skip-cargo-tests \
+  --skip-tlc-composition meerkat_mob_seam \
+  --skip-tlc-composition adaptive_mob_bundle

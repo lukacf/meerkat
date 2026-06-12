@@ -65,6 +65,10 @@ import {
   type LiveTruncateParams,
   type LiveWebrtcAnswerParams,
   type LiveWebrtcAnswerResult,
+  type MobFlowRunResult,
+  type MobRunParams,
+  type MobRunResult,
+  type MobRunResultParams,
   type WireLiveAdapterObservation,
   type MobTurnStartParams,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
@@ -117,6 +121,7 @@ import type {
   MobProfile,
   MobProfileDeleteResult,
   MobProfileLookupResult,
+  MobRunResult as PublicMobRunResult,
   MobSpawnResult,
   MobStatus,
   MobSummary,
@@ -2291,8 +2296,26 @@ export class MeerkatClient {
     return String(result.run_id ?? "");
   }
 
+  async runMob(
+    mobId: string,
+    params: Record<string, unknown> = {},
+    options: { prompt?: string; flowId?: string } = {},
+  ): Promise<string> {
+    const payload: MobRunParams = { mob_id: mobId, params };
+    if (options.prompt !== undefined) payload.prompt = options.prompt;
+    if (options.flowId !== undefined) payload.flow_id = options.flowId;
+    const result = (await this.request("mob/run", payload)) as MobFlowRunResult;
+    return String(result.run_id ?? "");
+  }
+
   async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {
     const result = await this.request("mob/flow_status", { mob_id: mobId, run_id: runId });
+    return result.run == null ? null : { run: result.run as Record<string, unknown> };
+  }
+
+  async getMobRunResult(mobId: string, runId: string): Promise<PublicMobRunResult | null> {
+    const params: MobRunResultParams = { mob_id: mobId, run_id: runId };
+    const result = (await this.request("mob/run_result", params)) as MobRunResult;
     return result.run == null ? null : { run: result.run as Record<string, unknown> };
   }
 

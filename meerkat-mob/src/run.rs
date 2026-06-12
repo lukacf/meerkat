@@ -459,6 +459,23 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
             | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
             | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
+            | mob_dsl::MobMachineInput::InitializeAdaptiveRun { .. }
+            | mob_dsl::MobMachineInput::RecordPlanningDecision { .. }
+            | mob_dsl::MobMachineInput::RecordPlanRejected { .. }
+            | mob_dsl::MobMachineInput::ResolveLayerAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordLayerProvisioned { .. }
+            | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
+            | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
+            | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobRetained { .. }
+            | mob_dsl::MobMachineInput::RecordCleanupResolved { .. }
+            | mob_dsl::MobMachineInput::RecordBodyEvidenceMissing { .. }
+            | mob_dsl::MobMachineInput::ResolveAdaptiveFinish { .. }
+            | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
+            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. }
     };
 }
 
@@ -1625,7 +1642,24 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
             | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
             | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
-            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. } => {
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
+            | mob_dsl::MobMachineInput::InitializeAdaptiveRun { .. }
+            | mob_dsl::MobMachineInput::RecordPlanningDecision { .. }
+            | mob_dsl::MobMachineInput::RecordPlanRejected { .. }
+            | mob_dsl::MobMachineInput::ResolveLayerAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordLayerProvisioned { .. }
+            | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
+            | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
+            | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
+            | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }
+            | mob_dsl::MobMachineInput::RecordLayerMobRetained { .. }
+            | mob_dsl::MobMachineInput::RecordCleanupResolved { .. }
+            | mob_dsl::MobMachineInput::RecordBodyEvidenceMissing { .. }
+            | mob_dsl::MobMachineInput::ResolveAdaptiveFinish { .. }
+            | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
+            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));
@@ -4529,6 +4563,44 @@ impl MobRun {
         })
     }
 
+    pub fn public_run_result_value(
+        run: Option<&Self>,
+    ) -> Result<Option<meerkat_contracts::WireMobRunResultEnvelope>, MobError> {
+        match run {
+            Some(run) => run.public_result_value().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Public typed result-envelope projection for callable mob runs.
+    ///
+    /// `root_step_outputs` is the MobRun-owned output ledger. A single root
+    /// output is projected as the callable result; multi-root flows keep every
+    /// step output under `outputs` and expose a stable `{ "steps": ... }`
+    /// result object for machine consumers.
+    pub fn public_result_value(
+        &self,
+    ) -> Result<meerkat_contracts::WireMobRunResultEnvelope, MobError> {
+        let outputs: BTreeMap<String, serde_json::Value> = self
+            .root_step_outputs
+            .iter()
+            .map(|(step_id, value)| (step_id.to_string(), value.clone()))
+            .collect();
+        let result = match outputs.len() {
+            0 => None,
+            1 => outputs.values().next().cloned(),
+            _ => Some(serde_json::json!({ "steps": outputs.clone() })),
+        };
+        Ok(meerkat_contracts::WireMobRunResultEnvelope {
+            run_id: self.run_id.to_string(),
+            mob_id: self.mob_id.to_string(),
+            flow_id: self.flow_id.to_string(),
+            status: self.wire_status(),
+            result,
+            outputs,
+        })
+    }
+
     /// Read-only access to the run's current status.
     pub fn status(&self) -> &MobRunStatus {
         &self.status
@@ -6841,6 +6913,66 @@ mod tests {
             failure_entry.get("reason"),
             Some(&serde_json::json!("boom"))
         );
+    }
+
+    #[test]
+    fn public_run_result_projection_returns_typed_callable_envelope() {
+        let mut single = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            MobRun::flow_state_for_steps([StepId::from("translate")]).unwrap(),
+            serde_json::json!({"prompt":"Hello"}),
+        );
+        single.status = MobRunStatus::Completed;
+        single.root_step_outputs.insert(
+            StepId::from("translate"),
+            serde_json::json!({"language":"fr","text":"Bonjour"}),
+        );
+
+        let envelope = single.public_result_value().expect("public result");
+        assert_eq!(envelope.mob_id, "mob");
+        assert_eq!(envelope.flow_id, "flow-a");
+        assert_eq!(
+            envelope.status,
+            meerkat_contracts::WireMobRunStatus::Completed
+        );
+        assert_eq!(
+            envelope.result,
+            Some(serde_json::json!({"language":"fr","text":"Bonjour"}))
+        );
+        assert_eq!(
+            envelope.outputs,
+            BTreeMap::from([(
+                "translate".to_string(),
+                serde_json::json!({"language":"fr","text":"Bonjour"})
+            )])
+        );
+
+        let mut multi = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-b"),
+            MobRun::flow_state_for_steps([StepId::from("a"), StepId::from("b")]).unwrap(),
+            serde_json::json!({}),
+        );
+        multi.status = MobRunStatus::Completed;
+        multi
+            .root_step_outputs
+            .insert(StepId::from("a"), serde_json::json!({"ok":1}));
+        multi
+            .root_step_outputs
+            .insert(StepId::from("b"), serde_json::json!({"ok":2}));
+
+        let envelope = multi.public_result_value().expect("public result");
+        assert_eq!(
+            envelope.result,
+            Some(serde_json::json!({
+                "steps": {
+                    "a": {"ok": 1},
+                    "b": {"ok": 2}
+                }
+            }))
+        );
+        assert_eq!(envelope.outputs.len(), 2);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::trust::{
 };
 use crate::validate::PackValidationError;
 use crate::vocabulary::ArchiveSection;
-use meerkat_mob::MobDefinition;
+use meerkat_mob::{MobDefinition, MobpackCallableConfig, MobpackRunSpec, ProfileName};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -23,11 +23,22 @@ pub struct MobpackArchive {
     pub skills: BTreeMap<String, Vec<u8>>,
     pub hooks: BTreeMap<String, Vec<u8>>,
     pub mcp: BTreeMap<String, Vec<u8>>,
+    pub adaptive: BTreeMap<String, Vec<u8>>,
+    pub schemas: BTreeMap<String, Vec<u8>>,
     /// Typed, capability-gated deploy defaults parsed from the pack's
     /// `config/defaults.toml` at load. Replaces the former raw config byte map
     /// so pack-authored TOML can never reach arbitrary runtime configuration:
     /// only the allow-listed knobs in [`MobpackDeployPolicy`] survive parsing.
     pub deploy_policy: MobpackDeployPolicy,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MobpackArchiveSections {
+    pub skills: BTreeMap<String, Vec<u8>>,
+    pub hooks: BTreeMap<String, Vec<u8>>,
+    pub mcp: BTreeMap<String, Vec<u8>>,
+    pub adaptive: BTreeMap<String, Vec<u8>>,
+    pub schemas: BTreeMap<String, Vec<u8>>,
 }
 
 impl MobpackArchive {
@@ -37,17 +48,17 @@ impl MobpackArchive {
     pub(crate) fn new(
         manifest: MobpackManifest,
         definition: MobDefinition,
-        skills: BTreeMap<String, Vec<u8>>,
-        hooks: BTreeMap<String, Vec<u8>>,
-        mcp: BTreeMap<String, Vec<u8>>,
+        sections: MobpackArchiveSections,
         deploy_policy: MobpackDeployPolicy,
     ) -> Self {
         Self {
             manifest,
             definition,
-            skills,
-            hooks,
-            mcp,
+            skills: sections.skills,
+            hooks: sections.hooks,
+            mcp: sections.mcp,
+            adaptive: sections.adaptive,
+            schemas: sections.schemas,
             deploy_policy,
         }
     }
@@ -74,6 +85,8 @@ impl MobpackArchive {
         let mut skills = BTreeMap::new();
         let mut hooks = BTreeMap::new();
         let mut mcp = BTreeMap::new();
+        let mut adaptive = BTreeMap::new();
+        let mut schemas = BTreeMap::new();
         for (path, bytes) in files {
             match ArchiveSection::classify(path) {
                 Some(ArchiveSection::Skills) => {
@@ -84,6 +97,12 @@ impl MobpackArchive {
                 }
                 Some(ArchiveSection::Mcp) => {
                     mcp.insert(path.clone(), bytes.clone());
+                }
+                Some(ArchiveSection::Adaptive) => {
+                    adaptive.insert(path.clone(), bytes.clone());
+                }
+                Some(ArchiveSection::Schemas) => {
+                    schemas.insert(path.clone(), bytes.clone());
                 }
                 // The config section is parsed into the typed deploy policy
                 // below, not stored as opaque bytes.
@@ -98,11 +117,31 @@ impl MobpackArchive {
         Ok(Self::new(
             manifest,
             definition,
-            skills,
-            hooks,
-            mcp,
+            MobpackArchiveSections {
+                skills,
+                hooks,
+                mcp,
+                adaptive,
+                schemas,
+            },
             deploy_policy,
         ))
+    }
+
+    /// Lower archive-format data into the mob runtime's generic mobpack run
+    /// specification. The format crate owns archive layout and manifest
+    /// parsing; execution semantics remain owned by `meerkat-mob`.
+    pub fn mob_run_spec(&self) -> MobpackRunSpec {
+        let callable = self.manifest.adaptive.as_ref().map(|section| {
+            MobpackCallableConfig::new(ProfileName::from(section.flowmaster_profile.as_str()))
+        });
+        MobpackRunSpec::new(
+            self.definition.clone(),
+            self.skills.clone(),
+            callable,
+            self.adaptive.clone(),
+            self.schemas.clone(),
+        )
     }
 }
 
@@ -202,11 +241,10 @@ mod tests {
                 surfaces: std::collections::BTreeSet::from([
                     crate::vocabulary::SurfaceSelector::Cli,
                 ]),
+                adaptive: None,
             },
             serde_json::from_str::<MobDefinition>("{\"id\":\"mob\"}").unwrap(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            MobpackArchiveSections::default(),
             crate::deploy_policy::MobpackDeployPolicy::default(),
         );
 
@@ -230,6 +268,14 @@ mod tests {
             ("hooks/run.sh".to_string(), b"#!/bin/sh\necho hi\n".to_vec()),
             ("mcp/server.toml".to_string(), b"name='s'".to_vec()),
             (
+                "adaptive/flowmaster.prompt.md".to_string(),
+                b"Plan the next layer as JSON.".to_vec(),
+            ),
+            (
+                "schemas/finding-set.schema.json".to_string(),
+                br#"{"type":"object"}"#.to_vec(),
+            ),
+            (
                 "config/defaults.toml".to_string(),
                 b"max_tokens = 400".to_vec(),
             ),
@@ -241,6 +287,16 @@ mod tests {
         assert!(archive.skills.contains_key("skills/review.md"));
         assert!(archive.hooks.contains_key("hooks/run.sh"));
         assert!(archive.mcp.contains_key("mcp/server.toml"));
+        assert!(
+            archive
+                .adaptive
+                .contains_key("adaptive/flowmaster.prompt.md")
+        );
+        assert!(
+            archive
+                .schemas
+                .contains_key("schemas/finding-set.schema.json")
+        );
         // `config/defaults.toml` is parsed into the typed deploy policy, not
         // retained as opaque bytes.
         assert_eq!(archive.deploy_policy.max_tokens, Some(400));

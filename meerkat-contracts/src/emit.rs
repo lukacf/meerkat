@@ -86,6 +86,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobFlowsResult": schema_for!(crate::wire::MobFlowsResult),
         "MobFlowRunResult": schema_for!(crate::wire::MobFlowRunResult),
         "MobFlowStatusResult": schema_for!(crate::wire::MobFlowStatusResult),
+        "MobRunResultParams": schema_for!(crate::wire::MobRunResultParams),
+        "MobRunResult": schema_for!(crate::wire::MobRunResult),
+        "WireMobRunResultEnvelope": schema_for!(crate::wire::WireMobRunResultEnvelope),
         // #54/#159/#235/#313: typed mob run / member-connectivity / error wire types
         "WireMobRun": schema_for!(crate::wire::WireMobRun),
         "WireMobRunStatus": schema_for!(crate::wire::WireMobRunStatus),
@@ -386,6 +389,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobUnwireParams": schema_for!(crate::wire::MobUnwireParams),
         "MobLifecycleParams": schema_for!(crate::wire::MobLifecycleParams),
         "MobAppendSystemContextParams": schema_for!(crate::wire::MobAppendSystemContextParams),
+        "MobRunParams": schema_for!(crate::wire::MobRunParams),
         "MobFlowRunParams": schema_for!(crate::wire::MobFlowRunParams),
         "MobFlowStatusParams": schema_for!(crate::wire::MobFlowStatusParams),
         "MobFlowCancelParams": schema_for!(crate::wire::MobFlowCancelParams),

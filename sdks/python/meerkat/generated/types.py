@@ -622,6 +622,17 @@ shape so consumers never re-derive run identity or lifecycle from a free
 
 
 @dataclass
+class WireMobRunResultEnvelope:
+    """Typed output envelope for a completed or in-flight mob flow run."""
+    flow_id: str
+    mob_id: str
+    run_id: str
+    status: Literal['pending', 'running', 'completed', 'failed', 'canceled']
+    outputs: Optional[dict[str, Any]] = None
+    result: Optional[Any] = None
+
+
+@dataclass
 class WireMobRunStatus:
     """Lifecycle status of a flow run on the wire. Mirrors
 `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
@@ -856,6 +867,18 @@ class MobFlowsResult:
 
 
 @dataclass
+class MobRunParams:
+    """Request payload for `mob/run`.
+
+Starts the pack's callable flow. `flow_id` defaults to `main`; `prompt` is
+sugar for `params.prompt` when the caller does not provide that key."""
+    mob_id: str
+    flow_id: Optional[str] = None
+    params: Optional[Any] = None
+    prompt: Optional[str] = None
+
+
+@dataclass
 class MobFlowRunParams:
     """Request payload for `mob/flow_run`."""
     flow_id: str
@@ -879,6 +902,21 @@ class MobFlowStatusParams:
 @dataclass
 class MobFlowStatusResult:
     """Response payload for `mob/flow_status`.
+
+`run` is `None` when the requested run id has no persisted run."""
+    run: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class MobRunResultParams:
+    """Request payload for `mob/run_result`."""
+    mob_id: str
+    run_id: str
+
+
+@dataclass
+class MobRunResult:
+    """Response payload for `mob/run_result`.
 
 `run` is `None` when the requested run id has no persisted run."""
     run: Optional[dict[str, Any]] = None

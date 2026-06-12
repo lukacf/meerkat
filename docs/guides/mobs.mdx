@@ -504,18 +504,20 @@ Run and inspect a flow:
     ```python
     run_id = await mob.run_flow("triage", {"severity": "critical"})
     status = await mob.flow_status(run_id)
+    result = await mob.run_result(run_id)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const runId = await mob.runFlow("triage", { severity: "critical" });
     const status = await mob.flowStatus(runId);
+    const result = await mob.runResult(runId);
     ```
   </Tab>
   <Tab title="CLI">
     ```bash
-    rkat mob run-flow release-triage --flow triage --params '{"severity":"critical"}'
-    rkat mob flow-status release-triage flow_run_123
+    rkat mob run release-triage --flow triage --param severity='"critical"'
+    rkat mob status release-triage <RUN_ID>
     ```
   </Tab>
 </Tabs>
@@ -587,7 +589,7 @@ artifact:
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
-rkat mob deploy ./dist/release-triage.mobpack "triage latest release regressions"
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest release regressions"
 ```
 
 Use mobpacks when the mob should be versioned, signed, reviewed, deployed, or

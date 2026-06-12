@@ -44,6 +44,8 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+#[doc(hidden)]
+pub mod adaptive;
 pub mod backend;
 mod build;
 pub mod coordination;
@@ -133,21 +135,30 @@ pub use runtime::bridge_protocol::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::run_mobpack_callable;
 pub use runtime::{
-    CurrentMobAdmission, ExternalPeerBindingSpec, HelperOptions, HelperResult,
-    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobBuilder, MobDestroyError,
-    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
-    MobEventsSubscriptionConfig, MobHandle, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobSpawnManyFailure, MobState,
-    MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
-    PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberAdmission, SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec,
-    SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
+    AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
+    AdaptiveLayerResultDigest, AdaptiveLayerRetention, AdaptiveLayerRunStart,
+    AdaptiveLayerSetupFault, AdaptiveLayerSetupFaultObservation, AdaptiveLayerSnapshot,
+    AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
+    AdaptiveStopReasonView, CurrentMobAdmission, ExternalPeerBindingSpec, HelperOptions,
+    HelperResult, InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle,
+    MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
+    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
+    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy,
+    SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride, SpawnToolAdmission,
+    SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire,
+    stored_realm_profile_to_wire,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
+pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

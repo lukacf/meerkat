@@ -72,6 +72,7 @@ impl MobpackRunSpec {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 pub async fn run_mobpack_callable(
     spec: &MobpackRunSpec,
     control_mob: MobHandle,
@@ -91,6 +92,7 @@ struct PackAdaptiveRuntime {
     session_service: Arc<dyn MobSessionService>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
@@ -192,6 +194,7 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 async fn run_adaptive_callable(
     spec: &MobpackRunSpec,
     control_mob: MobHandle,

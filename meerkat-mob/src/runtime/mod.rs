@@ -135,9 +135,9 @@ pub use handle::{
     WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
-pub use mobpack_execution::{
-    MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec, run_mobpack_callable,
-};
+#[cfg(feature = "runtime-adapter")]
+pub use mobpack_execution::run_mobpack_callable;
+pub use mobpack_execution::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,

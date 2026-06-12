@@ -135,6 +135,8 @@ pub use runtime::bridge_protocol::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::run_mobpack_callable;
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
@@ -156,7 +158,7 @@ pub use runtime::{
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
-pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec, run_mobpack_callable};
+pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

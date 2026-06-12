@@ -76,7 +76,6 @@ use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpConfig, McpScope, McpTransportConfig, McpTransportKind};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -11916,9 +11915,6 @@ fn choose_mobpack_flow(
     archive: &MobpackArchive,
     requested: Option<&str>,
 ) -> anyhow::Result<Option<FlowId>> {
-    if archive.manifest.adaptive.is_some() {
-        return Ok(None);
-    }
     if let Some(flow) = requested {
         let flow_id = FlowId::from(flow);
         if archive.definition.flows.contains_key(&flow_id) {
@@ -11930,12 +11926,7 @@ fn choose_mobpack_flow(
     if archive.definition.flows.contains_key(&main) {
         return Ok(Some(main));
     }
-    if archive.definition.flows.len() == 1 {
-        return Ok(archive.definition.flows.keys().next().cloned());
-    }
-    Err(anyhow::anyhow!(
-        "mob run failed: pack has no unambiguous callable flow; pass --flow"
-    ))
+    Ok(None)
 }
 
 #[cfg(feature = "mob")]
@@ -12828,14 +12819,6 @@ async fn execute_mob_run_pack(
             .mob_create_from_mobpack(archive.definition.clone(), archive.skills.clone())
             .await
             .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
-        if archive.manifest.adaptive.is_some() {
-            state
-                .mob_register_adaptive_pack_context(
-                    mob_id.clone(),
-                    adaptive_pack_context_from_archive(&archive)?,
-                )
-                .await;
-        }
         let run_id = state
             .mob_run_flow(&mob_id, flow_id.clone(), params)
             .await
@@ -12887,30 +12870,52 @@ async fn execute_mob_run_pack(
             .prompt
             .map(str::to_string)
             .unwrap_or_else(|| params.to_string());
-        let outcome = run_adaptive_deploy_loop(
-            &archive,
-            handle,
-            session_service.clone(),
-            session_service.runtime_adapter(),
-            &objective,
-        )
-        .await?;
-        if invocation.json {
-            serde_json::to_string_pretty(&serde_json::json!({
-                "mob_id": archive.definition.id.to_string(),
-                "run_id": outcome.adaptive_run_id.as_str(),
-                "status": "completed",
-                "result": outcome.final_result,
-                "result_digest": outcome.final_result_digest.as_ref().map(meerkat_mob_adaptive::BodyDigest::as_str),
-            }))?
-        } else {
-            let result = outcome.final_result.unwrap_or(serde_json::Value::Null);
-            format!(
-                "run\tmob={}\trun_id={}\tstatus=completed\nresult\t{}",
-                archive.definition.id,
-                outcome.adaptive_run_id.as_str(),
-                serde_json::to_string(&result)?
+        if meerkat_mob_pack::execution::has_mobpack_callable(&archive) {
+            let outcome = meerkat_mob_pack::execution::run_mobpack_callable(
+                &archive,
+                handle,
+                session_service.clone(),
+                &objective,
             )
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            if invocation.json {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "mob_id": archive.definition.id.to_string(),
+                    "run_id": outcome.run_id,
+                    "status": "completed",
+                    "result": outcome.final_result,
+                    "result_digest": outcome.final_result_digest,
+                }))?
+            } else {
+                let result = outcome.final_result.unwrap_or(serde_json::Value::Null);
+                format!(
+                    "run\tmob={}\trun_id={}\tstatus=completed\nresult\t{}",
+                    archive.definition.id,
+                    outcome.run_id,
+                    serde_json::to_string(&result)?
+                )
+            }
+        } else if archive.definition.flows.len() == 1 {
+            let flow_id = archive
+                .definition
+                .flows
+                .keys()
+                .next()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("mob run failed: pack has no callable flow"))?;
+            let run_id = handle
+                .run_flow(flow_id, params)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            let run = await_pack_flow_terminal(&handle, run_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+            render_mob_run_envelope(&run, invocation.json)?
+        } else {
+            return Err(anyhow::anyhow!(
+                "mob run failed: pack has no unambiguous callable flow; pass --flow"
+            ));
         }
     };
 
@@ -12953,282 +12958,6 @@ struct DeployInvocation {
 struct RpcSurfaceDeployResult {
     mob_id: String,
     result_render: Option<String>,
-}
-
-#[cfg(feature = "mob")]
-struct CliAdaptiveRuntime {
-    control_mob: meerkat_mob::MobHandle,
-    session_service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-}
-
-#[cfg(feature = "mob")]
-#[async_trait::async_trait]
-impl meerkat_mob_adaptive::AdaptiveDriverRuntime for CliAdaptiveRuntime {
-    type Layer = meerkat_mob::MobHandle;
-
-    fn now_ms(&mut self) -> u64 {
-        Utc::now().timestamp_millis().max(0) as u64
-    }
-
-    async fn run_planning_turn(
-        &mut self,
-        request: meerkat_mob_adaptive::PlanningTurnRequest,
-    ) -> Result<meerkat_mob_adaptive::LayerDecision, meerkat_mob_adaptive::AdaptiveError> {
-        let run_id = self
-            .control_mob
-            .run_flow(
-                FlowId::from("plan"),
-                serde_json::json!({
-                    "adaptive_run_id": request.adaptive_run_id.as_str(),
-                    "objective": request.objective,
-                    "previous_layer_result": request.previous_layer_result,
-                }),
-            )
-            .await?;
-        let run = self.await_control_flow_terminal(run_id.clone()).await?;
-        let decision = run
-            .root_step_outputs
-            .get(&meerkat_mob::StepId::from("plan"))
-            .or_else(|| {
-                if run.root_step_outputs.len() == 1 {
-                    run.root_step_outputs.values().next()
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
-                    "adaptive planning run '{run_id}' produced no LayerDecision output; status={:?}; failures={:?}; steps={:?}",
-                    run.status,
-                    run.failure_ledger,
-                    run.step_ledger
-                ))
-            })?;
-        serde_json::from_value(decision.clone()).map_err(meerkat_mob_adaptive::AdaptiveError::from)
-    }
-
-    async fn provision_layer(
-        &mut self,
-        compiled: &meerkat_mob_adaptive::CompiledLayer,
-    ) -> Result<Self::Layer, meerkat_mob_adaptive::AdaptiveError> {
-        let mut builder = meerkat_mob::MobBuilder::from_mobpack(
-            compiled.definition.clone(),
-            BTreeMap::new(),
-            meerkat_mob::MobStorage::in_memory(),
-        )?
-        .with_session_service(self.session_service.clone());
-        if let Some(adapter) = self.runtime_adapter.clone() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-        let handle = builder.create().await?;
-        let spawn_results = handle.spawn_many(compiled.spawn_specs.clone()).await?;
-        if let Some(failure) = spawn_results
-            .iter()
-            .find_map(|result| result.as_ref().err())
-        {
-            return Err(meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
-                "adaptive layer spawn failed: {failure}"
-            )));
-        }
-        Ok(handle)
-    }
-
-    async fn start_layer_flow(
-        &mut self,
-        layer: &Self::Layer,
-        activation_params: BTreeMap<String, serde_json::Value>,
-    ) -> Result<RunId, meerkat_mob_adaptive::AdaptiveError> {
-        Ok(layer
-            .run_flow(
-                FlowId::from("layer-flow"),
-                serde_json::to_value(activation_params)?,
-            )
-            .await?)
-    }
-
-    async fn await_layer_terminal(
-        &mut self,
-        layer: &Self::Layer,
-        run_id: RunId,
-    ) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
-        loop {
-            if let Some(run) = layer.flow_status(run_id.clone()).await?
-                && mob_machine_run_status_is_terminal(&run_id, &run.status)?
-            {
-                return Ok(run);
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    }
-
-    async fn cleanup_layer(
-        &mut self,
-        _layer: Self::Layer,
-        _layer_id: &meerkat_mob_adaptive::LayerId,
-        _attempt: u64,
-    ) -> Result<meerkat_mob_adaptive::AdaptiveLayerCleanup, meerkat_mob_adaptive::AdaptiveError>
-    {
-        Ok(meerkat_mob_adaptive::AdaptiveLayerCleanup::Destroyed)
-    }
-}
-
-#[cfg(feature = "mob")]
-impl CliAdaptiveRuntime {
-    async fn await_control_flow_terminal(
-        &mut self,
-        run_id: RunId,
-    ) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
-        loop {
-            if let Some(run) = self.control_mob.flow_status(run_id.clone()).await?
-                && mob_machine_run_status_is_terminal(&run_id, &run.status)?
-            {
-                return Ok(run);
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    }
-}
-
-#[cfg(feature = "mob")]
-fn load_adaptive_policy(
-    archive: &MobpackArchive,
-) -> anyhow::Result<meerkat_mob_adaptive::AdaptivePolicy> {
-    let bytes = archive
-        .adaptive
-        .get("adaptive/policies.toml")
-        .ok_or_else(|| anyhow::anyhow!("adaptive pack missing adaptive/policies.toml"))?;
-    let text = std::str::from_utf8(bytes)
-        .map_err(|err| anyhow::anyhow!("adaptive policy is not valid UTF-8: {err}"))?;
-    toml::from_str(text).map_err(|err| anyhow::anyhow!("invalid adaptive policy: {err}"))
-}
-
-#[cfg(feature = "mob")]
-fn load_adaptive_schema_registry(
-    archive: &MobpackArchive,
-) -> anyhow::Result<meerkat_mob_adaptive::SchemaRegistry> {
-    let registry_bytes = archive
-        .schemas
-        .get("schemas/registry.json")
-        .ok_or_else(|| anyhow::anyhow!("adaptive pack missing schemas/registry.json"))?;
-    let declared: BTreeMap<String, String> = serde_json::from_slice(registry_bytes)
-        .map_err(|err| anyhow::anyhow!("invalid schemas/registry.json: {err}"))?;
-    let mut registry = meerkat_mob_adaptive::SchemaRegistry::default();
-    for (name, path) in declared {
-        let schema_bytes = archive
-            .schemas
-            .get(&path)
-            .or_else(|| archive.schemas.get(&format!("schemas/{path}")))
-            .ok_or_else(|| anyhow::anyhow!("schema registry entry '{name}' missing '{path}'"))?;
-        let schema: serde_json::Value = serde_json::from_slice(schema_bytes)
-            .map_err(|err| anyhow::anyhow!("invalid schema '{path}': {err}"))?;
-        registry
-            .insert(meerkat_mob_adaptive::SchemaName::new(name)?, schema)
-            .map_err(|err| anyhow::anyhow!("invalid adaptive schema: {err}"))?;
-    }
-    Ok(registry)
-}
-
-#[cfg(feature = "mob")]
-fn load_adaptive_profile_templates(
-    archive: &MobpackArchive,
-) -> anyhow::Result<BTreeMap<meerkat_mob::ProfileName, meerkat_mob::Profile>> {
-    let mut profiles = BTreeMap::new();
-    for (name, binding) in &archive.definition.profiles {
-        let Some(profile) = binding.as_inline() else {
-            anyhow::bail!(
-                "adaptive pack profile '{name}' uses a realm profile reference; inline profile templates are required"
-            );
-        };
-        profiles.insert(name.clone(), profile.clone());
-    }
-    Ok(profiles)
-}
-
-#[cfg(feature = "mob")]
-fn adaptive_pack_context_from_archive(
-    archive: &MobpackArchive,
-) -> anyhow::Result<meerkat_mob_mcp::AdaptivePackContext> {
-    Ok(meerkat_mob_mcp::AdaptivePackContext::new(
-        load_adaptive_policy(archive)?,
-        load_adaptive_schema_registry(archive)?,
-        load_adaptive_profile_templates(archive)?,
-    ))
-}
-
-#[cfg(feature = "mob")]
-async fn run_adaptive_deploy_loop(
-    archive: &MobpackArchive,
-    control_mob: meerkat_mob::MobHandle,
-    session_service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    prompt: &str,
-) -> anyhow::Result<meerkat_mob_adaptive::AdaptiveRunOutcome> {
-    let policy = load_adaptive_policy(archive)?;
-    let schema_registry = load_adaptive_schema_registry(archive)?;
-    let profile_templates = load_adaptive_profile_templates(archive)?;
-    if let Some(adaptive) = &archive.manifest.adaptive {
-        let flowmaster_profile =
-            meerkat_mob::ProfileName::from(adaptive.flowmaster_profile.as_str());
-        let roster = control_mob.roster().await;
-        if roster.by_profile(&flowmaster_profile).next().is_none() {
-            control_mob
-                .spawn_spec(meerkat_mob::SpawnMemberSpec::new(
-                    flowmaster_profile,
-                    "adaptive-flowmaster",
-                ))
-                .await
-                .map_err(|err| anyhow::anyhow!("adaptive FlowMaster spawn failed: {err}"))?;
-        }
-    }
-    let adaptive_run_id = fresh_cli_adaptive_run_id()?;
-    let compile_context = meerkat_mob_adaptive::CompileContext {
-        adaptive_run_id: adaptive_run_id.clone(),
-        attempt: 1,
-        schema_registry,
-        profile_templates,
-        previous_layer_result: None,
-    };
-    let driver = meerkat_mob_adaptive::AdaptiveDriver::new(control_mob.clone());
-    let mut runtime = CliAdaptiveRuntime {
-        control_mob,
-        session_service,
-        runtime_adapter,
-    };
-    meerkat_mob_adaptive::run_adaptive_loop(
-        &driver,
-        &mut runtime,
-        meerkat_mob_adaptive::AdaptiveRunRequest {
-            adaptive_run_id,
-            policy,
-            compile_context,
-            objective: prompt.to_string(),
-            started_at_ms: Utc::now().timestamp_millis().max(0) as u64,
-        },
-    )
-    .await
-    .map_err(|err| anyhow::anyhow!("adaptive deploy failed: {err}"))
-}
-
-#[cfg(feature = "mob")]
-fn fresh_cli_adaptive_run_id() -> anyhow::Result<meerkat_mob_adaptive::AdaptiveRunId> {
-    meerkat_mob_adaptive::AdaptiveRunId::new(RunId::new().to_string())
-        .map_err(|err| anyhow::anyhow!("invalid adaptive run id: {err}"))
-}
-
-#[cfg(feature = "mob")]
-fn render_deploy_result_line(
-    outcome: &meerkat_mob_adaptive::AdaptiveRunOutcome,
-) -> anyhow::Result<Option<String>> {
-    let Some(digest) = &outcome.final_result_digest else {
-        return Ok(None);
-    };
-    let mut rendered = format!("result\tresult_digest={}", digest.as_str());
-    if let Some(result) = &outcome.final_result {
-        rendered.push_str("\tresult_json=");
-        rendered.push_str(&serde_json::to_string(result)?);
-    }
-    Ok(Some(rendered))
 }
 
 #[cfg(feature = "mob")]
@@ -13298,17 +13027,7 @@ async fn execute_mob_deploy_internal(
             .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
 
         let deployed_mob_id = handle.mob_id().to_string();
-        let result_render = if archive.manifest.adaptive.is_some() {
-            let outcome = run_adaptive_deploy_loop(
-                &archive,
-                handle,
-                session_service.clone(),
-                session_service.runtime_adapter(),
-                prompt,
-            )
-            .await?;
-            render_deploy_result_line(&outcome)?
-        } else if let Some(orchestrator) = &archive.definition.orchestrator {
+        let result_render = if let Some(orchestrator) = &archive.definition.orchestrator {
             let roster = handle.roster().await;
             if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
                 handle
@@ -13834,36 +13553,6 @@ where
         meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
     )
         as Arc<dyn meerkat_core::service::MobToolsFactory>);
-
-    if archive.manifest.adaptive.is_some() {
-        let adaptive_context = adaptive_pack_context_from_archive(archive)?;
-        mob_state
-            .mob_register_adaptive_pack_context(
-                meerkat_mob::MobId::from(deployed_mob_id.as_str()),
-                adaptive_context,
-            )
-            .await;
-        let run = mob_state
-            .mob_run_adaptive(
-                &meerkat_mob::MobId::from(deployed_mob_id.as_str()),
-                prompt.to_string(),
-            )
-            .await
-            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-        return Ok(RpcSurfaceDeployResult {
-            mob_id: deployed_mob_id,
-            result_render: {
-                let mut rendered = run
-                    .final_result_digest
-                    .map(|digest| format!("result\tresult_digest={digest}"));
-                if let (Some(line), Some(result)) = (rendered.as_mut(), run.final_result.as_ref()) {
-                    line.push_str("\tresult_json=");
-                    line.push_str(&serde_json::to_string(result)?);
-                }
-                rendered
-            },
-        });
-    }
 
     // RPC-host: this is the canonical RPC-host marker for `deploy_mob` —
     // the function inline-hosts a full `RpcServer` over the supplied
@@ -17695,27 +17384,6 @@ default_model = "gemma"
                 "label": "hello"
             })
         );
-    }
-
-    #[cfg(feature = "mob")]
-    #[test]
-    fn test_cli_adaptive_internal_run_ids_are_unique_per_invocation() {
-        let first = fresh_cli_adaptive_run_id().expect("first internal run id");
-        let second = fresh_cli_adaptive_run_id().expect("second internal run id");
-
-        assert_ne!(
-            first.as_str(),
-            second.as_str(),
-            "internal adaptive execution must not derive run ids from the mob id"
-        );
-        first
-            .as_str()
-            .parse::<RunId>()
-            .expect("adaptive internal id should preserve public RunId syntax");
-        second
-            .as_str()
-            .parse::<RunId>()
-            .expect("adaptive internal id should preserve public RunId syntax");
     }
 
     #[cfg(feature = "mob")]

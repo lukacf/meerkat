@@ -3392,7 +3392,6 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mob",
- "meerkat-mob-adaptive",
  "meerkat-runtime",
  "schemars 1.2.1",
  "serde",
@@ -3409,18 +3408,21 @@ dependencies = [
 name = "meerkat-mob-pack"
 version = "0.7.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ed25519-dalek",
  "flate2",
  "hex",
  "meerkat-contracts",
  "meerkat-mob",
+ "meerkat-mob-adaptive",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -4826,7 +4828,6 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-mob",
- "meerkat-mob-adaptive",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
  "meerkat-models",

@@ -64,7 +64,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",
         "//meerkat-mob:meerkat_mob",
@@ -151,7 +150,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -239,7 +237,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -327,7 +324,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -424,7 +420,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -521,7 +516,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -618,7 +612,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -706,7 +699,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -803,7 +795,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -890,7 +881,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -977,7 +967,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -1065,7 +1054,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -1161,7 +1149,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -1249,7 +1236,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
@@ -1345,7 +1331,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",

@@ -81,34 +81,6 @@ struct ManagedMob {
     storage_path: Option<PathBuf>,
 }
 
-#[derive(Clone)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub struct AdaptivePackContext {
-    policy: meerkat_mob_adaptive::AdaptivePolicy,
-    schema_registry: meerkat_mob_adaptive::SchemaRegistry,
-    profile_templates: BTreeMap<ProfileName, meerkat_mob::Profile>,
-}
-
-impl AdaptivePackContext {
-    pub fn new(
-        policy: meerkat_mob_adaptive::AdaptivePolicy,
-        schema_registry: meerkat_mob_adaptive::SchemaRegistry,
-        profile_templates: BTreeMap<ProfileName, meerkat_mob::Profile>,
-    ) -> Self {
-        Self {
-            policy,
-            schema_registry,
-            profile_templates,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MobPackExecutionResult {
-    pub final_result_digest: Option<String>,
-    pub final_result: Option<serde_json::Value>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum MobMcpDestroyError {
     #[error("mob destroy incomplete: {}", destroy_report_summary(.report))]
@@ -270,7 +242,6 @@ pub struct MobMcpState {
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     persistent_storage_root: Option<PathBuf>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
-    adaptive_pack_contexts: RwLock<BTreeMap<MobId, AdaptivePackContext>>,
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
@@ -305,7 +276,6 @@ impl MobMcpState {
             external_tools_provider: None,
             persistent_storage_root: None,
             mobs: RwLock::new(BTreeMap::new()),
-            adaptive_pack_contexts: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
             realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
@@ -818,22 +788,6 @@ impl MobMcpState {
                 storage_path: None,
             },
         );
-    }
-
-    /// Register adaptive pack context for an already-created control mob.
-    ///
-    /// `mob/create` only receives a `MobDefinition`; adaptive execution also
-    /// needs the mobpack-owned policy, schema registry, and inline profile
-    /// templates. Deploy surfaces seed that host-owned context here.
-    pub async fn mob_register_adaptive_pack_context(
-        &self,
-        mob_id: MobId,
-        context: AdaptivePackContext,
-    ) {
-        self.adaptive_pack_contexts
-            .write()
-            .await
-            .insert(mob_id, context);
     }
 
     /// Return known mob handles without asking each mob actor for live status.
@@ -1461,71 +1415,6 @@ impl MobMcpState {
 
     pub async fn mob_cancel_flow(&self, mob_id: &MobId, run_id: RunId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.cancel_flow(run_id).await
-    }
-
-    pub async fn mob_run_adaptive(
-        &self,
-        mob_id: &MobId,
-        objective: String,
-    ) -> Result<MobPackExecutionResult, MobError> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (mob_id, objective);
-            Err(MobError::Internal(
-                "mobpack callable execution is not supported by the wasm32 runtime target"
-                    .to_string(),
-            ))
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let control_mob = self.handle_for(mob_id).await?;
-            let context = self
-            .adaptive_pack_contexts
-            .read()
-            .await
-            .get(mob_id)
-            .cloned()
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "mobpack run context unavailable for mob {mob_id}; install the mob from its mobpack before starting a run"
-                ))
-            })?;
-            let adaptive_run_id = fresh_adaptive_run_id()?;
-            let compile_context = meerkat_mob_adaptive::CompileContext {
-                adaptive_run_id: adaptive_run_id.clone(),
-                attempt: 1,
-                schema_registry: context.schema_registry,
-                profile_templates: context.profile_templates,
-                previous_layer_result: None,
-            };
-            let driver = meerkat_mob_adaptive::AdaptiveDriver::new(control_mob.clone());
-            let mut runtime = StateAdaptiveRuntime {
-                control_mob: control_mob.clone(),
-                session_service: Arc::clone(&self.session_service),
-                runtime_adapter: self.runtime_adapter.clone(),
-            };
-            let outcome = meerkat_mob_adaptive::run_adaptive_loop(
-                &driver,
-                &mut runtime,
-                meerkat_mob_adaptive::AdaptiveRunRequest {
-                    adaptive_run_id: adaptive_run_id.clone(),
-                    policy: context.policy,
-                    compile_context,
-                    objective,
-                    started_at_ms: now_ms(),
-                },
-            )
-            .await
-            .map_err(|err| MobError::Internal(err.to_string()))?;
-            Ok(MobPackExecutionResult {
-                final_result_digest: outcome
-                    .final_result_digest
-                    .as_ref()
-                    .map(|digest| digest.as_str().to_string()),
-                final_result: outcome.final_result,
-            })
-        }
     }
 
     pub async fn mob_respawn(
@@ -2461,145 +2350,6 @@ impl CoreCommsRuntime for LocalCommsRuntime {
     async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
         Vec::new()
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct StateAdaptiveRuntime {
-    control_mob: MobHandle,
-    session_service: Arc<dyn MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
-impl meerkat_mob_adaptive::AdaptiveDriverRuntime for StateAdaptiveRuntime {
-    type Layer = MobHandle;
-
-    fn now_ms(&mut self) -> u64 {
-        now_ms()
-    }
-
-    async fn run_planning_turn(
-        &mut self,
-        request: meerkat_mob_adaptive::PlanningTurnRequest,
-    ) -> Result<meerkat_mob_adaptive::LayerDecision, meerkat_mob_adaptive::AdaptiveError> {
-        let run_id = self
-            .control_mob
-            .run_flow(
-                FlowId::from("plan"),
-                serde_json::json!({
-                    "adaptive_run_id": request.adaptive_run_id.as_str(),
-                    "objective": request.objective,
-                    "previous_layer_result": request.previous_layer_result,
-                }),
-            )
-            .await?;
-        let run = await_flow_terminal(&self.control_mob, run_id.clone()).await?;
-        let decision = run
-            .root_step_outputs
-            .get(&meerkat_mob::StepId::from("plan"))
-            .or_else(|| {
-                if run.root_step_outputs.len() == 1 {
-                    run.root_step_outputs.values().next()
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
-                    "adaptive planning run '{run_id}' produced no LayerDecision output; status={:?}; failures={:?}; steps={:?}",
-                    run.status, run.failure_ledger, run.step_ledger
-                ))
-            })?;
-        serde_json::from_value(decision.clone()).map_err(Into::into)
-    }
-
-    async fn provision_layer(
-        &mut self,
-        compiled: &meerkat_mob_adaptive::CompiledLayer,
-    ) -> Result<Self::Layer, meerkat_mob_adaptive::AdaptiveError> {
-        let mut builder = MobBuilder::from_mobpack(
-            compiled.definition.clone(),
-            BTreeMap::new(),
-            MobStorage::in_memory(),
-        )?
-        .with_session_service(Arc::clone(&self.session_service));
-        if let Some(adapter) = self.runtime_adapter.clone() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-        let handle = builder.create().await?;
-        let spawn_results = handle.spawn_many(compiled.spawn_specs.clone()).await?;
-        if let Some(failure) = spawn_results
-            .iter()
-            .find_map(|result| result.as_ref().err())
-        {
-            return Err(meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
-                "adaptive layer spawn failed: {failure}"
-            )));
-        }
-        Ok(handle)
-    }
-
-    async fn start_layer_flow(
-        &mut self,
-        layer: &Self::Layer,
-        activation_params: BTreeMap<String, serde_json::Value>,
-    ) -> Result<RunId, meerkat_mob_adaptive::AdaptiveError> {
-        Ok(layer
-            .run_flow(
-                FlowId::from("layer-flow"),
-                serde_json::to_value(activation_params)?,
-            )
-            .await?)
-    }
-
-    async fn await_layer_terminal(
-        &mut self,
-        layer: &Self::Layer,
-        run_id: RunId,
-    ) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
-        await_flow_terminal(layer, run_id).await
-    }
-
-    async fn cleanup_layer(
-        &mut self,
-        _layer: Self::Layer,
-        _layer_id: &meerkat_mob_adaptive::LayerId,
-        _attempt: u64,
-    ) -> Result<meerkat_mob_adaptive::AdaptiveLayerCleanup, meerkat_mob_adaptive::AdaptiveError>
-    {
-        Ok(meerkat_mob_adaptive::AdaptiveLayerCleanup::Destroyed)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn await_flow_terminal(
-    mob: &MobHandle,
-    run_id: RunId,
-) -> Result<meerkat_mob::MobRun, meerkat_mob_adaptive::AdaptiveError> {
-    loop {
-        if let Some(run) = mob.flow_status(run_id.clone()).await?
-            && meerkat_mob::run::mob_machine_run_status_is_terminal(&run_id, &run.status)?
-        {
-            return Ok(run);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn fresh_adaptive_run_id() -> Result<meerkat_mob_adaptive::AdaptiveRunId, MobError> {
-    meerkat_mob_adaptive::AdaptiveRunId::new(RunId::new().to_string())
-        .map_err(|err| MobError::Internal(err.to_string()))
 }
 
 struct LocalSessionService {
@@ -6241,21 +5991,6 @@ mod tests {
             matches!(terminal_status.as_deref(), Some("canceled" | "failed")),
             "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first"
         );
-    }
-
-    #[test]
-    fn fresh_adaptive_run_id_is_unique_per_invocation() {
-        let first = fresh_adaptive_run_id().expect("first adaptive run id");
-        let second = fresh_adaptive_run_id().expect("second adaptive run id");
-        assert_ne!(first, second);
-        first
-            .as_str()
-            .parse::<RunId>()
-            .expect("adaptive internal id should preserve public RunId syntax");
-        second
-            .as_str()
-            .parse::<RunId>()
-            .expect("adaptive internal id should preserve public RunId syntax");
     }
 
     #[tokio::test]

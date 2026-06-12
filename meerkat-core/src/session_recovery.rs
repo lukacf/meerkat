@@ -355,6 +355,10 @@ pub fn resolve_effective_turn_config(
 
     let mut build = SessionBuildOptions {
         provider: llm_binding.provider,
+        // Not persisted in recovery metadata; the application session hook
+        // re-injects it on fresh creates, and resumed root agents inherit
+        // the factory config.
+        retry_override: None,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
         output_schema: overrides
             .output_schema

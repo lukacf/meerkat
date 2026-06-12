@@ -711,7 +711,14 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.image_generation_executor_override = Some(executor);
         }
 
-        let config = self.resolve_config().await;
+        let mut config = self.resolve_config().await;
+        // Per-session retry override (SessionBuildOptions.retry_override):
+        // lets the application carry its configured retry policy into
+        // mob-spawned child sessions, which otherwise inherit only the
+        // factory snapshot for root agents.
+        if let Some(retry) = req.build.as_ref().and_then(|opts| opts.retry_override.clone()) {
+            config.retry = retry;
+        }
 
         // Capture the session_context handle before build_agent consumes the
         // RuntimeBuildMode. Needed so the session task can fire

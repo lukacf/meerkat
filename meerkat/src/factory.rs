@@ -739,6 +739,9 @@ impl AgentBuildConfig {
     pub fn to_session_build_options(&self) -> SessionBuildOptions {
         SessionBuildOptions {
             provider: self.provider,
+            // Direct-builder users configure retry via Config; the
+            // per-session override is a hook-seam affordance.
+            retry_override: None,
             self_hosted_server_id: self.self_hosted_server_id.clone(),
             output_schema: self.output_schema.clone(),
             structured_output_retries: self.structured_output_retries,

@@ -310,6 +310,14 @@ pub struct SessionBuildOptions {
     /// - `Disabled`: explicitly disable call timeout regardless of profile
     /// - `Value(d)`: explicitly set call timeout to `d`
     pub call_timeout_override: crate::CallTimeoutOverride,
+    /// Per-session override for the LLM retry configuration.
+    ///
+    /// `None` (default) inherits the factory config's retry settings.
+    /// Applications set this at the session-hook seam so mob-spawned child
+    /// sessions can carry the same retry policy as runtime root agents —
+    /// without it, children silently fall back to `RetryConfig::default()`
+    /// (3 attempts), which is fatal under provider rate-limit storms.
+    pub retry_override: Option<crate::config::RetryConfig>,
     /// Typed explicit-override intent for resumed-session merges.
     ///
     /// Surfaces set bits only for fields they can prove were explicitly
@@ -769,6 +777,7 @@ impl Default for SessionBuildOptions {
             initial_metadata_entries: BTreeMap::new(),
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
+            retry_override: None,
             resume_override_mask: ResumeOverrideMask::default(),
             mob_tools: None,
             runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
@@ -822,6 +831,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("call_timeout_override", &self.call_timeout_override)
+            .field("retry_override", &self.retry_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())
             .field("runtime_build_mode", &self.runtime_build_mode)

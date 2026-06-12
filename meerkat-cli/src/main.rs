@@ -13283,6 +13283,10 @@ fn runtime_capabilities(
         MobpackCapabilityId::DeploySurface(DeploySurfaceCapabilityId::Core),
         MobpackCapabilityId::Known(CapabilityId::Skills),
         MobpackCapabilityId::Known(CapabilityId::Hooks),
+        // Adaptive flow execution ships with the mob runtime itself
+        // (`meerkat-mob` owns the FlowMaster planning loop), so every mob
+        // deploy surface provides it.
+        MobpackCapabilityId::Known(CapabilityId::AdaptiveFlow),
     ];
     #[cfg(feature = "comms")]
     caps.push(MobpackCapabilityId::Known(CapabilityId::Comms));
@@ -18147,7 +18151,7 @@ name = "deploy-fixture"
 version = "1.0.0"
 
 [requires]
-capabilities = ["core", "skills", "hooks"]
+capabilities = ["core", "skills", "hooks", "adaptive_flow"]
 "#,
         )
         .expect("manifest fixture");
@@ -18261,6 +18265,35 @@ capabilities = ["core", "skills", "hooks"]
     async fn test_deploy_rejects_missing_capability() {
         let temp = tempfile::tempdir().expect("tempdir");
         let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        // A capability outside the typed vocabulary now fails closed at PACK
+        // time (fail-closed knowledge gate), so it can never silently ship.
+        let unknown_dir = temp.path().join("unknown-cap-mob");
+        std::fs::create_dir_all(unknown_dir.join("skills")).expect("skills");
+        std::fs::write(
+            unknown_dir.join("manifest.toml"),
+            r#"[mobpack]
+name = "cap"
+version = "1.0.0"
+
+[requires]
+capabilities = ["definitely_missing_capability"]
+"#,
+        )
+        .expect("manifest");
+        std::fs::write(unknown_dir.join("definition.json"), br#"{"id":"cap-mob"}"#).expect("def");
+        std::fs::write(unknown_dir.join("skills").join("review.md"), "# Review\n").expect("skill");
+        let unknown_out = temp.path().join("unknown-cap.mobpack");
+        let err = execute_mob_pack(&unknown_dir, &unknown_out, None)
+            .await
+            .expect_err("unknown capability must fail closed at pack time");
+        assert!(
+            err.to_string().contains("definitely_missing_capability"),
+            "unexpected error: {err}"
+        );
+
+        // A KNOWN capability the deploy surface does not provide still
+        // rejects at deploy time (`rpc` is not in the CLI surface set).
         let mob_dir = temp.path().join("cap-mob");
         std::fs::create_dir_all(mob_dir.join("skills")).expect("skills");
         std::fs::write(
@@ -18270,7 +18303,7 @@ name = "cap"
 version = "1.0.0"
 
 [requires]
-capabilities = ["definitely_missing_capability"]
+capabilities = ["rpc"]
 "#,
         )
         .expect("manifest");
@@ -18292,8 +18325,7 @@ capabilities = ["definitely_missing_capability"]
         .await
         .expect_err("missing capability should reject deploy");
         assert!(
-            err.to_string()
-                .contains("required capability missing: definitely_missing_capability"),
+            err.to_string().contains("required capability missing: rpc"),
             "unexpected error: {err}"
         );
     }

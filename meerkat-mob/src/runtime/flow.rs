@@ -654,7 +654,7 @@ impl FlowEngine {
                 &target,
                 &prompt,
                 flow_tool_overlay,
-                step.output_format.clone(),
+                step.effective_output_format(),
                 step_timeout,
                 max_retries,
                 cancel,
@@ -734,7 +734,7 @@ impl FlowEngine {
             let target = target.clone();
             let prompt = prompt.clone();
             let overlay = flow_tool_overlay.clone();
-            let output_format = step.output_format.clone();
+            let output_format = step.effective_output_format();
             let step_timeout_outcome = step_timeout_outcome.clone();
             in_flight.push(async move {
                 let result = engine

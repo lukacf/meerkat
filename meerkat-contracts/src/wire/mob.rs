@@ -376,11 +376,14 @@ pub enum MobDependencyModeInput {
     Any,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// Explicit step output format. Omitting `output_format` on a step is
+/// meaningful — the definition layer resolves a schema-aware default (`json`
+/// when the step declares `expected_schema_ref`, `text` otherwise) — so the
+/// wire shape keeps "omitted" representable instead of baking in a default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MobStepOutputFormatInput {
-    #[default]
     Json,
     Text,
 }
@@ -466,8 +469,10 @@ pub struct MobFlowStepInput {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_tools: Option<Vec<String>>,
-    #[serde(default)]
-    pub output_format: MobStepOutputFormatInput,
+    /// Explicit output format; omitted resolves schema-aware at the
+    /// definition layer (`json` with `expected_schema_ref`, `text` without).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<MobStepOutputFormatInput>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

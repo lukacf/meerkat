@@ -40,6 +40,12 @@ pub enum CapabilityId {
     SessionCompaction,
     Skills,
     McpLive,
+    /// Adaptive mobpack flow execution (FlowMaster planning loop, layer
+    /// compilation, policy composition). Stamped into a mobpack's
+    /// `[requires]` section by the pack builder whenever the manifest
+    /// declares an `[adaptive]` section, so hosts that do not know this
+    /// capability fail closed instead of silently downgrading the pack.
+    AdaptiveFlow,
 }
 
 /// A mobpack manifest capability token paired with its typed classification.
@@ -88,12 +94,54 @@ pub enum MobpackCapabilityId {
     Unknown,
 }
 
+/// Whether a typed mobpack capability requirement is known to this host
+/// build's capability vocabulary.
+///
+/// This is the fail-closed knowledge gate used at mobpack load: a pack that
+/// requires a capability this build cannot even name (a future or vendor
+/// token classifying as [`MobpackCapabilityId::Unknown`]) must be rejected
+/// rather than silently downgraded. Satisfaction against the *runtime*
+/// capability set of a concrete deploy surface is a separate, stricter check
+/// owned by the deploying surface.
+///
+/// The match is exhaustive on purpose: adding a new requirement family to
+/// [`MobpackCapabilityId`] forces an explicit decision here.
+pub fn mobpack_capability_known_to_host(capability: MobpackCapabilityId) -> bool {
+    match capability {
+        MobpackCapabilityId::Known(_)
+        | MobpackCapabilityId::HostProcess(_)
+        | MobpackCapabilityId::DeploySurface(_) => true,
+        MobpackCapabilityId::Unknown => false,
+    }
+}
+
+/// Every mobpack capability token known to this host build, for diagnostics
+/// when a pack requires a capability outside the vocabulary.
+///
+/// Driven by the enum iterators so a new variant in any of the three
+/// requirement families is included automatically (its token spelling is
+/// already forced by the exhaustive `Display`/`as_str` matches).
+pub fn known_mobpack_capability_tokens() -> Vec<String> {
+    let mut tokens: Vec<String> = <CapabilityId as strum::IntoEnumIterator>::iter()
+        .map(|id| id.to_string())
+        .collect();
+    tokens.extend(
+        <HostProcessCapabilityId as strum::IntoEnumIterator>::iter()
+            .map(|id| id.as_str().to_string()),
+    );
+    tokens.extend(
+        <DeploySurfaceCapabilityId as strum::IntoEnumIterator>::iter()
+            .map(|id| id.as_str().to_string()),
+    );
+    tokens
+}
+
 /// Deploy-surface capabilities named by mobpack manifests.
 ///
 /// These name the runtime surface a deployed mob is hosted on (`core`,
 /// `mcp`, `rpc`), distinct from the feature-capability vocabulary in
 /// [`CapabilityId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum DeploySurfaceCapabilityId {
     Core,
     Mcp,
@@ -120,7 +168,7 @@ impl DeploySurfaceCapabilityId {
 }
 
 /// Host process capabilities named by existing mobpack manifests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum HostProcessCapabilityId {
     McpStdio,
     ProcessSpawn,
@@ -392,6 +440,53 @@ mod tests {
                 browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw).id())
                     .is_forbidden(),
                 "{raw} should be forbidden in browser mobpacks"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_flow_classifies_as_known_capability() {
+        let requirement = MobpackCapabilityRequirement::parse("adaptive_flow");
+        assert_eq!(
+            requirement.id(),
+            MobpackCapabilityId::Known(CapabilityId::AdaptiveFlow)
+        );
+        assert_eq!(CapabilityId::AdaptiveFlow.to_string(), "adaptive_flow");
+    }
+
+    #[test]
+    fn host_knows_every_typed_capability_and_rejects_unknown() {
+        for raw in ["comms", "adaptive_flow", "mcp_stdio", "core"] {
+            assert!(
+                mobpack_capability_known_to_host(MobpackCapabilityRequirement::parse(raw).id()),
+                "{raw} must be known to this host build"
+            );
+        }
+        assert!(!mobpack_capability_known_to_host(
+            MobpackCapabilityRequirement::parse("capability-from-the-future").id()
+        ));
+    }
+
+    #[test]
+    fn known_tokens_cover_all_requirement_families_and_round_trip() {
+        let tokens = known_mobpack_capability_tokens();
+        for expected in [
+            "sessions",
+            "adaptive_flow",
+            "mcp_stdio",
+            "process_spawn",
+            "core",
+        ] {
+            assert!(
+                tokens.iter().any(|t| t == expected),
+                "known token set must contain {expected}: {tokens:?}"
+            );
+        }
+        // Every advertised token must classify back into a known typed id.
+        for token in &tokens {
+            assert!(
+                mobpack_capability_known_to_host(MobpackCapabilityRequirement::parse(token).id()),
+                "advertised token {token} must round-trip as known"
             );
         }
     }

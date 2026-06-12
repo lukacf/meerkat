@@ -8,11 +8,22 @@ use crate::vocabulary::{
 };
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
+use meerkat_contracts::capability::{
+    CapabilityId, MobpackCapabilityId, known_mobpack_capability_tokens,
+    mobpack_capability_known_to_host,
+};
+use meerkat_mob::adaptive::AdaptivePolicy;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
+
+/// Canonical archive path of the bundled LayerDecision schema artifact.
+const LAYER_DECISION_SCHEMA_PATH: &str = "adaptive/layer-decision.schema.json";
+
+/// Canonical archive path of the adaptive policy document.
+const ADAPTIVE_POLICIES_PATH: &str = "adaptive/policies.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackResult {
@@ -41,6 +52,7 @@ pub struct SigningRequest<'a> {
     pub key_path: &'a Path,
 }
 
+#[derive(Debug)]
 pub(crate) struct ValidatedPackFiles {
     pub manifest: MobpackManifest,
     pub definition: MobDefinition,
@@ -63,6 +75,7 @@ pub fn pack_directory_with_excludes(
     if let Some(request) = signing {
         exclude_paths_from_pack(directory, &[request.key_path], &mut files);
     }
+    prepare_adaptive_build_outputs(&mut files)?;
     validate_extracted_pack_files(&files)?;
 
     if let Some(request) = signing {
@@ -121,6 +134,7 @@ pub(crate) fn validate_extracted_pack_files(
     ensure_no_trust_section(files)?;
     let manifest = parse_manifest(files)?;
     validate_manifest_identity(&manifest)?;
+    validate_required_capabilities_known(&manifest)?;
     validate_adaptive_files(&manifest, files)?;
     let definition = parse_definition(files)?;
     reject_realm_refs(&definition)?;
@@ -131,6 +145,141 @@ pub(crate) fn validate_extracted_pack_files(
     })
 }
 
+/// Fail-closed capability knowledge gate, run at every pack load.
+///
+/// Every `[requires]` capability must classify into the typed vocabulary this
+/// host build knows ([`mobpack_capability_known_to_host`]); a token from the
+/// future (or a vendor token) is rejected with the host's known set instead
+/// of being silently ignored and the pack downgraded. Additionally, a
+/// manifest that declares `[adaptive]` must carry the stamped
+/// `adaptive_flow` capability so pre-stamp packs cannot smuggle adaptive
+/// payloads past hosts that gate on `[requires]`.
+fn validate_required_capabilities_known(
+    manifest: &MobpackManifest,
+) -> Result<(), PackValidationError> {
+    if let Some(requires) = &manifest.requires {
+        for capability in &requires.capabilities {
+            if !mobpack_capability_known_to_host(capability.id()) {
+                return Err(PackValidationError::UnknownRequiredCapability {
+                    capability: capability.token().to_string(),
+                    supported: known_mobpack_capability_tokens(),
+                });
+            }
+        }
+    }
+    if manifest.adaptive.is_some() && !manifest_declares_adaptive_capability(manifest) {
+        return Err(PackValidationError::MissingAdaptiveCapability {
+            capability: CapabilityId::AdaptiveFlow.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn manifest_declares_adaptive_capability(manifest: &MobpackManifest) -> bool {
+    manifest.requires.as_ref().is_some_and(|requires| {
+        requires
+            .capability_ids()
+            .any(|id| id == MobpackCapabilityId::Known(CapabilityId::AdaptiveFlow))
+    })
+}
+
+/// Build-side preparation for adaptive packs, run before validation when
+/// packing a directory.
+///
+/// For a manifest that declares `[adaptive]` this
+/// 1. stamps the `adaptive_flow` capability into `[requires]` (idempotent —
+///    an already-stamped manifest is left byte-identical), and
+/// 2. emits the host's canonical LayerDecision schema as
+///    `adaptive/layer-decision.schema.json`, overwriting any hand-supplied
+///    file (authors no longer maintain this artifact; the archive digest and
+///    signature cover the emitted bytes).
+///
+/// Non-adaptive packs and packs whose manifest does not parse are left
+/// untouched; validation reports those errors with full context.
+fn prepare_adaptive_build_outputs(
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PackValidationError> {
+    let Some(manifest_bytes) = files.get("manifest.toml") else {
+        return Ok(());
+    };
+    let Ok(manifest_text) = std::str::from_utf8(manifest_bytes) else {
+        return Ok(());
+    };
+    let Ok(manifest) = toml::from_str::<MobpackManifest>(manifest_text) else {
+        return Ok(());
+    };
+    if manifest.adaptive.is_none() {
+        return Ok(());
+    }
+
+    if !manifest_declares_adaptive_capability(&manifest) {
+        let stamped = stamp_adaptive_capability(manifest_text)?;
+        files.insert("manifest.toml".to_string(), stamped.into_bytes());
+    }
+    files.insert(
+        LAYER_DECISION_SCHEMA_PATH.to_string(),
+        canonical_layer_decision_schema_bytes()?,
+    );
+    Ok(())
+}
+
+/// Append `adaptive_flow` to `[requires].capabilities`, preserving the rest
+/// of the manifest document (comments, ordering, unknown entries) via
+/// `toml_edit`.
+fn stamp_adaptive_capability(manifest_text: &str) -> Result<String, PackValidationError> {
+    let mut doc: toml_edit::DocumentMut = manifest_text
+        .parse()
+        .map_err(|err| PackValidationError::InvalidManifest(format!("{err}")))?;
+    let requires = doc
+        .entry("requires")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    // `as_table_like_mut` accepts both `[requires]` tables and
+    // `requires = { ... }` inline tables — the typed manifest parser does.
+    let requires_table = requires.as_table_like_mut().ok_or_else(|| {
+        PackValidationError::InvalidManifest("`requires` must be a table".to_string())
+    })?;
+    if requires_table.get("capabilities").is_none() {
+        requires_table.insert(
+            "capabilities",
+            toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+        );
+    }
+    let array = requires_table
+        .get_mut("capabilities")
+        .and_then(toml_edit::Item::as_array_mut)
+        .ok_or_else(|| {
+            PackValidationError::InvalidManifest(
+                "`requires.capabilities` must be an array".to_string(),
+            )
+        })?;
+    array.push(CapabilityId::AdaptiveFlow.to_string());
+    Ok(doc.to_string())
+}
+
+/// The canonical `adaptive/layer-decision.schema.json` bytes for this host
+/// version, rendered deterministically from
+/// [`meerkat_mob::adaptive::layer_decision_schema`].
+fn canonical_layer_decision_schema_bytes() -> Result<Vec<u8>, PackValidationError> {
+    let schema = canonical_layer_decision_schema()?;
+    let mut bytes = serde_json::to_vec_pretty(&schema).map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: LAYER_DECISION_SCHEMA_PATH.to_string(),
+            reason: format!("failed to render canonical schema: {err}"),
+        }
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn canonical_layer_decision_schema() -> Result<serde_json::Value, PackValidationError> {
+    meerkat_mob::adaptive::layer_decision_schema().map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: LAYER_DECISION_SCHEMA_PATH.to_string(),
+            reason: format!("failed to derive canonical schema: {err}"),
+        }
+    })
+}
+
 fn validate_adaptive_files(
     manifest: &MobpackManifest,
     files: &BTreeMap<String, Vec<u8>>,
@@ -138,19 +287,21 @@ fn validate_adaptive_files(
     let Some(adaptive) = &manifest.adaptive else {
         return Ok(());
     };
-    let policy_bytes = require_adaptive_file(files, "adaptive/policies.toml")?;
+    let policy_bytes = require_adaptive_file(files, ADAPTIVE_POLICIES_PATH)?;
     let observed_policy_digest = format!("sha256:{}", hex::encode(Sha256::digest(policy_bytes)));
     if adaptive.policy_digest != observed_policy_digest {
         return Err(PackValidationError::InvalidAdaptiveFile {
-            path: "adaptive/policies.toml".to_string(),
+            path: ADAPTIVE_POLICIES_PATH.to_string(),
             reason: format!(
                 "policy_digest mismatch: manifest has `{}`, observed `{observed_policy_digest}`",
                 adaptive.policy_digest
             ),
         });
     }
+    validate_adaptive_policy_document(policy_bytes)?;
     require_adaptive_file(files, "adaptive/flowmaster.prompt.md")?;
-    require_adaptive_file(files, "adaptive/layer-decision.schema.json")?;
+    let schema_bytes = require_adaptive_file(files, LAYER_DECISION_SCHEMA_PATH)?;
+    validate_layer_decision_schema(schema_bytes)?;
     let registry_bytes = require_adaptive_file(files, "schemas/registry.json")?;
     let registry: serde_json::Value = serde_json::from_slice(registry_bytes).map_err(|err| {
         PackValidationError::InvalidAdaptiveFile {
@@ -176,6 +327,61 @@ fn validate_adaptive_files(
         };
         validate_relative_adaptive_schema_path(schema_file)?;
         require_adaptive_file(files, schema_file)?;
+    }
+    Ok(())
+}
+
+/// Parse and structurally validate the pack's adaptive policy document at
+/// pack-validation time, not first at runtime: the TOML must parse into the
+/// typed [`AdaptivePolicy`] and its limit record must be complete (every
+/// limit non-zero, via `AdaptiveLimitRecord::validate_complete`).
+fn validate_adaptive_policy_document(policy_bytes: &[u8]) -> Result<(), PackValidationError> {
+    let policy_text = std::str::from_utf8(policy_bytes).map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: ADAPTIVE_POLICIES_PATH.to_string(),
+            reason: format!("not valid UTF-8: {err}"),
+        }
+    })?;
+    let policy: AdaptivePolicy =
+        toml::from_str(policy_text).map_err(|err| PackValidationError::InvalidAdaptiveFile {
+            path: ADAPTIVE_POLICIES_PATH.to_string(),
+            reason: err.to_string(),
+        })?;
+    policy.limits.validate_complete("pack").map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: ADAPTIVE_POLICIES_PATH.to_string(),
+            reason: err.to_string(),
+        }
+    })?;
+    Ok(())
+}
+
+/// Validate the bundled LayerDecision schema artifact against this host's
+/// canonical schema.
+///
+/// Match rule: the bundled bytes must parse as a JSON object and be
+/// structurally equal to [`meerkat_mob::adaptive::layer_decision_schema`]
+/// (`serde_json::Value` equality — i.e. byte equality after canonical JSON
+/// serialization, key order normalized). The builder emits exactly this
+/// artifact, so any divergence means the pack was built by older or
+/// hand-rolled tooling and fails closed with a regenerate hint.
+fn validate_layer_decision_schema(schema_bytes: &[u8]) -> Result<(), PackValidationError> {
+    let bundled: serde_json::Value = serde_json::from_slice(schema_bytes).map_err(|err| {
+        PackValidationError::InvalidAdaptiveFile {
+            path: LAYER_DECISION_SCHEMA_PATH.to_string(),
+            reason: format!("not valid JSON: {err}"),
+        }
+    })?;
+    if !bundled.is_object() {
+        return Err(PackValidationError::InvalidAdaptiveFile {
+            path: LAYER_DECISION_SCHEMA_PATH.to_string(),
+            reason: "must be a JSON object schema".to_string(),
+        });
+    }
+    if bundled != canonical_layer_decision_schema()? {
+        return Err(PackValidationError::StaleAdaptiveSchema {
+            path: LAYER_DECISION_SCHEMA_PATH.to_string(),
+        });
     }
     Ok(())
 }
@@ -585,16 +791,36 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_adaptive_manifest_requires_typed_payload_files_and_policy_digest() {
-        let temp = fixture_mob_dir();
-        let policy = b"[limits]\nmax_depth = 1\n";
+    /// A complete adaptive policy document: every limit non-zero so
+    /// `AdaptiveLimitRecord::validate_complete` accepts it.
+    const COMPLETE_POLICY: &[u8] = b"[limits]\n\
+max_depth = 3\n\
+max_total_decisions = 6\n\
+max_repair_attempts = 2\n\
+max_layer_failures = 2\n\
+max_attempts_per_layer = 2\n\
+max_members_per_layer = 4\n\
+max_total_spawned_members = 12\n\
+max_active_members = 4\n\
+max_retained_layer_mobs = 1\n\
+max_wall_clock_ms = 180000\n\
+max_aggregate_tokens = 200000\n\
+max_aggregate_tool_calls = 100\n";
+
+    fn adaptive_manifest_text(policy: &[u8]) -> String {
         let policy_digest = format!("sha256:{}", hex::encode(Sha256::digest(policy)));
+        format!(
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[adaptive]\nflowmaster_profile = \"flowmaster\"\nobjective_class = \"audit\"\npolicy_digest = \"{policy_digest}\"\nrequired_schemas = [\"finding-set\"]\n"
+        )
+    }
+
+    /// Write a complete adaptive pack source directory. Authors do not supply
+    /// `adaptive/layer-decision.schema.json` — the builder emits it.
+    fn adaptive_fixture_dir(policy: &[u8]) -> TempDir {
+        let temp = fixture_mob_dir();
         std::fs::write(
             temp.path().join("manifest.toml"),
-            format!(
-                "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[adaptive]\nflowmaster_profile = \"flowmaster\"\nobjective_class = \"audit\"\npolicy_digest = \"{policy_digest}\"\nrequired_schemas = [\"finding-set\"]\n"
-            ),
+            adaptive_manifest_text(policy),
         )
         .unwrap();
         std::fs::create_dir_all(temp.path().join("adaptive")).unwrap();
@@ -602,28 +828,35 @@ mod tests {
         std::fs::write(temp.path().join("adaptive/policies.toml"), policy).unwrap();
         std::fs::write(temp.path().join("adaptive/flowmaster.prompt.md"), "Plan").unwrap();
         std::fs::write(
-            temp.path().join("adaptive/layer-decision.schema.json"),
-            br#"{"type":"object"}"#,
-        )
-        .unwrap();
-        std::fs::write(
             temp.path().join("schemas/registry.json"),
             br#"{"finding-set":"schemas/finding-set.schema.json"}"#,
         )
         .unwrap();
         std::fs::write(
             temp.path().join("schemas/finding-set.schema.json"),
-            br#"{"type":"object"}"#,
+            br#"{"type":"object","required":["findings"],"properties":{"findings":{"type":"array","items":{"type":"object"}}}}"#,
         )
         .unwrap();
+        temp
+    }
 
+    /// An extracted-files map for a complete, builder-shaped adaptive pack
+    /// (stamped capability + canonical schema), for load-level tampering tests.
+    fn adaptive_pack_files() -> BTreeMap<String, Vec<u8>> {
+        let temp = adaptive_fixture_dir(COMPLETE_POLICY);
+        let packed = pack_directory(temp.path(), None).unwrap();
+        extract_targz_safe(&packed.archive_bytes).unwrap()
+    }
+
+    #[test]
+    fn test_adaptive_manifest_requires_typed_payload_files_and_policy_digest() {
+        let temp = adaptive_fixture_dir(COMPLETE_POLICY);
         pack_directory(temp.path(), None).expect("complete adaptive payload validates");
 
-        std::fs::write(
-            temp.path().join("adaptive/policies.toml"),
-            b"[limits]\nmax_depth = 2\n",
-        )
-        .unwrap();
+        // Tampering with the policy after digesting fails closed.
+        let mut tampered = COMPLETE_POLICY.to_vec();
+        tampered.extend_from_slice(b"# drift\n");
+        std::fs::write(temp.path().join("adaptive/policies.toml"), &tampered).unwrap();
         let err = pack_directory(temp.path(), None).unwrap_err();
         assert!(matches!(
             err,
@@ -631,14 +864,207 @@ mod tests {
                 if path == "adaptive/policies.toml" && reason.contains("policy_digest mismatch")
         ));
 
-        std::fs::write(temp.path().join("adaptive/policies.toml"), policy).unwrap();
-        std::fs::remove_file(temp.path().join("adaptive/layer-decision.schema.json")).unwrap();
-        let err = pack_directory(temp.path(), None).unwrap_err();
+        // Load-level: an archive missing the layer-decision schema fails
+        // closed (the builder always emits it, so absence means tampering or
+        // foreign tooling).
+        let mut files = adaptive_pack_files();
+        files.remove("adaptive/layer-decision.schema.json").unwrap();
+        let err = validate_extracted_pack_files(&files).unwrap_err();
         assert!(matches!(
             err,
             PackValidationError::MissingAdaptiveFile { path }
                 if path == "adaptive/layer-decision.schema.json"
         ));
+    }
+
+    #[test]
+    fn test_builder_stamps_adaptive_capability_idempotently() {
+        // First pack: manifest has no [requires]; the builder stamps it.
+        let temp = adaptive_fixture_dir(COMPLETE_POLICY);
+        let packed = pack_directory(temp.path(), None).unwrap();
+        let files = extract_targz_safe(&packed.archive_bytes).unwrap();
+        let manifest: MobpackManifest =
+            toml::from_str(std::str::from_utf8(files.get("manifest.toml").unwrap()).unwrap())
+                .unwrap();
+        let stamped_tokens = manifest
+            .requires
+            .as_ref()
+            .expect("builder must create [requires]")
+            .capabilities
+            .iter()
+            .filter(|cap| cap.token() == "adaptive_flow")
+            .count();
+        assert_eq!(stamped_tokens, 1);
+
+        // Second pack from a source dir whose manifest is already stamped:
+        // no duplicate entry, and the manifest survives byte-identical.
+        let already = adaptive_fixture_dir(COMPLETE_POLICY);
+        let stamped_manifest =
+            String::from_utf8(files.get("manifest.toml").unwrap().clone()).unwrap();
+        std::fs::write(already.path().join("manifest.toml"), &stamped_manifest).unwrap();
+        let repacked = pack_directory(already.path(), None).unwrap();
+        let refiles = extract_targz_safe(&repacked.archive_bytes).unwrap();
+        assert_eq!(
+            std::str::from_utf8(refiles.get("manifest.toml").unwrap()).unwrap(),
+            stamped_manifest,
+            "an already-stamped manifest must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_builder_emits_canonical_layer_decision_schema() {
+        let temp = adaptive_fixture_dir(COMPLETE_POLICY);
+        // Even a hand-supplied (vacuous) schema is overwritten by the builder.
+        std::fs::write(
+            temp.path().join("adaptive/layer-decision.schema.json"),
+            br#"{"type":"object"}"#,
+        )
+        .unwrap();
+        let packed = pack_directory(temp.path(), None).unwrap();
+        let files = extract_targz_safe(&packed.archive_bytes).unwrap();
+        assert_eq!(
+            files.get("adaptive/layer-decision.schema.json").unwrap(),
+            &canonical_layer_decision_schema_bytes().unwrap(),
+        );
+        let emitted: serde_json::Value =
+            serde_json::from_slice(files.get("adaptive/layer-decision.schema.json").unwrap())
+                .unwrap();
+        assert!(
+            emitted.get("$defs").is_some(),
+            "emitted schema must be the structural LayerDecision schema"
+        );
+    }
+
+    #[test]
+    fn test_load_rejects_prestamp_adaptive_pack_without_capability() {
+        // Simulate a pack built by pre-stamp tooling: complete adaptive
+        // payload, canonical schema, but no adaptive_flow under [requires].
+        let mut files = adaptive_pack_files();
+        files.insert(
+            "manifest.toml".to_string(),
+            adaptive_manifest_text(COMPLETE_POLICY).into_bytes(),
+        );
+        let err = validate_extracted_pack_files(&files).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::MissingAdaptiveCapability { capability }
+                if capability == "adaptive_flow"
+        ));
+    }
+
+    #[test]
+    fn test_load_accepts_stamped_adaptive_pack() {
+        let files = adaptive_pack_files();
+        validate_extracted_pack_files(&files).expect("builder-produced adaptive pack loads");
+    }
+
+    #[test]
+    fn test_load_rejects_unknown_future_capability_with_supported_set() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[requires]\ncapabilities = [\"comms\", \"quantum_flux\"]\n",
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        match err {
+            PackValidationError::UnknownRequiredCapability {
+                capability,
+                supported,
+            } => {
+                assert_eq!(capability, "quantum_flux");
+                assert!(supported.iter().any(|t| t == "comms"));
+                assert!(supported.iter().any(|t| t == "adaptive_flow"));
+            }
+            other => panic!("expected UnknownRequiredCapability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pack_rejects_garbage_adaptive_policy_toml() {
+        let policy = b"limits = \"not a table\"\nthis is not TOML at all {{{";
+        let temp = adaptive_fixture_dir(policy);
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidAdaptiveFile { path, .. }
+                if path == "adaptive/policies.toml"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_incomplete_adaptive_policy_limits() {
+        // Zero limits parse but fail validate_complete at pack time.
+        let policy = String::from_utf8(COMPLETE_POLICY.to_vec())
+            .unwrap()
+            .replace("max_depth = 3", "max_depth = 0");
+        let temp = adaptive_fixture_dir(policy.as_bytes());
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidAdaptiveFile { path, reason }
+                if path == "adaptive/policies.toml" && reason.contains("max_depth")
+        ));
+    }
+
+    #[test]
+    fn test_load_rejects_non_json_layer_decision_schema() {
+        let mut files = adaptive_pack_files();
+        files.insert(
+            "adaptive/layer-decision.schema.json".to_string(),
+            b"not json at all".to_vec(),
+        );
+        let err = validate_extracted_pack_files(&files).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidAdaptiveFile { path, reason }
+                if path == "adaptive/layer-decision.schema.json"
+                    && reason.contains("not valid JSON")
+        ));
+
+        let mut files = adaptive_pack_files();
+        files.insert(
+            "adaptive/layer-decision.schema.json".to_string(),
+            b"true".to_vec(),
+        );
+        let err = validate_extracted_pack_files(&files).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidAdaptiveFile { path, reason }
+                if path == "adaptive/layer-decision.schema.json"
+                    && reason.contains("JSON object")
+        ));
+    }
+
+    #[test]
+    fn test_load_rejects_stale_or_vacuous_layer_decision_schema() {
+        // The vacuous hand-rolled shape from pre-0.7.1 packs fails closed
+        // with a regenerate hint, as does any schema diverging from the
+        // host's canonical LayerDecision schema.
+        let mut files = adaptive_pack_files();
+        files.insert(
+            "adaptive/layer-decision.schema.json".to_string(),
+            br#"{"type":"object"}"#.to_vec(),
+        );
+        let err = validate_extracted_pack_files(&files).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::StaleAdaptiveSchema { path }
+                if path == "adaptive/layer-decision.schema.json"
+        ));
+    }
+
+    #[test]
+    fn test_layer_decision_schema_match_is_key_order_insensitive() {
+        // Match rule: structural equality (canonical-serialization byte
+        // equality), so a re-serialized canonical schema with different
+        // formatting still matches.
+        let canonical = canonical_layer_decision_schema().unwrap();
+        let compact = serde_json::to_vec(&canonical).unwrap();
+        let mut files = adaptive_pack_files();
+        files.insert("adaptive/layer-decision.schema.json".to_string(), compact);
+        validate_extracted_pack_files(&files)
+            .expect("formatting-only differences must not fail the schema match");
     }
 
     #[test]

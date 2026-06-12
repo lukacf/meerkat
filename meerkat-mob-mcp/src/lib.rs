@@ -5643,6 +5643,11 @@ mod tests {
                         "start": {
                             "role": "worker",
                             "message": "run demo",
+                            // Explicit: the cancel test depends on the mock's
+                            // non-JSON "ok" turn output remaining a parse
+                            // fault; the schema-aware omitted default would
+                            // resolve to text and complete the step.
+                            "output_format": "json",
                             "timeout_ms": 1000
                         }
                     }
@@ -5989,7 +5994,7 @@ mod tests {
         }
         assert!(
             matches!(terminal_status.as_deref(), Some("canceled" | "failed")),
-            "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first"
+            "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first; got {terminal_status:?}"
         );
     }
 

@@ -224,7 +224,7 @@ fn decode_flow_step(
             depends_on_mode: decode_dependency_mode(input.depends_on_mode),
             allowed_tools: input.allowed_tools,
             blocked_tools: input.blocked_tools,
-            output_format: decode_step_output_format(input.output_format),
+            output_format: input.output_format.map(decode_step_output_format),
         },
     ))
 }
@@ -445,7 +445,7 @@ mod tests {
                 depends_on_mode: MobDependencyModeInput::All,
                 allowed_tools: Some(vec!["comms/send".to_string()]),
                 blocked_tools: Some(vec!["mob_create".to_string()]),
-                output_format: MobStepOutputFormatInput::Text,
+                output_format: Some(MobStepOutputFormatInput::Text),
             },
         );
 
@@ -528,6 +528,7 @@ mod tests {
         assert!(!flow.root.nodes.is_empty());
         let step = flow.steps.get(&StepId::from("plan")).expect("plan step");
         assert_eq!(step.branch, Some(BranchId::from("winner")));
-        assert_eq!(step.output_format, StepOutputFormat::Text);
+        assert_eq!(step.output_format, Some(StepOutputFormat::Text));
+        assert_eq!(step.effective_output_format(), StepOutputFormat::Text);
     }
 }

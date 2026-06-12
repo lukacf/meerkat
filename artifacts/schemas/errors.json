@@ -3,23 +3,32 @@
     "$defs": {
       "CapabilityId": {
         "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
-        "enum": [
-          "sessions",
-          "streaming",
-          "structured_output",
-          "hooks",
-          "builtins",
-          "shell",
-          "comms",
-          "memory_store",
-          "schedule",
-          "work_graph",
-          "session_store",
-          "session_compaction",
-          "skills",
-          "mcp_live"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "sessions",
+              "streaming",
+              "structured_output",
+              "hooks",
+              "builtins",
+              "shell",
+              "comms",
+              "memory_store",
+              "schedule",
+              "work_graph",
+              "session_store",
+              "session_compaction",
+              "skills",
+              "mcp_live"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "adaptive_flow",
+            "description": "Adaptive mobpack flow execution (FlowMaster planning loop, layer\ncompilation, policy composition). Stamped into a mobpack's\n`[requires]` section by the pack builder whenever the manifest\ndeclares an `[adaptive]` section, so hosts that do not know this\ncapability fail closed instead of silently downgrading the pack.",
+            "type": "string"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -101,23 +110,32 @@
       },
       "CapabilityId": {
         "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
-        "enum": [
-          "sessions",
-          "streaming",
-          "structured_output",
-          "hooks",
-          "builtins",
-          "shell",
-          "comms",
-          "memory_store",
-          "schedule",
-          "work_graph",
-          "session_store",
-          "session_compaction",
-          "skills",
-          "mcp_live"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "sessions",
+              "streaming",
+              "structured_output",
+              "hooks",
+              "builtins",
+              "shell",
+              "comms",
+              "memory_store",
+              "schedule",
+              "work_graph",
+              "session_store",
+              "session_compaction",
+              "skills",
+              "mcp_live"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "adaptive_flow",
+            "description": "Adaptive mobpack flow execution (FlowMaster planning loop, layer\ncompilation, policy composition). Stamped into a mobpack's\n`[requires]` section by the pack builder whenever the manifest\ndeclares an `[adaptive]` section, so hosts that do not know this\ncapability fail closed instead of silently downgrading the pack.",
+            "type": "string"
+          }
+        ]
       },
       "ErrorCategory": {
         "description": "Error category for grouping.",

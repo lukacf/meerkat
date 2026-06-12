@@ -5004,7 +5004,7 @@ impl MobRun {
                     depends_on_mode: crate::definition::DependencyMode::All,
                     allowed_tools: None,
                     blocked_tools: None,
-                    output_format: crate::definition::StepOutputFormat::Json,
+                    output_format: Some(crate::definition::StepOutputFormat::Json),
                 },
             );
         }
@@ -5497,7 +5497,7 @@ impl MobRun {
                     depends_on_mode: crate::definition::DependencyMode::All,
                     allowed_tools: None,
                     blocked_tools: None,
-                    output_format: crate::definition::StepOutputFormat::Json,
+                    output_format: Some(crate::definition::StepOutputFormat::Json),
                 },
             );
         }
@@ -6469,7 +6469,7 @@ mod tests {
                 depends_on_mode: crate::definition::DependencyMode::All,
                 allowed_tools: None,
                 blocked_tools: None,
-                output_format: crate::definition::StepOutputFormat::Json,
+                output_format: Some(crate::definition::StepOutputFormat::Json),
             },
         );
 
@@ -7010,7 +7010,7 @@ mod tests {
                 depends_on_mode: crate::definition::DependencyMode::All,
                 allowed_tools: None,
                 blocked_tools: None,
-                output_format: crate::definition::StepOutputFormat::Json,
+                output_format: Some(crate::definition::StepOutputFormat::Json),
             },
         );
         let spec = FlowSpec::new(None, steps, None);

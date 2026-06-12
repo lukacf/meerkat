@@ -59,6 +59,10 @@ pub enum DiagnosticCode {
     InvalidCustomModel,
     /// An `image_generation_provider` has no image-generation capability.
     InvalidImageGenerationProvider,
+    /// A step explicitly sets `output_format = "json"` without attaching
+    /// `expected_schema_ref` (free-form JSON is legitimate but usually wants
+    /// a schema, or `text`).
+    JsonOutputWithoutSchema,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -88,6 +92,7 @@ impl fmt::Display for DiagnosticCode {
             Self::UnknownModel => "unknown_model",
             Self::InvalidCustomModel => "invalid_custom_model",
             Self::InvalidImageGenerationProvider => "invalid_image_generation_provider",
+            Self::JsonOutputWithoutSchema => "json_output_without_schema",
         };
         f.write_str(s)
     }

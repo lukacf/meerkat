@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Controls which tool categories are enabled for members spawned
 /// from this profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ToolConfig {
     /// Enable built-in tools (file read, etc.).
     #[serde(default)]
@@ -54,6 +55,7 @@ pub struct ToolConfig {
 /// Profiles can be defined inline (the existing behavior) or reference
 /// a reusable realm-scoped profile by name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum ProfileBinding {
     /// Reference to a realm-scoped profile by name.
@@ -99,6 +101,7 @@ impl ProfileBinding {
 /// Controls how the child's tool surface is determined at spawn time.
 /// External/public spawn remains role-based; this enum is for agent-owned spawns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SpawnTooling {
     /// Inherit the parent's currently visible tools (ToolScope snapshot).
@@ -127,6 +130,7 @@ pub enum SpawnTooling {
 
 /// Source of a profile for spawn tooling resolution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProfileSource {
     /// Reference a realm-scoped reusable profile by name.
@@ -144,6 +148,7 @@ pub enum ProfileSource {
 /// Each profile defines the model, skills, tool configuration, and
 /// communication properties for a class of mob members.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Profile {
     /// LLM model name (e.g. "claude-opus-4-8").
     pub model: String,
@@ -240,6 +245,7 @@ pub struct Profile {
 /// Typed, closed vocabulary parsed fail-closed at profile ingress; maps onto
 /// the corresponding bits of [`meerkat_core::service::ResumeOverrideMask`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeOverrideField {
     /// Re-apply the profile `model` on resume.

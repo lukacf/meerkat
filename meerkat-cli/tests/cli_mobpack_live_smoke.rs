@@ -391,11 +391,8 @@ policy_digest = "{policy_digest}"
         "Return only typed Adaptive Flow JSON decisions.\n",
     )
     .await?;
-    tokio::fs::write(
-        mob_dir.join("adaptive").join("layer-decision.schema.json"),
-        r#"{"type":"object"}"#,
-    )
-    .await?;
+    // No hand-written adaptive/layer-decision.schema.json: `rkat mob pack`
+    // emits the canonical LayerDecision schema into the archive.
     tokio::fs::write(mob_dir.join("schemas").join("registry.json"), "{}").await?;
 
     let definition = format!(
@@ -417,6 +414,7 @@ policy_digest = "{policy_digest}"
         "plan":{{
           "role":"flowmaster",
           "message":"Return only valid JSON, with no markdown. Read this objective exactly: {{{{params.objective}}}}. The top-level JSON object must have decision set to finish, reason set to smoke complete followed by the objective nonce, and result set to an object whose only field is result. That nested result object must have nonce copied from the objective nonce and summary copied from the objective summary. Do not invent the nonce or summary.",
+          "output_format":"json",
           "collection_policy":{{"type":"any"}},
           "timeout_ms":120000
         }}

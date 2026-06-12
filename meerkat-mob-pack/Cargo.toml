@@ -14,10 +14,14 @@ categories.workspace = true
 
 [dependencies]
 meerkat-contracts = { workspace = true }
-meerkat-mob = { workspace = true }
+# `schema` is required unconditionally: pack validation compares the bundled
+# adaptive layer-decision schema against the host's canonical schema, and the
+# pack builder emits that canonical schema into adaptive packs.
+meerkat-mob = { workspace = true, features = ["schema"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
+toml_edit = { workspace = true }
 thiserror = { workspace = true }
 sha2 = "0.10"
 flate2 = "1.0"

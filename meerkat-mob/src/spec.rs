@@ -2,7 +2,7 @@
 
 use crate::definition::{
     CollectionPolicy, DependencyMode, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
-    MobDefinition,
+    MobDefinition, StepOutputFormat,
 };
 use crate::ids::{BranchId, FlowId, FlowNodeId, StepId};
 use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
@@ -242,6 +242,20 @@ impl SpecValidator {
                         "flows.{flow_name}.steps.{step_id}.collection_policy.n"
                     )),
                     severity: DiagnosticSeverity::Error,
+                });
+            }
+
+            if step.output_format == Some(StepOutputFormat::Json)
+                && step.expected_schema_ref.is_none()
+            {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::JsonOutputWithoutSchema,
+                    message: format!(
+                        "step '{step_id}' sets output_format = \"json\" without a schema; \
+                         attach expected_schema_ref or use output_format = \"text\""
+                    ),
+                    location: Some(format!("flows.{flow_name}.steps.{step_id}.output_format")),
+                    severity: DiagnosticSeverity::Warning,
                 });
             }
 
@@ -536,8 +550,62 @@ mod tests {
             depends_on_mode: DependencyMode::All,
             allowed_tools: None,
             blocked_tools: None,
-            output_format: crate::definition::StepOutputFormat::Json,
+            output_format: None,
         }
+    }
+
+    #[test]
+    fn test_explicit_json_without_schema_warns_but_does_not_error() {
+        let mut def = base_definition();
+        let mut json_step = step("worker", "produce");
+        json_step.output_format = Some(StepOutputFormat::Json);
+        let mut steps = IndexMap::new();
+        steps.insert(StepId::from("produce"), json_step);
+        def.flows
+            .insert(FlowId::from("flow"), FlowSpec::new(None, steps, None));
+
+        let diagnostics = SpecValidator::validate(&def);
+        let warning = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::JsonOutputWithoutSchema)
+            .expect("explicit json without schema must produce a diagnostic");
+        assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+        assert!(warning.message.contains("produce"));
+        assert!(warning.message.contains("expected_schema_ref"));
+        // Warning only: no errors are raised for this shape.
+        assert!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::JsonOutputWithoutSchema)
+                .all(|d| d.severity == DiagnosticSeverity::Warning)
+        );
+    }
+
+    #[test]
+    fn test_omitted_or_text_output_format_does_not_warn() {
+        let mut def = base_definition();
+        let omitted = step("worker", "freeform"); // output_format: None
+        let mut text_step = step("worker", "prose");
+        text_step.output_format = Some(StepOutputFormat::Text);
+        let mut schema_json = step("worker", "typed");
+        schema_json.output_format = Some(StepOutputFormat::Json);
+        schema_json.expected_schema_ref = Some(
+            crate::definition::FlowSchemaRef::parse(r#"{"type":"object"}"#).expect("inline schema"),
+        );
+        let mut steps = IndexMap::new();
+        steps.insert(StepId::from("freeform"), omitted);
+        steps.insert(StepId::from("prose"), text_step);
+        steps.insert(StepId::from("typed"), schema_json);
+        def.flows
+            .insert(FlowId::from("flow"), FlowSpec::new(None, steps, None));
+
+        let diagnostics = SpecValidator::validate(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::JsonOutputWithoutSchema),
+            "only explicit json without schema warns: {diagnostics:?}"
+        );
     }
 
     #[test]

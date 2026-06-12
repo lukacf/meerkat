@@ -22447,8 +22447,15 @@
             "$ref": "#/$defs/WireContentInput"
           },
           "output_format": {
-            "$ref": "#/$defs/MobStepOutputFormatInput",
-            "default": "json"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MobStepOutputFormatInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit output format; omitted resolves schema-aware at the\ndefinition layer (`json` with `expected_schema_ref`, `text` without)."
           },
           "role": {
             "type": "string"
@@ -22799,6 +22806,7 @@
         ]
       },
       "MobStepOutputFormatInput": {
+        "description": "Explicit step output format. Omitting `output_format` on a step is\nmeaningful — the definition layer resolves a schema-aware default (`json`\nwhen the step declares `expected_schema_ref`, `text` otherwise) — so the\nwire shape keeps \"omitted\" representable instead of baking in a default.",
         "enum": [
           "json",
           "text"

@@ -3521,7 +3521,7 @@ fn flow_step(role: impl Into<crate::ids::ProfileName>, message: &str) -> FlowSte
         depends_on_mode: DependencyMode::All,
         allowed_tools: None,
         blocked_tools: None,
-        output_format: StepOutputFormat::Json,
+        output_format: Some(StepOutputFormat::Json),
     }
 }
 
@@ -26683,7 +26683,7 @@ async fn test_plain_text_step_output_can_skip_json_parsing() {
         .get_mut(&FlowId::from("demo"))
         .and_then(|flow| flow.steps.get_mut(&crate::StepId::from("start")))
         .expect("start step exists");
-    step.output_format = StepOutputFormat::Text;
+    step.output_format = Some(StepOutputFormat::Text);
 
     let (handle, service) = create_test_mob(definition).await;
     handle

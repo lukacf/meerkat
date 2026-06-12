@@ -273,7 +273,7 @@ mod tests {
             ),
             (
                 "schemas/finding-set.schema.json".to_string(),
-                br#"{"type":"object"}"#.to_vec(),
+                br#"{"type":"object","required":["findings"],"properties":{"findings":{"type":"array"}}}"#.to_vec(),
             ),
             (
                 "config/defaults.toml".to_string(),

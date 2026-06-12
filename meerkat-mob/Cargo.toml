@@ -95,7 +95,7 @@ default = ["runtime-adapter"]
 # is empty because the dep is always present.
 runtime-adapter = []
 integration-real-tests = []
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "meerkat-core/schema"]
 test-support = []
 
 [package.metadata.cargo-machete]

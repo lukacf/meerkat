@@ -60,6 +60,24 @@ pub enum PackValidationError {
     MissingAdaptiveFile { path: String },
     #[error("adaptive mobpack file `{path}` is invalid: {reason}")]
     InvalidAdaptiveFile { path: String, reason: String },
+    #[error(
+        "mobpack requires capability `{capability}` which this host does not recognize; \
+         capabilities known to this host: {supported:?}"
+    )]
+    UnknownRequiredCapability {
+        capability: String,
+        supported: Vec<String>,
+    },
+    #[error(
+        "mobpack declares [adaptive] but its [requires] section does not declare capability \
+         `{capability}`; re-pack with current tooling to stamp it"
+    )]
+    MissingAdaptiveCapability { capability: String },
+    #[error(
+        "adaptive mobpack file `{path}` does not match this host's canonical LayerDecision \
+         schema; re-pack with current tooling to regenerate it"
+    )]
+    StaleAdaptiveSchema { path: String },
 }
 
 impl From<std::io::Error> for PackValidationError {
@@ -120,8 +138,25 @@ mod tests {
             PackValidationError::DeployPolicy(crate::deploy_policy::DeployPolicyError::Invalid(
                 "bad toml".to_string(),
             )),
+            PackValidationError::MissingAdaptiveFile {
+                path: "adaptive/policies.toml".to_string(),
+            },
+            PackValidationError::InvalidAdaptiveFile {
+                path: "adaptive/policies.toml".to_string(),
+                reason: "bad toml".to_string(),
+            },
+            PackValidationError::UnknownRequiredCapability {
+                capability: "quantum_flux".to_string(),
+                supported: vec!["comms".to_string()],
+            },
+            PackValidationError::MissingAdaptiveCapability {
+                capability: "adaptive_flow".to_string(),
+            },
+            PackValidationError::StaleAdaptiveSchema {
+                path: "adaptive/layer-decision.schema.json".to_string(),
+            },
         ];
 
-        assert_eq!(errors.len(), 22);
+        assert_eq!(errors.len(), 27);
     }
 }

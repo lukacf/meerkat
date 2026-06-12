@@ -50,6 +50,25 @@ one-liner for switching the default model.
   runtime-projection quarantine (no shell-side fallback); WebRTC input
   handoff failures terminate with typed client error frames; Codemob built-in
   packs require machine-owned `main` flows (local comms completion removed).
+- **Adaptive pack format hardened before first release** — packs with an
+  `[adaptive]` section are stamped with a required `adaptive_flow` capability
+  at build time, and hosts now enforce `[requires]` fail-closed (unknown or
+  unsatisfied capabilities reject the pack with the supported set named).
+  Hosts older than 0.7.1 ignore `[requires]` and will silently run adaptive
+  packs as static packs — deploy adaptive packs to 0.7.1+ hosts only.
+  `adaptive/policies.toml` is parsed and completeness-validated at pack time
+  (garbage TOML or zero limits fail the build, not the run), and
+  `adaptive/layer-decision.schema.json` is emitted by the builder from the
+  canonical types (hand-rolled or stale schemas fail closed with a
+  regenerate hint); inline layer profiles are now structurally validated.
+- **BREAKING (flow semantics): step `output_format` defaults are
+  schema-aware** — an omitted `output_format` resolves to `json` when the
+  step declares an expected schema and `text` otherwise (previously always
+  `json`, which made schema-less free-text steps fail as "malformed JSON
+  output"). Definitions that wrote the field explicitly are unchanged;
+  explicit `json` without a schema now earns a definition-time warning.
+  Adaptive plan flows that relied on the old implicit json default must say
+  `output_format = "json"` explicitly.
 - **BREAKING (CLI behavior): legacy default-model healing removed** (#764) —
   a persisted `agent.model` naming an old built-in default (e.g.
   `claude-opus-4-7`) is now used as-is instead of being silently redirected

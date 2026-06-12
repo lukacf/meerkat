@@ -283,7 +283,7 @@ fn json_step(role: &str, message: impl Into<String>) -> FlowStepSpec {
         depends_on_mode: DependencyMode::All,
         allowed_tools: None,
         blocked_tools: None,
-        output_format: meerkat_mob::definition::StepOutputFormat::Json,
+        output_format: Some(meerkat_mob::definition::StepOutputFormat::Json),
     }
 }
 

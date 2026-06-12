@@ -3736,7 +3736,10 @@ class MobSpawnPolicyInputAuto(TypedDict, total=False):
 
 MobSpawnPolicyInput = MobSpawnPolicyInputNone | MobSpawnPolicyInputAuto
 
-# Mob RPC helper wire type for MobStepOutputFormatInput.
+# Explicit step output format. Omitting `output_format` on a step is
+# meaningful — the definition layer resolves a schema-aware default (`json`
+# when the step declares `expected_schema_ref`, `text` otherwise) — so the
+# wire shape keeps "omitted" representable instead of baking in a default.
 MobStepOutputFormatInput = Literal['json', 'text']
 
 # Closed wire stage for a per-identity `mob/reconcile` failure.

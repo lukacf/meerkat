@@ -577,7 +577,7 @@ mod tests {
                 depends_on_mode: DependencyMode::default(),
                 allowed_tools: None,
                 blocked_tools: None,
-                output_format: StepOutputFormat::Text,
+                output_format: Some(StepOutputFormat::Text),
             },
         );
         FlowSpec::new(Some("sample".into()), steps, None)

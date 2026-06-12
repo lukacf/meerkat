@@ -129,11 +129,15 @@ pub enum DependencyMode {
 }
 
 /// How to parse a step target's terminal output.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// There is deliberately no `Default` impl: an omitted `output_format` is a
+/// meaningful authored state resolved schema-aware by
+/// [`FlowStepSpec::effective_output_format`] (`Json` when the step declares
+/// `expected_schema_ref`, `Text` otherwise), not a baked-in choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutputFormat {
     /// Parse output as JSON.
-    #[default]
     Json,
     /// Keep output as plain text (stored as a JSON string value).
     Text,
@@ -382,8 +386,31 @@ pub struct FlowStepSpec {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub blocked_tools: Option<Vec<String>>,
-    #[serde(default)]
-    pub output_format: StepOutputFormat,
+    /// Explicit output format, when the author chose one. `None` means
+    /// "omitted" and resolves schema-aware via
+    /// [`FlowStepSpec::effective_output_format`]; the parsed shape keeps the
+    /// distinction so an omitted format is never laundered into a fake
+    /// explicit choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<StepOutputFormat>,
+}
+
+impl FlowStepSpec {
+    /// The effective output format for this step — the single resolution
+    /// point for the schema-aware default.
+    ///
+    /// An explicit `output_format` always wins. When omitted, a step that
+    /// declares `expected_schema_ref` resolves to [`StepOutputFormat::Json`]
+    /// (the schema can only validate parsed JSON); a schema-less step
+    /// resolves to [`StepOutputFormat::Text`] so free-form model output does
+    /// not fail the turn with a malformed-JSON fault by default.
+    pub fn effective_output_format(&self) -> StepOutputFormat {
+        match (self.output_format, &self.expected_schema_ref) {
+            (Some(format), _) => format,
+            (None, Some(_)) => StepOutputFormat::Json,
+            (None, None) => StepOutputFormat::Text,
+        }
+    }
 }
 
 /// Flow definition for a named workflow.
@@ -1219,7 +1246,9 @@ max_orphaned_turns = 8
     }
 
     #[test]
-    fn test_flow_step_output_format_defaults_to_json_and_parses_text() {
+    fn test_flow_step_output_format_omitted_resolves_schema_aware() {
+        // Omitted format, no schema: stays representable as None and
+        // resolves to Text (free-form output must not fail the turn).
         let default_toml = r#"
 [mob]
 id = "flow-default-output"
@@ -1237,8 +1266,38 @@ message = "hello"
             .get(&FlowId::from("demo"))
             .and_then(|flow| flow.steps.get(&StepId::from("start")))
             .expect("step exists");
-        assert_eq!(default_step.output_format, StepOutputFormat::Json);
+        assert_eq!(default_step.output_format, None);
+        assert_eq!(
+            default_step.effective_output_format(),
+            StepOutputFormat::Text
+        );
 
+        // Omitted format with a schema attached resolves to Json.
+        let schema_toml = r#"
+[mob]
+id = "flow-schema-output"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "hello"
+expected_schema_ref = '{"type":"object","properties":{"answer":{"type":"string"}}}'
+        "#;
+        let schema_definition = MobDefinition::from_toml(schema_toml).unwrap();
+        let schema_step = schema_definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .and_then(|flow| flow.steps.get(&StepId::from("start")))
+            .expect("step exists");
+        assert_eq!(schema_step.output_format, None);
+        assert_eq!(
+            schema_step.effective_output_format(),
+            StepOutputFormat::Json
+        );
+
+        // An explicit format always wins over the schema-aware default.
         let text_toml = r#"
 [mob]
 id = "flow-text-output"
@@ -1257,7 +1316,32 @@ output_format = "text"
             .get(&FlowId::from("demo"))
             .and_then(|flow| flow.steps.get(&StepId::from("start")))
             .expect("step exists");
-        assert_eq!(text_step.output_format, StepOutputFormat::Text);
+        assert_eq!(text_step.output_format, Some(StepOutputFormat::Text));
+        assert_eq!(text_step.effective_output_format(), StepOutputFormat::Text);
+    }
+
+    #[test]
+    fn test_flow_step_explicit_json_without_schema_stays_json() {
+        let json_toml = r#"
+[mob]
+id = "flow-json-output"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "hello"
+output_format = "json"
+        "#;
+        let definition = MobDefinition::from_toml(json_toml).unwrap();
+        let step = definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .and_then(|flow| flow.steps.get(&StepId::from("start")))
+            .expect("step exists");
+        assert_eq!(step.output_format, Some(StepOutputFormat::Json));
+        assert_eq!(step.effective_output_format(), StepOutputFormat::Json);
     }
 
     #[test]
@@ -1447,7 +1531,7 @@ include_patterns = ["text_complete"]
                 depends_on_mode: DependencyMode::default(),
                 allowed_tools: None,
                 blocked_tools: None,
-                output_format: StepOutputFormat::default(),
+                output_format: None,
             },
         );
         let mut value =

@@ -84,6 +84,18 @@ pub struct FinishResult {
     pub result: serde_json::Value,
 }
 
+/// The canonical JSON schema for [`LayerDecision`].
+///
+/// Single source of truth for the `adaptive/layer-decision.schema.json`
+/// artifact bundled in adaptive mobpacks: the pack builder emits this schema
+/// when packing an adaptive pack, and pack validation requires the bundled
+/// bytes to match it (structural JSON equality, i.e. byte equality after
+/// canonical serialization), so a stale or hand-rolled schema fails closed.
+#[cfg(feature = "schema")]
+pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(schemars::schema_for!(LayerDecision))
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerPlan {
@@ -163,7 +175,9 @@ pub enum LayerProfile {
         template: ProfileName,
     },
     Inline {
-        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        // `Profile` derives `JsonSchema` itself (schema feature), so inline
+        // profiles are validated structurally instead of as an opaque
+        // `serde_json::Value` the bundled schema would accept as `true`.
         inline: Box<Profile>,
     },
 }
@@ -1516,7 +1530,7 @@ fn compile_flow(plan: &LayerPlan, registry: &SchemaRegistry) -> Result<FlowSpec,
                     depends_on_mode: Default::default(),
                     allowed_tools: None,
                     blocked_tools: None,
-                    output_format: StepOutputFormat::Json,
+                    output_format: Some(StepOutputFormat::Json),
                 },
             );
             steps.insert(
@@ -1539,7 +1553,7 @@ fn compile_flow(plan: &LayerPlan, registry: &SchemaRegistry) -> Result<FlowSpec,
                     depends_on_mode: Default::default(),
                     allowed_tools: None,
                     blocked_tools: None,
-                    output_format: StepOutputFormat::Json,
+                    output_format: Some(StepOutputFormat::Json),
                 },
             );
         }
@@ -1559,7 +1573,7 @@ fn compile_flow(plan: &LayerPlan, registry: &SchemaRegistry) -> Result<FlowSpec,
                     depends_on_mode: Default::default(),
                     allowed_tools: None,
                     blocked_tools: None,
-                    output_format: StepOutputFormat::Json,
+                    output_format: Some(StepOutputFormat::Json),
                 },
             );
         }
@@ -1830,6 +1844,50 @@ mod tests {
     use indexmap::IndexMap;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn layer_decision_schema_validates_inline_profiles_structurally() {
+        let schema = layer_decision_schema().expect("canonical schema serializes");
+        let rendered = serde_json::to_string(&schema).expect("schema renders");
+        // The schema is a real object schema, not a vacuous placeholder.
+        assert!(schema.is_object());
+        assert!(schema.get("$defs").is_some(), "schema carries definitions");
+        // Inline layer profiles reference the structural Profile definition
+        // instead of an opaque any-value escape hatch.
+        assert!(
+            rendered.contains("\"Profile\""),
+            "inline profiles must be validated against the Profile schema: {rendered}"
+        );
+        let validator =
+            jsonschema::validator_for(&schema).expect("canonical schema is a valid JSON schema");
+        // A malformed inline profile (model must be a string) is rejected.
+        let bad_decision = serde_json::json!({
+            "decision": "run_layer",
+            "reason": "test",
+            "plan": {
+                "id": "layer-1",
+                "objective": "do work",
+                "shape": { "kind": "solo" },
+                "profiles": { "solo": { "inline": { "model": 42 } } },
+                "collector": {
+                    "profile": "solo",
+                    "output_schema": { "inline": { "type": "object" } }
+                }
+            }
+        });
+        assert!(
+            !validator.is_valid(&bad_decision),
+            "inline profile with non-string model must fail schema validation"
+        );
+        // A well-formed finish decision validates.
+        let finish = serde_json::json!({
+            "decision": "finish",
+            "reason": "done",
+            "result": { "result": { "ok": true } }
+        });
+        assert!(validator.is_valid(&finish));
+    }
 
     fn limits(value: u64) -> AdaptiveLimitRecord {
         AdaptiveLimitRecord {

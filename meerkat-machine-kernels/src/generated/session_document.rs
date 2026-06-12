@@ -1391,6 +1391,7 @@ pub mod inputs {
         pub session_id: SessionId,
         pub has_metadata: bool,
         pub has_build_state: bool,
+        pub runtime_projection_quarantined: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {

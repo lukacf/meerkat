@@ -1729,23 +1729,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         // Recovery-source eligibility (whether a store-only
                         // projection may stand in as authoritative when the
                         // runtime snapshot is absent) is owned by the canonical
-                        // SessionDocumentMachine. The shell extracts only the two
-                        // pure presence observations and mirrors the verdict; the
-                        // separate quarantine fallback OR-term remains shell-side
-                        // (a distinct runtime fact). Fails closed: a machine drive
-                        // error makes the projection ineligible (the quarantine
-                        // fallback cannot rescue an unresolved verdict).
+                        // SessionDocumentMachine. The shell extracts only typed
+                        // store/runtime observations and mirrors the verdict.
+                        // Fails closed: a machine drive error makes the
+                        // projection ineligible.
                         match store_projection {
                             Some(session) => {
-                                match self.store_projection_recovery_source_resolved(id, &session) {
+                                let runtime_projection_quarantined =
+                                    self.runtime_projection_fallback_quarantined(id).await;
+                                match self.store_projection_recovery_source_resolved(
+                                    id,
+                                    &session,
+                                    runtime_projection_quarantined,
+                                ) {
                                     Ok(true) => Some(session),
-                                    Ok(false)
-                                        if self
-                                            .runtime_projection_fallback_quarantined(id)
-                                            .await =>
-                                    {
-                                        Some(session)
-                                    }
                                     Ok(false) | Err(_) => None,
                                 }
                             }
@@ -2315,13 +2312,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Whether a SessionStore projection may stand in as the authoritative read
     /// source when the runtime snapshot is absent. The shell extracts only the
-    /// two pure presence observations (canonical metadata / build state) and
-    /// mirrors the canonical SessionDocumentMachine recovery-source verdict; it
-    /// decides nothing. Fails closed if the machine emits no verdict.
+    /// store/runtime observations (canonical metadata / build state / runtime
+    /// projection quarantine) and mirrors the canonical SessionDocumentMachine
+    /// recovery-source verdict; it decides nothing. Fails closed if the machine
+    /// emits no verdict.
     fn store_projection_recovery_source_resolved(
         &self,
         id: &SessionId,
         session: &Session,
+        runtime_projection_quarantined: bool,
     ) -> Result<bool, SessionError> {
         let mut authority = SessionDocumentMachineAuthority::new();
         let effects = authority
@@ -2329,6 +2328,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 SessionDocumentKey::new(id.to_string()),
                 session.session_metadata().is_some(),
                 session.build_state().is_some(),
+                runtime_projection_quarantined,
             )
             .map_err(|err| {
                 SessionError::Agent(AgentError::InternalError(format!(

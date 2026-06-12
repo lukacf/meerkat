@@ -49,14 +49,16 @@ fn validate_name(name: &str) -> Result<(), ToolCallError> {
 pub struct UserMobConfig {
     pub name: String,
     pub description: String,
-    /// "comms" for autonomous loop, "flow" for structured steps.
+    /// "comms" is a legacy/default authoring shape that is normalized to a
+    /// machine-owned flow; "flow" uses caller-supplied structured steps.
     #[serde(default = "default_mode")]
     pub mode: String,
-    /// For comms mode: which agent's output is captured as the result.
-    /// Also receives the initial message.
+    /// For legacy comms mode: synthesis agent that receives peer flow outputs
+    /// and produces the final result.
     pub orchestrator: Option<String>,
     pub agents: BTreeMap<String, UserAgentConfig>,
-    /// Pairs of agent names to wire for comms. E.g. [["coder", "reviewer"]]
+    /// Pairs of agent names to wire for explicit flow-mode comms ingress/egress.
+    /// Ignored by legacy comms mode, which is normalized to strict flow edges.
     #[serde(default)]
     pub wiring: Vec<[String; 2]>,
     /// Flow definitions. Key is flow name (use "main").
@@ -101,20 +103,19 @@ impl UserMobConfig {
         task: &str,
         context: &str,
         model_overrides: &BTreeMap<String, String>,
-        provider_params: Option<&Value>,
+        provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
         let ctx = format_context(context);
+        let is_comms = self.mode == "comms";
+        // `deliberate` no longer owns a local event-idle completion loop. Even
+        // user-authored comms mobs therefore run as a MobMachine-owned flow;
+        // the conversion is flow fan-in/synthesis, not peer-to-peer tool comms.
+        let runtime = MobRuntimeMode::TurnDriven;
         let tools = ToolConfig {
             builtins: true,
             shell: true,
-            comms: true,
+            comms: !is_comms,
             ..ToolConfig::default()
-        };
-        let is_comms = self.mode == "comms";
-        let runtime = if is_comms {
-            MobRuntimeMode::AutonomousHost
-        } else {
-            MobRuntimeMode::TurnDriven
         };
 
         let mut profiles = BTreeMap::new();
@@ -126,6 +127,11 @@ impl UserMobConfig {
                 ProfileName::from(name.as_str()),
                 ProfileBinding::Inline(Box::new(Profile {
                     model: resolve_model(model_overrides, name, &agent.model),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
                     skills: vec![skill_key.clone()],
                     tools: tools.clone(),
                     peer_description: if agent.peer_description.is_empty() {
@@ -149,14 +155,17 @@ impl UserMobConfig {
             );
         }
 
-        let role_wiring: Vec<RoleWiringRule> = self
-            .wiring
-            .iter()
-            .map(|pair| RoleWiringRule {
-                a: ProfileName::from(pair[0].as_str()),
-                b: ProfileName::from(pair[1].as_str()),
-            })
-            .collect();
+        let role_wiring: Vec<RoleWiringRule> = if is_comms {
+            Vec::new()
+        } else {
+            self.wiring
+                .iter()
+                .map(|pair| RoleWiringRule {
+                    a: ProfileName::from(pair[0].as_str()),
+                    b: ProfileName::from(pair[1].as_str()),
+                })
+                .collect()
+        };
 
         let has_orchestrator = self.orchestrator.is_some();
         let orchestrator = self.orchestrator.as_ref().map(|name| OrchestratorConfig {
@@ -164,7 +173,85 @@ impl UserMobConfig {
         });
 
         let mut flows = BTreeMap::new();
-        if !is_comms {
+        if is_comms {
+            if let Some(orchestrator_name) = self
+                .orchestrator
+                .as_deref()
+                .or_else(|| self.agents.keys().next().map(String::as_str))
+            {
+                let mut step_specs = indexmap::IndexMap::new();
+                let peer_steps: Vec<(String, StepId)> = self
+                    .agents
+                    .keys()
+                    .filter(|name| name.as_str() != orchestrator_name)
+                    .enumerate()
+                    .map(|(idx, name)| (name.clone(), StepId::from(format!("peer_{idx}"))))
+                    .collect();
+                for (agent_name, step_id) in &peer_steps {
+                    step_specs.insert(
+                        step_id.clone(),
+                        FlowStepSpec {
+                            role: ProfileName::from(agent_name.as_str()),
+                            message: ContentInput::from(format!(
+                                "Analyze the task independently. Return concise findings for the orchestrator to synthesize. Do not message peer agents directly.\n\n## Task\n{task}{ctx}"
+                            )),
+                            depends_on: Vec::new(),
+                            dispatch_mode: DispatchMode::default(),
+                            collection_policy: CollectionPolicy::default(),
+                            condition: None,
+                            timeout_ms: Some(default_timeout()),
+                            expected_schema_ref: None,
+                            branch: None,
+                            depends_on_mode: DependencyMode::default(),
+                            allowed_tools: None,
+                            blocked_tools: None,
+                            output_format: StepOutputFormat::Text,
+                        },
+                    );
+                }
+                let peer_outputs = peer_steps
+                    .iter()
+                    .map(|(agent_name, step_id)| {
+                        format!("### {agent_name}\n{{{{ steps.{step_id} }}}}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let message = if peer_outputs.is_empty() {
+                    format!(
+                        "Return the final answer for this task.\n\n## Task\n{task}{ctx}"
+                    )
+                } else {
+                    format!(
+                        "Synthesize the peer flow outputs into the final answer. Do not message peer agents directly.\n\n## Task\n{task}{ctx}\n\n## Peer outputs\n{peer_outputs}"
+                    )
+                };
+                step_specs.insert(
+                    StepId::from("orchestrate"),
+                    FlowStepSpec {
+                        role: ProfileName::from(orchestrator_name),
+                        message: ContentInput::from(message),
+                        depends_on: peer_steps
+                            .iter()
+                            .map(|(_, step_id)| step_id.clone())
+                            .collect(),
+                        dispatch_mode: DispatchMode::default(),
+                        collection_policy: CollectionPolicy::default(),
+                        condition: None,
+                        timeout_ms: Some(default_timeout()),
+                        expected_schema_ref: None,
+                        branch: None,
+                        depends_on_mode: DependencyMode::default(),
+                        allowed_tools: None,
+                        blocked_tools: None,
+                        output_format: StepOutputFormat::Text,
+                    },
+                );
+                flows.insert(
+                    FlowId::from("main"),
+                    FlowSpec::new(Some("Comms-mode orchestrator flow".into()), step_specs, None),
+                );
+            }
+        } else {
             for (flow_name, steps) in &self.flows {
                 let mut step_specs = indexmap::IndexMap::new();
                 for step in steps {
@@ -243,8 +330,10 @@ impl Pack for UserPack {
     fn flow_step_count(&self) -> usize {
         if self.config.mode == "flow" {
             self.config.flows.values().map(|steps| steps.len()).sum()
-        } else {
+        } else if self.config.agents.is_empty() {
             0
+        } else {
+            self.config.agents.len()
         }
     }
     fn definition(
@@ -252,7 +341,7 @@ impl Pack for UserPack {
         task: &str,
         context: &str,
         model_overrides: &BTreeMap<String, String>,
-        provider_params: Option<&Value>,
+        provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
         self.config
             .to_mob_definition(task, context, model_overrides, provider_params)
@@ -390,4 +479,77 @@ pub fn load_user_packs(dir: &Path) -> Vec<Box<dyn Pack>> {
         packs.push(Box::new(UserPack::new(config)));
     }
     packs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user_mob(mode: &str) -> UserMobConfig {
+        let mut agents = BTreeMap::new();
+        agents.insert(
+            "lead".to_string(),
+            UserAgentConfig {
+                model: "gpt-5.5".to_string(),
+                skill: "You lead the mob.".to_string(),
+                peer_description: "Lead".to_string(),
+            },
+        );
+        agents.insert(
+            "critic".to_string(),
+            UserAgentConfig {
+                model: "claude-sonnet-4-6".to_string(),
+                skill: "You critique plans.".to_string(),
+                peer_description: "Critic".to_string(),
+            },
+        );
+        UserMobConfig {
+            name: "custom".to_string(),
+            description: "Custom mob".to_string(),
+            mode: mode.to_string(),
+            orchestrator: Some("lead".to_string()),
+            agents,
+            wiring: vec![["lead".to_string(), "critic".to_string()]],
+            flows: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn comms_user_pack_synthesizes_machine_owned_main_flow() {
+        let pack = UserPack::new(sample_user_mob("comms"));
+
+        assert_eq!(pack.flow_step_count(), 2);
+
+        let definition = pack.definition("Ship it", "extra context", &BTreeMap::new(), None);
+        let main = definition
+            .flows
+            .get(&FlowId::from("main"))
+            .expect("comms user packs synthesize a main flow");
+        let peer = main
+            .steps
+            .get(&StepId::from("peer_0"))
+            .expect("synthetic peer analysis step");
+        let orchestrate = main
+            .steps
+            .get(&StepId::from("orchestrate"))
+            .expect("synthetic orchestrator step");
+
+        assert_eq!(peer.role, ProfileName::from("critic"));
+        assert!(peer.depends_on.is_empty());
+        assert_eq!(orchestrate.role, ProfileName::from("lead"));
+        assert_eq!(orchestrate.depends_on, vec![StepId::from("peer_0")]);
+        let text = orchestrate.message.text_content();
+        assert!(
+            text.contains("Ship it")
+                && text.contains("extra context")
+                && text.contains("{{ steps.peer_0 }}")
+                && text.contains("Do not message peer agents directly")
+        );
+        assert!(definition.wiring.role_wiring.is_empty());
+        for binding in definition.profiles.values() {
+            let profile = binding.as_inline().expect("inline user profile");
+            assert_eq!(profile.runtime_mode, MobRuntimeMode::TurnDriven);
+            assert!(!profile.tools.comms);
+        }
+    }
 }

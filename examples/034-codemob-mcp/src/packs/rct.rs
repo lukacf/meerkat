@@ -10,7 +10,6 @@ use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::*;
@@ -36,7 +35,7 @@ impl Pack for RctPack {
         task: &str,
         context: &str,
         overrides: &BTreeMap<String, String>,
-        pp: Option<&Value>,
+        pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
         let ctx = format_context(context);
 
@@ -104,6 +103,11 @@ impl Pack for RctPack {
                 ProfileName::from(*name),
                 ProfileBinding::Inline(Box::new(Profile {
                     model: resolve_model(overrides, name, default),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
                     skills: vec![skill.to_string()],
                     tools: tools.clone(),
                     peer_description: desc.to_string(),

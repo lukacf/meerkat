@@ -117,6 +117,11 @@ pub async fn handle(
     let system_prompt = input
         .system_prompt
         .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let provider_params = input
+        .provider_params
+        .map(serde_json::from_value::<meerkat_core::ProviderParamsOverride>)
+        .transpose()
+        .map_err(|e| ToolCallError::invalid_params(format!("Invalid provider_params: {e}")))?;
 
     let mut labels = BTreeMap::new();
     labels.insert("source".into(), "consult".into());
@@ -136,12 +141,12 @@ pub async fn handle(
         initial_turn_metadata: None,
         ..SessionBuildOptions::default()
     };
-    build.provider_params = input.provider_params;
+    build.provider_params = provider_params;
 
     let req = CreateSessionRequest {
         model,
         prompt: prompt.into(),
-        system_prompt: Some(system_prompt),
+        system_prompt: meerkat_core::SystemPromptOverride::Set(system_prompt),
         max_tokens: None,
         event_tx: None,
         initial_turn: InitialTurnPolicy::RunImmediately,

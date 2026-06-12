@@ -1,23 +1,16 @@
-//! Panel pack — free-form debate with 5 opinionated agents and a moderator.
+//! Panel pack — structured debate with opinionated agents and a moderator.
 //!
-//! Unlike flow-based packs, the panel uses **comms-based** execution:
-//! all agents are `autonomous_host` with full-mesh wiring. The moderator
-//! controls the floor, and all agents obey moderator instructions absolutely.
-//!
-//! The deliberate handler detects `flow_step_count() == 0` and routes to
-//! `run_comms()` instead of `run_flow()`. The task is injected via
-//! `mob_member_send` to the moderator (not baked into a flow step), which
-//! is why `_task` and `_context` are unused in `definition()`.
+//! The panel is a `"main"` flow: the moderator frames the task, the panelists
+//! respond in parallel, and the moderator synthesizes. Completion is therefore
+//! owned by `MobMachine`, not by event-stream quiescence heuristics.
 
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
-use meerkat_mob::MobRuntimeMode;
-use serde_json::Value;
 
-use super::{resolve_model, Pack};
+use super::{flow_step, format_context, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack};
 
 pub struct PanelPack;
 
@@ -26,22 +19,24 @@ impl Pack for PanelPack {
         "panel"
     }
     fn description(&self) -> &str {
-        "Free-form review panel: 5 opinionated agents debate with a moderator keeping order. Full mesh comms, no flow script."
+        "Structured review panel: opinionated agents respond in parallel, then a moderator synthesizes"
     }
     fn agent_count(&self) -> usize {
         5
     }
     fn flow_step_count(&self) -> usize {
-        0
-    } // comms-driven, no flow
+        6
+    }
 
     fn definition(
         &self,
-        _task: &str,
-        _context: &str,
+        task: &str,
+        context: &str,
         overrides: &BTreeMap<String, String>,
-        pp: Option<&Value>,
+        pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
+        let ctx = format_context(context);
+
         // Diverse models across providers for genuine perspective differences
         let agents: Vec<(&str, &str, &str, String)> = vec![
             (
@@ -76,29 +71,11 @@ impl Pack for PanelPack {
             ),
         ];
 
-        let tools = ToolConfig {
-            builtins: true,
-            shell: true,
-            comms: true,
-            ..ToolConfig::default()
-        };
-
         let mut profiles = BTreeMap::new();
         for (name, skill, desc, m) in &agents {
             profiles.insert(
                 ProfileName::from(*name),
-                ProfileBinding::Inline(Box::new(Profile {
-                    model: m.clone(),
-                    skills: vec![skill.to_string()],
-                    tools: tools.clone(),
-                    peer_description: desc.to_string(),
-                    external_addressable: true,
-                    backend: None,
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    max_inline_peer_notifications: None,
-                    output_schema: None,
-                    provider_params: pp.cloned(),
-                })),
+                turn_driven_profile(m.clone(), skill, desc, pp),
             );
         }
 
@@ -134,31 +111,76 @@ impl Pack for PanelPack {
             },
         );
 
-        // Full mesh: every pair wired (agents can message anyone)
-        let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
-        let mut role_wiring = Vec::new();
-        for i in 0..names.len() {
-            for j in (i + 1)..names.len() {
-                role_wiring.push(RoleWiringRule {
-                    a: ProfileName::from(names[i]),
-                    b: ProfileName::from(names[j]),
-                });
-            }
-        }
+        let mut steps = IndexMap::new();
+        steps.insert(
+            StepId::from("moderator_brief"),
+            flow_step(
+                "moderator",
+                format!("Frame this panel discussion. Identify the key question, constraints, and what each panelist should pressure-test.\n\n{task}{ctx}"),
+                &[],
+                300_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("purist_case"),
+            flow_step(
+                "purist",
+                "Respond as the architecture purist. Name clean-design risks, boundary violations, and the purest path forward.\n\n## Moderator Brief\n{{ steps.moderator_brief }}".into(),
+                &["moderator_brief"],
+                300_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("pragmatist_case"),
+            flow_step(
+                "pragmatist",
+                "Respond as the pragmatist. Name the shortest shippable path, acceptable compromises, and what not to overbuild.\n\n## Moderator Brief\n{{ steps.moderator_brief }}".into(),
+                &["moderator_brief"],
+                300_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("skeptic_case"),
+            flow_step(
+                "skeptic",
+                "Respond as the skeptic. Find edge cases, weak assumptions, failure modes, and missing evidence.\n\n## Moderator Brief\n{{ steps.moderator_brief }}".into(),
+                &["moderator_brief"],
+                300_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("veteran_case"),
+            flow_step(
+                "veteran",
+                "Respond as the veteran. Bring operational lessons, maintainability concerns, and long-term cost trade-offs.\n\n## Moderator Brief\n{{ steps.moderator_brief }}".into(),
+                &["moderator_brief"],
+                300_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("moderator_synthesis"),
+            flow_step(
+                "moderator",
+                "Synthesize the panel into a clear verdict. Include: core tension, strongest agreements, unresolved risks, and recommended next action.\n\n\
+                 ## Purist\n{{ steps.purist_case }}\n\n## Pragmatist\n{{ steps.pragmatist_case }}\n\n## Skeptic\n{{ steps.skeptic_case }}\n\n## Veteran\n{{ steps.veteran_case }}".into(),
+                &["purist_case", "pragmatist_case", "skeptic_case", "veteran_case"],
+                300_000,
+            ),
+        );
 
-        let mut definition = MobDefinition::explicit(MobId::from(format!(
-            "codemob-panel-{}",
-            uuid::Uuid::new_v4().as_simple()
-        )));
-        definition.orchestrator = Some(OrchestratorConfig {
-            profile: ProfileName::from("moderator"),
-        });
-        definition.profiles = profiles;
-        definition.wiring = WiringRules {
-            auto_wire_orchestrator: true,
-            role_wiring,
-        };
-        definition.skills = skills;
-        definition
+        let mut flows = BTreeMap::new();
+        flows.insert(
+            FlowId::from("main"),
+            FlowSpec::new(Some("Structured panel debate with moderator synthesis".into()), steps, None),
+        );
+
+        let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
+        mob_definition(
+            "panel",
+            profiles,
+            skills,
+            flows,
+            identity_spawn_policy(&names),
+        )
     }
 }

@@ -624,7 +624,11 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
         ToolPreset::Full => ToolPresetResolution {
             builtins: true,
             shell: true,
-            memory: true,
+            // Presets mean "everything this build supports": like `mob`
+            // below, memory degrades with the build instead of demanding a
+            // capability the factory must fail closed on (the factory still
+            // rejects explicit memory enables on memory-less builds).
+            memory: cfg!(feature = "memory-store-session"),
             workgraph: true,
             mob: cfg!(feature = "mob"),
         },
@@ -15754,7 +15758,8 @@ default_model = "gemma"
         let full = resolve_tool_preset(ToolPreset::Full, false);
         assert!(full.builtins);
         assert!(full.shell);
-        assert!(full.memory);
+        // Presets degrade with the build, mirroring `mob` below.
+        assert_eq!(full.memory, cfg!(feature = "memory-store-session"));
         assert!(full.workgraph);
         #[cfg(feature = "mob")]
         assert!(full.mob);
@@ -15763,7 +15768,7 @@ default_model = "gemma"
 
         let yolo = resolve_tool_preset(ToolPreset::Safe, true);
         assert!(yolo.shell);
-        assert!(yolo.memory);
+        assert_eq!(yolo.memory, cfg!(feature = "memory-store-session"));
         #[cfg(feature = "mob")]
         assert!(yolo.mob);
         #[cfg(not(feature = "mob"))]
@@ -15789,7 +15794,12 @@ default_model = "gemma"
 
         assert_eq!(tooling.builtins, meerkat_core::ToolCategoryOverride::Enable);
         assert_eq!(tooling.shell, meerkat_core::ToolCategoryOverride::Enable);
-        assert_eq!(tooling.memory, meerkat_core::ToolCategoryOverride::Enable);
+        assert_eq!(
+            tooling.memory,
+            meerkat_core::ToolCategoryOverride::from_effective(cfg!(
+                feature = "memory-store-session"
+            ))
+        );
         assert_eq!(
             tooling.workgraph,
             meerkat_core::ToolCategoryOverride::Enable
@@ -21345,7 +21355,33 @@ mod docs_cli_examples {
 
     /// Doc lines that are illustrative shapes rather than literal
     /// invocations: placeholders, shell composition, or output elision.
+    /// Subcommands that exist only behind build features: doc examples
+    /// using them are valid for full builds and must be skipped when this
+    /// test runs in a trimmed feature-matrix combo.
+    fn subcommand_compiled_out(line: &str) -> bool {
+        let mut tokens = line.split_whitespace();
+        if tokens.next() != Some("rkat") {
+            return false;
+        }
+        let gated_subcommand = match tokens.next() {
+            Some("mob") => cfg!(not(feature = "mob")),
+            Some("mcp") => cfg!(not(feature = "mcp")),
+            Some("skill" | "skills") => cfg!(not(feature = "skills")),
+            Some("workgraph") => cfg!(not(feature = "workgraph")),
+            _ => false,
+        };
+        // Feature-gated FLAGS (cfg'd fields on Run/Resume) are also absent
+        // from trimmed builds.
+        let gated_flag = (line.contains("--skill") && cfg!(not(feature = "skills")))
+            || ((line.contains("--wait-for-mcp") || line.contains("--mcp-auth"))
+                && cfg!(not(feature = "mcp")));
+        gated_subcommand || gated_flag
+    }
+
     fn skippable(line: &str) -> bool {
+        if subcommand_compiled_out(line) {
+            return true;
+        }
         line.contains('<')
             || line.contains('[')
             || line.contains("...")

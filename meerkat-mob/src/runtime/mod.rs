@@ -74,6 +74,7 @@ mod handle;
 pub mod local_bridge;
 mod mob_member_lifecycle_projection;
 mod mob_runtime_bridge_authority;
+mod mobpack_execution;
 mod ops_adapter;
 pub mod path;
 mod pending_spawn_lineage;
@@ -134,6 +135,9 @@ pub use handle::{
     WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
+pub use mobpack_execution::{
+    MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec, run_mobpack_callable,
+};
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,

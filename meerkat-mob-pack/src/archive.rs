@@ -8,7 +8,7 @@ use crate::trust::{
 };
 use crate::validate::PackValidationError;
 use crate::vocabulary::ArchiveSection;
-use meerkat_mob::MobDefinition;
+use meerkat_mob::{MobDefinition, MobpackCallableConfig, MobpackRunSpec, ProfileName};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -126,6 +126,22 @@ impl MobpackArchive {
             },
             deploy_policy,
         ))
+    }
+
+    /// Lower archive-format data into the mob runtime's generic mobpack run
+    /// specification. The format crate owns archive layout and manifest
+    /// parsing; execution semantics remain owned by `meerkat-mob`.
+    pub fn mob_run_spec(&self) -> MobpackRunSpec {
+        let callable = self.manifest.adaptive.as_ref().map(|section| {
+            MobpackCallableConfig::new(ProfileName::from(section.flowmaster_profile.as_str()))
+        });
+        MobpackRunSpec::new(
+            self.definition.clone(),
+            self.skills.clone(),
+            callable,
+            self.adaptive.clone(),
+            self.schemas.clone(),
+        )
     }
 }
 

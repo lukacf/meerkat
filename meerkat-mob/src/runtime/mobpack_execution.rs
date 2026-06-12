@@ -1,12 +1,13 @@
-use crate::archive::MobpackArchive;
-use async_trait::async_trait;
-use meerkat_mob::{
-    FlowId, MobBuilder, MobError, MobHandle, MobRun, MobSessionService, MobStorage, ProfileName,
-    RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
+use crate::{
+    FlowId, MobBuilder, MobDefinition, MobError, MobHandle, MobRun, MobSessionService, MobStorage,
+    Profile, ProfileName, RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
 };
+use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+const CALLABLE_POLICY_PATH: &str = "adaptive/policies.toml";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MobpackRunOutcome {
@@ -15,22 +16,70 @@ pub struct MobpackRunOutcome {
     pub final_result: Option<serde_json::Value>,
 }
 
-pub fn has_mobpack_callable(archive: &MobpackArchive) -> bool {
-    archive.manifest.adaptive.is_some()
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MobpackCallableConfig {
+    coordinator_profile: ProfileName,
+}
+
+impl MobpackCallableConfig {
+    pub fn new(coordinator_profile: ProfileName) -> Self {
+        Self {
+            coordinator_profile,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MobpackRunSpec {
+    definition: MobDefinition,
+    packed_skills: BTreeMap<String, Vec<u8>>,
+    callable: Option<MobpackCallableConfig>,
+    policy_files: BTreeMap<String, Vec<u8>>,
+    schemas: BTreeMap<String, Vec<u8>>,
+}
+
+impl MobpackRunSpec {
+    pub fn new(
+        definition: MobDefinition,
+        packed_skills: BTreeMap<String, Vec<u8>>,
+        callable: Option<MobpackCallableConfig>,
+        policy_files: BTreeMap<String, Vec<u8>>,
+        schemas: BTreeMap<String, Vec<u8>>,
+    ) -> Self {
+        Self {
+            definition,
+            packed_skills,
+            callable,
+            policy_files,
+            schemas,
+        }
+    }
+
+    pub fn is_callable(&self) -> bool {
+        self.callable.is_some()
+    }
+
+    pub fn definition(&self) -> &MobDefinition {
+        &self.definition
+    }
+
+    pub fn packed_skills(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.packed_skills
+    }
 }
 
 pub async fn run_mobpack_callable(
-    archive: &MobpackArchive,
+    spec: &MobpackRunSpec,
     control_mob: MobHandle,
     session_service: Arc<dyn MobSessionService>,
     objective: &str,
 ) -> Result<MobpackRunOutcome, MobError> {
-    if archive.manifest.adaptive.is_none() {
+    if !spec.is_callable() {
         return Err(MobError::Internal(
             "mobpack has no callable flow".to_string(),
         ));
     }
-    run_adaptive_callable(archive, control_mob, session_service, objective).await
+    run_adaptive_callable(spec, control_mob, session_service, objective).await
 }
 
 struct PackAdaptiveRuntime {
@@ -39,7 +88,7 @@ struct PackAdaptiveRuntime {
 }
 
 #[async_trait]
-impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
+impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
     type Layer = MobHandle;
 
     fn now_ms(&mut self) -> u64 {
@@ -48,8 +97,8 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
 
     async fn run_planning_turn(
         &mut self,
-        request: meerkat_mob_adaptive::PlanningTurnRequest,
-    ) -> Result<meerkat_mob_adaptive::LayerDecision, meerkat_mob_adaptive::AdaptiveError> {
+        request: crate::adaptive::PlanningTurnRequest,
+    ) -> Result<crate::adaptive::LayerDecision, crate::adaptive::AdaptiveError> {
         let run_id = self
             .control_mob
             .run_flow(
@@ -64,7 +113,7 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         let run = await_flow_terminal(&self.control_mob, run_id.clone()).await?;
         let decision = run
             .root_step_outputs
-            .get(&meerkat_mob::StepId::from("plan"))
+            .get(&crate::StepId::from("plan"))
             .or_else(|| {
                 if run.root_step_outputs.len() == 1 {
                     run.root_step_outputs.values().next()
@@ -73,8 +122,8 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
                 }
             })
             .ok_or_else(|| {
-                meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
-                    "mobpack planning run '{run_id}' produced no LayerDecision output; status={:?}; failures={:?}; steps={:?}",
+                crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                    "adaptive planning run '{run_id}' produced no LayerDecision output; status={:?}; failures={:?}; steps={:?}",
                     run.status, run.failure_ledger, run.step_ledger
                 ))
             })?;
@@ -83,8 +132,8 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
 
     async fn provision_layer(
         &mut self,
-        compiled: &meerkat_mob_adaptive::CompiledLayer,
-    ) -> Result<Self::Layer, meerkat_mob_adaptive::AdaptiveError> {
+        compiled: &crate::adaptive::CompiledLayer,
+    ) -> Result<Self::Layer, crate::adaptive::AdaptiveError> {
         let mut builder = MobBuilder::from_mobpack(
             compiled.definition.clone(),
             BTreeMap::new(),
@@ -100,7 +149,7 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
             .iter()
             .find_map(|result| result.as_ref().err())
         {
-            return Err(meerkat_mob_adaptive::AdaptiveError::DriverRuntime(format!(
+            return Err(crate::adaptive::AdaptiveError::DriverRuntime(format!(
                 "mobpack layer spawn failed: {failure}"
             )));
         }
@@ -111,7 +160,7 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         &mut self,
         layer: &Self::Layer,
         activation_params: BTreeMap<String, serde_json::Value>,
-    ) -> Result<RunId, meerkat_mob_adaptive::AdaptiveError> {
+    ) -> Result<RunId, crate::adaptive::AdaptiveError> {
         Ok(layer
             .run_flow(
                 FlowId::from("layer-flow"),
@@ -124,37 +173,36 @@ impl meerkat_mob_adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         &mut self,
         layer: &Self::Layer,
         run_id: RunId,
-    ) -> Result<MobRun, meerkat_mob_adaptive::AdaptiveError> {
+    ) -> Result<MobRun, crate::adaptive::AdaptiveError> {
         await_flow_terminal(layer, run_id).await
     }
 
     async fn cleanup_layer(
         &mut self,
         _layer: Self::Layer,
-        _layer_id: &meerkat_mob_adaptive::LayerId,
+        _layer_id: &crate::adaptive::LayerId,
         _attempt: u64,
-    ) -> Result<meerkat_mob_adaptive::AdaptiveLayerCleanup, meerkat_mob_adaptive::AdaptiveError>
-    {
-        Ok(meerkat_mob_adaptive::AdaptiveLayerCleanup::Destroyed)
+    ) -> Result<crate::adaptive::AdaptiveLayerCleanup, crate::adaptive::AdaptiveError> {
+        Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed)
     }
 }
 
 async fn run_adaptive_callable(
-    archive: &MobpackArchive,
+    spec: &MobpackRunSpec,
     control_mob: MobHandle,
     session_service: Arc<dyn MobSessionService>,
     objective: &str,
 ) -> Result<MobpackRunOutcome, MobError> {
-    let policy = load_policy(archive)?;
-    let schema_registry = load_schema_registry(archive)?;
-    let profile_templates = load_profile_templates(archive)?;
-    if let Some(adaptive) = &archive.manifest.adaptive {
-        let flowmaster_profile = ProfileName::from(adaptive.flowmaster_profile.as_str());
+    let policy = load_policy(spec)?;
+    let schema_registry = load_schema_registry(spec)?;
+    let profile_templates = load_profile_templates(spec)?;
+    if let Some(callable) = &spec.callable {
+        let coordinator_profile = callable.coordinator_profile.clone();
         let roster = control_mob.roster().await;
-        if roster.by_profile(&flowmaster_profile).next().is_none() {
+        if roster.by_profile(&coordinator_profile).next().is_none() {
             control_mob
                 .spawn_spec(SpawnMemberSpec::new(
-                    flowmaster_profile,
+                    coordinator_profile,
                     "adaptive-flowmaster",
                 ))
                 .await
@@ -164,22 +212,22 @@ async fn run_adaptive_callable(
         }
     }
     let adaptive_run_id = fresh_run_id()?;
-    let compile_context = meerkat_mob_adaptive::CompileContext {
+    let compile_context = crate::adaptive::CompileContext {
         adaptive_run_id: adaptive_run_id.clone(),
         attempt: 1,
         schema_registry,
         profile_templates,
         previous_layer_result: None,
     };
-    let driver = meerkat_mob_adaptive::AdaptiveDriver::new(control_mob.clone());
+    let driver = crate::adaptive::AdaptiveDriver::new(control_mob.clone());
     let mut runtime = PackAdaptiveRuntime {
         control_mob,
         session_service,
     };
-    let outcome = meerkat_mob_adaptive::run_adaptive_loop(
+    let outcome = crate::adaptive::run_adaptive_loop(
         &driver,
         &mut runtime,
-        meerkat_mob_adaptive::AdaptiveRunRequest {
+        crate::adaptive::AdaptiveRunRequest {
             adaptive_run_id: adaptive_run_id.clone(),
             policy,
             compile_context,
@@ -199,10 +247,10 @@ async fn run_adaptive_callable(
     })
 }
 
-fn load_policy(archive: &MobpackArchive) -> Result<meerkat_mob_adaptive::AdaptivePolicy, MobError> {
-    let bytes = archive
-        .adaptive
-        .get("adaptive/policies.toml")
+fn load_policy(spec: &MobpackRunSpec) -> Result<crate::adaptive::AdaptivePolicy, MobError> {
+    let bytes = spec
+        .policy_files
+        .get(CALLABLE_POLICY_PATH)
         .ok_or_else(|| MobError::Internal("mobpack missing adaptive/policies.toml".to_string()))?;
     let text = std::str::from_utf8(bytes)
         .map_err(|err| MobError::Internal(format!("mobpack policy is not valid UTF-8: {err}")))?;
@@ -210,20 +258,20 @@ fn load_policy(archive: &MobpackArchive) -> Result<meerkat_mob_adaptive::Adaptiv
 }
 
 fn load_schema_registry(
-    archive: &MobpackArchive,
-) -> Result<meerkat_mob_adaptive::SchemaRegistry, MobError> {
-    let registry_bytes = archive
+    spec: &MobpackRunSpec,
+) -> Result<crate::adaptive::SchemaRegistry, MobError> {
+    let registry_bytes = spec
         .schemas
         .get("schemas/registry.json")
         .ok_or_else(|| MobError::Internal("mobpack missing schemas/registry.json".to_string()))?;
     let declared: BTreeMap<String, String> = serde_json::from_slice(registry_bytes)
         .map_err(|err| MobError::Internal(format!("invalid schemas/registry.json: {err}")))?;
-    let mut registry = meerkat_mob_adaptive::SchemaRegistry::default();
+    let mut registry = crate::adaptive::SchemaRegistry::default();
     for (name, path) in declared {
-        let schema_bytes = archive
+        let schema_bytes = spec
             .schemas
             .get(&path)
-            .or_else(|| archive.schemas.get(&format!("schemas/{path}")))
+            .or_else(|| spec.schemas.get(&format!("schemas/{path}")))
             .ok_or_else(|| {
                 MobError::Internal(format!("schema registry entry '{name}' missing '{path}'"))
             })?;
@@ -231,7 +279,7 @@ fn load_schema_registry(
             .map_err(|err| MobError::Internal(format!("invalid schema '{path}': {err}")))?;
         registry
             .insert(
-                meerkat_mob_adaptive::SchemaName::new(name)
+                crate::adaptive::SchemaName::new(name)
                     .map_err(|err| MobError::Internal(err.to_string()))?,
                 schema,
             )
@@ -241,10 +289,10 @@ fn load_schema_registry(
 }
 
 fn load_profile_templates(
-    archive: &MobpackArchive,
-) -> Result<BTreeMap<ProfileName, meerkat_mob::Profile>, MobError> {
+    spec: &MobpackRunSpec,
+) -> Result<BTreeMap<ProfileName, Profile>, MobError> {
     let mut profiles = BTreeMap::new();
-    for (name, binding) in &archive.definition.profiles {
+    for (name, binding) in &spec.definition.profiles {
         let Some(profile) = binding.as_inline() else {
             return Err(MobError::Internal(format!(
                 "mobpack profile '{name}' uses a realm profile reference; inline profile templates are required"
@@ -258,7 +306,7 @@ fn load_profile_templates(
 async fn await_flow_terminal(
     mob: &MobHandle,
     run_id: RunId,
-) -> Result<MobRun, meerkat_mob_adaptive::AdaptiveError> {
+) -> Result<MobRun, crate::adaptive::AdaptiveError> {
     loop {
         if let Some(run) = mob.flow_status(run_id.clone()).await?
             && mob_machine_run_status_is_terminal(&run_id, &run.status)?
@@ -269,8 +317,8 @@ async fn await_flow_terminal(
     }
 }
 
-fn fresh_run_id() -> Result<meerkat_mob_adaptive::AdaptiveRunId, MobError> {
-    meerkat_mob_adaptive::AdaptiveRunId::new(RunId::new().to_string())
+fn fresh_run_id() -> Result<crate::adaptive::AdaptiveRunId, MobError> {
+    crate::adaptive::AdaptiveRunId::new(RunId::new().to_string())
         .map_err(|err| MobError::Internal(err.to_string()))
 }
 

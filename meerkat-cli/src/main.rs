@@ -12841,9 +12841,10 @@ async fn execute_mob_run_pack(
     }
 
     let session_service = build_deploy_mob_session_service(scope, effective_config).await?;
+    let run_spec = archive.mob_run_spec();
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
-        archive.definition.clone(),
-        archive.skills.clone(),
+        run_spec.definition().clone(),
+        run_spec.packed_skills().clone(),
         meerkat_mob::MobStorage::in_memory(),
     )
     .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?
@@ -12870,9 +12871,9 @@ async fn execute_mob_run_pack(
             .prompt
             .map(str::to_string)
             .unwrap_or_else(|| params.to_string());
-        if meerkat_mob_pack::execution::has_mobpack_callable(&archive) {
-            let outcome = meerkat_mob_pack::execution::run_mobpack_callable(
-                &archive,
+        if run_spec.is_callable() {
+            let outcome = meerkat_mob::run_mobpack_callable(
+                &run_spec,
                 handle,
                 session_service.clone(),
                 &objective,

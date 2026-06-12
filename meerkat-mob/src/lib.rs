@@ -44,6 +44,8 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+#[doc(hidden)]
+pub mod adaptive;
 pub mod backend;
 mod build;
 pub mod coordination;
@@ -154,6 +156,7 @@ pub use runtime::{
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
+pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec, run_mobpack_callable};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

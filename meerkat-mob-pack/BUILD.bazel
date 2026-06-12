@@ -49,7 +49,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive",
         "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
@@ -83,7 +82,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
         "//meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
@@ -131,7 +129,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob-adaptive:meerkat_mob_adaptive_with_runtime_test_support",
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
         "//meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(

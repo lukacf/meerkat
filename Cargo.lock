@@ -3346,6 +3346,7 @@ dependencies = [
  "notify",
  "reqwest",
  "rusqlite",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3364,18 +3365,7 @@ dependencies = [
 name = "meerkat-mob-adaptive"
 version = "0.7.0"
 dependencies = [
- "async-trait",
- "chrono",
- "indexmap",
- "jsonschema",
- "meerkat-core",
  "meerkat-mob",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -3408,21 +3398,18 @@ dependencies = [
 name = "meerkat-mob-pack"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "chrono",
  "ed25519-dalek",
  "flate2",
  "hex",
  "meerkat-contracts",
  "meerkat-mob",
- "meerkat-mob-adaptive",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "toml 0.9.12+spec-1.1.0",
 ]
 

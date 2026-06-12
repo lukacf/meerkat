@@ -50,7 +50,6 @@ rust_library(
     ),
     deps = [
         "//meerkat-mob:meerkat_mob",
-        "//meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-adaptive",
         normal = True,
@@ -70,7 +69,6 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//meerkat-mob-adaptive:__pkg__",
-        "//meerkat-mob-pack:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.7.0",
@@ -82,7 +80,6 @@ rust_library(
     ),
     deps = [
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-adaptive",
         normal = True,
@@ -129,7 +126,6 @@ rust_test(
     ),
     deps = [
         "//meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-adaptive",
         normal = True,

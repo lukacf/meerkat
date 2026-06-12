@@ -3,8 +3,6 @@
 pub mod archive;
 pub mod deploy_policy;
 pub mod digest;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod execution;
 pub mod manifest;
 pub mod pack;
 pub mod signing;

@@ -15,8 +15,6 @@ categories.workspace = true
 [dependencies]
 meerkat-contracts = { workspace = true }
 meerkat-mob = { workspace = true }
-meerkat-mob-adaptive = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -27,9 +25,6 @@ tar = "0.4"
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 hex = "0.4"
 chrono = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

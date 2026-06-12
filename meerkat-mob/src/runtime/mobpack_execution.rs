@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::time as tokio_time;
 use crate::{
     FlowId, MobBuilder, MobDefinition, MobError, MobHandle, MobRun, MobSessionService, MobStorage,
     Profile, ProfileName, RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
@@ -6,6 +8,8 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time as tokio_time;
 
 const CALLABLE_POLICY_PATH: &str = "adaptive/policies.toml";
 
@@ -87,7 +91,8 @@ struct PackAdaptiveRuntime {
     session_service: Arc<dyn MobSessionService>,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
     type Layer = MobHandle;
 
@@ -313,7 +318,7 @@ async fn await_flow_terminal(
         {
             return Ok(run);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio_time::sleep(Duration::from_millis(250)).await;
     }
 }
 

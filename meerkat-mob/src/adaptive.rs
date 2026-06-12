@@ -763,7 +763,8 @@ pub enum AdaptiveLayerCleanup {
     Retained(crate::AdaptiveLayerDisposition),
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AdaptiveKernel {
     type Capability: Send + Sync;
 
@@ -865,7 +866,8 @@ pub trait AdaptiveKernel {
     ) -> Result<(), AdaptiveError>;
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AdaptiveKernel for AdaptiveDriver {
     type Capability = crate::AdaptiveDriverCapability;
 
@@ -1019,7 +1021,8 @@ impl AdaptiveKernel for AdaptiveDriver {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AdaptiveDriverRuntime {
     type Layer: Send + Sync;
 
@@ -1988,7 +1991,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AdaptiveKernel for FakeKernel {
         type Capability = ();
 
@@ -2138,7 +2142,8 @@ mod tests {
         saw_previous_layer_result: bool,
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AdaptiveDriverRuntime for FakeRuntime {
         type Layer = String;
 

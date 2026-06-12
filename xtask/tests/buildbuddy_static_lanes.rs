@@ -42,7 +42,13 @@ fn walk_files(root: &Path, files: &mut Vec<PathBuf>) {
                 .unwrap_or("");
             if matches!(
                 name,
-                ".git" | ".rct" | "bazel-bin" | "bazel-out" | "bazel-testlogs" | "node_modules"
+                ".git"
+                    | ".rct"
+                    | ".rkat"
+                    | "bazel-bin"
+                    | "bazel-out"
+                    | "bazel-testlogs"
+                    | "node_modules"
             ) || (parent_name == ".claude" && name == "worktrees")
                 || name.starts_with("target")
                 || name.starts_with("bazel-")

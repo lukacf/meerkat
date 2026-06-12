@@ -165,6 +165,10 @@ fn workspace_files(root: &Path) -> Result<Vec<WorkspaceFile>> {
                     continue;
                 }
                 stack.push(path);
+            } else if name == "nohup.out" {
+                // Stray process logs are runtime junk, not workspace surface
+                // (the bash predecessor excluded nohup.out the same way).
+                continue;
             } else if file_type.is_file() {
                 let rel = path
                     .strip_prefix(root)

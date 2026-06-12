@@ -373,7 +373,9 @@ fn comms_trust_authority_minting_is_generated_only() {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == ".git" || name == "target" {
+            // .claude holds sibling worktrees (full repo copies) and agent
+            // state; scanning them double-counts every workspace file.
+            if name == ".git" || name == "target" || name == ".claude" || name == "node_modules" {
                 continue;
             }
             if path.is_dir() {

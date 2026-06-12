@@ -3157,6 +3157,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         if method == "mob/flows":
             return {"flows": ["incident"]}
+        if method == "mob/run":
+            return {"run_id": "run-typed"}
         if method == "mob/flow_run":
             return {"run_id": "run-1"}
         if method == "mob/flow_status":
@@ -3287,6 +3289,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "status": "staged",
     }
     assert await client.list_mob_flows("mob-1") == ["incident"]
+    assert await mob_handle.run({"severity": "high"}, prompt="triage") == "run-typed"
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"
     assert await client.get_mob_flow_status("mob-1", "run-1") == {"status": "running"}
     await client.cancel_mob_flow("mob-1", "run-1")
@@ -3309,10 +3312,16 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/wait_ready",
         "mob/append_system_context",
         "mob/flows",
+        "mob/run",
         "mob/flow_run",
         "mob/flow_status",
         "mob/flow_cancel",
     ]
+    assert calls[17][1] == {
+        "mob_id": "mob-1",
+        "params": {"severity": "high"},
+        "prompt": "triage",
+    }
     assert calls[8][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
     assert calls[9][1] == {
         "mob_id": "mob-1",

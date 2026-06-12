@@ -698,6 +698,49 @@ impl MobMcpState {
         self.mob_create_definition_inner(definition, None).await
     }
 
+    pub async fn mob_create_from_mobpack(
+        &self,
+        definition: MobDefinition,
+        packed_skills: BTreeMap<String, Vec<u8>>,
+    ) -> Result<MobId, MobError> {
+        let mob_id = definition.id.clone();
+        self.ensure_restored().await?;
+        if self.mobs.read().await.contains_key(&mob_id) {
+            return Ok(mob_id);
+        }
+        let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
+        let handle = self
+            .configure_builder(MobBuilder::from_mobpack(
+                definition,
+                packed_skills,
+                storage,
+            )?)
+            .create()
+            .await?;
+        match self.mobs.write().await.entry(mob_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(ManagedMob {
+                    handle,
+                    storage_path,
+                });
+                Ok(mob_id)
+            }
+            Entry::Occupied(_) => {
+                if let Err(error) = handle.destroy().await {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        error = %error,
+                        "duplicate mobpack create cleanup failed"
+                    );
+                }
+                if let Err(error) = Self::remove_storage_files(storage_path.as_deref()).await {
+                    tracing::error!(error = %error, "duplicate mobpack storage cleanup failed");
+                }
+                Ok(mob_id)
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub async fn mob_create_definition_with_owner_bridge_session(
         &self,
@@ -2555,7 +2598,7 @@ fn now_ms() -> u64 {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn fresh_adaptive_run_id() -> Result<meerkat_mob_adaptive::AdaptiveRunId, MobError> {
-    meerkat_mob_adaptive::AdaptiveRunId::new(format!("run-{}", RunId::new()))
+    meerkat_mob_adaptive::AdaptiveRunId::new(RunId::new().to_string())
         .map_err(|err| MobError::Internal(err.to_string()))
 }
 
@@ -6205,8 +6248,14 @@ mod tests {
         let first = fresh_adaptive_run_id().expect("first adaptive run id");
         let second = fresh_adaptive_run_id().expect("second adaptive run id");
         assert_ne!(first, second);
-        assert!(first.as_str().starts_with("run-"));
-        assert!(second.as_str().starts_with("run-"));
+        first
+            .as_str()
+            .parse::<RunId>()
+            .expect("adaptive internal id should preserve public RunId syntax");
+        second
+            .as_str()
+            .parse::<RunId>()
+            .expect("adaptive internal id should preserve public RunId syntax");
     }
 
     #[tokio::test]

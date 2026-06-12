@@ -177,8 +177,10 @@ await channel.close();
 | `mob.member(agentIdentity).send(content, options?)` | Send work to a member |
 | `mob.readEvents(options?)` | Read mob event history (`mob/events`) |
 | `mob.listFlows()` | List available flows |
+| `mob.run(params, options?)` | Invoke the mob as a typed callable run |
 | `mob.runFlow(flowId, params)` | Start a flow run |
 | `mob.flowStatus(runId)` | Get flow run status |
+| `mob.runResult(runId)` | Read the typed run output envelope |
 | `mob.cancelFlow(runId)` | Cancel a flow run |
 | `mob.subscribeMemberEvents(agentIdentity)` | Subscribe to member events; returns `EventSubscription<AgentEventEnvelope>` |
 | `mob.subscribeEvents()` | Subscribe to mob-wide events; returns `EventSubscription<AttributedMobEvent>` |

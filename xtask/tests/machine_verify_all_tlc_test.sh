@@ -39,8 +39,10 @@ if ! command -v tlc >/dev/null 2>&1; then
   exit 1
 fi
 
-# Broad composition TLC skips are CI-time/memory-budget exceptions, NOT codegen
-# defects. The earlier "Unknown operator" gap (mob
+# Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
+# codegen defects. `machine-verify` still validates drift and the generated
+# ci.cfg structural-invariant contract before honoring these skips. The earlier
+# "Unknown operator" gap (mob
 # coordination temporal predicates referenced but not emitted) was RESOLVED by
 # the LUC-524 machine-authority work: the generated composition model
 # (specs/compositions/meerkat_mob_seam/model.tla) now parses cleanly under SANY

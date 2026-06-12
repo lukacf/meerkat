@@ -1737,6 +1737,23 @@ pub struct MobFlowRunParams {
     pub params: Value,
 }
 
+/// Request payload for `mob/run`.
+///
+/// Starts the pack's callable flow. `flow_id` defaults to `main`; `prompt` is
+/// sugar for `params.prompt` when the caller does not provide that key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRunParams {
+    pub mob_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub params: Value,
+}
+
 /// Response payload for `mob/flow_run`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

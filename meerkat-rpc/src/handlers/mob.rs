@@ -16,13 +16,14 @@ use meerkat_contracts::{
     MobCreateParams, MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult,
     MobFlowRunResult, MobFlowsResult, MobForceCancelResult, MobHelperResult, MobLifecycleResult,
     MobListResult, MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult,
-    MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunResult,
-    MobRunResultParams, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
-    MobSpawnResult, MobStatusResult, MobUnwireResult, MobWaitMembersResult,
-    MobWireMembersBatchEdge, MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
-    SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
-    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
-    WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
+    MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunParams,
+    MobRunResult, MobRunResultParams, MobSnapshotResult, MobSpawnManyResult,
+    MobSpawnManyResultEntry, MobSpawnResult, MobStatusResult, MobUnwireResult,
+    MobWaitMembersResult, MobWireMembersBatchEdge, MobWireMembersBatchParams,
+    MobWireMembersBatchResult, MobWireResult, SupervisorRotationIncompleteDataWire,
+    SupervisorRotationIncompleteDetailsWire, SupervisorRotationReportWire,
+    SupervisorRotationRetryAuthority, SupervisorRotationRetryScope, WireMobBackendKind,
+    WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
@@ -1167,6 +1168,7 @@ pub async fn handle_flows(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobFlowRunParams {
     pub mob_id: String,
     pub flow_id: String,
@@ -1205,7 +1207,54 @@ pub async fn handle_flow_run(
     }
 }
 
+pub async fn handle_run(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobRunParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let activation_params = match bind_prompt_param(params.params, params.prompt) {
+        Ok(params) => params,
+        Err(message) => return invalid_params(id, message),
+    };
+    let flow_id = FlowId::from(params.flow_id.as_deref().unwrap_or("main"));
+    match state
+        .mob_run_flow(&mob_id, flow_id, activation_params)
+        .await
+    {
+        Ok(run_id) => RpcResponse::success(
+            id,
+            MobFlowRunResult {
+                run_id: run_id.to_string(),
+            },
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+fn bind_prompt_param(params: Value, prompt: Option<String>) -> Result<Value, String> {
+    let mut params = match params {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(map) => map,
+        _ => return Err("mob/run params must be an object".to_string()),
+    };
+    if let Some(prompt) = prompt
+        && !params.contains_key("prompt")
+    {
+        params.insert("prompt".to_string(), Value::String(prompt));
+    }
+    Ok(Value::Object(params))
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobFlowStatusParams {
     pub mob_id: String,
     pub run_id: String,
@@ -1264,6 +1313,7 @@ pub async fn handle_run_result(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobFlowCancelParams {
     pub mob_id: String,
     pub run_id: String,
@@ -2855,6 +2905,36 @@ mod tests {
         assert_eq!(handler.profile, wire.profile);
         assert_eq!(handler.agent_identity, wire.agent_identity);
         assert_eq!(handler.auto_wire_parent, wire.auto_wire_parent);
+    }
+
+    #[test]
+    fn mob_run_prompt_sugar_binds_params_prompt_without_overwrite() {
+        let bound = bind_prompt_param(
+            serde_json::json!({
+                "severity": "high"
+            }),
+            Some("triage this".to_string()),
+        )
+        .expect("object params should bind prompt");
+        assert_eq!(bound["severity"], "high");
+        assert_eq!(bound["prompt"], "triage this");
+
+        let explicit = bind_prompt_param(
+            serde_json::json!({
+                "prompt": "caller explicit",
+            }),
+            Some("sugar should not overwrite".to_string()),
+        )
+        .expect("explicit prompt should survive");
+        assert_eq!(explicit["prompt"], "caller explicit");
+
+        let from_null =
+            bind_prompt_param(Value::Null, Some("from null".to_string())).expect("null params");
+        assert_eq!(from_null["prompt"], "from null");
+
+        let err = bind_prompt_param(Value::String("bad".into()), None)
+            .expect_err("non-object params should fail closed");
+        assert!(err.contains("must be an object"));
     }
 
     #[test]

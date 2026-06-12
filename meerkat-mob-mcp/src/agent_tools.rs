@@ -1463,10 +1463,6 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             TOOL_MOB_PROFILE_UPDATE => self.dispatch_mob_profile_update(call).await,
             TOOL_MOB_PROFILE_DELETE => self.dispatch_mob_profile_delete(call).await,
             TOOL_MOB_PROFILE_LIST_SOURCES => self.dispatch_mob_profile_list_sources(call).await,
-            name if is_adaptive_flow_tool_name(name) => Err(ToolError::unavailable(
-                name,
-                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
-            )),
             _ => Err(ToolError::not_found(call.name)),
         }
     }
@@ -1537,7 +1533,7 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
 fn build_tool_defs_with_profile_support(
     has_profile_store: bool,
     has_snapshot_provider: bool,
-    can_run_adaptive_packs: bool,
+    _can_run_adaptive_packs: bool,
 ) -> Arc<[Arc<ToolDef>]> {
     let mut defs = vec![
         tool_def(
@@ -1837,26 +1833,7 @@ fn build_tool_defs_with_profile_support(
         ));
     }
 
-    if can_run_adaptive_packs {
-        defs.extend(
-            meerkat_mob_adaptive::adaptive_flow_tool_defs()
-                .into_iter()
-                .map(|tool| {
-                    Arc::new(tool.with_provenance(ToolProvenance {
-                        kind: ToolSourceKind::Mob,
-                        source_id: "mob-adaptive".into(),
-                    }))
-                }),
-        );
-    }
-
     defs.into()
-}
-
-fn is_adaptive_flow_tool_name(name: &str) -> bool {
-    meerkat_mob_adaptive::AdaptiveFlowTool::ALL
-        .iter()
-        .any(|tool| tool.name() == name)
 }
 
 // ─── Argument types ──────────────────────────────────────────────────────
@@ -4340,30 +4317,24 @@ mod tests {
     }
 
     #[test]
-    fn test_adaptive_flow_tools_present_only_with_adaptive_authority() {
+    fn test_adaptive_authority_does_not_expose_adaptive_named_agent_tools() {
         let without = build_tool_defs_with_profile_support(false, false, false);
         let without_names: Vec<&str> = without.iter().map(|d| d.name.as_str()).collect();
         assert!(!without_names.contains(&"adaptive_flow_start"));
 
         let with = build_tool_defs_with_profile_support(false, false, true);
-        let with_names: Vec<&str> = with.iter().map(|d| d.name.as_str()).collect();
-        for tool in meerkat_mob_adaptive::AdaptiveFlowTool::ALL {
-            assert!(
-                with_names.contains(&tool.name()),
-                "missing adaptive tool {}",
-                tool.name()
-            );
-        }
-        let start = with
-            .iter()
-            .find(|tool| tool.name.as_str() == "adaptive_flow_start")
-            .expect("adaptive_flow_start");
-        assert_eq!(
-            start
-                .provenance
-                .as_ref()
-                .map(|provenance| provenance.source_id.as_str()),
-            Some("mob-adaptive")
+        assert!(
+            with.iter()
+                .all(|tool| !tool.name.as_str().contains("adaptive")),
+            "agent tools must expose mob run capabilities without adaptive implementation names"
+        );
+        assert!(
+            with.iter().all(|tool| {
+                tool.provenance
+                    .as_ref()
+                    .is_none_or(|provenance| provenance.source_id.as_str() != "mob-adaptive")
+            }),
+            "agent tool provenance must not expose the adaptive implementation crate"
         );
     }
 

@@ -229,6 +229,7 @@ pub use wire::{
     MobRespawnResult,
     MobRetireResult,
     MobRotateSupervisorResult,
+    MobRunParams,
     MobRunResult,
     MobRunResultParams,
     MobSnapshotResult,

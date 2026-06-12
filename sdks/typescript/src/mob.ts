@@ -251,6 +251,13 @@ export class Mob {
     return this.client.runMobFlow(this.mobId, flowId, params);
   }
 
+  async run(
+    params: Record<string, unknown> = {},
+    options: { prompt?: string; flowId?: string } = {},
+  ): Promise<string> {
+    return this.client.runMob(this.mobId, params, options);
+  }
+
   async flowStatus(runId: string): Promise<MobFlowStatus | null> {
     return this.client.getMobFlowStatus(this.mobId, runId);
   }

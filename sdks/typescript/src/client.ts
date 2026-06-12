@@ -2294,6 +2294,18 @@ export class MeerkatClient {
     return String(result.run_id ?? "");
   }
 
+  async runMob(
+    mobId: string,
+    params: Record<string, unknown> = {},
+    options: { prompt?: string; flowId?: string } = {},
+  ): Promise<string> {
+    const payload: Record<string, unknown> = { mob_id: mobId, params };
+    if (options.prompt !== undefined) payload.prompt = options.prompt;
+    if (options.flowId !== undefined) payload.flow_id = options.flowId;
+    const result = await this.request("mob/run", payload);
+    return String(result.run_id ?? "");
+  }
+
   async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {
     const result = await this.request("mob/flow_status", { mob_id: mobId, run_id: runId });
     return result.run == null ? null : { run: result.run as Record<string, unknown> };

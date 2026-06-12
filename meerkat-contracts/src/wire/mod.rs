@@ -132,7 +132,7 @@ pub use mob::{
     MobProfileNameParams, MobProfileUpdateParams, MobReconcileFailureWire, MobReconcileOptionsWire,
     MobReconcileParams, MobReconcileReportWire, MobReconcileResult, MobRepeatUntilInput,
     MobRespawnParams, MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRoleWiringRuleInput,
-    MobRotateSupervisorResult, MobRunResult, MobRunResultParams, MobSkillSourceInput,
+    MobRotateSupervisorResult, MobRunParams, MobRunResult, MobRunResultParams, MobSkillSourceInput,
     MobSnapshotResult, MobSpawnHelperParams, MobSpawnManyFailedResult, MobSpawnManyFailureCause,
     MobSpawnManyParams, MobSpawnManyResult, MobSpawnManyResultEntry, MobSpawnManyResultPayload,
     MobSpawnManyResultStatus, MobSpawnManySpawnedResult, MobSpawnParams, MobSpawnPolicyInput,

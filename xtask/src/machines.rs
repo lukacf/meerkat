@@ -436,8 +436,13 @@ fn machine_verify_at_root(
         println!("composition: {}", composition.schema.name);
         if run_tlc {
             if skip_tlc_compositions.contains(&composition.slug) {
+                ensure_composition_ci_structural_invariants(
+                    root,
+                    &composition.slug,
+                    &composition.schema,
+                )?;
                 println!(
-                    "skipping TLC for broad composition {} after drift validation",
+                    "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation",
                     composition.schema.name
                 );
                 continue;
@@ -508,6 +513,44 @@ fn machine_verify_at_root(
     }
 
     Ok(())
+}
+
+fn ensure_composition_ci_structural_invariants(
+    root: &Path,
+    slug: &str,
+    schema: &CompositionSchema,
+) -> Result<()> {
+    let expected = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_structural())
+        .map(|invariant| invariant.name.as_str())
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let path = composition_ci_path(root, slug);
+    let cfg = fs::read_to_string(&path)
+        .with_context(|| format!("read composition ci.cfg {}", path.display()))?;
+    let missing = expected
+        .into_iter()
+        .filter(|name| !cfg.lines().any(|line| line.trim() == *name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "composition {} is skipped for full TLC but its ci.cfg omits structural invariants:\n{}",
+        schema.name,
+        missing
+            .into_iter()
+            .map(|name| format!("- {name}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {

@@ -5028,13 +5028,14 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .await
         .expect("initialize adaptive run");
     assert_eq!(capability.adaptive_run_id(), "adaptive-test-run");
+    let layer_id = "adaptive-test-run-layer-one";
 
     handle
         .record_adaptive_planning_decision(&capability, AdaptivePlanningDecisionKind::RunLayer)
         .await
         .expect("record planning decision");
     let admission = handle
-        .resolve_adaptive_layer_admission(&capability, adaptive_admission_request("layer-one", 2))
+        .resolve_adaptive_layer_admission(&capability, adaptive_admission_request(layer_id, 2))
         .await
         .expect("resolve layer admission");
     assert_eq!(admission, AdaptiveLayerAdmission::Allowed);
@@ -5043,7 +5044,7 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .record_adaptive_layer_provisioned(
             &capability,
             AdaptiveLayerAttempt {
-                layer_id: "layer-one".to_string(),
+                layer_id: layer_id.to_string(),
                 attempt: 1,
             },
         )
@@ -5056,7 +5057,7 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .record_adaptive_layer_run_started(
             &capability,
             AdaptiveLayerRunStart {
-                layer_id: "layer-one".to_string(),
+                layer_id: layer_id.to_string(),
                 attempt: 1,
                 child_run_id: child_run.run_id.clone(),
             },
@@ -5067,7 +5068,7 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .ingest_adaptive_layer_terminal(
             &capability,
             AdaptiveLayerAttempt {
-                layer_id: "layer-one".to_string(),
+                layer_id: layer_id.to_string(),
                 attempt: 1,
             },
             &child_run,
@@ -5086,15 +5087,15 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
     assert_eq!(collecting.aggregate_token_reserved, 100);
     assert_eq!(collecting.aggregate_tool_call_reserved, 3);
     assert_eq!(
-        collecting.layers["layer-one"].plan_digest.as_deref(),
-        Some("sha256:layer-one-plan")
+        collecting.layers[layer_id].plan_digest.as_deref(),
+        Some("sha256:adaptive-test-run-layer-one-plan")
     );
     assert_eq!(
-        collecting.layers["layer-one"].child_mob_id.as_deref(),
-        Some("adaptive-test-layer-one-a1")
+        collecting.layers[layer_id].child_mob_id.as_deref(),
+        Some("adaptive-test-adaptive-test-run-layer-one-a1")
     );
     assert_eq!(
-        collecting.layers["layer-one"].phase,
+        collecting.layers[layer_id].phase,
         AdaptiveLayerPhaseView::Collecting,
         "terminal ingest must not skip result validation"
     );
@@ -5103,7 +5104,7 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .record_adaptive_layer_result_validated(
             &capability,
             AdaptiveLayerResultDigest {
-                layer_id: "layer-one".to_string(),
+                layer_id: layer_id.to_string(),
                 attempt: 1,
                 result_digest: "sha256:test-result".to_string(),
             },
@@ -5114,7 +5115,7 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .record_adaptive_layer_mob_destroyed(
             &capability,
             AdaptiveLayerAttempt {
-                layer_id: "layer-one".to_string(),
+                layer_id: layer_id.to_string(),
                 attempt: 1,
             },
         )
@@ -5135,11 +5136,11 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         Some(AdaptiveStopReasonView::FinishDecision)
     );
     assert_eq!(
-        finished.layers["layer-one"].phase,
+        finished.layers[layer_id].phase,
         AdaptiveLayerPhaseView::Completed
     );
     assert_eq!(
-        finished.layers["layer-one"].result_digest.as_deref(),
+        finished.layers[layer_id].result_digest.as_deref(),
         Some("sha256:test-result")
     );
     assert_eq!(
@@ -5185,6 +5186,83 @@ async fn adaptive_public_seam_returns_kernel_admission_denial_for_member_limit()
         !snapshot.layers.contains_key("too-wide"),
         "denied layer must not be recorded as admitted"
     );
+}
+
+#[tokio::test]
+async fn adaptive_public_seam_requests_host_cancel_through_mob_machine() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let capability = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-cancel-run".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize adaptive run");
+
+    handle
+        .request_adaptive_cancel(&capability)
+        .await
+        .expect("request adaptive cancel");
+
+    let snapshot = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("snapshot");
+    assert_eq!(snapshot.phase, Some(AdaptiveRunPhaseView::Canceled));
+    assert_eq!(
+        snapshot.stop_reason,
+        Some(AdaptiveStopReasonView::HostCancel)
+    );
+}
+
+#[tokio::test]
+async fn adaptive_run_snapshot_filters_layers_by_scoped_run_id() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let first = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "run-a".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize first adaptive run");
+    handle
+        .resolve_adaptive_layer_admission(&first, adaptive_admission_request("run-a-layer", 1))
+        .await
+        .expect("admit first layer");
+    handle
+        .resolve_adaptive_finish(&first, "sha256:first")
+        .await
+        .expect("finish first run");
+
+    let second = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "run-b".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize second adaptive run");
+    handle
+        .resolve_adaptive_layer_admission(&second, adaptive_admission_request("run-b-layer", 1))
+        .await
+        .expect("admit second layer");
+
+    let first_snapshot = handle
+        .adaptive_run_snapshot_by_id("run-a")
+        .await
+        .expect("first snapshot");
+    assert!(first_snapshot.layers.contains_key("run-a-layer"));
+    assert!(
+        !first_snapshot.layers.contains_key("run-b-layer"),
+        "run snapshots must not project layer ledger entries from another adaptive run"
+    );
+
+    let second_snapshot = handle
+        .adaptive_run_snapshot_by_id("run-b")
+        .await
+        .expect("second snapshot");
+    assert!(second_snapshot.layers.contains_key("run-b-layer"));
+    assert!(!second_snapshot.layers.contains_key("run-a-layer"));
 }
 
 async fn seed_test_loop_in_mob_machine(

@@ -391,6 +391,15 @@ class Mob:
     async def run_flow(self, flow_id: str, params: dict[str, Any] | None = None) -> str:
         return await self._client.run_mob_flow(self.id, flow_id, params or {})
 
+    async def run(
+        self,
+        params: dict[str, Any] | None = None,
+        *,
+        prompt: str | None = None,
+        flow_id: str | None = None,
+    ) -> str:
+        return await self._client.run_mob(self.id, params or {}, prompt=prompt, flow_id=flow_id)
+
     async def flow_status(self, run_id: str) -> dict[str, Any] | None:
         return await self._client.get_mob_flow_status(self.id, run_id)
 

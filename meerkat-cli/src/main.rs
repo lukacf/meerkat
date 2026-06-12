@@ -12775,11 +12775,6 @@ async fn execute_mob_run_pack(
     scope: &RuntimeScope,
     invocation: MobRunPackInvocation<'_>,
 ) -> anyhow::Result<String> {
-    if invocation.detach {
-        return Err(anyhow::anyhow!(
-            "mob run --detach is not supported for one-shot pack files yet; install the pack first"
-        ));
-    }
     let VerifiedMobpack {
         archive,
         trust_warnings: warnings,
@@ -12806,6 +12801,61 @@ async fn execute_mob_run_pack(
         &archive.deploy_policy,
         DeploySurfaceArg::Cli,
     )?;
+    let flow_id = choose_mobpack_flow(&archive, invocation.flow)?;
+
+    if invocation.detach {
+        let Some(flow_id) = flow_id else {
+            return Err(anyhow::anyhow!(
+                "mob run --detach requires a mobpack with a callable flow"
+            ));
+        };
+        let (manifest, persistence) = create_persistence_bundle(scope).await?;
+        let surface = get_or_create_cli_persistent_surface_from_bundle(
+            scope,
+            effective_config,
+            manifest,
+            persistence,
+        )
+        .await?;
+        let state = hydrate_cli_mob_state_cached(
+            scope,
+            Arc::clone(&surface.service),
+            Arc::clone(&surface.runtime_adapter),
+            Arc::clone(&surface.mob_state_cache),
+        )
+        .await?;
+        let mob_id = state
+            .mob_create_from_mobpack(archive.definition.clone(), archive.skills.clone())
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        if archive.manifest.adaptive.is_some() {
+            state
+                .mob_register_adaptive_pack_context(
+                    mob_id.clone(),
+                    adaptive_pack_context_from_archive(&archive)?,
+                )
+                .await;
+        }
+        let run_id = state
+            .mob_run_flow(&mob_id, flow_id.clone(), params)
+            .await
+            .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
+        let rendered = if invocation.json {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mob_id": mob_id.to_string(),
+                "flow_id": flow_id.as_str(),
+                "run_id": run_id.to_string(),
+                "status": "running"
+            }))?
+        } else {
+            format!(
+                "run\tmob={}\tflow={}\trun_id={run_id}",
+                mob_id,
+                flow_id.as_str()
+            )
+        };
+        return render_mob_run_pack_with_warnings(rendered, warnings);
+    }
 
     let session_service = build_deploy_mob_session_service(scope, effective_config).await?;
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
@@ -12823,7 +12873,6 @@ async fn execute_mob_run_pack(
         .await
         .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
 
-    let flow_id = choose_mobpack_flow(&archive, invocation.flow)?;
     let rendered = if let Some(flow_id) = flow_id {
         let run_id = handle
             .run_flow(flow_id, params)
@@ -12865,6 +12914,14 @@ async fn execute_mob_run_pack(
         }
     };
 
+    render_mob_run_pack_with_warnings(rendered, warnings)
+}
+
+#[cfg(feature = "mob")]
+fn render_mob_run_pack_with_warnings(
+    rendered: String,
+    warnings: Vec<String>,
+) -> anyhow::Result<String> {
     if warnings.is_empty() {
         Ok(rendered)
     } else {
@@ -13155,7 +13212,7 @@ async fn run_adaptive_deploy_loop(
 
 #[cfg(feature = "mob")]
 fn fresh_cli_adaptive_run_id() -> anyhow::Result<meerkat_mob_adaptive::AdaptiveRunId> {
-    meerkat_mob_adaptive::AdaptiveRunId::new(format!("run-{}", RunId::new()))
+    meerkat_mob_adaptive::AdaptiveRunId::new(RunId::new().to_string())
         .map_err(|err| anyhow::anyhow!("invalid adaptive run id: {err}"))
 }
 
@@ -17651,6 +17708,14 @@ default_model = "gemma"
             second.as_str(),
             "internal adaptive execution must not derive run ids from the mob id"
         );
+        first
+            .as_str()
+            .parse::<RunId>()
+            .expect("adaptive internal id should preserve public RunId syntax");
+        second
+            .as_str()
+            .parse::<RunId>()
+            .expect("adaptive internal id should preserve public RunId syntax");
     }
 
     #[cfg(feature = "mob")]

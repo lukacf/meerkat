@@ -1740,6 +1740,8 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/flow_run" => handlers::mob::handle_flow_run(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/run" => handlers::mob::handle_run(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
             "mob/flow_status" => {
                 handlers::mob::handle_flow_status(id, params, &self.mob_state).await
             }

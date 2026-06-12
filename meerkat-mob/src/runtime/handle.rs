@@ -5964,8 +5964,12 @@ impl MobHandle {
             .copied()
             .map(Into::into);
         let mut layers = BTreeMap::new();
+        let layer_prefix = format!("{adaptive_run_id}-");
         for (layer_id, phase) in &state.adaptive_layer_phase {
             let layer_key = layer_id.0.clone();
+            if !layer_key.starts_with(&layer_prefix) {
+                continue;
+            }
             layers.insert(
                 layer_key.clone(),
                 AdaptiveLayerSnapshot {

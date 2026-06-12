@@ -2519,6 +2519,22 @@ class MeerkatClient:
         result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
         return str(result.get("run_id", ""))
 
+    async def run_mob(
+        self,
+        mob_id: str,
+        params: dict[str, Any] | None = None,
+        *,
+        prompt: str | None = None,
+        flow_id: str | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {"mob_id": mob_id, "params": params or {}}
+        if prompt is not None:
+            payload["prompt"] = prompt
+        if flow_id is not None:
+            payload["flow_id"] = flow_id
+        result = await self._request("mob/run", payload)
+        return str(result.get("run_id", ""))
+
     async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
         result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
         return result.get("run")

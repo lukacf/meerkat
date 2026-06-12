@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::schema::MeerkatSchema;
-use meerkat_core::types::{ContentInput, ToolDef};
+use meerkat_core::types::ContentInput;
 use meerkat_mob::definition::{
     CollectionPolicy, DispatchMode, FlowSchemaRef, FlowSpec, FlowStepSpec, OrchestratorConfig,
     RoleWiringRule, StepOutputFormat, WiringRules,
@@ -421,95 +421,15 @@ pub struct CompiledLayer {
     pub spawn_specs: Vec<SpawnMemberSpec>,
     pub activation_params: BTreeMap<String, serde_json::Value>,
     pub plan_digest: BodyDigest,
+    pub policy_evidence: LayerPolicyEvidence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum AdaptiveFlowTool {
-    Start,
-    Status,
-    Layers,
-    Events,
-    Result,
-    Cancel,
-    RetryLayer,
-}
-
-impl AdaptiveFlowTool {
-    pub const ALL: &'static [Self] = &[
-        Self::Start,
-        Self::Status,
-        Self::Layers,
-        Self::Events,
-        Self::Result,
-        Self::Cancel,
-        Self::RetryLayer,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Start => "adaptive_flow_start",
-            Self::Status => "adaptive_flow_status",
-            Self::Layers => "adaptive_flow_layers",
-            Self::Events => "adaptive_flow_events",
-            Self::Result => "adaptive_flow_result",
-            Self::Cancel => "adaptive_flow_cancel",
-            Self::RetryLayer => "adaptive_flow_retry_layer",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::Start => "Start an Adaptive Flow Mobpack run.",
-            Self::Status => "Read AdaptiveRun status from kernel state.",
-            Self::Layers => "List AdaptiveRun layer ledger entries.",
-            Self::Events => "Read AdaptiveRun event projection entries.",
-            Self::Result => "Read the final AdaptiveRun result body.",
-            Self::Cancel => "Request host cancellation for an active AdaptiveRun.",
-            Self::RetryLayer => "Request a retry for a failed AdaptiveRun layer.",
-        }
-    }
-
-    fn input_schema(self) -> serde_json::Value {
-        match self {
-            Self::Start => serde_json::json!({
-                "type": "object",
-                "required": ["pack_ref", "objective"],
-                "properties": {
-                    "pack_ref": { "type": "string" },
-                    "objective": { "type": "string" },
-                    "args": { "type": "object", "additionalProperties": true }
-                },
-                "additionalProperties": false
-            }),
-            Self::RetryLayer => serde_json::json!({
-                "type": "object",
-                "required": ["adaptive_run_id", "layer_id"],
-                "properties": {
-                    "adaptive_run_id": { "type": "string" },
-                    "layer_id": { "type": "string" }
-                },
-                "additionalProperties": false
-            }),
-            Self::Status | Self::Layers | Self::Events | Self::Result | Self::Cancel => {
-                serde_json::json!({
-                    "type": "object",
-                    "required": ["adaptive_run_id"],
-                    "properties": {
-                        "adaptive_run_id": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                })
-            }
-        }
-    }
-}
-
-pub fn adaptive_flow_tool_defs() -> Vec<ToolDef> {
-    AdaptiveFlowTool::ALL
-        .iter()
-        .copied()
-        .map(|tool| ToolDef::new(tool.name(), tool.description(), tool.input_schema()))
-        .collect()
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayerPolicyEvidence {
+    pub used_model_classes: BTreeSet<String>,
+    pub used_tool_classes: BTreeSet<String>,
+    pub used_skill_identities: BTreeSet<String>,
+    pub used_auth_binding_refs: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -588,10 +508,10 @@ impl AdaptiveDriver {
                     member_count: compiled.spawn_specs.len() as u64,
                     token_reservation: 0,
                     tool_call_reservation: 0,
-                    used_model_classes: BTreeSet::new(),
-                    used_tool_classes: BTreeSet::new(),
-                    used_skill_identities: BTreeSet::new(),
-                    used_auth_binding_refs: BTreeSet::new(),
+                    used_model_classes: compiled.policy_evidence.used_model_classes.clone(),
+                    used_tool_classes: compiled.policy_evidence.used_tool_classes.clone(),
+                    used_skill_identities: compiled.policy_evidence.used_skill_identities.clone(),
+                    used_auth_binding_refs: compiled.policy_evidence.used_auth_binding_refs.clone(),
                     observed_at_ms,
                 },
             )
@@ -1180,25 +1100,30 @@ where
             }
             LayerDecision::RunLayer { plan, .. } => {
                 let plan_digest = body_store.put_json(&serde_json::to_value(&plan)?)?;
+                let scoped_layer_id = scoped_layer_id(&request.adaptive_run_id, &plan.id)?;
                 context.previous_layer_result = previous_layer_result.clone();
-                let compiled = match compile_layer(&plan, &context) {
+                let compiled = match compile_layer(&plan, &context, &request.policy) {
                     Ok(compiled) if compiled.plan_digest == plan_digest => compiled,
                     Ok(compiled) => {
-                        kernel.record_plan_rejected(&capability, &plan.id).await?;
+                        kernel
+                            .record_plan_rejected(&capability, &scoped_layer_id)
+                            .await?;
                         return Err(AdaptiveError::BodyDigestMismatch {
                             expected: plan_digest,
                             actual: compiled.plan_digest,
                         });
                     }
                     Err(error) => {
-                        kernel.record_plan_rejected(&capability, &plan.id).await?;
+                        kernel
+                            .record_plan_rejected(&capability, &scoped_layer_id)
+                            .await?;
                         return Err(error);
                     }
                 };
                 let admission = kernel
                     .resolve_layer_admission(
                         &capability,
-                        &plan.id,
+                        &scoped_layer_id,
                         context.attempt,
                         &compiled,
                         runtime.now_ms(),
@@ -1214,7 +1139,7 @@ where
                         kernel
                             .record_layer_setup_fault(
                                 &capability,
-                                &plan.id,
+                                &scoped_layer_id,
                                 context.attempt,
                                 meerkat_mob::AdaptiveLayerSetupFault::MobCreateFailed,
                                 0,
@@ -1225,7 +1150,7 @@ where
                     }
                 };
                 kernel
-                    .record_layer_provisioned(&capability, &plan.id, context.attempt)
+                    .record_layer_provisioned(&capability, &scoped_layer_id, context.attempt)
                     .await?;
                 let child_run_id = runtime
                     .start_layer_flow(&layer, compiled.activation_params.clone())
@@ -1233,14 +1158,19 @@ where
                 kernel
                     .record_layer_run_started(
                         &capability,
-                        &plan.id,
+                        &scoped_layer_id,
                         context.attempt,
                         child_run_id.clone(),
                     )
                     .await?;
                 let child_run = runtime.await_layer_terminal(&layer, child_run_id).await?;
                 kernel
-                    .ingest_layer_terminal(&capability, &plan.id, context.attempt, &child_run)
+                    .ingest_layer_terminal(
+                        &capability,
+                        &scoped_layer_id,
+                        context.attempt,
+                        &child_run,
+                    )
                     .await?;
 
                 let layer_result = match extract_layer_result(&plan, &child_run)
@@ -1249,7 +1179,11 @@ where
                     Ok(result) => result,
                     Err(error) => {
                         kernel
-                            .record_layer_result_invalid(&capability, &plan.id, context.attempt)
+                            .record_layer_result_invalid(
+                                &capability,
+                                &scoped_layer_id,
+                                context.attempt,
+                            )
                             .await?;
                         return Err(error);
                     }
@@ -1258,26 +1192,30 @@ where
                 kernel
                     .record_layer_result_validated(
                         &capability,
-                        &plan.id,
+                        &scoped_layer_id,
                         context.attempt,
                         &result_digest,
                     )
                     .await?;
 
                 match runtime
-                    .cleanup_layer(layer, &plan.id, context.attempt)
+                    .cleanup_layer(layer, &scoped_layer_id, context.attempt)
                     .await?
                 {
                     AdaptiveLayerCleanup::Destroyed => {
                         kernel
-                            .record_layer_mob_destroyed(&capability, &plan.id, context.attempt)
+                            .record_layer_mob_destroyed(
+                                &capability,
+                                &scoped_layer_id,
+                                context.attempt,
+                            )
                             .await?;
                     }
                     AdaptiveLayerCleanup::Retained(disposition) => {
                         kernel
                             .record_layer_mob_retained(
                                 &capability,
-                                &plan.id,
+                                &scoped_layer_id,
                                 context.attempt,
                                 disposition,
                             )
@@ -1364,6 +1302,7 @@ pub fn adaptive_run_limits_from_policy(
 pub fn compile_layer(
     plan: &LayerPlan,
     context: &CompileContext,
+    policy: &AdaptivePolicy,
 ) -> Result<CompiledLayer, AdaptiveError> {
     validate_identifier("layer_id", plan.id.as_str())?;
     let plan_value = serde_json::to_value(plan)?;
@@ -1385,7 +1324,8 @@ pub fn compile_layer(
     definition.orchestrator = Some(OrchestratorConfig {
         profile: plan.collector.profile.clone(),
     });
-    definition.profiles = compile_profiles(plan, context)?;
+    definition.profiles = compile_profiles(plan, context, policy)?;
+    let policy_evidence = collect_layer_policy_evidence(&definition.profiles, &spawn_specs);
     definition.wiring = compile_wiring(plan);
     definition.flows.insert(
         FlowId::from("layer-flow"),
@@ -1416,6 +1356,7 @@ pub fn compile_layer(
         spawn_specs,
         activation_params,
         plan_digest,
+        policy_evidence,
     })
 }
 
@@ -1442,6 +1383,7 @@ impl SpawnBudgetExt for SpawnMemberSpec {
 fn compile_profiles(
     plan: &LayerPlan,
     context: &CompileContext,
+    policy: &AdaptivePolicy,
 ) -> Result<BTreeMap<ProfileName, ProfileBinding>, AdaptiveError> {
     let mut profiles = BTreeMap::new();
     for (name, layer_profile) in &plan.profiles {
@@ -1451,7 +1393,14 @@ fn compile_profiles(
                 .get(template)
                 .cloned()
                 .ok_or_else(|| AdaptiveError::MissingProfileTemplate(template.to_string()))?,
-            LayerProfile::Inline { inline } => inline.as_ref().clone(),
+            LayerProfile::Inline { inline } => {
+                if !policy.allow_inline_profiles {
+                    return Err(AdaptiveError::InlineProfilesDisabled {
+                        profile: name.to_string(),
+                    });
+                }
+                inline.as_ref().clone()
+            }
         };
         profiles.insert(name.clone(), ProfileBinding::Inline(Box::new(profile)));
     }
@@ -1469,6 +1418,62 @@ fn compile_profiles(
         );
     }
     Ok(profiles)
+}
+
+fn collect_layer_policy_evidence(
+    profiles: &BTreeMap<ProfileName, ProfileBinding>,
+    spawn_specs: &[LayerSpawnSpec],
+) -> LayerPolicyEvidence {
+    let mut evidence = LayerPolicyEvidence::default();
+    for spec in spawn_specs {
+        let Some(profile) = profiles
+            .get(&spec.profile)
+            .and_then(ProfileBinding::as_inline)
+        else {
+            continue;
+        };
+        evidence.used_model_classes.insert(profile.model.clone());
+        collect_profile_tool_classes(profile, &mut evidence.used_tool_classes);
+        evidence
+            .used_skill_identities
+            .extend(profile.skills.iter().cloned());
+    }
+    evidence
+}
+
+fn collect_profile_tool_classes(profile: &Profile, out: &mut BTreeSet<String>) {
+    if profile.tools.builtins {
+        out.insert("builtins".to_string());
+    }
+    if profile.tools.shell {
+        out.insert("shell".to_string());
+    }
+    if profile.tools.comms {
+        out.insert("comms".to_string());
+    }
+    if profile.tools.memory {
+        out.insert("memory".to_string());
+    }
+    if profile.tools.workgraph {
+        out.insert("workgraph".to_string());
+    }
+    if profile.tools.mob {
+        out.insert("mob".to_string());
+    }
+    if profile.tools.schedule {
+        out.insert("schedule".to_string());
+    }
+    if profile.tools.image_generation {
+        out.insert("image_generation".to_string());
+    }
+    out.extend(profile.tools.mcp.iter().map(|name| format!("mcp:{name}")));
+    out.extend(
+        profile
+            .tools
+            .rust_bundles
+            .iter()
+            .map(|name| format!("rust_bundle:{name}")),
+    );
 }
 
 fn compile_wiring(plan: &LayerPlan) -> WiringRules {
@@ -1591,6 +1596,17 @@ pub fn derive_child_mob_id(
         layer_id.as_str(),
         attempt
     )))
+}
+
+pub fn scoped_layer_id(
+    adaptive_run_id: &AdaptiveRunId,
+    layer_id: &LayerId,
+) -> Result<LayerId, AdaptiveError> {
+    LayerId::new(format!(
+        "{}-{}",
+        adaptive_run_id.as_str(),
+        layer_id.as_str()
+    ))
 }
 
 fn expand_spawn_group(
@@ -1773,6 +1789,8 @@ pub enum AdaptiveError {
     MissingSchema(String),
     #[error("missing profile template: {0}")]
     MissingProfileTemplate(String),
+    #[error("inline profile '{profile}' is not allowed by the composed adaptive policy")]
+    InlineProfilesDisabled { profile: String },
     #[error("attempt ordinals start at 1")]
     InvalidAttempt,
     #[error("body missing for digest {0:?}")]
@@ -1879,6 +1897,15 @@ mod tests {
                     { "id": "F-2", "title": "Auth binding leak" }
                 ]
             })),
+        }
+    }
+
+    fn compile_policy() -> AdaptivePolicy {
+        AdaptivePolicy {
+            limits: limits(10),
+            allowed_model_classes: BTreeSet::from(["gpt-5.5".to_string()]),
+            allow_inline_profiles: false,
+            ..AdaptivePolicy::default()
         }
     }
 
@@ -2213,35 +2240,6 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_flow_tool_declarations_are_feature_owned() {
-        let defs = adaptive_flow_tool_defs();
-        let names = defs
-            .iter()
-            .map(|tool| tool.name.as_str().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "adaptive_flow_start",
-                "adaptive_flow_status",
-                "adaptive_flow_layers",
-                "adaptive_flow_events",
-                "adaptive_flow_result",
-                "adaptive_flow_cancel",
-                "adaptive_flow_retry_layer",
-            ]
-        );
-        let start = defs
-            .iter()
-            .find(|tool| tool.name.as_str() == "adaptive_flow_start")
-            .expect("start tool");
-        assert_eq!(
-            start.input_schema["required"],
-            serde_json::json!(["pack_ref", "objective"])
-        );
-    }
-
-    #[test]
     fn adaptive_refs_parse_once_into_typed_forms() {
         assert_eq!(
             AdaptiveRef::parse("previous_layer.result.findings").unwrap(),
@@ -2350,12 +2348,12 @@ mod tests {
             vec![
                 "initialize:run-1",
                 "decision:run_layer",
-                "admission:verify-findings",
-                "provisioned:verify-findings",
-                "run_started:verify-findings",
-                "terminal:verify-findings",
-                "result_valid:verify-findings",
-                "destroyed:verify-findings",
+                "admission:run-1-verify-findings",
+                "provisioned:run-1-verify-findings",
+                "run_started:run-1-verify-findings",
+                "terminal:run-1-verify-findings",
+                "result_valid:run-1-verify-findings",
+                "destroyed:run-1-verify-findings",
                 "decision:finish",
                 "finish",
             ]
@@ -2420,10 +2418,14 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_layer(&plan, &compile_context()).unwrap();
+        let compiled = compile_layer(&plan, &compile_context(), &compile_policy()).unwrap();
         assert_eq!(
             compiled.child_mob_id.as_str(),
             "adaptive-run-1-verify-findings-a1"
+        );
+        assert_eq!(
+            compiled.policy_evidence.used_model_classes,
+            BTreeSet::from(["gpt-5.5".to_string()])
         );
         assert_eq!(compiled.spawn_specs.len(), 3);
         assert_eq!(
@@ -2479,7 +2481,7 @@ mod tests {
             activation_params: BTreeMap::new(),
         };
 
-        let compiled = compile_layer(&plan, &compile_context()).unwrap();
+        let compiled = compile_layer(&plan, &compile_context(), &compile_policy()).unwrap();
         let flow = compiled
             .definition
             .flows
@@ -2491,5 +2493,36 @@ mod tests {
             panic!("solo schema must be inline");
         };
         assert_eq!(schema.as_value()["type"], "object");
+    }
+
+    #[test]
+    fn inline_profiles_require_explicit_policy_authority() {
+        let mut plan = layer_plan();
+        plan.profiles.insert(
+            ProfileName::from("verifier"),
+            LayerProfile::Inline {
+                inline: Box::new(profile()),
+            },
+        );
+        let denied = compile_layer(&plan, &compile_context(), &compile_policy()).unwrap_err();
+        assert!(matches!(
+            denied,
+            AdaptiveError::InlineProfilesDisabled { profile } if profile == "verifier"
+        ));
+
+        let mut policy = compile_policy();
+        policy.allow_inline_profiles = true;
+        compile_layer(&plan, &compile_context(), &policy)
+            .expect("inline profile should compile with explicit adaptive policy authority");
+    }
+
+    #[test]
+    fn scoped_layer_ids_are_run_unique_without_mutating_planner_ids() {
+        let layer = LayerId::new("verify-findings").unwrap();
+        let first = scoped_layer_id(&AdaptiveRunId::new("run-a").unwrap(), &layer).unwrap();
+        let second = scoped_layer_id(&AdaptiveRunId::new("run-b").unwrap(), &layer).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.as_str(), "run-a-verify-findings");
+        assert_eq!(layer.as_str(), "verify-findings");
     }
 }

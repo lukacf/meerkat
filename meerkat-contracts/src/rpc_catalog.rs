@@ -713,6 +713,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobFlowRunResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/run",
+                "Invoke a mob as a typed callable run",
+                "MobRunParams",
+                "MobFlowRunResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/flow_status",
                 "Get status for a mob flow run",
                 "MobFlowStatusParams",
@@ -1426,6 +1432,7 @@ mod tests {
                 Some("MobFlowRunParams"),
                 Some("MobFlowRunResult"),
             ),
+            ("mob/run", Some("MobRunParams"), Some("MobFlowRunResult")),
             (
                 "mob/flow_status",
                 Some("MobFlowStatusParams"),

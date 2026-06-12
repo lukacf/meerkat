@@ -331,7 +331,7 @@ async fn write_callable_flow_mobpack_fixture(
       "steps":{{
         "answer":{{
           "role":"worker",
-          "message":"Reply in one sentence and include the literal token CALLABLE_FLOW_OK exactly once.",
+          "message":"The caller prompt is: {{ params.prompt }}. Reply in one sentence and include the literal tokens CALLABLE_FLOW_OK and CALLABLE_PROMPT_NONCE_91 exactly once.",
           "output_format":"text",
           "collection_policy":{{"type":"any"}},
           "timeout_ms":120000
@@ -785,7 +785,7 @@ async fn e2e_smoke_mobpack_callable_flow_run_live() -> Result<(), Box<dyn std::e
         "--flow".to_string(),
         "main".to_string(),
         "--prompt".to_string(),
-        "Produce the required smoke tokens.".to_string(),
+        "Produce the required smoke tokens for CALLABLE_PROMPT_NONCE_91.".to_string(),
         "--trust-policy".to_string(),
         "permissive".to_string(),
         "--json".to_string(),
@@ -804,6 +804,12 @@ async fn e2e_smoke_mobpack_callable_flow_run_live() -> Result<(), Box<dyn std::e
     assert!(
         envelope["result"].to_string().contains("CALLABLE_FLOW_OK"),
         "typed run envelope should include callable smoke token: {run_stdout}"
+    );
+    assert!(
+        envelope["result"]
+            .to_string()
+            .contains("CALLABLE_PROMPT_NONCE_91"),
+        "typed run envelope should prove --prompt was bound to params.prompt: {run_stdout}"
     );
     assert!(
         run_stdout.contains("warning\tunsigned pack accepted in permissive mode"),

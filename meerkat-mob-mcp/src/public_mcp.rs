@@ -204,6 +204,18 @@ struct MeerkatMobFlowRunInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct MeerkatMobRunInput {
+    mob_id: String,
+    #[serde(default)]
+    flow_id: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MeerkatMobRunIdInput {
     mob_id: String,
     run_id: String,
@@ -383,6 +395,11 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
         schema: typed_schema::<MeerkatMobFlowRunInput>,
     },
     PublicTool {
+        name: "meerkat_mob_run",
+        description: "Invoke a mob as a typed callable run.",
+        schema: typed_schema::<MeerkatMobRunInput>,
+    },
+    PublicTool {
         name: "meerkat_mob_flow_status",
         description: "Read status for a mob flow run.",
         schema: typed_schema::<MeerkatMobRunIdInput>,
@@ -489,6 +506,7 @@ const DISPATCH_TOOL_NAMES: &[&str] = &[
     "meerkat_mob_events",
     "meerkat_mob_flows",
     "meerkat_mob_flow_run",
+    "meerkat_mob_run",
     "meerkat_mob_flow_status",
     "meerkat_mob_run_result",
     "meerkat_mob_flow_cancel",
@@ -814,6 +832,17 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({ "run_id": run_id }))
         }
+        "meerkat_mob_run" => {
+            let input: MeerkatMobRunInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let params = bind_prompt_param(input.params, input.prompt)?;
+            let flow_id = meerkat_mob::FlowId::from(input.flow_id.as_deref().unwrap_or("main"));
+            let run_id = state
+                .mob_run_flow(&mob_id, flow_id, params)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!({ "run_id": run_id }))
+        }
         "meerkat_mob_flow_status" => {
             let input: MeerkatMobRunIdInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
@@ -976,6 +1005,20 @@ fn parse_mob_id(raw: &str) -> Result<meerkat_mob::MobId, McpToolError> {
 fn parse_run_id(raw: &str) -> Result<meerkat_mob::RunId, McpToolError> {
     raw.parse::<meerkat_mob::RunId>()
         .map_err(|err| McpToolError::invalid_params(format!("invalid run_id: {err}")))
+}
+
+fn bind_prompt_param(params: Value, prompt: Option<String>) -> Result<Value, McpToolError> {
+    let mut params = match params {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(map) => map,
+        _ => return Err(McpToolError::invalid_params("params must be an object")),
+    };
+    if let Some(prompt) = prompt
+        && !params.contains_key("prompt")
+    {
+        params.insert("prompt".to_string(), Value::String(prompt));
+    }
+    Ok(Value::Object(params))
 }
 
 fn content_input_from_wire(
@@ -1151,10 +1194,14 @@ mod tests {
             table_names.contains("meerkat_mob_run_result"),
             "meerkat_mob_run_result must be routable, advertised, and dispatched"
         );
+        assert!(
+            table_names.contains("meerkat_mob_run"),
+            "meerkat_mob_run must be routable, advertised, and dispatched"
+        );
         assert_eq!(
             table_names.len(),
-            27,
-            "expected exactly 27 public tools across all surfaces"
+            28,
+            "expected exactly 28 public tools across all surfaces"
         );
     }
 

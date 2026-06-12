@@ -20,6 +20,7 @@ pub mod auth_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "oauth")]
 pub mod mcp_oauth;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod oauth_flow;
@@ -48,6 +49,7 @@ pub use auth_store::{
     FileTokenStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "oauth")]
 pub use mcp_oauth::{
     BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpOAuthAuthority, McpOAuthError,
     McpServerIdentity,

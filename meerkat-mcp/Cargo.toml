@@ -14,7 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-capabilities = { workspace = true }
-meerkat-auth-core = { workspace = true }
+meerkat-auth-core = { workspace = true, features = ["oauth"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 rmcp = { workspace = true, features = [
@@ -38,7 +38,7 @@ sse-stream = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-meerkat-runtime = { workspace = true }
+meerkat-runtime = { path = "../meerkat-runtime" } # path-only: breaks packaging dev-dep cycle
 axum = { workspace = true }
 
 [package.metadata.cargo-machete]

@@ -51,8 +51,11 @@ __meerkat-facade-agent-factory-build = []
 __meerkat-generated-authority-bridge = []
 
 [dev-dependencies]
-meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
-meerkat-machine-schema = { workspace = true }
+# Path-only (no version): dev-deps that cycle back to meerkat-core are
+# stripped from the published tarball, which is the canonical cargo answer
+# to dev-dependency cycles (consumers never see dev-deps).
+meerkat-machine-kernels = { path = "../meerkat-machine-kernels", features = ["test-oracle"] }
+meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 

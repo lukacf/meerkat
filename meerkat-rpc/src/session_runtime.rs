@@ -13213,13 +13213,25 @@ mod tests {
     // removed: set+clear is now structurally unrepresentable (Option<TurnMetadataOverride>)
 
     #[cfg(feature = "mcp")]
-    fn collect_tool_config_events(
+    async fn collect_tool_config_events(
         event_rx: &mut mpsc::Receiver<EventEnvelope<AgentEvent>>,
     ) -> Vec<ToolConfigChangedPayload> {
+        // Await delivery rather than try_recv-draining: the boundary events
+        // are forwarded by an async task that may lag behind start_turn's
+        // return under full-suite CPU load. The sender side drops when the
+        // turn task finishes, closing the channel; the outer deadline only
+        // bounds a genuinely wedged forwarder.
         let mut out = Vec::new();
-        while let Ok(event) = event_rx.try_recv() {
-            if let AgentEvent::ToolConfigChanged { payload } = event.payload {
-                out.push(payload);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout_at(deadline, event_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let AgentEvent::ToolConfigChanged { payload } = event.payload {
+                        out.push(payload);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
             }
         }
         out
@@ -19105,7 +19117,7 @@ mod tests {
             first.is_ok(),
             "non-blocking apply_staged should not fail synchronously"
         );
-        let first_events = collect_tool_config_events(&mut event_rx);
+        let first_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             first_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Add
@@ -19165,7 +19177,7 @@ mod tests {
             )
             .await
             .expect("turn add should apply staged add");
-        let add_events = collect_tool_config_events(&mut event_rx);
+        let add_events = collect_tool_config_events(&mut event_rx).await;
         assert!(add_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Add
                 && payload.target == "test-server"
@@ -19189,7 +19201,7 @@ mod tests {
             )
             .await
             .expect("turn remove should apply staged remove");
-        let remove_events = collect_tool_config_events(&mut event_rx);
+        let remove_events = collect_tool_config_events(&mut event_rx).await;
         assert!(remove_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "test-server"
@@ -19269,7 +19281,7 @@ mod tests {
             )
             .await
             .expect("remove boundary");
-        let first_turn_events = collect_tool_config_events(&mut event_rx);
+        let first_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(first_turn_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "timeout-server"
@@ -19306,7 +19318,7 @@ mod tests {
             .expect("follow-up boundary");
         let second_turn_events = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let events = collect_tool_config_events(&mut event_rx);
+                let events = collect_tool_config_events(&mut event_rx).await;
                 if !events.is_empty() {
                     break events;
                 }
@@ -19391,7 +19403,7 @@ mod tests {
             )
             .await
             .expect("remove starts draining");
-        let first_turn_events = collect_tool_config_events(&mut event_rx);
+        let first_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(first_turn_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "server-draining"
@@ -19430,7 +19442,7 @@ mod tests {
             .await
             .expect("next boundary should apply staged add");
 
-        let next_turn_events = collect_tool_config_events(&mut event_rx);
+        let next_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             next_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Add
@@ -19457,7 +19469,7 @@ mod tests {
             .await
             .expect("drain should resolve pending add");
 
-        let drain_events = collect_tool_config_events(&mut event_rx);
+        let drain_events = collect_tool_config_events(&mut event_rx).await;
         // The server becomes active via drain_pending → process_pending_result
         // → Activated lifecycle action. The event status may be "applied" (from
         // emit_mcp_lifecycle_events) or "activated" (from session service tool
@@ -19570,7 +19582,7 @@ mod tests {
             )
             .await;
 
-        let fail_turn_events = collect_tool_config_events(&mut event_rx);
+        let fail_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             fail_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove

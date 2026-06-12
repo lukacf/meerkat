@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-12
+
+Meerkat 0.7.1 restores the core/provider boundary: the model catalog returns
+to a real `meerkat-models` crate and `meerkat-core` is provider-free again,
+guarded by a recurrence gate. It also ships adaptive flow mobpacks and a
+one-liner for switching the default model.
+
+### Added
+
+- **`meerkat-models` is a real crate again** (#763) — all provider model data
+  (catalog entries, per-provider capability tables, image-generation profiles,
+  defaults) lives in `meerkat-models`, restoring the pre-B2 public API
+  (`meerkat_models::{catalog, capabilities, profile}` and the historical
+  function surface). Downstream consumers that imported `meerkat_models::*`
+  before 0.7.0 work again unchanged.
+- **Adaptive flow mobpacks** (#762) — mobpack flows adapt at runtime.
+- **`rkat --default-model <model>`** (#763) — validates against the catalog
+  and configured custom models, persists `agent.model` through the
+  scope-resolved config (project/user/realm), and exits when given bare or
+  applies before the given command. Documented in `rkat help`'s built-in
+  reference, the CLI skill, and the docs site.
+
+### Changed
+
+- **BREAKING (Rust API): core takes the catalog as an explicit parameter**
+  (#763) — `Config::validate`, `Config::model_registry`,
+  `ModelRegistry::from_config*`, `MemoryConfigStore::new`, and
+  `FileConfigStore::{new, global, project}` now accept a
+  `meerkat_core::ModelCatalog` (pass `meerkat_models::canonical()`).
+  `Provider::infer_from_model` is removed; use
+  `meerkat_models::infer_provider`. meerkat-core embeds no provider data and
+  must not depend on meerkat-models (enforced by a workspace gate).
+- **Default model resolves through the catalog** (#763) — fresh configs no
+  longer pin a model id; an empty `agent.model` resolves through the catalog's
+  per-provider defaults and the global default (`gpt-5.5`) at session-creation
+  time. Existing configs with a pinned model are unaffected.
+- **Mob storage removal fails closed** (#763) — `mob_destroy` now surfaces
+  storage-file removal failures (with post-remove verification) instead of
+  reporting a clean destroy over a surviving store.
+
 ## [0.7.0] - 2026-06-11
 
 Meerkat 0.7.0 promotes the 0.7 line from generated-authority canary to the

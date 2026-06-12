@@ -3764,23 +3764,6 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     Ok((config, base_dir))
 }
 
-/// FROZEN historical snapshot of prior built-in CLI agent-model defaults.
-///
-/// This is intentionally NOT a mirror of the live model catalog. Its sole
-/// purpose is to detect a stale, previously-shipped default that a user still
-/// carries in their persisted `config.agent.model` and heal it by redirecting
-/// to the catalog-derived current default (see `resolve_cli_default_agent_model`
-/// → `meerkat::resolve_provider_catalog_default_model`, the canonical tiers-2/3
-/// ladder). Entries are prior *shipped CLI defaults*,
-/// not catalog membership claims: a listed model may still be a live catalog
-/// row (e.g. `claude-opus-4-7` remains a `Supported` Anthropic entry) — being
-/// here only means it was once the built-in default and should be healed when
-/// still persisted. Append the prior default here whenever the built-in default
-/// changes; never remove entries.
-///
-/// Covered by `test_resolve_cli_default_agent_model_heals_legacy_builtin_default`.
-const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
-
 fn model_provider(config: &Config, model: &str) -> Option<Provider> {
     config
         .model_registry(meerkat_models::canonical())
@@ -3802,21 +3785,6 @@ fn provider_default_model(config: &Config, provider: Provider) -> Option<String>
         return meerkat_models::default_model(provider.as_core()).map(str::to_string);
     }
     Some(model.clone())
-}
-
-fn resolve_cli_default_agent_model(config: &Config) -> String {
-    if LEGACY_AGENT_MODEL_DEFAULTS.contains(&config.agent.model.as_str()) {
-        // Known-stale operator default: resolve through the canonical
-        // provider-priority/catalog ladder (tiers 2-3 of the create-session
-        // seam), explicitly bypassing the stale `config.agent.model` knob.
-        // The CLI owns no parallel ladder.
-        return meerkat::resolve_provider_catalog_default_model(config);
-    }
-
-    // Canonical ladder: operator-set `config.agent.model` (tier 1), else the
-    // per-provider/catalog defaults. An unset agent model is the normal state
-    // (core embeds no provider data), not an error.
-    meerkat::resolve_create_session_default_model(config)
 }
 
 fn resolve_provider_constrained_default_model(config: &Config, provider: Provider) -> String {
@@ -3852,7 +3820,9 @@ fn resolve_cli_effective_model(
         return resolve_provider_constrained_default_model(config, provider);
     }
 
-    resolve_cli_default_agent_model(config)
+    // Canonical ladder: shared create-session default resolution owns operator
+    // defaults, stale built-in default healing, and provider/catalog fallback.
+    meerkat::resolve_create_session_default_model(config)
 }
 
 async fn handle_config_get(
@@ -20420,60 +20390,39 @@ capabilities = ["definitely_missing_capability"]
     }
 
     #[test]
-    fn test_resolve_cli_default_agent_model_heals_legacy_builtin_default() {
+    fn test_resolve_cli_effective_model_uses_shared_legacy_default_heal() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
-        // A legacy builtin default heals through the canonical ladder.
-        // Priority is owned by the catalog seam
-        // (`meerkat_models::provider_priority()` — anthropic first), so even
-        // with a customized OpenAI model the heal resolves to the configured
-        // anthropic override, not whichever provider happened to be set.
         config.models.anthropic = "custom-anthropic".to_string();
         config.models.openai = "gpt-5.5-custom".to_string();
 
-        assert_eq!(resolve_cli_default_agent_model(&config), "custom-anthropic");
-    }
-
-    #[test]
-    fn test_resolve_cli_default_agent_model_heals_to_global_default_without_overrides() {
-        // With no per-provider operator overrides (core leaves them empty),
-        // the heal terminates at the catalog-owned global default.
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-
         assert_eq!(
-            resolve_cli_default_agent_model(&config),
-            meerkat_models::global_default_model()
+            resolve_cli_effective_model(&config, None, None, None),
+            meerkat::resolve_create_session_default_model(&config)
+        );
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, None, None),
+            "custom-anthropic"
         );
     }
 
     #[test]
-    fn test_resolve_cli_default_agent_model_falls_back_by_best_available_priority() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-        config.models.openai = "custom-openai".to_string();
-        config.models.gemini = "custom-gemini".to_string();
+    fn test_resolve_cli_effective_model_uses_shared_default_when_unset() {
+        let config = Config::default();
 
-        // anthropic unset: the next provider in catalog priority order wins.
-        assert_eq!(resolve_cli_default_agent_model(&config), "custom-openai");
-
-        config.models.openai.clear();
-        assert_eq!(resolve_cli_default_agent_model(&config), "custom-gemini");
-
-        config.models.gemini.clear();
         assert_eq!(
-            resolve_cli_default_agent_model(&config),
-            meerkat_models::global_default_model()
+            resolve_cli_effective_model(&config, None, None, None),
+            meerkat::resolve_create_session_default_model(&config)
         );
     }
 
     #[test]
-    fn test_resolve_cli_default_agent_model_preserves_custom_model() {
+    fn test_resolve_cli_effective_model_preserves_custom_model() {
         let mut config = Config::default();
         config.agent.model = "claude-sonnet-4-6".to_string();
 
         assert_eq!(
-            resolve_cli_default_agent_model(&config),
+            resolve_cli_effective_model(&config, None, None, None),
             "claude-sonnet-4-6"
         );
     }

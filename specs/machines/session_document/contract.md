@@ -42,7 +42,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
-- `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool)
+- `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -100,7 +100,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_reject_build_only_after_first_turn`(has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
-- `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool) -> `Bool`
+- `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool) -> `Bool`
 - `archive_should_retire_runtime`(runtime_backed: Bool, durable_snapshot_present: Bool, runtime_session_registered: Bool) -> `Bool`
 
 ## Invariants
@@ -680,7 +680,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverSessionFromStoreAuthorized`
 - From: `Ready`
-- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
 - Guards:
   - ``
 - Emits: `SessionStoreRecoverySourceResolved`
@@ -688,7 +688,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverSessionFromStoreUnrecoverable`
 - From: `Ready`
-- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
 - Guards:
   - ``
 - Emits: `SessionStoreRecoverySourceResolved`

@@ -649,18 +649,19 @@ machine! {
             // `runtime_backed_store_projection_can_recover_authority`). When
             // the runtime snapshot is absent, the session-store projection may
             // stand in as the authoritative read source iff it carries
-            // canonical session metadata or build state. The shell extracts the
-            // two typed presence observations and drives this input; THIS
+            // canonical session metadata, build state, or a generated runtime
+            // projection quarantine fact. The shell extracts the typed
+            // observations and drives this input; THIS
             // machine — not a handwritten shell `||` reducer — owns the
             // recoverable verdict. The shell mirrors `recoverable` onto its load
             // fallback (recoverable -> the projection is authoritative; not
-            // recoverable -> fall through to the quarantine check / `None`).
-            // Fails closed.
+            // recoverable -> `None`). Fails closed.
             // -----------------------------------------------------------
             RecoverSessionFromStore {
                 session_id: SessionId,
                 has_metadata: bool,
                 has_build_state: bool,
+                runtime_projection_quarantined: bool,
             },
 
             // -----------------------------------------------------------
@@ -1042,12 +1043,14 @@ machine! {
         // Recovery-source-projection predicate (port of the retired shell
         // `runtime_backed_store_projection_can_recover_authority`): a persisted
         // store projection is a valid authoritative read source iff it carries
-        // canonical session metadata OR build state.
+        // canonical session metadata, build state, OR a generated runtime
+        // projection quarantine fact.
         helper store_projection_can_recover_authority(
             has_metadata: bool,
-            has_build_state: bool
+            has_build_state: bool,
+            runtime_projection_quarantined: bool
         ) -> bool {
-            has_metadata || has_build_state
+            has_metadata || has_build_state || runtime_projection_quarantined
         }
 
         // Lifecycle-terminal realization helper: the runtime is retired iff
@@ -2979,7 +2982,7 @@ machine! {
 
         // ===============================================================
         // Recovery-source-projection region (KEYSTONE). Both transitions read
-        // the two typed presence observations and resolve the recoverable
+        // typed store/runtime observations and resolve the recoverable
         // verdict via `store_projection_can_recover_authority`. The verdict is
         // total over the boolean cube, so it is emitted on both branches; the
         // shell mirrors `recoverable` onto its load fallback and decides
@@ -2990,11 +2993,16 @@ machine! {
             on input RecoverSessionFromStore {
                 session_id,
                 has_metadata,
-                has_build_state
+                has_build_state,
+                runtime_projection_quarantined
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && store_projection_can_recover_authority(has_metadata, has_build_state)
+                && store_projection_can_recover_authority(
+                    has_metadata,
+                    has_build_state,
+                    runtime_projection_quarantined
+                )
             }
             update {}
             to Ready
@@ -3005,11 +3013,16 @@ machine! {
             on input RecoverSessionFromStore {
                 session_id,
                 has_metadata,
-                has_build_state
+                has_build_state,
+                runtime_projection_quarantined
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && store_projection_can_recover_authority(has_metadata, has_build_state) == false
+                && store_projection_can_recover_authority(
+                    has_metadata,
+                    has_build_state,
+                    runtime_projection_quarantined
+                ) == false
             }
             update {}
             to Ready

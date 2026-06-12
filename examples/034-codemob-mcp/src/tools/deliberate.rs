@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use meerkat_mob::definition::FlowSpec;
-use meerkat_mob::ids::{AgentIdentity, FlowId, MobId};
+use meerkat_mob::ids::{FlowId, MobId};
 use meerkat_mob::{
     MobDefinition, MobFlowRunPublicResultClass, MobRun, MobRunStatus, SpawnMemberSpec,
     StepRunStatus, mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
@@ -47,9 +47,15 @@ pub async fn handle(
 
     let context = input.context.as_deref().unwrap_or("");
     let overrides = input.model_overrides.unwrap_or_default();
+    let provider_params = input
+        .provider_params
+        .as_ref()
+        .map(|value| serde_json::from_value::<meerkat_core::ProviderParamsOverride>(value.clone()))
+        .transpose()
+        .map_err(|e| ToolCallError::invalid_params(format!("Invalid provider_params: {e}")))?;
 
     // Borrow registry, extract what we need, then drop the borrow
-    let (total_steps, has_flows, definition) = {
+    let (total_steps, definition) = {
         let registry = state.pack_registry();
         let pack = registry.get(&input.pack).ok_or_else(|| {
             ToolCallError::invalid_params(format!(
@@ -59,14 +65,19 @@ pub async fn handle(
             ))
         })?;
         let total_steps = pack.flow_step_count();
-        let has_flows = total_steps > 0;
+        if total_steps == 0 {
+            return Err(ToolCallError::invalid_params(format!(
+                "Pack '{}' has no machine-owned flow; deliberate requires a 'main' flow so completion is resolved by MobMachine",
+                input.pack
+            )));
+        }
         let definition = pack.definition(
             &input.task,
             context,
             &overrides,
-            input.provider_params.as_ref(),
+            provider_params.as_ref(),
         );
-        (total_steps, has_flows, definition)
+        (total_steps, definition)
     };
 
     // If session_id is provided, attempt to reuse an existing mob.
@@ -121,21 +132,9 @@ pub async fn handle(
         }
     }
 
-    // Collect profile names and orchestrator before moving definition
+    // Collect profile names before moving definition.
     let profile_names: Vec<String> = definition.profiles.keys().map(|p| p.to_string()).collect();
-    let orchestrator_name = definition
-        .orchestrator
-        .as_ref()
-        .map(|o| o.profile.to_string())
-        .unwrap_or_else(|| "moderator".to_string());
-    let flow_timeout = if has_flows {
-        Some(derive_flow_watchdog_timeout(
-            &definition,
-            &FlowId::from("main"),
-        )?)
-    } else {
-        None
-    };
+    let flow_timeout = derive_flow_watchdog_timeout(&definition, &FlowId::from("main"))?;
 
     if !mob_exists {
         // Override the mob id when resuming with a new mob
@@ -206,11 +205,8 @@ pub async fn handle(
             )));
         }
 
-        // Wait for all autonomous kickoff turns to complete before subscribing
-        // to events. Without this barrier, the event subscription misses
-        // RunStarted events from kickoff turns (emitted during spawn) but sees
-        // their RunCompleted, causing the active_turns counter to go negative
-        // and triggering premature quiescence detection.
+        // Wait for autonomous kickoff turns to settle before the machine-owned
+        // flow starts dispatching steps to the same agents.
         if let Some(token) = progress_token.as_ref() {
             send_progress(
                 progress_notifier.as_ref(),
@@ -233,35 +229,16 @@ pub async fn handle(
         }
     }
 
-    // Route to flow-based or comms-based execution
-    let result = if has_flows {
-        run_flow(
-            state,
-            &mob_id,
-            total_steps,
-            progress_token.as_ref(),
-            progress_notifier.as_ref(),
-            request_context.as_ref(),
-            flow_timeout.expect("flow timeout computed when has_flows"),
-        )
-        .await
-    } else {
-        // Build the prompt with context
-        let prompt = if context.is_empty() {
-            input.task.clone()
-        } else {
-            format!("{}\n\n## Context\n\n{context}", input.task)
-        };
-        run_comms(
-            state,
-            &mob_id,
-            &orchestrator_name,
-            &prompt,
-            progress_token.as_ref(),
-            progress_notifier.as_ref(),
-        )
-        .await
-    };
+    let result = run_flow(
+        state,
+        &mob_id,
+        total_steps,
+        progress_token.as_ref(),
+        progress_notifier.as_ref(),
+        request_context.as_ref(),
+        flow_timeout,
+    )
+    .await;
 
     // Only destroy mob if not resuming (caller owns the lifecycle)
     if !resuming {
@@ -557,167 +534,6 @@ fn format_run_status(status: &MobRunStatus) -> &'static str {
         MobRunStatus::Failed => "failed",
         MobRunStatus::Canceled => "canceled",
     }
-}
-
-// ── Comms-based execution (autonomous panel) ────────────────────────────────
-
-async fn run_comms(
-    state: &ForceState,
-    mob_id: &MobId,
-    orchestrator: &str,
-    task: &str,
-    progress_token: Option<&Value>,
-    progress_notifier: Option<&ProgressNotifier>,
-) -> Result<Value, ToolCallError> {
-    use meerkat_core::event::AgentEvent;
-
-    if let Some(token) = progress_token {
-        send_progress(progress_notifier, token, 0, 1, "agents deliberating");
-    }
-
-    // Subscribe to mob-wide agent events (all members' streams merged)
-    let mut router_handle = state
-        .mob_state
-        .subscribe_mob_events(mob_id)
-        .await
-        .map_err(|e| ToolCallError::internal(format!("Event subscription failed: {e}")))?;
-
-    // Kick off the discussion by sending the task to the orchestrator
-    state
-        .mob_state
-        .mob_member_send(
-            mob_id,
-            AgentIdentity::from(orchestrator),
-            task.to_string().into(),
-            meerkat_core::types::HandlingMode::Queue,
-            None,
-        )
-        .await
-        .map_err(|e| ToolCallError::internal(format!("Failed to trigger {orchestrator}: {e}")))?;
-
-    // Drain events until all agents are idle.
-    //
-    // Track active turns via RunStarted/RunCompleted. When active_turns
-    // drops to 0 AND at least one turn has completed, the mob is done.
-    // A generous idle grace period handles the gap between one agent
-    // finishing and another being triggered by a comms message.
-    // Hard ceiling. Comms-based mobs can run iterative review loops where each
-    // agent turn involves full LLM calls, tool use, or even code execution —
-    // individual turns can take minutes. 1 hour accommodates long pipelines.
-    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
-    // After all agents go idle, wait this long for a new turn to start (covers
-    // the gap between one agent finishing and a comms message triggering another).
-    const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
-
-    let deadline = tokio::time::Instant::now() + MAX_WAIT;
-    let mut last_orchestrator_text = String::new();
-    let mut total_events = 0u64;
-    let mut active_turns: i64 = 0;
-    let mut any_turn_completed = false;
-    let mut idle_since: Option<tokio::time::Instant> = None;
-
-    loop {
-        let poll_timeout = if active_turns <= 0 && any_turn_completed {
-            // All agents idle — wait grace period for a new turn to start
-            let remaining_grace = idle_since
-                .map(|t| IDLE_GRACE.saturating_sub(t.elapsed()))
-                .unwrap_or(IDLE_GRACE);
-            remaining_grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
-        } else {
-            // Agents are working — just enforce the hard deadline
-            deadline.saturating_duration_since(tokio::time::Instant::now())
-        };
-
-        if poll_timeout.is_zero() {
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(total_events, active_turns, "hit max wait time");
-            } else {
-                tracing::info!(total_events, "all agents idle, grace period expired");
-            }
-            break;
-        }
-
-        match tokio::time::timeout(poll_timeout, router_handle.event_rx.recv()).await {
-            Ok(Some(attributed)) => {
-                total_events += 1;
-
-                match &attributed.envelope.payload {
-                    AgentEvent::RunStarted { .. } => {
-                        active_turns += 1;
-                        idle_since = None;
-                    }
-                    AgentEvent::RunCompleted { .. } => {
-                        active_turns -= 1;
-                        any_turn_completed = true;
-                        if active_turns <= 0 {
-                            idle_since = Some(tokio::time::Instant::now());
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Capture the orchestrator's latest text output.
-                // Always update on RunCompleted (even empty) so we know the
-                // orchestrator ran. Prefer non-empty results; TextComplete
-                // overwrites if it carries content.
-                if attributed.source.identity.as_str() == orchestrator {
-                    match &attributed.envelope.payload {
-                        AgentEvent::RunCompleted { result, .. } => {
-                            if !result.is_empty() {
-                                last_orchestrator_text = result.clone();
-                            } else if last_orchestrator_text.is_empty() {
-                                last_orchestrator_text =
-                                    "[orchestrator completed a turn with tool-call-only output]"
-                                        .to_string();
-                            }
-                        }
-                        AgentEvent::TextComplete { content, .. } if !content.is_empty() => {
-                            last_orchestrator_text = content.clone();
-                        }
-                        _ => {}
-                    }
-                }
-
-                if total_events % 20 == 0 {
-                    if let Some(token) = progress_token {
-                        send_progress(
-                            progress_notifier,
-                            token,
-                            0,
-                            1,
-                            &format!("{total_events} events, {active_turns} active"),
-                        );
-                    }
-                }
-            }
-            Ok(None) => {
-                tracing::info!(total_events, "event channel closed");
-                break;
-            }
-            Err(_) => {
-                // Timeout expired — either grace period or deadline
-                if active_turns <= 0 && any_turn_completed {
-                    tracing::info!(total_events, "all agents idle, grace period expired");
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!(total_events, active_turns, "hit max wait time");
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(token) = progress_token {
-        send_progress(progress_notifier, token, 1, 1, "complete");
-    }
-
-    if last_orchestrator_text.is_empty() {
-        last_orchestrator_text =
-            format!("Discussion completed but {orchestrator} output not captured.");
-    }
-
-    Ok(json!({"content": [{"type": "text", "text": last_orchestrator_text}]}))
 }
 
 // ── Progress notifications ──────────────────────────────────────────────────

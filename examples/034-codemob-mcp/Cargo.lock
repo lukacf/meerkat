@@ -424,6 +424,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -761,6 +771,16 @@ checksum = "0f158e3ff0a1b334408dc9fb811cd99b446986f4d8b741bb08f9df1604085ae7"
 dependencies = [
  "lazy_static",
  "num",
+]
+
+[[package]]
+name = "fs4"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29c30684418547d476f0b48e84f4821639119c483b1eccd566c8cd0cd05f521"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1346,6 +1366,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "jni"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
+dependencies = [
+ "cfg-if",
+ "combine",
+ "jni-macros",
+ "jni-sys",
+ "log",
+ "simd_cesu8",
+ "thiserror 2.0.18",
+ "walkdir",
+ "windows-link",
+]
+
+[[package]]
+name = "jni-macros"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "simd_cesu8",
+ "syn",
+]
+
+[[package]]
+name = "jni-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6377a88cb3910bee9b0fa88d4f42e1d2da8e79915598f65fb0c7ee14c878af2"
+dependencies = [
+ "jni-sys-macros",
+]
+
+[[package]]
+name = "jni-sys-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1456,6 +1525,12 @@ dependencies = [
 
 [[package]]
 name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
@@ -1513,13 +1588,14 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "meerkat"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "inventory",
  "meerkat-anthropic",
+ "meerkat-capabilities",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -1537,7 +1613,9 @@ dependencies = [
  "meerkat-skills",
  "meerkat-store",
  "meerkat-tools",
+ "meerkat-workgraph",
  "parking_lot",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1548,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1558,6 +1636,7 @@ dependencies = [
  "meerkat-auth-core",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-models",
  "reqwest",
  "serde",
  "serde_json",
@@ -1569,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1587,16 +1666,30 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
  "tracing",
  "urlencoding",
+ "uuid",
+ "webbrowser",
+]
+
+[[package]]
+name = "meerkat-capabilities"
+version = "0.7.0"
+dependencies = [
+ "inventory",
+ "meerkat-core",
+ "schemars",
+ "serde",
+ "strum",
 ]
 
 [[package]]
 name = "meerkat-client"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -1607,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1618,6 +1711,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -1640,13 +1734,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "chrono",
- "inventory",
+ "meerkat-capabilities",
  "meerkat-core",
  "meerkat-schedule",
+ "meerkat-workgraph",
  "schemars",
  "serde",
  "serde_json",
@@ -1656,9 +1751,10 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "dirs",
  "futures",
@@ -1671,6 +1767,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "thiserror 2.0.18",
  "tokio",
@@ -1683,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1699,17 +1796,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tokio_with_wasm",
 ]
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -1723,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1747,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "quote",
  "syn",
@@ -1755,14 +1854,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1771,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -1782,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -1793,11 +1892,12 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "hnsw_rs",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -1811,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1827,6 +1927,7 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",
  "notify",
@@ -1845,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1868,16 +1969,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "meerkat-core",
- "schemars",
- "serde_json",
 ]
 
 [[package]]
 name = "meerkat-openai"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1890,6 +1989,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-models",
  "reqwest",
  "serde",
  "serde_json",
@@ -1901,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -1909,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1922,7 +2022,6 @@ dependencies = [
  "meerkat-machine-schema",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
@@ -1932,15 +2031,18 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
  "futures",
  "indexmap",
+ "inventory",
+ "meerkat-capabilities",
  "meerkat-core",
  "meerkat-machine-schema",
+ "meerkat-skills",
  "schemars",
  "serde",
  "serde_json",
@@ -1952,14 +2054,16 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures",
  "indexmap",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-skills",
  "meerkat-store",
@@ -1974,12 +2078,12 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "indexmap",
  "inventory",
- "meerkat-contracts",
+ "meerkat-capabilities",
  "meerkat-core",
  "regex",
  "reqwest",
@@ -1995,11 +2099,12 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "fs4",
  "meerkat-core",
  "meerkat-schedule",
  "rusqlite",
@@ -2015,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2025,6 +2130,7 @@ dependencies = [
  "humantime",
  "inventory",
  "jsonschema",
+ "meerkat-capabilities",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
@@ -2044,6 +2150,30 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "meerkat-workgraph"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "inventory",
+ "meerkat-capabilities",
+ "meerkat-core",
+ "meerkat-machine-schema",
+ "meerkat-skills",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strum",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "uuid",
 ]
 
 [[package]]
@@ -2086,6 +2216,12 @@ dependencies = [
  "widestring",
  "windows",
 ]
+
+[[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "nix"
@@ -2260,6 +2396,31 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "url",
+]
+
+[[package]]
+name = "objc2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+dependencies = [
+ "objc2-encode",
+]
+
+[[package]]
+name = "objc2-encode"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "objc2-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+dependencies = [
+ "bitflags 2.11.0",
+ "objc2",
 ]
 
 [[package]]
@@ -2746,6 +2907,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.11.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -2753,7 +2927,7 @@ dependencies = [
  "bitflags 2.11.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -2928,11 +3102,11 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "0.6.9"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
- "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3023,6 +3197,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd_cesu8"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94f90157bb87cddf702797c5dadfa0be7d266cdf49e22da2fcaa32eff75b2c33"
+dependencies = [
+ "rustc_version",
+ "simdutf8",
+]
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "simple_asn1"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3054,9 +3244,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.6.2"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3080,18 +3270,18 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "strum"
-version = "0.27.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
  "strum_macros",
 ]
 
 [[package]]
 name = "strum_macros"
-version = "0.27.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3159,7 +3349,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -3357,44 +3547,42 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
+version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
- "serde",
+ "indexmap",
+ "serde_core",
  "serde_spanned",
  "toml_datetime",
- "toml_edit",
+ "toml_parser",
+ "toml_writer",
+ "winnow 0.7.15",
 ]
 
 [[package]]
 name = "toml_datetime"
-version = "0.6.11"
+version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
 dependencies = [
- "serde",
+ "serde_core",
 ]
 
 [[package]]
-name = "toml_edit"
-version = "0.22.27"
+name = "toml_parser"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "indexmap",
- "serde",
- "serde_spanned",
- "toml_datetime",
- "toml_write",
- "winnow",
+ "winnow 1.0.3",
 ]
 
 [[package]]
-name = "toml_write"
-version = "0.1.2"
+name = "toml_writer"
+version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tower"
@@ -3809,6 +3997,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "webbrowser"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc95580916af1e68ff6a7be07446fc5db73ebf71cf092de939bbf5f7e189f72"
+dependencies = [
+ "core-foundation",
+ "jni",
+ "log",
+ "ndk-context",
+ "objc2",
+ "objc2-foundation",
+ "url",
+ "web-sys",
+]
+
+[[package]]
 name = "webpki-roots"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3825,7 +4029,7 @@ checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
 dependencies = [
  "either",
  "env_home",
- "rustix",
+ "rustix 1.1.4",
  "winsafe",
 ]
 
@@ -4161,9 +4365,12 @@ name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
+
+[[package]]
+name = "winnow"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 
 [[package]]
 name = "winsafe"
@@ -4263,7 +4470,7 @@ dependencies = [
 name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "yoke"

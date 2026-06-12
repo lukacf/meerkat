@@ -182,6 +182,12 @@ impl From<serde_json::Error> for LiveWebrtcError {
     }
 }
 
+#[derive(serde::Serialize)]
+struct WebrtcErrorFrame<'a> {
+    error: String,
+    reason: &'a str,
+}
+
 struct LiveWebrtcPeer {
     peer: Arc<RTCPeerConnection>,
     outgoing_audio: Arc<OutgoingAudioControl>,
@@ -358,6 +364,8 @@ impl LiveWebrtcState {
             Arc::clone(&self.host),
             channel_id.clone(),
             Arc::clone(&peer),
+            Arc::clone(&self.peers),
+            Arc::clone(&self.close_feedback),
             Arc::clone(&outgoing_audio_control),
         );
 
@@ -527,8 +535,18 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                                     tracing::warn!(
                                         channel = %channel_id,
                                         error = %err,
-                                        "WebRTC data-channel send_input failed"
+                                        "WebRTC data-channel send_input failed; closing"
                                     );
+                                    send_webrtc_input_error_frame(&data_channel, &err).await;
+                                    reject_failed_input_handoff(
+                                        host.as_ref(),
+                                        close_feedback.as_ref(),
+                                        &peer_registry,
+                                        &channel_id,
+                                        &data_channel,
+                                        &peer,
+                                    )
+                                    .await;
                                 }
                             }
                             None => {
@@ -564,11 +582,17 @@ fn install_incoming_audio_handler(
     host: Arc<LiveAdapterHost>,
     channel_id: LiveChannelId,
     peer: Arc<RTCPeerConnection>,
+    peer_registry: LiveWebrtcPeerRegistry,
+    close_feedback: Arc<dyn LiveChannelCloseFeedback>,
     outgoing_audio_control: Arc<OutgoingAudioControl>,
 ) {
+    let peer_for_track = Arc::clone(&peer);
     peer.on_track(Box::new(move |track: Arc<TrackRemote>, _, _| {
         let host = Arc::clone(&host);
         let channel_id = channel_id.clone();
+        let peer_registry = Arc::clone(&peer_registry);
+        let close_feedback = Arc::clone(&close_feedback);
+        let peer = Arc::clone(&peer_for_track);
         let outgoing_audio_control = Arc::clone(&outgoing_audio_control);
         tokio::spawn(async move {
             let mut bridge = match WebrtcAudioBridge::new() {
@@ -625,8 +649,17 @@ fn install_incoming_audio_handler(
                     tracing::warn!(
                         channel = %channel_id,
                         error = %err,
-                        "WebRTC audio send_input failed"
+                        "WebRTC audio send_input failed; closing"
                     );
+                    reject_failed_audio_input_handoff(
+                        host.as_ref(),
+                        close_feedback.as_ref(),
+                        &peer_registry,
+                        &channel_id,
+                        peer.as_ref(),
+                    )
+                    .await;
+                    break;
                 }
             }
         });
@@ -938,12 +971,41 @@ async fn close_and_deregister_peer(
     data_channel: &RTCDataChannel,
     peer: &RTCPeerConnection,
 ) {
-    let registered_peer = peer_registry.lock().await.remove(channel_id);
     let _ = data_channel.close().await;
+    close_registered_peer(peer_registry, channel_id, peer).await;
+}
+
+async fn close_registered_peer(
+    peer_registry: &LiveWebrtcPeerRegistry,
+    channel_id: &LiveChannelId,
+    peer: &RTCPeerConnection,
+) {
+    let registered_peer = peer_registry.lock().await.remove(channel_id);
     if let Some(registered_peer) = registered_peer {
         let _ = registered_peer.peer.close().await;
     } else {
         let _ = peer.close().await;
+    }
+}
+
+fn webrtc_host_error_frame_json(err: &LiveAdapterHostError) -> String {
+    serde_json::to_string(&WebrtcErrorFrame {
+        error: err.to_string(),
+        reason: err.reason_code(),
+    })
+    .unwrap_or_default()
+}
+
+async fn send_webrtc_input_error_frame(data_channel: &RTCDataChannel, err: &LiveAdapterHostError) {
+    let frame = webrtc_host_error_frame_json(err);
+    if frame.is_empty() {
+        return;
+    }
+    if let Err(send_err) = data_channel.send_text(frame).await {
+        tracing::warn!(
+            error = %send_err,
+            "failed to send WebRTC input error frame"
+        );
     }
 }
 
@@ -967,6 +1029,32 @@ async fn reject_invalid_live_frame(
 ) {
     let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
     close_and_deregister_peer(peer_registry, channel_id, data_channel, peer).await;
+}
+
+/// Terminalize a live channel after a parsed WebRTC input cannot be handed to
+/// the live host. This mirrors the malformed-frame path with one extra client
+/// error frame when the data channel is available.
+async fn reject_failed_input_handoff(
+    host: &LiveAdapterHost,
+    close_feedback: &dyn LiveChannelCloseFeedback,
+    peer_registry: &LiveWebrtcPeerRegistry,
+    channel_id: &LiveChannelId,
+    data_channel: &RTCDataChannel,
+    peer: &RTCPeerConnection,
+) {
+    let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
+    close_and_deregister_peer(peer_registry, channel_id, data_channel, peer).await;
+}
+
+async fn reject_failed_audio_input_handoff(
+    host: &LiveAdapterHost,
+    close_feedback: &dyn LiveChannelCloseFeedback,
+    peer_registry: &LiveWebrtcPeerRegistry,
+    channel_id: &LiveChannelId,
+    peer: &RTCPeerConnection,
+) {
+    let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
+    close_registered_peer(peer_registry, channel_id, peer).await;
 }
 
 fn spawn_outgoing_audio_track_pump(
@@ -1401,6 +1489,20 @@ mod tests {
                 "reason codes must be distinct: {expected}"
             );
         }
+    }
+
+    #[test]
+    fn webrtc_host_error_frame_carries_stable_reason_code() {
+        let err = LiveAdapterHostError::NoAdapter(LiveChannelId::new("ch-1"));
+        let frame: serde_json::Value =
+            serde_json::from_str(&webrtc_host_error_frame_json(&err)).expect("error frame JSON");
+
+        assert_eq!(frame["reason"], "no_adapter");
+        assert!(
+            frame["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("no adapter attached"))
+        );
     }
 
     // -----------------------------------------------------------------

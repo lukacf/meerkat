@@ -191,8 +191,8 @@ pub fn tools_list() -> Vec<Value> {
                         "properties": {
                             "name": { "type": "string", "description": "Unique mob name (alphanumeric, hyphens, underscores)" },
                             "description": { "type": "string", "description": "Human-readable description" },
-                            "mode": { "type": "string", "enum": ["comms", "flow"], "description": "comms=autonomous agents communicate freely (good for iterative loops), flow=structured DAG steps" },
-                            "orchestrator": { "type": "string", "description": "For comms mode: agent whose output is captured as the result and who receives the initial message" },
+                            "mode": { "type": "string", "enum": ["comms", "flow"], "description": "comms=legacy/default authoring shape normalized to a machine-owned analysis+synthesis flow, flow=structured DAG steps" },
+                            "orchestrator": { "type": "string", "description": "For comms mode: synthesis agent that receives peer flow outputs and produces the final result" },
                             "agents": {
                                 "type": "object",
                                 "description": "Map of agent_name → {model, skill, peer_description}",
@@ -208,7 +208,7 @@ pub fn tools_list() -> Vec<Value> {
                             },
                             "wiring": {
                                 "type": "array",
-                                "description": "Pairs of agent names to wire for communication, e.g. [[\"coder\", \"reviewer\"]]",
+                                "description": "Pairs of agent names to wire for explicit flow-mode communication ingress/egress, e.g. [[\"coder\", \"reviewer\"]]",
                                 "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }
                             },
                             "flows": {

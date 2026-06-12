@@ -1,17 +1,10 @@
 //! Pack definitions — reusable team compositions for the `deliberate` tool.
 //!
 //! Each pack implements the [`Pack`] trait and builds a [`MobDefinition`] that
-//! the deliberate handler uses to create an ephemeral mob. Packs come in two
-//! execution modes:
-//!
-//! - **Flow-based** (`flow_step_count() > 0`): Structured step execution with
-//!   dependency tracking. The deliberate handler runs the `"main"` flow and
-//!   polls for completion. Prior step outputs are forwarded via `{{ steps.<id> }}`
-//!   template references.
-//!
-//! - **Comms-based** (`flow_step_count() == 0`): Autonomous agents communicate
-//!   freely via peer messaging. The deliberate handler injects the task via
-//!   `mob_member_send` and monitors the event stream for quiescence.
+//! the deliberate handler uses to create an ephemeral mob. Every pack must
+//! define a `"main"` flow: structured step execution gives `MobMachine` the
+//! terminal result, and prior step outputs are forwarded via
+//! `{{ steps.<id> }}` template references.
 
 pub mod advisor;
 pub mod architect;
@@ -29,7 +22,6 @@ use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
-use serde_json::Value;
 
 // ── Pack trait ───────────────────────────────────────────────────────────────
 
@@ -41,7 +33,7 @@ pub trait Pack: Send + Sync {
     fn description(&self) -> &str;
     /// Number of agents this pack spawns.
     fn agent_count(&self) -> usize;
-    /// Number of flow steps (0 = comms-based, no flow).
+    /// Number of flow steps in the required `"main"` flow.
     fn flow_step_count(&self) -> usize;
     /// Build the [`MobDefinition`] with task/context interpolated and overrides applied.
     fn definition(
@@ -49,7 +41,7 @@ pub trait Pack: Send + Sync {
         task: &str,
         context: &str,
         model_overrides: &BTreeMap<String, String>,
-        provider_params: Option<&Value>,
+        provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition;
 }
 
@@ -123,10 +115,15 @@ pub fn turn_driven_profile(
     model: String,
     skill: &str,
     desc: &str,
-    provider_params: Option<&Value>,
+    provider_params: Option<&meerkat_core::ProviderParamsOverride>,
 ) -> ProfileBinding {
     ProfileBinding::Inline(Box::new(Profile {
         model,
+        provider: None,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
         skills: vec![skill.to_string()],
         tools: ToolConfig {
             builtins: true,
@@ -254,6 +251,25 @@ mod tests {
                     profile.model
                 );
             }
+        }
+    }
+
+    #[test]
+    fn built_in_packs_all_have_machine_owned_flows() {
+        let registry = PackRegistry::new();
+
+        for pack in registry.all() {
+            let definition = pack.definition("check flows", "", &BTreeMap::new(), None);
+            assert!(
+                pack.flow_step_count() > 0,
+                "pack '{}' must expose a machine-owned main flow",
+                pack.name()
+            );
+            assert!(
+                definition.flows.contains_key(&FlowId::from("main")),
+                "pack '{}' must define a main flow",
+                pack.name()
+            );
         }
     }
 }

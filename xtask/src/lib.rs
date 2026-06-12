@@ -89,7 +89,9 @@ pub fn run() -> Result<()> {
             run_machine_authority_task(move || machines::machine_check_drift(args))
         }
         Commands::SeamInventory(args) => seam_inventory::run_seam_inventory(args),
-        Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
+        Commands::ProtocolCodegen => {
+            run_machine_authority_task(protocol_codegen::run_protocol_codegen)
+        }
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
         Commands::EffectAuthority => effect_authority::run_effect_authority(),
         Commands::BridgeClassifier => bridge_classifier::run_bridge_classifier(),

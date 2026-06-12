@@ -6,7 +6,6 @@
 use indexmap::IndexMap;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::*;
@@ -32,7 +31,7 @@ impl Pack for AdvisorPack {
         task: &str,
         context: &str,
         overrides: &BTreeMap<String, String>,
-        pp: Option<&Value>,
+        pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
         let ctx = format_context(context);
 

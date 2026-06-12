@@ -1,23 +1,16 @@
-//! Implement pack — gated implementation with iterative review.
+//! Implement pack — gated implementation with reviewer synthesis.
 //!
-//! Two agents in a comms-based review loop:
-//! - **implementer**: receives the task, produces the solution
-//! - **reviewer**: quality gate — approves or sends feedback for revision
-//!
-//! The reviewer acts as orchestrator. It receives the task, forwards it to
-//! the implementer, reviews the output, and either approves (captured as
-//! the final result) or sends feedback for another iteration. Capped at
-//! 3 revision rounds by the reviewer's skill instructions.
+//! Two agents run in a `"main"` flow: the implementer produces the solution,
+//! then the reviewer emits the terminal gate verdict. Completion is resolved by
+//! `MobMachine` flow terminality.
 
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
-use meerkat_mob::MobRuntimeMode;
-use serde_json::Value;
 
-use super::{resolve_model, Pack};
+use super::{flow_step, format_context, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack};
 
 pub struct ImplementPack;
 
@@ -26,60 +19,42 @@ impl Pack for ImplementPack {
         "implement"
     }
     fn description(&self) -> &str {
-        "Gated implementation: an implementer produces work, a reviewer approves or sends feedback. Iterates until the reviewer is satisfied (max 3 rounds)."
+        "Gated implementation: an implementer produces work, then a reviewer emits a gate verdict"
     }
     fn agent_count(&self) -> usize {
         2
     }
     fn flow_step_count(&self) -> usize {
-        0
-    } // comms-driven review loop
+        2
+    }
 
     fn definition(
         &self,
-        _task: &str,
-        _context: &str,
+        task: &str,
+        context: &str,
         overrides: &BTreeMap<String, String>,
-        pp: Option<&Value>,
+        pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let tools = ToolConfig {
-            builtins: true,
-            shell: true,
-            comms: true,
-            ..ToolConfig::default()
-        };
+        let ctx = format_context(context);
 
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("implementer"),
-            ProfileBinding::Inline(Box::new(Profile {
-                model: resolve_model(overrides, "implementer", "claude-sonnet-4-6"),
-                skills: vec!["implementer-skill".to_string()],
-                tools: tools.clone(),
-                peer_description: "Implementation agent — produces the solution".to_string(),
-                external_addressable: true,
-                backend: None,
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: pp.cloned(),
-            })),
+            turn_driven_profile(
+                resolve_model(overrides, "implementer", "claude-sonnet-4-6"),
+                "implementer-skill",
+                "Implementation agent — produces the solution",
+                pp,
+            ),
         );
         profiles.insert(
             ProfileName::from("reviewer"),
-            ProfileBinding::Inline(Box::new(Profile {
-                model: resolve_model(overrides, "reviewer", "gpt-5.5"),
-                skills: vec!["gate-reviewer-skill".to_string()],
-                tools: tools.clone(),
-                peer_description: "Quality gate reviewer — approves or requests revision"
-                    .to_string(),
-                external_addressable: true,
-                backend: None,
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: pp.cloned(),
-            })),
+            turn_driven_profile(
+                resolve_model(overrides, "reviewer", "gpt-5.5"),
+                "gate-reviewer-skill",
+                "Quality gate reviewer — approves or requests revision",
+                pp,
+            ),
         );
 
         let mut skills = BTreeMap::new();
@@ -96,22 +71,38 @@ impl Pack for ImplementPack {
             },
         );
 
-        let mut definition = MobDefinition::explicit(MobId::from(format!(
-            "codemob-implement-{}",
-            uuid::Uuid::new_v4().as_simple()
-        )));
-        definition.orchestrator = Some(OrchestratorConfig {
-            profile: ProfileName::from("reviewer"),
-        });
-        definition.profiles = profiles;
-        definition.wiring = WiringRules {
-            auto_wire_orchestrator: true,
-            role_wiring: vec![RoleWiringRule {
-                a: ProfileName::from("implementer"),
-                b: ProfileName::from("reviewer"),
-            }],
-        };
-        definition.skills = skills;
-        definition
+        let mut steps = IndexMap::new();
+        steps.insert(
+            StepId::from("implement"),
+            flow_step(
+                "implementer",
+                format!("Implement the requested change. Include the approach, changed files, and verification performed.\n\n{task}{ctx}"),
+                &[],
+                600_000,
+            ),
+        );
+        steps.insert(
+            StepId::from("review"),
+            flow_step(
+                "reviewer",
+                "Review the implementation below. Produce a final gate verdict: APPROVE or BLOCK, with blocking issues first and any follow-up recommendations.\n\n## Implementation\n{{ steps.implement }}".into(),
+                &["implement"],
+                300_000,
+            ),
+        );
+
+        let mut flows = BTreeMap::new();
+        flows.insert(
+            FlowId::from("main"),
+            FlowSpec::new(Some("Implementation followed by gate review".into()), steps, None),
+        );
+
+        mob_definition(
+            "implement",
+            profiles,
+            skills,
+            flows,
+            identity_spawn_policy(&["implementer", "reviewer"]),
+        )
     }
 }

@@ -348,6 +348,7 @@ pub enum SessionDocumentInput {
         session_id: SessionDocumentKey,
         has_metadata: bool,
         has_build_state: bool,
+        runtime_projection_quarantined: bool,
     },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
@@ -2529,16 +2530,24 @@ impl SessionDocumentMachineAuthority {
                 session_id,
                 has_metadata,
                 has_build_state,
+                runtime_projection_quarantined,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (store_projection_can_recover_authority(has_metadata, has_build_state))
+                    && (store_projection_can_recover_authority(
+                        has_metadata,
+                        has_build_state,
+                        runtime_projection_quarantined,
+                    ))
                 {
                     matches.push(SessionDocumentTransition::RecoverSessionFromStoreAuthorized);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (store_projection_can_recover_authority(has_metadata, has_build_state)
-                        == false)
+                    && (store_projection_can_recover_authority(
+                        has_metadata,
+                        has_build_state,
+                        runtime_projection_quarantined,
+                    ) == false)
                 {
                     matches.push(SessionDocumentTransition::RecoverSessionFromStoreUnrecoverable);
                 }
@@ -3106,11 +3115,13 @@ impl SessionDocumentMachineAuthority {
         session_id: SessionDocumentKey,
         has_metadata: bool,
         has_build_state: bool,
+        runtime_projection_quarantined: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::RecoverSessionFromStore {
             session_id,
             has_metadata,
             has_build_state,
+            runtime_projection_quarantined,
         })
     }
 
@@ -3287,8 +3298,12 @@ fn resume_provider_recompute_from_model(
     (model_override_present) && (provider_override_present == false)
 }
 
-fn store_projection_can_recover_authority(has_metadata: bool, has_build_state: bool) -> bool {
-    (has_metadata) || (has_build_state)
+fn store_projection_can_recover_authority(
+    has_metadata: bool,
+    has_build_state: bool,
+    runtime_projection_quarantined: bool,
+) -> bool {
+    (has_metadata) || (has_build_state) || (runtime_projection_quarantined)
 }
 
 fn archive_should_retire_runtime(

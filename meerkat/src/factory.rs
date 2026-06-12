@@ -4685,10 +4685,26 @@ impl AgentFactory {
             }
         };
 
+        // 12b. Map the resolved config's retry settings into the agent loop's
+        // RetryPolicy. Without this, AgentBuilder's RetryPolicy::default()
+        // (3 attempts / 30s cap) silently overrides Config.retry for EVERY
+        // factory-built agent — root and child alike — which is what killed
+        // the 2026-06-12 bulk fan-out under provider rate limiting despite a
+        // configured 8-attempt policy. call_timeout stays None here: the
+        // per-call deadline is owned by with_call_timeout_override below.
+        let retry_policy = meerkat_core::retry::RetryPolicy {
+            max_retries: config.retry.max_retries,
+            initial_delay: config.retry.initial_delay,
+            max_delay: config.retry.max_delay,
+            multiplier: config.retry.multiplier,
+            call_timeout: None,
+        };
+
         let mut builder = AgentBuilder::new()
             .model(model.clone())
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
+            .retry_policy(retry_policy)
             .structured_output_retries(build_config.structured_output_retries)
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {

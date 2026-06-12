@@ -46,6 +46,8 @@ matches=$(cd "$ROOT_DIR" && rg -n -H -e "$PATTERN" \
   --glob '!dist/**' \
   --glob '!.rct/**' \
   --glob '!.rct-*/**' \
+  --glob '!.rkat/**' \
+  --glob '!**/.rkat/**' \
   --glob '!.claude/worktrees/**' \
   --glob '!.claude/skills/**' \
   --glob '!examples/*/target/**' \

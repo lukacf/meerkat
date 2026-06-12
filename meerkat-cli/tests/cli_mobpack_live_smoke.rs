@@ -688,6 +688,11 @@ async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::er
         "mob".to_string(),
         "validate".to_string(),
         pack.display().to_string(),
+        // The fixture is a deliberately unsigned dev pack; this test covers
+        // the inspect/validate SURFACE, not trust. Strict rejection of
+        // unsigned packs is covered by the signed-strict scenarios.
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
     ];
     let validate_refs: Vec<&str> = validate_args.iter().map(String::as_str).collect();
     let validate_out = run_rkat(&rkat, &project_dir, &validate_refs, None).await?;
@@ -997,6 +1002,16 @@ async fn e2e_scenario_28_cli_mobpack_deploy_signed_strict_live()
     Ok(())
 }
 
+/// Locate the repo's built wasm32 runtime artifact for `mob web build --wasm`.
+/// The CLI deliberately refuses to emit placeholder bundles, so the surface
+/// tests need the real artifact from the meerkat-web-runtime pipeline; when
+/// it has not been built locally, skip (mirrors the no-API-key skip).
+fn prebuilt_web_runtime_wasm() -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    let path = root.join("sdks/web/wasm/meerkat_web_runtime_bg.wasm");
+    path.exists().then_some(path)
+}
+
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
 async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>> {
@@ -1021,11 +1036,19 @@ async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>>
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, None).await?;
     let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
 
+    let Some(runtime_wasm) = prebuilt_web_runtime_wasm() else {
+        eprintln!("Skipping: sdks/web/wasm runtime artifact not built");
+        return Ok(());
+    };
     let wasm_args = [
         "mob".to_string(),
         "web".to_string(),
         "build".to_string(),
         pack.display().to_string(),
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
+        "--wasm".to_string(),
+        runtime_wasm.display().to_string(),
         "-o".to_string(),
         project_dir.join("web-out").display().to_string(),
     ];
@@ -1102,6 +1125,8 @@ capabilities = ["shell"]
         "web".to_string(),
         "build".to_string(),
         pack.display().to_string(),
+        "--trust-policy".to_string(),
+        "permissive".to_string(),
         "-o".to_string(),
         project_dir.join("web-out").display().to_string(),
     ];

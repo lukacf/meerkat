@@ -2,7 +2,11 @@
 # Single source of truth for all build, test, and lint commands
 
 CRATE_NAME := meerkat
-XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target
+# Per-tree xtask build cache: a path-keyed suffix prevents sibling
+# worktrees from serving each other stale codegen binaries (a shared
+# /tmp cache once emitted another branch's DSL into clean main).
+XTASK_TREE_KEY := $(shell printf '%s' "$(CURDIR)" | shasum | cut -c1-12)
+XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target-$(XTASK_TREE_KEY)
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
 PYTHON ?= $(shell command -v python3.11 2>/dev/null || command -v python3)

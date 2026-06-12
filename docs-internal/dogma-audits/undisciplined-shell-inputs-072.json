@@ -548,5 +548,19 @@
    },
    "lane": "surfaces"
   }
- ]
+ ],
+ "plan_072": {
+  "layer1_drain_obligations": [
+   "unregister_session",
+   "session archive (ephemeral/admission)",
+   "auth release_lease",
+   "schedule delete/pause",
+   "mob retire-adjacent kickoff/spawn"
+  ],
+  "layer2_total_inputs": "explicit no-op transitions for legitimately-post-teardown arrivals (peer callbacks, flow expiry)",
+  "layer3_token_pilot": [
+   "unregister_session seam (highest traffic, codegen-emitted completion-resolution token)",
+   "member-bridge discard seam: discard-live-session requires durable-bridge-snapshot-committed-first token (MobMachine binding + SessionDocument snapshot truth; 0.6.x production casualty: 'missing bridge session snapshot' after RetryExhausted discard)"
+  ]
+ }
 }

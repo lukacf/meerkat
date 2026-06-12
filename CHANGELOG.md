@@ -46,6 +46,18 @@ one-liner for switching the default model.
 - **Mob storage removal fails closed** (#763) — `mob_destroy` now surfaces
   storage-file removal failures (with post-remove verification) instead of
   reporting a clean destroy over a surviving store.
+- **Dogma ledger fixes** (#764) — the SessionDocument recovery verdict owns
+  runtime-projection quarantine (no shell-side fallback); WebRTC input
+  handoff failures terminate with typed client error frames; Codemob built-in
+  packs require machine-owned `main` flows (local comms completion removed).
+- **BREAKING (CLI behavior): legacy default-model healing removed** (#764) —
+  a persisted `agent.model` naming an old built-in default (e.g.
+  `claude-opus-4-7`) is now used as-is instead of being silently redirected
+  to the current catalog default. An explicitly configured model always wins;
+  use `rkat --default-model <id>` to change it. This deliberately supersedes
+  the earlier by-design adjudication that kept healing (dogma resolution
+  log #254): silently overriding a user's persisted choice was itself
+  surface-owned magic.
 
 ## [0.7.0] - 2026-06-11
 

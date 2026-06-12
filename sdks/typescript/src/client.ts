@@ -65,6 +65,8 @@ import {
   type LiveTruncateParams,
   type LiveWebrtcAnswerParams,
   type LiveWebrtcAnswerResult,
+  type MobFlowRunResult,
+  type MobRunParams,
   type MobRunResult,
   type MobRunResultParams,
   type WireLiveAdapterObservation,
@@ -2299,10 +2301,10 @@ export class MeerkatClient {
     params: Record<string, unknown> = {},
     options: { prompt?: string; flowId?: string } = {},
   ): Promise<string> {
-    const payload: Record<string, unknown> = { mob_id: mobId, params };
+    const payload: MobRunParams = { mob_id: mobId, params };
     if (options.prompt !== undefined) payload.prompt = options.prompt;
     if (options.flowId !== undefined) payload.flow_id = options.flowId;
-    const result = await this.request("mob/run", payload);
+    const result = (await this.request("mob/run", payload)) as MobFlowRunResult;
     return String(result.run_id ?? "");
   }
 

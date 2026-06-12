@@ -85,6 +85,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobAppendSystemContextParams",
     "MobAppendSystemContextResult",
     "MobFlowsResult",
+    "MobRunParams",
     "MobFlowRunParams",
     "MobFlowRunResult",
     "MobFlowStatusParams",

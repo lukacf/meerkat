@@ -584,6 +584,12 @@
       "result_type": "MobFlowRunResult"
     },
     {
+      "description": "Invoke a mob as a typed callable run",
+      "name": "mob/run",
+      "params_type": "MobRunParams",
+      "result_type": "MobFlowRunResult"
+    },
+    {
       "description": "Get status for a mob flow run",
       "name": "mob/flow_status",
       "params_type": "MobFlowStatusParams",

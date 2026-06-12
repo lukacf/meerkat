@@ -867,6 +867,18 @@ class MobFlowsResult:
 
 
 @dataclass
+class MobRunParams:
+    """Request payload for `mob/run`.
+
+Starts the pack's callable flow. `flow_id` defaults to `main`; `prompt` is
+sugar for `params.prompt` when the caller does not provide that key."""
+    mob_id: str
+    flow_id: Optional[str] = None
+    params: Optional[Any] = None
+    prompt: Optional[str] = None
+
+
+@dataclass
 class MobFlowRunParams:
     """Request payload for `mob/flow_run`."""
     flow_id: str

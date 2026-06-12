@@ -389,6 +389,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobUnwireParams": schema_for!(crate::wire::MobUnwireParams),
         "MobLifecycleParams": schema_for!(crate::wire::MobLifecycleParams),
         "MobAppendSystemContextParams": schema_for!(crate::wire::MobAppendSystemContextParams),
+        "MobRunParams": schema_for!(crate::wire::MobRunParams),
         "MobFlowRunParams": schema_for!(crate::wire::MobFlowRunParams),
         "MobFlowStatusParams": schema_for!(crate::wire::MobFlowStatusParams),
         "MobFlowCancelParams": schema_for!(crate::wire::MobFlowCancelParams),

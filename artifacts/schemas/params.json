@@ -13088,6 +13088,36 @@
     "title": "MobRespawnParams",
     "type": "object"
   },
+  "MobRunParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/run`.\n\nStarts the pack's callable flow. `flow_id` defaults to `main`; `prompt` is\nsugar for `params.prompt` when the caller does not provide that key.",
+    "properties": {
+      "flow_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "params": {
+        "default": null
+      },
+      "prompt": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "mob_id"
+    ],
+    "title": "MobRunParams",
+    "type": "object"
+  },
   "MobSpawnHelperParams": {
     "$defs": {
       "WireMobBackendKind": {

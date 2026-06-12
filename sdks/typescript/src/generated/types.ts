@@ -627,6 +627,13 @@ export interface MobFlowsResult {
   mob_id: string;
 }
 
+export interface MobRunParams {
+  flow_id?: string;
+  mob_id: string;
+  params?: unknown;
+  prompt?: string;
+}
+
 export interface MobFlowRunParams {
   flow_id: string;
   mob_id: string;

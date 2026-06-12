@@ -315,7 +315,7 @@ make audit       # Security audit via cargo-deny
 | `build_web_sdk_package` | Always | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
 | `update_homebrew` | After GitHub release | Updates the Homebrew tap formula |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 37 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 38 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual | Publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -429,7 +429,7 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 37 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 38 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -445,8 +445,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (37 crates, dependency order):
-`meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (38 crates, dependency order):
+`meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 ### Key Rules for AI Agents
 

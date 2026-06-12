@@ -34,6 +34,7 @@ printf '%s\n' \
   meerkat-client \
   meerkat \
   meerkat-mob \
+  meerkat-mob-adaptive \
   meerkat-mob-mcp \
   meerkat-mob-pack \
   meerkat-mcp-server \

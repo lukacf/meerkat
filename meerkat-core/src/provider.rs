@@ -19,8 +19,9 @@ pub enum Provider {
     // diverges from the canonical `as_str()` name `"openai"` that every other
     // seam (and durable data) uses. Pin the canonical wire/schema name on the
     // variant so the derived `Serialize`/`Deserialize` and the generated
-    // `schemars` schema all agree on `"openai"` — one representation, no shim.
-    #[serde(rename = "openai")]
+    // `schemars` schema all agree on `"openai"`. The alias is read-only for
+    // durable pre-0.7 session metadata; serialization remains canonical.
+    #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
     Gemini,
     SelfHosted,
@@ -125,5 +126,13 @@ mod tests {
             Some(Provider::Anthropic)
         );
         assert_eq!(Provider::parse_strict("openai"), Some(Provider::OpenAI));
+    }
+
+    #[test]
+    fn provider_deserializes_legacy_openai_tag() -> Result<(), serde_json::Error> {
+        let provider: Provider = serde_json::from_str("\"open_a_i\"")?;
+        assert_eq!(provider, Provider::OpenAI);
+        assert_eq!(serde_json::to_string(&provider)?, "\"openai\"");
+        Ok(())
     }
 }

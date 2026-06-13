@@ -775,6 +775,36 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.comms_name.is_none());
 }
 
+#[tokio::test]
+async fn build_agent_applies_configured_retry_schedule_without_call_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.retry.max_retries = 8;
+    config.retry.initial_delay = std::time::Duration::from_millis(750);
+    config.retry.max_delay = std::time::Duration::from_secs(120);
+    config.retry.multiplier = 2.5;
+    config.retry.call_timeout_override =
+        meerkat_core::CallTimeoutOverride::Value(std::time::Duration::from_secs(90));
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let retry = agent.retry_policy();
+
+    assert_eq!(retry.max_retries, 8);
+    assert_eq!(retry.initial_delay, std::time::Duration::from_millis(750));
+    assert_eq!(retry.max_delay, std::time::Duration::from_secs(120));
+    assert_eq!(retry.multiplier, 2.5);
+    assert_eq!(
+        retry.call_timeout, None,
+        "factory retry schedule wiring must not steal call-timeout ownership from call_timeout_override"
+    );
+}
+
 /// 4b. Configured self-hosted aliases resolve as first-class model IDs.
 #[tokio::test]
 async fn build_agent_resolves_self_hosted_alias_from_registry() {

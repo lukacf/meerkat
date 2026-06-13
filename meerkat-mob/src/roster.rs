@@ -205,6 +205,14 @@ impl Roster {
                     entry.agent_runtime_id = agent_runtime_id.clone();
                 }
             }
+            MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                if let Some(bridge_session_id) = recovered.bridge_session_id() {
+                    self.set_bridge_session_id(
+                        &recovered.agent_identity,
+                        bridge_session_id.clone(),
+                    );
+                }
+            }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));
             }

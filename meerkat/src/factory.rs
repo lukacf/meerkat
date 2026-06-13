@@ -5083,6 +5083,10 @@ impl AgentFactory {
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
             .structured_output_retries(resolved_structured_output_retries)
+            .retry_policy(meerkat_core::retry::RetryPolicy {
+                call_timeout: None,
+                ..config.retry.clone().into()
+            })
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {
                 registry: Arc::new(registry.clone()),

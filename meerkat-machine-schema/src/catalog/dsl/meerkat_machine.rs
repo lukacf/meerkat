@@ -8342,7 +8342,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.registration_phase = RegistrationPhase::Queuing;
                 }
             }
-            to Stopped
+            // Retired is the terminal archived projection. An executor exit
+            // (e.g. the 0.7.2 unregister drain awaiting the runtime loop after
+            // archive retired the session) records the exit but must NOT
+            // un-archive the session to Stopped: that durable Stopped would
+            // overwrite the archive marker `session_archived_by_authority`
+            // reads, making a post-archive control mutation observe a
+            // non-archived runtime. Stay Retired.
+            to Retired
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
         }
         transition RuntimeExecutorExitedFromStopped {

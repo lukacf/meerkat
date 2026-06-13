@@ -4018,9 +4018,11 @@ mod tests {
 
         assert_eq!(
             mutator.effects,
-            vec![OccurrenceLifecycleEffect::LateCompletionResolutionRecorded {
-                resolution: LateCompletionResolutionClass::DeliveryCompleted,
-            }],
+            vec![
+                OccurrenceLifecycleEffect::LateCompletionResolutionRecorded {
+                    resolution: LateCompletionResolutionClass::DeliveryCompleted,
+                }
+            ],
             "late arrival must emit exactly the late-record effect (no terminal effects)"
         );
         let updated = mutator.into_occurrence();
@@ -4215,10 +4217,12 @@ mod tests {
                 .expect("stale-arrival classification must be total in every phase");
             assert_eq!(
                 mutator.effects,
-                vec![OccurrenceLifecycleEffect::StaleCompletionArrivalClassified {
-                    phase: phase_before,
-                    trigger: StaleCompletionArrivalTrigger::Complete,
-                }]
+                vec![
+                    OccurrenceLifecycleEffect::StaleCompletionArrivalClassified {
+                        phase: phase_before,
+                        trigger: StaleCompletionArrivalTrigger::Complete,
+                    }
+                ]
             );
             let updated = mutator.into_occurrence();
             assert_eq!(

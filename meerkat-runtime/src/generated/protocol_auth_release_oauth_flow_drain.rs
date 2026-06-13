@@ -44,17 +44,21 @@ pub fn extract_obligations(
 pub fn submit_expire_o_auth_browser_flow(
     authority: &mut AuthMachineAuthority,
     _obligation: AuthReleaseOauthFlowDrainObligation,
-    flow_id: String,
+    browser_flow_id: String,
 ) -> Result<AuthMachineTransition, AuthMachineTransitionError> {
-    let transition = authority.apply(AuthMachineInput::ExpireOAuthBrowserFlow { flow_id })?;
+    let transition = authority.apply(AuthMachineInput::ExpireOAuthBrowserFlow {
+        flow_id: browser_flow_id,
+    })?;
     Ok(transition)
 }
 
 pub fn submit_expire_o_auth_device_flow(
     authority: &mut AuthMachineAuthority,
     _obligation: AuthReleaseOauthFlowDrainObligation,
-    flow_id: String,
+    device_flow_id: String,
 ) -> Result<AuthMachineTransition, AuthMachineTransitionError> {
-    let transition = authority.apply(AuthMachineInput::ExpireOAuthDeviceFlow { flow_id })?;
+    let transition = authority.apply(AuthMachineInput::ExpireOAuthDeviceFlow {
+        flow_id: device_flow_id,
+    })?;
     Ok(transition)
 }

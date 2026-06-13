@@ -6725,8 +6725,23 @@ impl MobHandle {
     pub(crate) async fn query_machine_state(
         &self,
     ) -> Result<crate::machines::mob_machine::MobMachineState, MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::QueryMachineState { reply_tx })
+        match self
+            .send_actor_command(|reply_tx| MobCommand::QueryMachineState { reply_tx })
             .await
+        {
+            Ok(state) => Ok(state),
+            // Destroy is terminal: once the actor commits the `Destroy`
+            // transition it exits its command loop and the command channel
+            // closes. The actor publishes the final (Destroyed) machine state to
+            // the watch channel before exiting, so a post-destroy query reads the
+            // durable final projection from the watch instead of failing on the
+            // closed command channel. Live callers (flows) always reach the actor
+            // because the command channel is open while the actor runs.
+            Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
+                Ok(self.machine_state_watch_rx.borrow().clone())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(test)]

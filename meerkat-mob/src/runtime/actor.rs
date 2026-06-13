@@ -35,8 +35,12 @@ pub(super) struct InitialTurnHandle {
 }
 
 impl InitialTurnHandle {
-    fn abort(self) {
+    /// Abort the in-flight initial turn and await its task so it has fully
+    /// stopped before teardown proceeds. The cancellation `JoinError` is
+    /// expected and intentionally ignored.
+    async fn abort_and_join(self) {
         self.handle.abort();
+        let _ = self.handle.await;
     }
 }
 
@@ -5195,15 +5199,8 @@ impl MobActor {
             )
             .await
         {
-            Ok(true) => {
+            Ok(_) => {
                 self.roster.write().await.set_kickoff(agent_identity, None);
-            }
-            Ok(false) => {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %agent_identity,
-                    "kickoff clear rejected by MobMachine; roster projection left unchanged"
-                );
             }
             Err(error) => {
                 tracing::warn!(
@@ -6685,13 +6682,10 @@ impl MobActor {
                 .filter_map(|session_id| SessionId::parse(&session_id.0).ok())
                 .collect::<Vec<_>>();
             for session_id in session_ids {
-                if let Err(error) = adapter.abort_comms_drain(&session_id).await {
-                    tracing::warn!(
-                        %session_id,
-                        %error,
-                        "failed to abort comms drain during mob runtime binding teardown"
-                    );
-                }
+                // `unregister_session` now runs the two-phase drain internally
+                // (0.7.2 D1): it aborts the comms drain task *and* awaits its
+                // quiescence before committing teardown, so a separate
+                // pre-unregister `abort_comms_drain` here is redundant.
                 adapter.unregister_session(&session_id).await;
             }
         }
@@ -6846,22 +6840,27 @@ impl MobActor {
         agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
-        // Abort any in-flight initial turn.
-        let had_kickoff_handle = self
+        // Abort any in-flight initial turn and await the handle so the task has
+        // fully stopped before dispose proceeds.
+        //
+        // `stop_autonomous_member` is reached on BOTH the dispose path
+        // (retire/destroy, where `dispose_stop_host_loop` fires the total
+        // `KickoffQuiesced` discharge afterwards) AND the plain Stop/Reset path
+        // (`stop_all_autonomous_members`, where no `KickoffQuiesced` follows).
+        // To cancel an in-flight kickoff on the Stop/Reset path we mark the
+        // kickoff cancelled here when a handle is present.  On the dispose path
+        // this is harmless: `KickoffCancelRequested` clears the in-flight flags,
+        // so the later `KickoffQuiesced` takes the idle no-op branch and does not
+        // re-emit a `Cancelled` notice.
+        let kickoff_handle = self
             .autonomous_initial_turns
             .lock()
             .await
-            .contains_key(agent_identity);
-        if had_kickoff_handle {
+            .remove(agent_identity);
+        if let Some(handle) = kickoff_handle {
             self.maybe_mark_kickoff_cancelled(agent_identity).await;
-        }
-        if let Some(handle) = self
-            .autonomous_initial_turns
-            .lock()
-            .await
-            .remove(agent_identity)
-        {
-            handle.abort();
+            // Abort and await so the task is fully gone before archival proceeds.
+            handle.abort_and_join().await;
         }
         if let Err(error) = self.provisioner.interrupt_member(member_ref).await
             && !matches!(
@@ -8355,27 +8354,37 @@ impl MobActor {
         }
 
         let mut cleanup_errors = Vec::new();
-        for slot in self.pending_spawns.drain_all() {
+        for mut slot in self.pending_spawns.drain_all() {
             let spawn_ticket = slot.ticket;
             let agent_identity = slot.spawn.agent_identity.clone();
             let dsl_identity =
                 mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
-            if self
-                .dsl_authority
-                .state()
-                .pending_spawn_sessions
-                .contains_key(&dsl_identity)
-            {
-                self.complete_orchestrator_spawn(
-                    Some(spawn_ticket),
-                    &agent_identity,
-                    "lifecycle transition cleared pending spawn",
-                );
+            // Extract the provisioning task handle before `fail()` consumes the
+            // slot so we can abort AND await it (abort is the cancellation signal;
+            // await ensures the task has fully stopped before destroy commits).
+            let task_handle = slot.task.take();
+            // Realize the RequestPendingSpawnQuiesceForDestroy obligation with an
+            // unconditional CancelPendingSpawn input.  The input is total: the
+            // machine self-loops with Present/Absent/Destroyed variants, so no
+            // shell-side probe is needed (decision 6, Stage-A notes).
+            if let Err(error) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::CancelPendingSpawn {
+                    agent_identity: dsl_identity,
+                },
+                "fail_all_pending_spawns",
+            ) {
+                cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
             }
             if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
             }
             slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
+            // Await the provisioning task so it has fully stopped before destroy
+            // commits.  JoinError from cancellation is expected and ignored.
+            if let Some(handle) = task_handle {
+                handle.abort();
+                let _ = handle.await;
+            }
             tracing::debug!(
                 spawn_ticket,
                 agent_identity = %agent_identity,
@@ -8447,17 +8456,23 @@ impl MobActor {
         }
         let canceled = slots.len();
 
-        for slot in &slots {
-            self.complete_orchestrator_spawn(
-                Some(slot.ticket),
-                &slot.spawn.agent_identity,
-                "member lifecycle command canceled pending spawn",
-            );
-        }
-
         let mut cleanup_errors = Vec::new();
         for slot in slots {
             let spawn_ticket = slot.ticket;
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
+                slot.spawn.agent_identity.as_str(),
+            ));
+            // Replace the machine-probe + CompleteSpawn laundering with an
+            // unconditional CancelPendingSpawn (total input — decision 6,
+            // Stage-A notes).
+            if let Err(error) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::CancelPendingSpawn {
+                    agent_identity: dsl_identity,
+                },
+                "cancel_pending_spawns_for_member",
+            ) {
+                cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
+            }
             if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
             }
@@ -13970,6 +13985,17 @@ impl MobActor {
             "MobActor::handle_respawn retired previous member"
         );
 
+        // Clear the retired runtime's kickoff lifecycle for this identity. The
+        // retire admission opened (and the disposal pipeline closed) the
+        // machine-owned kickoff-waiter drain obligation, leaving a terminal
+        // `Cancelled` kickoff marker for the OLD runtime. The replacement is a
+        // fresh runtime whose kickoff lifecycle must start clean: the new
+        // spawn's `KickoffMarkPending` guards on `!kickoff_cancelled`, so the
+        // stale tombstone would otherwise fail-close the replacement's
+        // kickoff. `KickoffClear` is total and removes every kickoff marker for
+        // the identity (no-op when none is present).
+        self.clear_kickoff_state(&agent_identity).await;
+
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
         let (prompt, initial_turn_prompt) = match replacement_initial_message {
             Some(message) => {
@@ -14812,6 +14838,19 @@ impl MobActor {
             self.stop_autonomous_member(&ctx.agent_identity, &ctx.entry.member_ref)
                 .await?;
         }
+        // Discharge the machine-owned kickoff quiesce obligation opened by
+        // every retire/destroy-retire transition (RequestKickoffQuiesce effect,
+        // decision 2 in the Stage-A notes).  KickoffQuiesced is TOTAL: the
+        // machine self-loops with no-op when the kickoff is already Idle or the
+        // member is in the Destroyed phase, so no shell-side guard is needed.
+        self.apply_kickoff_input(
+            &ctx.agent_identity,
+            mob_dsl::MobMachineInput::KickoffQuiesced {
+                member_id: mob_dsl::AgentIdentity::from_domain(&ctx.agent_identity),
+            },
+            "dispose_stop_host_loop",
+        )
+        .await?;
         Ok(())
     }
 
@@ -14819,21 +14858,53 @@ impl MobActor {
         &mut self,
         ctx: &DisposalContext,
     ) -> Result<(), MobError> {
-        if ctx.entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
-            return Ok(());
+        // For AutonomousHost members, stop the host loop unless a prior partial
+        // destroy already cleaned it up.  For all members (including TurnDriven)
+        // the KickoffQuiesced discharge happens unconditionally at the end of this
+        // function because RequestKickoffQuiesce is emitted by every
+        // retire/destroy-retire transition regardless of runtime mode.
+        if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            let session_already_gone = {
+                #[cfg(feature = "runtime-adapter")]
+                {
+                    match (
+                        &self.runtime_adapter,
+                        ctx.entry.member_ref.bridge_session_id(),
+                    ) {
+                        (Some(adapter), Some(session_id)) => {
+                            !adapter.contains_session(session_id).await
+                        }
+                        _ => false,
+                    }
+                }
+                #[cfg(not(feature = "runtime-adapter"))]
+                {
+                    false
+                }
+            };
+            if !session_already_gone {
+                self.stop_autonomous_member(&ctx.agent_identity, &ctx.entry.member_ref)
+                    .await?;
+            }
+            // else: A prior partial destroy stopped and unregistered the
+            // autonomous runtime; retry continues from the retained roster anchor
+            // to reach ArchiveSession again.  Still need the quiesce discharge
+            // below, so we fall through rather than returning early.
         }
-        #[cfg(feature = "runtime-adapter")]
-        if let (Some(adapter), Some(session_id)) = (
-            &self.runtime_adapter,
-            ctx.entry.member_ref.bridge_session_id(),
-        ) && !adapter.contains_session(session_id).await
-        {
-            // A prior partial destroy can stop and unregister the autonomous
-            // runtime, then fail later at ArchiveSession. Retry must continue
-            // from the retained roster anchor and reach ArchiveSession again.
-            return Ok(());
-        }
-        self.dispose_stop_host_loop(ctx).await
+        // Unconditional quiesce discharge — covers TurnDriven members (no host
+        // loop), AutonomousHost members (host loop stopped above), and
+        // prior-partial-destroy retries (session already gone, loop skipped).
+        // KickoffQuiesced is total: the machine self-loops with a no-op when the
+        // kickoff is Idle or the member is Destroyed (decision 2, Stage-A notes).
+        self.apply_kickoff_input(
+            &ctx.agent_identity,
+            mob_dsl::MobMachineInput::KickoffQuiesced {
+                member_id: mob_dsl::AgentIdentity::from_domain(&ctx.agent_identity),
+            },
+            "dispose_stop_host_loop_for_destroy",
+        )
+        .await?;
+        Ok(())
     }
 
     /// Notify all machine-wired peers that this member is retiring.
@@ -19925,20 +19996,26 @@ mod kickoff_tests {
     #[test]
     fn kickoff_generated_rejection_maps_to_typed_mob_error() {
         let mut authority = mob_dsl::MobMachineAuthority::new();
+        // `KickoffMarkStarting` requires the member to be in the pending kickoff
+        // set; on a fresh authority it is genuinely rejected by the generated
+        // machine (unlike the late-arrival `KickoffResolve*` / `KickoffCancel*`
+        // inputs, which the 0.7.2 L5 D2a totality work made into typed no-op
+        // self-loops). This keeps the test exercising the real
+        // generated-rejection → typed-error mapping.
         let generated = mob_dsl::MobMachineMutator::apply(
             &mut authority,
-            mob_dsl::MobMachineInput::KickoffResolveStarted {
+            mob_dsl::MobMachineInput::KickoffMarkStarting {
                 member_id: mob_dsl::AgentIdentity::from("worker-1"),
             },
         )
-        .expect_err("resolve without active kickoff must be generated rejection");
+        .expect_err("mark-starting without a pending kickoff must be generated rejection");
 
         let error = MobActor::kickoff_rejection_error("test_kickoff", generated);
 
         match error {
             MobError::MobMachineRejected { context, reason } => {
                 assert_eq!(context, "test_kickoff");
-                assert!(reason.contains("KickoffResolveStarted"));
+                assert!(reason.contains("KickoffMarkStarting"));
             }
             other => panic!("expected typed MobMachineRejected, got {other:?}"),
         }

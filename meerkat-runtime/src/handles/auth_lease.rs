@@ -1137,18 +1137,28 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         let context = "AuthLeaseHandle::release_lease";
-        // Stage-then-commit ordering: every fallible side effect (observer
-        // collection + durable release cleanup) runs BEFORE the authoritative
-        // Release transition. An observer fault aborts the release fail-closed
-        // — the lease and its OAuth flow membership are untouched and the
-        // caller retries — so no post-transition compensation (the deleted
-        // restore arm, which could resurrect a live lease over a credential
-        // the token-clear flow was destroying) is ever needed.
+        // Two-phase machine-owned release drain (D1).
         //
-        // Capture OAuth membership while the live machine is still the
-        // canonical AuthMachine state. Observers prune only those exact
-        // payloads, so a same-target flow admitted after this capture is
-        // not removed by stale target-wide cleanup.
+        // Phase 1 — BeginRelease: fire the machine-owned drain input to record
+        // release intent and obtain the typed CancelOAuthFlowsForRelease
+        // obligation carrying the in-flight membership. Only fires if a local
+        // machine exists; the stale-authority case (no local machine) has an
+        // empty obligation and relies entirely on the observer's durable-store
+        // scan (phase 2) for cleanup.
+        //
+        // Phase 2 — observer collect: gather registry-payload-only ids from the
+        // durable store. Merged with the machine-emitted obligation so the
+        // observer's auth_lease_released prune covers both the machine-owned
+        // flows and any flows admitted by a stale authority that the local
+        // machine never saw.
+        //
+        // Fail-closed ordering: observer notify (phase 3) and drain discharge
+        // (phase 4) are both fallible and both precede the Release commit
+        // (phase 5). An error in either aborts the release — the machine stays
+        // in release_draining (or un-created in the stale case) and the caller
+        // retries. Retried release re-fires BeginRelease which re-emits the
+        // remaining membership (idempotent). No machine entry is synthesized in
+        // the registry for the stale-authority path until Release commits.
         #[cfg(not(target_arch = "wasm32"))]
         let release_observers = self.live_release_observers();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1158,29 +1168,101 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .collect::<Result<Vec<_>, _>>()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut released =
-                self.collect_release_observer_flows(&release_observers, lease_key)?;
-            {
-                let guard = self
+            // Phase 1: BeginRelease under the machines lock.
+            // Extract the machine-owned drain obligation (empty for stale authority).
+            let machine_drain_obligation = {
+                let mut guard = self
                     .machines
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = guard.authorities.get(lease_key) {
-                    released
-                        .browser_flow_ids
-                        .extend(entry.state().oauth_browser_flow_ids.iter().cloned());
-                    released
-                        .device_flow_ids
-                        .extend(entry.state().oauth_device_flow_ids.iter().cloned());
+                if let Some(entry) = guard.authorities.get_mut(lease_key) {
+                    let transition = auth_dsl::AuthMachineMutator::apply(
+                        entry,
+                        auth_dsl::AuthMachineInput::BeginRelease,
+                    )
+                    .map_err(|err| map_auth_machine_error(err, context))?;
+                    // BeginRelease emits no EmitLifecycleEvent; use the
+                    // maybe_-variant (strict variant errors on missing
+                    // publication which BeginRelease legitimately omits).
+                    maybe_auth_lease_transition_from_generated_publication(
+                        lease_key,
+                        entry,
+                        &transition,
+                        context,
+                    )?;
+                    crate::protocol_auth_release_oauth_flow_drain::extract_obligations(&transition)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
                 }
-                released.dedup();
+            };
+
+            // Phase 2: Observer-only durable-store scan (stale-authority
+            // flows the local machine never admitted). Merged with the
+            // machine-emitted obligation so observers see the full prune set.
+            let mut released =
+                self.collect_release_observer_flows(&release_observers, lease_key)?;
+            if let Some(ref obligation) = machine_drain_obligation {
+                released
+                    .browser_flow_ids
+                    .extend(obligation.browser_flow_ids.iter().cloned());
+                released
+                    .device_flow_ids
+                    .extend(obligation.device_flow_ids.iter().cloned());
             }
+            released.dedup();
+
+            // Phase 3: Notify observers — prune payloads from registry and
+            // durable store. Fallible: abort on error, machine stays draining.
             self.notify_release_observers(&release_observers, &released)?;
+
+            // Phase 4: Discharge machine-owned drain obligations.
+            // Fire typed terminal Expire* feedback per drained flow id.
+            // Each is total (Released no-op + Absent no-op exist); Err is
+            // a genuine fault (machine absent/poisoned), propagated.
+            if let Some(obligation) = machine_drain_obligation {
+                let mut guard = self
+                    .machines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = guard.authorities.get_mut(lease_key) {
+                    for flow_id in obligation.browser_flow_ids {
+                        let transition = auth_dsl::AuthMachineMutator::apply(
+                            entry,
+                            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow { flow_id },
+                        )
+                        .map_err(|err| map_auth_machine_error(err, context))?;
+                        maybe_auth_lease_transition_from_generated_publication(
+                            lease_key,
+                            entry,
+                            &transition,
+                            context,
+                        )?;
+                    }
+                    for flow_id in obligation.device_flow_ids {
+                        let transition = auth_dsl::AuthMachineMutator::apply(
+                            entry,
+                            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { flow_id },
+                        )
+                        .map_err(|err| map_auth_machine_error(err, context))?;
+                        maybe_auth_lease_transition_from_generated_publication(
+                            lease_key,
+                            entry,
+                            &transition,
+                            context,
+                        )?;
+                    }
+                }
+            }
         }
         #[cfg(test)]
         run_release_before_commit_hook(lease_key);
-        // Commit: the Release transition through generated machine authority.
-        // Nothing fallible follows it.
+        // Phase 5: Commit — Release transition through generated machine
+        // authority. The oauth_release_drained guard passes (count == 0 after
+        // the drain discharge above). For the stale-authority path (no local
+        // machine), or_insert_with creates a fresh machine whose initial
+        // count is already 0. Nothing fallible follows the Release commit.
         let (from_phase, to_phase) = {
             let mut guard = self
                 .machines
@@ -2608,8 +2690,7 @@ mod tests {
         assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
 
         // All drain obligations closed: Release commits.
-        apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release)
-            .expect("drained release");
+        apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release).expect("drained release");
         assert!(matches!(
             machine.state().lifecycle_phase,
             auth_dsl::AuthLifecyclePhase::Released

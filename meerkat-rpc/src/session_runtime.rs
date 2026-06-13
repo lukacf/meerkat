@@ -2333,11 +2333,25 @@ impl SessionRuntime {
         {
             Ok(authority) => authority,
             Err(error) => {
-                tracing::warn!(
-                    %session_id,
-                    error = ?error,
-                    "runtime completion cleanup skipped because generated cleanup authority was unavailable"
-                );
+                if archived_now {
+                    // Benign post-teardown arrival: the session was archived
+                    // (its unregister drain already resolved every completion
+                    // waiter with the committed/terminal outcome) and its
+                    // runtime entry is gone, so cleanup-authority resolution has
+                    // nothing left to act on. This is the expected race when a
+                    // completion waiter resolves after archive, not a fault.
+                    tracing::debug!(
+                        %session_id,
+                        error = ?error,
+                        "runtime completion cleanup observed a post-archive teardown (benign)"
+                    );
+                } else {
+                    tracing::warn!(
+                        %session_id,
+                        error = ?error,
+                        "runtime completion cleanup skipped because generated cleanup authority was unavailable"
+                    );
+                }
                 return None;
             }
         };

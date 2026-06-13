@@ -1,12 +1,13 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
 use crate::lifecycle::{
-    ClaimedDispatchDisposition, CompletionSupersessionDisposition, OccurrenceLifecycleInput,
+    ClaimedDispatchDisposition, CompletionSupersessionDisposition, OccurrenceLifecycleEffect,
+    OccurrenceLifecycleInput, StaleCompletionArrivalTrigger,
 };
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
     DeliveryCompletionFailureReason, DeliveryFailureReason, DeliveryReceipt, Occurrence,
-    OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
+    OccurrenceId, OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
     RuntimeDeliveryOutcome, SchedulePhase,
 };
 use async_trait::async_trait;
@@ -146,6 +147,23 @@ enum TargetProbeResolution {
     StaleClaim,
 }
 
+/// Typed result of `terminalize_occurrence_inner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalizeOutcome {
+    /// The transition was applied and a terminal receipt was minted.
+    Applied,
+    /// The transition was applied but the machine emitted
+    /// `LateCompletionResolutionRecorded` — no fresh receipt is minted
+    /// (the commit-time supersession sweep already minted the canonical one).
+    LateRecorded,
+    /// The transition was a no-op (zero effects, e.g. `SupersedeAlreadySuperseded`).
+    /// No receipt is minted.
+    IdempotentNoop,
+    /// The store screen rejected the claim evidence (attempt/token mismatch).
+    /// The caller is responsible for feeding `ClassifyStaleCompletionArrival`.
+    StaleClaim,
+}
+
 pub struct ScheduleDriver {
     service: ScheduleService,
     store: Arc<dyn ScheduleStore>,
@@ -219,7 +237,7 @@ impl ScheduleDriver {
         {
             ClaimedOccurrenceDispatchState::Ready(occurrence) => occurrence,
             ClaimedOccurrenceDispatchState::Frozen => {
-                let released = self
+                let result = self
                     .store
                     .transition_occurrence_if_current(
                         &frozen_occurrence.occurrence_id,
@@ -230,7 +248,7 @@ impl ScheduleDriver {
                         },
                     )
                     .await?;
-                if let Some(released) = released {
+                if let Some((released, _effects)) = result {
                     let receipt = released
                         .delivery_receipt_from_authority(None)
                         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
@@ -306,22 +324,64 @@ impl ScheduleDriver {
             .await?;
         self.store.append_receipt(dispatch_receipt).await?;
 
-        let dispatching = self
+        let refetched_id = dispatching.occurrence_id.clone();
+        let refetched = self
             .store
-            .get_occurrence(&dispatching.occurrence_id)
+            .get_occurrence(&refetched_id)
             .await?
             .ok_or_else(|| ScheduleStoreError::OccurrenceNotFound {
-                occurrence_id: dispatching.occurrence_id.clone(),
+                occurrence_id: refetched_id.clone(),
             })?;
-        let await_mutator = dispatching
+        let await_mutator = refetched
             .apply(OccurrenceLifecycleInput::AwaitCompletion {
                 at_utc: store_now_utc,
             })
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        let dispatching = await_mutator.occurrence.clone();
-        self.store
+        // Capture the post-await occurrence before consuming the mutator.
+        let awaiting_occurrence = await_mutator.occurrence.clone();
+        // 0.7.2 D1/D2a item 5: a schedule-commit sweep can supersede the
+        // occurrence between the dispatch commit and the refetch/await-commit.
+        // Two sub-cases:
+        //
+        // a) Refetch returned Superseded → AwaitCompletion is a machine no-op
+        //    (AwaitCompletionAfterSupersession). Commit the no-op and proceed to
+        //    spawn the waiter; the waiter's delivery resolution will land as a
+        //    typed late-arrival record via AlreadySuperseded → fall-through.
+        //
+        // b) Refetch returned Dispatching (sweep hadn't run yet) but the sweep
+        //    ran between refetch and commit → commit_occurrence_write returns
+        //    Concurrency. Refetch again; if now Superseded, spawn the waiter
+        //    (same late-arrival path); otherwise propagate the real error.
+        let dispatching = match self
+            .store
             .commit_occurrence_write(await_mutator.into_authorized_write())
-            .await?;
+            .await
+        {
+            Ok(()) => awaiting_occurrence,
+            Err(ScheduleStoreError::Concurrency(_)) => {
+                // The sweep raced the await commit. Re-read the current state.
+                let current = self
+                    .store
+                    .get_occurrence(&refetched_id)
+                    .await?
+                    .ok_or_else(|| ScheduleStoreError::OccurrenceNotFound {
+                        occurrence_id: refetched_id.clone(),
+                    })?;
+                if current.phase != OccurrencePhase::Superseded {
+                    return Err(ScheduleDomainError::Store(ScheduleStoreError::Concurrency(
+                        format!(
+                            "await-completion commit failed with non-superseded current phase {:?}",
+                            current.phase
+                        ),
+                    )));
+                }
+                // Benign stop: sweep already revoked the claim. Spawn the
+                // waiter so the dispatched delivery's resolution is recorded
+                // as a typed late-arrival fact.
+                current
+            }
+            Err(other) => return Err(ScheduleDomainError::Store(other)),
+        };
 
         self.spawn_completion_waiter(dispatching, dispatch.completion);
         Ok(false)
@@ -416,6 +476,9 @@ impl ScheduleDriver {
             detail,
             at_utc: store_now_utc,
         };
+        // Predict the terminal phase the generated authority will resolve the
+        // probe to so we can route Claimed (no receipt) and Skipped/Misfired
+        // (typed delivery receipt) through the correct store method.
         let predicted = occurrence
             .clone()
             .apply(lifecycle.clone())
@@ -423,6 +486,9 @@ impl ScheduleDriver {
             .into_occurrence();
         let updated = match predicted.phase {
             OccurrencePhase::Claimed => {
+                // `transition_occurrence_if_current` now returns the emitted
+                // effects alongside the occurrence; the target-probe Continue
+                // path does not consume them.
                 self.store
                     .transition_occurrence_if_current(
                         &occurrence.occurrence_id,
@@ -431,6 +497,7 @@ impl ScheduleDriver {
                         lifecycle,
                     )
                     .await?
+                    .map(|(updated, _effects)| updated)
             }
             OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
                 self.store
@@ -469,11 +536,16 @@ impl ScheduleDriver {
         let schedule_id = occurrence.schedule_id.clone();
         let occurrence_id = occurrence.occurrence_id.clone();
         crate::tokio::spawn(async move {
-            if let Err(error) =
-                complete_dispatched_occurrence(store, occurrence, completion.await).await
-            {
-                eprintln!(
-                    "schedule completion waiter failed to append terminal receipt: schedule_id={schedule_id:?} occurrence_id={occurrence_id:?}: {error}"
+            let result = complete_dispatched_occurrence(store, occurrence, completion.await).await;
+            // All legitimate interleaving paths (late arrivals, stale claims,
+            // idempotent no-ops) are classified as Ok by the time they reach
+            // here. A residual Err is a real internal fault.
+            if let Err(error) = result {
+                tracing::error!(
+                    schedule_id = ?schedule_id,
+                    occurrence_id = ?occurrence_id,
+                    %error,
+                    "completion waiter encountered unexpected fault after totality guard"
                 );
             }
         });
@@ -503,9 +575,9 @@ async fn complete_dispatched_occurrence(
                             .to_string(),
                     )
                 })?;
-                let _ = terminalize_occurrence_inner(
-                    store,
-                    occurrence,
+                let outcome = terminalize_occurrence_inner(
+                    store.clone(),
+                    occurrence.clone(),
                     OccurrenceLifecycleInput::Supersede {
                         superseded_by_revision,
                         at_utc: store_now_utc,
@@ -514,7 +586,27 @@ async fn complete_dispatched_occurrence(
                     None,
                 )
                 .await?;
-                return Ok(());
+                // The supersession verdict is computed against this waiter's
+                // (stale) occurrence snapshot, which still reads
+                // `AwaitingCompletion` even though a commit-time supersession
+                // sweep (schedule delete/update D1) has already moved the
+                // durable row to terminal `Superseded`. The `Supersede`
+                // terminalize therefore lands as either `IdempotentNoop`
+                // (`SupersedeAlreadySuperseded`, claim evidence still matched)
+                // or `StaleClaim` (claim evidence revoked) — both meaning the
+                // occurrence is already terminally superseded and this delivery
+                // is a late arrival. In that case the delivery's *actual*
+                // terminal outcome (e.g. a completed delivery) must still be
+                // recorded as a typed late-arrival fact on the Superseded row,
+                // so fall through to the delivery-terminal resolution below.
+                // Only an `Applied`/`LateRecorded` Supersede committed the
+                // terminal itself, fully accounting the completion → return.
+                if !matches!(
+                    outcome,
+                    TerminalizeOutcome::StaleClaim | TerminalizeOutcome::IdempotentNoop
+                ) {
+                    return Ok(());
+                }
             }
             CompletionSupersessionDisposition::Proceed => {}
             // 0.7.2 D2a: the occurrence snapshot is already Superseded (the
@@ -530,9 +622,9 @@ async fn complete_dispatched_occurrence(
         Ok(terminal) => terminal,
         Err(error) => {
             let (reason, detail) = delivery_completion_failure_evidence(error);
-            let _ = terminalize_occurrence_inner(
-                store,
-                occurrence,
+            let outcome = terminalize_occurrence_inner(
+                store.clone(),
+                occurrence.clone(),
                 OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
                     reason,
                     detail,
@@ -542,36 +634,53 @@ async fn complete_dispatched_occurrence(
                 None,
             )
             .await?;
+            if outcome == TerminalizeOutcome::StaleClaim {
+                classify_stale_arrival(
+                    store,
+                    &occurrence.occurrence_id,
+                    StaleCompletionArrivalTrigger::ResolveDeliveryCompletionFailure,
+                )
+                .await;
+            }
             return Ok(());
         }
     };
 
-    let lifecycle = if let Some(outcome) = terminal.runtime_completion_outcome {
-        OccurrenceLifecycleInput::ResolveRuntimeCompletion {
-            outcome,
-            detail: terminal.detail.clone(),
-            at_utc: store_now_utc,
-        }
-    } else {
-        match terminal.phase {
-            OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
+    let (lifecycle, stale_trigger) = if let Some(outcome) = terminal.runtime_completion_outcome {
+        (
+            OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                outcome,
+                detail: terminal.detail.clone(),
                 at_utc: store_now_utc,
             },
+            StaleCompletionArrivalTrigger::ResolveRuntimeCompletion,
+        )
+    } else {
+        match terminal.phase {
+            OccurrencePhase::Completed => (
+                OccurrenceLifecycleInput::Complete {
+                    at_utc: store_now_utc,
+                },
+                StaleCompletionArrivalTrigger::Complete,
+            ),
             OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
                 return Err(ScheduleDomainError::Internal(format!(
                     "delivery terminal returned unsupported adapter-selected occurrence phase: {:?}",
                     terminal.phase
                 )));
             }
-            OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::ResolveDeliveryFailure {
-                reason: terminal.delivery_failure_reason.ok_or_else(|| {
-                    ScheduleDomainError::Internal(
-                        "delivery failed terminal omitted generated failure reason".to_string(),
-                    )
-                })?,
-                detail: terminal.detail.clone(),
-                at_utc: store_now_utc,
-            },
+            OccurrencePhase::DeliveryFailed => (
+                OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                    reason: terminal.delivery_failure_reason.ok_or_else(|| {
+                        ScheduleDomainError::Internal(
+                            "delivery failed terminal omitted generated failure reason".to_string(),
+                        )
+                    })?,
+                    detail: terminal.detail.clone(),
+                    at_utc: store_now_utc,
+                },
+                StaleCompletionArrivalTrigger::ResolveDeliveryFailure,
+            ),
             other => {
                 return Err(ScheduleDomainError::Internal(format!(
                     "delivery terminal returned non-terminal occurrence phase: {other:?}"
@@ -580,15 +689,69 @@ async fn complete_dispatched_occurrence(
         }
     };
 
-    let _ = terminalize_occurrence_inner(
-        store,
-        occurrence,
+    let outcome = terminalize_occurrence_inner(
+        store.clone(),
+        occurrence.clone(),
         lifecycle,
         terminal.receipt,
         terminal.runtime_outcome,
     )
     .await?;
+    if outcome == TerminalizeOutcome::StaleClaim {
+        // 0.7.2 D2a: the claim evidence (attempt count / token) no longer
+        // matches the durable row (the occurrence was reclaimed for a new
+        // attempt while this waiter's completion was in flight). Record the
+        // screened arrival as a typed machine fact on the current row.
+        classify_stale_arrival(store, &occurrence.occurrence_id, stale_trigger).await;
+    }
     Ok(())
+}
+
+/// Feed a `ClassifyStaleCompletionArrival` input to the occurrence authority
+/// for an arrival whose claim evidence was stale (0.7.2 D2a). Fetches the
+/// current row without a claim precondition, applies the classification, and
+/// commits. Never returns an error — the classification is observability-only
+/// and must not disrupt the caller's completion path.
+async fn classify_stale_arrival(
+    store: Arc<dyn ScheduleStore>,
+    occurrence_id: &OccurrenceId,
+    trigger: StaleCompletionArrivalTrigger,
+) {
+    let result: Result<(), ScheduleDomainError> = async {
+        let Some(current) = store.get_occurrence(occurrence_id).await? else {
+            return Ok(());
+        };
+        let mutator = current
+            .apply(OccurrenceLifecycleInput::ClassifyStaleCompletionArrival { trigger })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        // Log the classification effect before consuming the mutator.
+        if let Some(effect) = mutator.effects.iter().find(|e| {
+            matches!(
+                e,
+                OccurrenceLifecycleEffect::StaleCompletionArrivalClassified { .. }
+            )
+        }) {
+            tracing::debug!(
+                occurrence_id = %occurrence_id,
+                ?trigger,
+                ?effect,
+                "stale completion arrival classified as typed machine fact"
+            );
+        }
+        store
+            .commit_occurrence_write(mutator.into_authorized_write())
+            .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::debug!(
+            occurrence_id = %occurrence_id,
+            ?trigger,
+            %error,
+            "stale completion arrival classification could not be committed (concurrent modification)"
+        );
+    }
 }
 
 fn delivery_completion_failure_evidence(
@@ -603,24 +766,158 @@ fn delivery_completion_failure_evidence(
     }
 }
 
+/// Apply a terminal transition to an occurrence through the claim-screened
+/// store seam and decide receipt policy from the emitted machine effects.
+///
+/// Receipt policy (0.7.2 D1/D2a):
+/// - `Applied` — normal terminal transition; mint and append the receipt.
+/// - `LateRecorded` — transition emitted `LateCompletionResolutionRecorded`
+///   meaning the occurrence was already Superseded by the commit-time sweep;
+///   that sweep already minted the canonical superseded receipt, so no
+///   second receipt is appended here.
+/// - `IdempotentNoop` — transition emitted zero effects (e.g.
+///   `SupersedeAlreadySuperseded`); the first supersession wins, no receipt.
+/// - `StaleClaim` — store screen rejected claim evidence; caller must feed
+///   `ClassifyStaleCompletionArrival` to record the stale arrival as a
+///   typed machine fact.
 async fn terminalize_occurrence_inner(
     store: Arc<dyn ScheduleStore>,
     occurrence: Occurrence,
     lifecycle: OccurrenceLifecycleInput,
     _receipt: Option<DeliveryReceipt>,
     runtime_outcome: Option<RuntimeDeliveryOutcome>,
-) -> Result<bool, ScheduleDomainError> {
-    store
-        .transition_occurrence_with_receipt_if_current(
-            &occurrence.occurrence_id,
-            occurrence.attempt_count,
-            occurrence.claim_token(),
-            lifecycle,
-            runtime_outcome,
+) -> Result<TerminalizeOutcome, ScheduleDomainError> {
+    let _ = _receipt;
+    // Route on the *current* durable phase rather than the (possibly stale)
+    // waiter snapshot. A commit-time supersession sweep (schedule delete/update,
+    // 0.7.2 D1) moves the durable row to `Superseded` *without* changing the
+    // claim evidence (`SupersedePendingOrLive` leaves attempt/token intact), so
+    // the fresh phase read is authoritative for the genuine-terminal vs.
+    // late-after-supersession split, while the claim screen inside the chosen
+    // store method still guards the actual commit against a concurrent reclaim.
+    let current_phase = store
+        .get_occurrence(&occurrence.occurrence_id)
+        .await?
+        .map(|current| current.phase);
+
+    match current_phase {
+        None => {
+            // Row gone entirely — a genuine stale arrival.
+            Ok(TerminalizeOutcome::StaleClaim)
+        }
+        Some(OccurrencePhase::Superseded) => {
+            // The completion resolved after the supersession sweep already
+            // moved the row to Superseded and minted the canonical superseded
+            // receipt. Apply the terminal input through the effects-returning
+            // claim screen so the occurrence authority records it through its
+            // `Late*AfterSupersession` transitions
+            // (`LateCompletionResolutionRecorded`) without minting a second
+            // receipt. A `Supersede` landing on an already-superseded row is the
+            // idempotent no-op (`SupersedeAlreadySuperseded`, zero effects).
+            let Some((_updated, effects)) = store
+                .transition_occurrence_if_current(
+                    &occurrence.occurrence_id,
+                    occurrence.attempt_count,
+                    occurrence.claim_token(),
+                    lifecycle.clone(),
+                )
+                .await?
+            else {
+                // Claim evidence was revoked between the read and the apply;
+                // fall back to the current-row late handling (no claim
+                // precondition) so a genuine late arrival is still recorded.
+                return terminalize_late_completion_on_superseded(store, &occurrence, lifecycle)
+                    .await;
+            };
+            let late_recorded = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    OccurrenceLifecycleEffect::LateCompletionResolutionRecorded { .. }
+                )
+            });
+            if late_recorded {
+                Ok(TerminalizeOutcome::LateRecorded)
+            } else if effects.is_empty() {
+                Ok(TerminalizeOutcome::IdempotentNoop)
+            } else {
+                // A terminal transition unexpectedly succeeded on a Superseded
+                // row (no late-arrival record, non-empty effects). This is not a
+                // reachable occurrence-authority transition; surface it as a
+                // typed internal fault rather than minting an out-of-band
+                // receipt.
+                Err(ScheduleDomainError::Internal(
+                    "terminal transition resolved on a superseded occurrence without a \
+                     late-completion record"
+                        .to_string(),
+                ))
+            }
+        }
+        Some(_) => {
+            // Genuine terminal: the row is still live for the terminal
+            // transition. Apply it and mint the canonical receipt atomically
+            // inside the store transaction (D1). The receipt is written through
+            // the claim-screened store seam, never a separate `append_receipt`,
+            // so a partial receipt-append failure cannot leave a terminalized
+            // occurrence without its receipt.
+            let updated = store
+                .transition_occurrence_with_receipt_if_current(
+                    &occurrence.occurrence_id,
+                    occurrence.attempt_count,
+                    occurrence.claim_token(),
+                    lifecycle,
+                    runtime_outcome,
+                )
+                .await?;
+            match updated {
+                Some(_) => Ok(TerminalizeOutcome::Applied),
+                None => Ok(TerminalizeOutcome::StaleClaim),
+            }
+        }
+    }
+}
+
+/// A completion whose claim evidence was screened out by
+/// [`terminalize_occurrence_inner`]'s claim precondition. Refetch the current
+/// row and, only when it is terminally `Superseded`, apply the same terminal
+/// `lifecycle` input directly on the current row (no claim precondition) so the
+/// occurrence authority records it through its `Late*AfterSupersession`
+/// transitions (`LateCompletionResolutionRecorded`). The commit-time
+/// supersession sweep already minted the canonical superseded receipt, so this
+/// records the typed late-arrival fact without minting a second receipt
+/// (`LateRecorded`). Any non-`Superseded` phase is a genuine stale arrival and
+/// is returned as `StaleClaim` for the caller's stale-arrival classification.
+async fn terminalize_late_completion_on_superseded(
+    store: Arc<dyn ScheduleStore>,
+    occurrence: &Occurrence,
+    lifecycle: OccurrenceLifecycleInput,
+) -> Result<TerminalizeOutcome, ScheduleDomainError> {
+    let Some(current) = store.get_occurrence(&occurrence.occurrence_id).await? else {
+        return Ok(TerminalizeOutcome::StaleClaim);
+    };
+    if current.phase != OccurrencePhase::Superseded {
+        return Ok(TerminalizeOutcome::StaleClaim);
+    }
+
+    let mutator = current
+        .apply(lifecycle)
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+    let late_recorded = mutator.effects.iter().any(|e| {
+        matches!(
+            e,
+            OccurrenceLifecycleEffect::LateCompletionResolutionRecorded { .. }
         )
-        .await
-        .map(|updated| updated.is_some())
-        .map_err(ScheduleDomainError::from)
+    });
+    if !late_recorded {
+        // The current-row apply produced no late-completion record (e.g. a
+        // no-op self-loop): the supersession already accounts for the
+        // delivery and there is nothing new to commit. Surface it as the
+        // benign stale arrival the claim screen first detected.
+        return Ok(TerminalizeOutcome::StaleClaim);
+    }
+    store
+        .commit_occurrence_write(mutator.into_authorized_write())
+        .await?;
+    Ok(TerminalizeOutcome::LateRecorded)
 }
 
 #[cfg(test)]
@@ -902,7 +1199,8 @@ mod tests {
             expected_attempt: u32,
             expected_claim_token: Option<Uuid>,
             transition: OccurrenceLifecycleInput,
-        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError>
+        {
             self.inner
                 .transition_occurrence_if_current(
                     occurrence_id,
@@ -1512,7 +1810,12 @@ mod tests {
         )
         .await?;
 
-        assert!(terminalized);
+        assert_eq!(
+            terminalized,
+            TerminalizeOutcome::Applied,
+            "a genuine terminal completion must record its receipt atomically through the \
+             claim-screened store seam even when standalone append_receipt is unavailable"
+        );
         let completed =
             wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
                 .await?;
@@ -2266,9 +2569,7 @@ mod tests {
         );
         assert_eq!(at_commit.superseded_by_revision, Some(deleted.revision));
         assert!(
-            deleted
-                .superseded_ack_ids
-                .contains(&awaiting.occurrence_id),
+            deleted.superseded_ack_ids.contains(&awaiting.occurrence_id),
             "the revoked in-flight claim must be accounted in the schedule authority's ack set"
         );
 
@@ -2501,12 +2802,9 @@ mod tests {
             .send(DeliveryTerminal::completed(None))
             .expect("completion receiver should be open");
 
-        let completed = wait_for_occurrence_phase(
-            &service,
-            &schedule.schedule_id,
-            OccurrencePhase::Completed,
-        )
-        .await?;
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
         assert_eq!(completed.occurrence_id, awaiting.occurrence_id);
         let receipts = store.list_receipts(&completed.occurrence_id).await?;
         assert_eq!(

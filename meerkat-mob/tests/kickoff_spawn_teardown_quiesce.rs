@@ -157,8 +157,8 @@ fn persist_kickoff_effects(
         .effects()
         .iter()
         .filter_map(|effect| match effect {
-            MobMachineEffect::PersistKickoffUpdate { phase, .. } => Some(phase.clone()),
-            MobMachineEffect::PersistKickoffFailureUpdate { phase, .. } => Some(phase.clone()),
+            MobMachineEffect::PersistKickoffUpdate { phase, .. } => Some(*phase),
+            MobMachineEffect::PersistKickoffFailureUpdate { phase, .. } => Some(*phase),
             _ => None,
         })
         .collect()
@@ -279,8 +279,7 @@ fn late_kickoff_resolutions_after_quiesce_are_typed_noops() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
     mark_kickoff_starting(&mut authority, "alpha");
-    MobMachineMutator::apply(&mut authority, kickoff_quiesced("alpha"))
-        .expect("quiesce accepted");
+    MobMachineMutator::apply(&mut authority, kickoff_quiesced("alpha")).expect("quiesce accepted");
 
     // The waiter task's outcome lands after teardown quiesced the kickoff.
     let late_started = MobMachineMutator::apply(
@@ -478,10 +477,10 @@ fn destroy_admission_emits_pending_spawn_quiesce_request() {
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy admission accepted");
     assert!(
-        transition
-            .effects()
-            .iter()
-            .any(|effect| matches!(effect, MobMachineEffect::RequestPendingSpawnQuiesceForDestroy)),
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::RequestPendingSpawnQuiesceForDestroy
+        )),
         "destroy admission must open the pending-spawn drain obligation",
     );
 }

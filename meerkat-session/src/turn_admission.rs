@@ -16,18 +16,22 @@ use meerkat_core::lifecycle::RuntimeExecutionKind;
 
 mod authority {
     pub(crate) use crate::generated::session_turn_admission::{
-        RuntimeKeepAlivePersistenceDecision, RuntimeKeepAliveRequest, SessionTurnAdmissionEffect,
+        RuntimeKeepAlivePersistenceDecision, RuntimeKeepAliveRequest,
+        RuntimeSystemContextApplicationAuthorization, SessionTurnAdmissionEffect,
         SessionTurnAdmissionMachineAuthority, StartTurnDispatchAuthorization, StartTurnDisposition,
         StartTurnExecutionKind, StartTurnPublicTerminal, TurnAdmissionPhase,
+        TurnAdmissionShutdownTerminal,
     };
 }
 
 pub(crate) use authority::RuntimeKeepAlivePersistenceDecision;
 pub(crate) use authority::RuntimeKeepAliveRequest;
+pub(crate) use authority::RuntimeSystemContextApplicationAuthorization;
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
 pub(crate) use authority::TurnAdmissionPhase;
+pub(crate) use authority::TurnAdmissionShutdownTerminal;
 pub use meerkat_core::pending_continuation::ObservedSessionTailKind;
 
 /// Generated projection of the session-visible turn-admission state.
@@ -70,6 +74,36 @@ pub(crate) struct StartTurnResolution {
     pub(crate) public_terminal: Option<StartTurnPublicTerminal>,
 }
 
+/// Typed outcome of `claim()`: either the slot was admitted normally or the
+/// machine is in `ShuttingDown` and emitted the shutdown terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimOutcome {
+    Admitted,
+    ShutdownTerminal(TurnAdmissionShutdownTerminal),
+}
+
+/// Typed outcome of `begin()`: either the run started or the machine is in
+/// `ShuttingDown` and emitted the shutdown terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BeginOutcome {
+    Running,
+    ShutdownTerminal(TurnAdmissionShutdownTerminal),
+}
+
+/// Typed outcome of `resolve_start_turn_disposition()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartTurnDispositionOutcome {
+    Resolved(StartTurnResolution),
+    ShutdownTerminal(TurnAdmissionShutdownTerminal),
+}
+
+/// Typed outcome of `resolve_runtime_keep_alive()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeKeepAliveOutcome {
+    Decided(RuntimeKeepAlivePersistenceDecision),
+    ShutdownTerminal(TurnAdmissionShutdownTerminal),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartTurnPromptObservation {
     trimmed_text_byte_count: u64,
@@ -100,6 +134,20 @@ fn observe_start_turn_prompt(
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Extract the `TurnAdmissionShutdownTerminal` from a D2a effect slice.
+/// Returns `Some` when the machine is in `ShuttingDown` and emitted the
+/// typed terminal instead of the normal projection/decision.
+fn find_shutdown_terminal(
+    effects: &[authority::SessionTurnAdmissionEffect],
+) -> Option<TurnAdmissionShutdownTerminal> {
+    effects.iter().find_map(|effect| match effect {
+        authority::SessionTurnAdmissionEffect::TurnAdmissionShutdownTerminalResolved {
+            terminal,
+        } => Some(*terminal),
+        _ => None,
+    })
 }
 
 /// Serialized turn-admission state for a single session.
@@ -148,15 +196,20 @@ impl TurnAdmissionSlot {
         self.authority.state().admission_drain_pending
     }
 
-    /// Claim the turn slot before dispatching `StartTurn`. `Idle -> Admitted`.
-    pub(crate) fn claim(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
+    /// Claim the turn slot before dispatching `StartTurn`. `Idle -> Admitted`,
+    /// or produces a `ShutdownTerminal` if the machine is already in
+    /// `ShuttingDown`.
+    pub(crate) fn claim(&mut self) -> Result<ClaimOutcome, TurnAdmissionError> {
         let from = self.phase();
         let effects = self
             .authority
             .claim_turn()
             .map_err(|_| TurnAdmissionError { from, op: "claim" })?;
+        if let Some(terminal) = find_shutdown_terminal(&effects) {
+            return Ok(ClaimOutcome::ShutdownTerminal(terminal));
+        }
         self.update_projection_from_effects(&effects, from, "claim")?;
-        Ok(self.phase())
+        Ok(ClaimOutcome::Admitted)
     }
 
     /// Release an admitted slot without running the turn. `Admitted -> Idle`.
@@ -173,15 +226,19 @@ impl TurnAdmissionSlot {
         Ok(self.phase())
     }
 
-    /// Mark the admitted slot as actively running. `Admitted -> Running`.
-    pub(crate) fn begin(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
+    /// Mark the admitted slot as actively running. `Admitted -> Running`, or
+    /// produces a `ShutdownTerminal` if the machine is in `ShuttingDown`.
+    pub(crate) fn begin(&mut self) -> Result<BeginOutcome, TurnAdmissionError> {
         let from = self.phase();
         let effects = self
             .authority
             .begin_turn()
             .map_err(|_| TurnAdmissionError { from, op: "begin" })?;
+        if let Some(terminal) = find_shutdown_terminal(&effects) {
+            return Ok(BeginOutcome::ShutdownTerminal(terminal));
+        }
         self.update_projection_from_effects(&effects, from, "begin")?;
-        Ok(self.phase())
+        Ok(BeginOutcome::Running)
     }
 
     /// Move a finished run into the finalization window. `Running -> Completing`.
@@ -312,7 +369,7 @@ impl TurnAdmissionSlot {
         prompt: &meerkat_core::types::ContentInput,
         session_tail: ObservedSessionTailKind,
         staged_tool_result_count: u64,
-    ) -> Result<StartTurnResolution, TurnAdmissionError> {
+    ) -> Result<StartTurnDispositionOutcome, TurnAdmissionError> {
         let (execution_kind_present, execution_kind) = match execution_kind {
             Some(RuntimeExecutionKind::ContentTurn) => {
                 (true, authority::StartTurnExecutionKind::ContentTurn)
@@ -360,6 +417,9 @@ impl TurnAdmissionSlot {
                 from,
                 op: "resolve_start_turn_disposition",
             })?;
+        if let Some(terminal) = find_shutdown_terminal(&effects) {
+            return Ok(StartTurnDispositionOutcome::ShutdownTerminal(terminal));
+        }
         let disposition = effects
             .iter()
             .find_map(|effect| match effect {
@@ -378,10 +438,13 @@ impl TurnAdmissionSlot {
             }
             _ => None,
         });
-        Ok(StartTurnResolution {
+        // Disposition transitions do not emit TurnAdmissionProjected; the
+        // phase stays Admitted and is not observed externally between claim and
+        // begin. No projection update needed.
+        Ok(StartTurnDispositionOutcome::Resolved(StartTurnResolution {
             disposition,
             public_terminal,
-        })
+        }))
     }
 
     pub(crate) fn resolve_last_start_turn_public_terminal(
@@ -412,7 +475,7 @@ impl TurnAdmissionSlot {
     pub(crate) fn resolve_runtime_keep_alive(
         &mut self,
         request: RuntimeKeepAliveRequest,
-    ) -> Result<RuntimeKeepAlivePersistenceDecision, TurnAdmissionError> {
+    ) -> Result<RuntimeKeepAliveOutcome, TurnAdmissionError> {
         let from = self.phase();
         let effects = self
             .authority
@@ -421,7 +484,10 @@ impl TurnAdmissionSlot {
                 from,
                 op: "resolve_runtime_keep_alive",
             })?;
-        effects
+        if let Some(terminal) = find_shutdown_terminal(&effects) {
+            return Ok(RuntimeKeepAliveOutcome::ShutdownTerminal(terminal));
+        }
+        let decision = effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::RuntimeKeepAliveResolved { decision } => {
@@ -432,6 +498,66 @@ impl TurnAdmissionSlot {
             .ok_or(TurnAdmissionError {
                 from,
                 op: "resolve_runtime_keep_alive",
+            })?;
+        // Keep-alive transitions do not emit TurnAdmissionProjected; no
+        // projection update needed.
+        Ok(RuntimeKeepAliveOutcome::Decided(decision))
+    }
+
+    /// Ask the machine whether a runtime system-context application is
+    /// authorized in the current phase. Returns `Authorized` in all live
+    /// phases and `SessionArchived` in `ShuttingDown`.
+    pub(crate) fn authorize_runtime_system_context_application(
+        &mut self,
+    ) -> Result<RuntimeSystemContextApplicationAuthorization, TurnAdmissionError> {
+        let from = self.phase();
+        let effects = self
+            .authority
+            .authorize_runtime_system_context_application()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "authorize_runtime_system_context_application",
+            })?;
+        effects
+            .iter()
+            .find_map(|effect| {
+                match effect {
+                authority::SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved {
+                    authorization,
+                } => Some(*authorization),
+                _ => None,
+            }
+            })
+            .ok_or(TurnAdmissionError {
+                from,
+                op: "authorize_runtime_system_context_application",
+            })
+    }
+
+    /// Signal to the machine that the shell has finished draining queued
+    /// admission work. Closes the `admission_drain_pending` obligation minted
+    /// when the machine entered `ShuttingDown`.
+    pub(crate) fn resolve_pending_admission_drained(&mut self) -> Result<(), TurnAdmissionError> {
+        let from = self.phase();
+        self.authority
+            .resolve_pending_admission_drained()
+            .map(|_| ())
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "resolve_pending_admission_drained",
+            })
+    }
+
+    /// Signal to the machine that teardown may proceed. Accepted only after
+    /// the drain obligation has been closed.
+    pub(crate) fn authorize_session_teardown(&mut self) -> Result<(), TurnAdmissionError> {
+        let from = self.phase();
+        self.authority
+            .authorize_session_teardown()
+            .map(|_| ())
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "authorize_session_teardown",
             })
     }
 
@@ -479,7 +605,7 @@ impl Default for TurnAdmissionSlot {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -490,22 +616,34 @@ mod tests {
         staged_tool_result_count: u64,
     ) -> StartTurnDisposition {
         let mut slot = TurnAdmissionSlot::new();
-        slot.claim().expect("claim should admit disposition check");
-        slot.resolve_start_turn_disposition(
-            execution_kind,
-            &prompt,
-            session_tail,
-            staged_tool_result_count,
-        )
-        .expect("generated disposition should resolve")
-        .disposition
+        assert!(
+            matches!(
+                slot.claim().expect("claim should admit disposition check"),
+                ClaimOutcome::Admitted
+            ),
+            "idle slot should admit"
+        );
+        match slot
+            .resolve_start_turn_disposition(
+                execution_kind,
+                &prompt,
+                session_tail,
+                staged_tool_result_count,
+            )
+            .expect("generated disposition should resolve")
+        {
+            StartTurnDispositionOutcome::Resolved(resolution) => resolution.disposition,
+            StartTurnDispositionOutcome::ShutdownTerminal(t) => {
+                panic!("unexpected shutdown terminal {t:?} in claimed_disposition helper")
+            }
+        }
     }
 
     #[test]
     fn claim_reserves_slot() {
         let mut slot = TurnAdmissionSlot::new();
-        let phase = slot.claim().expect("idle session should admit a turn");
-        assert_eq!(phase, TurnAdmissionPhase::Admitted);
+        let outcome = slot.claim().expect("idle session should admit a turn");
+        assert_eq!(outcome, ClaimOutcome::Admitted);
         assert!(slot.is_active());
         assert!(slot.projection().is_active);
     }
@@ -525,7 +663,7 @@ mod tests {
         assert!(admitted_woke);
         assert!(slot.interrupt_pending());
 
-        slot.begin().unwrap();
+        assert!(matches!(slot.begin().unwrap(), BeginOutcome::Running));
         let woke = slot
             .request_interrupt()
             .expect("running session should retain interrupt");
@@ -538,7 +676,7 @@ mod tests {
     fn shutdown_gracefully_drains_running_turn() {
         let mut slot = TurnAdmissionSlot::new();
         slot.claim().unwrap();
-        slot.begin().unwrap();
+        assert!(matches!(slot.begin().unwrap(), BeginOutcome::Running));
         slot.request_shutdown().unwrap();
         assert_eq!(slot.phase(), TurnAdmissionPhase::Running);
 
@@ -567,7 +705,7 @@ mod tests {
         slot.claim().unwrap();
         slot.authorize_cancel_after_boundary()
             .expect("admitted slot should accept boundary cancel");
-        slot.begin().unwrap();
+        assert!(matches!(slot.begin().unwrap(), BeginOutcome::Running));
         slot.authorize_cancel_after_boundary()
             .expect("running slot should accept boundary cancel");
         slot.resolve().unwrap();
@@ -635,16 +773,22 @@ mod tests {
     fn resume_pending_no_boundary_no_staged() {
         let mut slot = TurnAdmissionSlot::new();
         slot.claim().expect("claim should admit disposition check");
-        let disposition = slot
+        let resolution = match slot
             .resolve_start_turn_disposition(
                 Some(RuntimeExecutionKind::ResumePending),
                 &meerkat_core::types::ContentInput::Text(String::new()),
                 ObservedSessionTailKind::BlockAssistant,
                 0,
             )
-            .expect("generated disposition should resolve");
+            .expect("generated disposition should resolve")
+        {
+            StartTurnDispositionOutcome::Resolved(r) => r,
+            StartTurnDispositionOutcome::ShutdownTerminal(t) => {
+                panic!("unexpected shutdown terminal {t:?}")
+            }
+        };
         assert_eq!(
-            disposition.public_terminal,
+            resolution.public_terminal,
             Some(StartTurnPublicTerminal::NoPendingBoundary)
         );
         let terminal = slot
@@ -652,7 +796,7 @@ mod tests {
             .expect("generated public terminal should be retained");
         assert_eq!(terminal, StartTurnPublicTerminal::NoPendingBoundary);
         assert_eq!(
-            disposition.disposition,
+            resolution.disposition,
             StartTurnDisposition::NoPendingBoundary
         );
     }
@@ -661,19 +805,22 @@ mod tests {
     fn non_terminal_disposition_has_no_public_terminal() {
         let mut slot = TurnAdmissionSlot::new();
         slot.claim().expect("claim should admit disposition check");
-        let disposition = slot
+        let resolution = match slot
             .resolve_start_turn_disposition(
                 Some(RuntimeExecutionKind::ContentTurn),
                 &meerkat_core::types::ContentInput::Text(String::new()),
                 ObservedSessionTailKind::Empty,
                 0,
             )
-            .expect("generated disposition should resolve");
-        assert_eq!(
-            disposition.disposition,
-            StartTurnDisposition::RunContentTurn
-        );
-        assert_eq!(disposition.public_terminal, None);
+            .expect("generated disposition should resolve")
+        {
+            StartTurnDispositionOutcome::Resolved(r) => r,
+            StartTurnDispositionOutcome::ShutdownTerminal(t) => {
+                panic!("unexpected shutdown terminal {t:?}")
+            }
+        };
+        assert_eq!(resolution.disposition, StartTurnDisposition::RunContentTurn);
+        assert_eq!(resolution.public_terminal, None);
         assert!(slot.resolve_last_start_turn_public_terminal().is_err());
     }
 
@@ -681,16 +828,22 @@ mod tests {
     fn direct_no_pending_public_terminal_is_generated() {
         let mut slot = TurnAdmissionSlot::new();
         slot.claim().expect("claim should admit disposition check");
-        let disposition = slot
+        let resolution = match slot
             .resolve_start_turn_disposition(
                 None,
                 &meerkat_core::types::ContentInput::Text(String::new()),
                 ObservedSessionTailKind::Empty,
                 0,
             )
-            .expect("generated disposition should resolve");
+            .expect("generated disposition should resolve")
+        {
+            StartTurnDispositionOutcome::Resolved(r) => r,
+            StartTurnDispositionOutcome::ShutdownTerminal(t) => {
+                panic!("unexpected shutdown terminal {t:?}")
+            }
+        };
         assert_eq!(
-            disposition.public_terminal,
+            resolution.public_terminal,
             Some(StartTurnPublicTerminal::NoPendingBoundary)
         );
         let terminal = slot
@@ -698,7 +851,7 @@ mod tests {
             .expect("generated public terminal should be retained");
         assert_eq!(terminal, StartTurnPublicTerminal::NoPendingBoundary);
         assert_eq!(
-            disposition.disposition,
+            resolution.disposition,
             StartTurnDisposition::NoPendingBoundary
         );
     }
@@ -753,7 +906,7 @@ mod tests {
 /// terminals in `ShuttingDown`). These drive the generated authority
 /// directly: the shell mirrors are rewired in the Stage B cutover.
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod shutdown_drain_machine_tests {
     use crate::generated::session_turn_admission::{
         PendingContinuationDisposition, RuntimeKeepAlivePersistenceDecision,
@@ -864,10 +1017,7 @@ mod shutdown_drain_machine_tests {
             .request_shutdown()
             .expect("admitted shutdown should commit");
         assert!(drain_requested(&effects));
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
         assert!(authority.state().admission_drain_pending);
     }
 
@@ -891,10 +1041,7 @@ mod shutdown_drain_machine_tests {
             .finalize_turn()
             .expect("completing finalizes into shutdown");
         assert!(drain_requested(&finalized));
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
         assert!(authority.state().admission_drain_pending);
     }
 
@@ -982,10 +1129,7 @@ mod shutdown_drain_machine_tests {
             None,
             "no admission projection may be emitted for a shutdown claim"
         );
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     #[test]
@@ -998,10 +1142,7 @@ mod shutdown_drain_machine_tests {
             projected_phase(&effects),
             Some(TurnAdmissionPhase::ShuttingDown)
         );
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     #[test]
@@ -1019,10 +1160,7 @@ mod shutdown_drain_machine_tests {
             None,
             "a run may only begin on a projected Running transition"
         );
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     #[test]
@@ -1041,10 +1179,7 @@ mod shutdown_drain_machine_tests {
             )),
             "no runnable disposition exists for a shutting-down session"
         );
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     #[test]
@@ -1124,10 +1259,7 @@ mod shutdown_drain_machine_tests {
             context_application_authorization(&effects),
             Some(RuntimeSystemContextApplicationAuthorization::SessionArchived)
         );
-        assert_eq!(
-            authority.state().phase(),
-            TurnAdmissionPhase::ShuttingDown
-        );
+        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     // ------------------------------------------------------------------

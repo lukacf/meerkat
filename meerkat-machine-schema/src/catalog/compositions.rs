@@ -2546,7 +2546,11 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthBrowserFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        source: FeedbackFieldSource::OwnerContext("flow_id".into()),
+                        // Distinct owner-context labels per feedback input: the
+                        // codegen derives the TLA bound-variable name from this
+                        // string, so two `flow_id` labels in the same handoff
+                        // collide as duplicate `\E owner_ctx_flow_id` binders.
+                        source: FeedbackFieldSource::OwnerContext("browser_flow_id".into()),
                     }],
                 },
                 FeedbackInputRef {
@@ -2554,7 +2558,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthDeviceFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        source: FeedbackFieldSource::OwnerContext("flow_id".into()),
+                        source: FeedbackFieldSource::OwnerContext("device_flow_id".into()),
                     }],
                 },
             ],

@@ -14721,19 +14721,24 @@ async fn set_peer_ingress_context_rejects_destroyed_session() {
 }
 
 #[tokio::test]
-async fn notify_drain_exited_rejects_unknown_session() {
+async fn notify_drain_exited_for_missing_session_is_benign() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // The guard rejection is a typed fault, not a silent swallow.
-    let err = adapter
+    // D2b (0.7.2 disciplined-shell-inputs): NotifyDrainExited is an
+    // observation-shaped input, fired only by the per-session comms-drain
+    // task reporting its own exit. That task exists only after registration
+    // and is aborted+awaited during unregister, so any arrival with no
+    // sessions-map entry is necessarily a benign post-teardown straggler
+    // (the dispatch layer cannot distinguish "never registered" from "torn
+    // down" — both are a missing entry). Surfacing an ERROR-class fault for
+    // that legitimate race is exactly the defect this campaign removes, so a
+    // missing entry is a benign Ok no-op. A present-but-Destroyed binding
+    // still rejects typed (covered separately).
+    adapter
         .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
         .await
-        .expect_err("unknown session must surface a typed rejection");
-    assert!(
-        matches!(err, RuntimeDriverError::NotReady { .. }),
-        "expected NotReady, got {err:?}"
-    );
+        .expect("missing-session drain-exit observation must be a benign no-op");
 }
 
 #[tokio::test]

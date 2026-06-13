@@ -111,11 +111,19 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Spawned(spawned))
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {
-                // Guard: session must exist.
+                // D2b: a drain-exit observation arriving after the session's
+                // sessions-map entry is gone is a legitimate post-teardown
+                // interleaving (the unregister drain aborts the drain task and
+                // removes the entry; a straggling exit can still be reported).
+                // It is observation-shaped and benign — surface it as an
+                // accepted no-op, not a `Destroyed` error.
                 if !self.sessions.read().await.contains_key(&session_id) {
-                    return Err(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    });
+                    tracing::debug!(
+                        %session_id,
+                        ?reason,
+                        "post-teardown drain-exit observation (benign no-op)"
+                    );
+                    return Ok(MeerkatMachineCommandResult::Unit);
                 }
 
                 let gate = self.session_mutation_gate(&session_id).await;

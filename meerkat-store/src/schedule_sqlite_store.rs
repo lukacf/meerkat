@@ -5,9 +5,10 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimDueRequest, ClaimDueResult,
     DeliveryReceipt, Occurrence, OccurrenceDueAction, OccurrenceFilter, OccurrenceId,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrencePhase, OccurrenceSupersessionAck,
-    PendingSupersession, RuntimeDeliveryOutcome, Schedule, ScheduleFilter, SchedulePhase,
-    ScheduleStore, ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
+    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceSupersessionAck, PendingSupersession, RuntimeDeliveryOutcome, Schedule,
+    ScheduleFilter, SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -508,8 +509,11 @@ impl ScheduleStore for SqliteScheduleStore {
                 write_occurrence_in_txn(&tx, &occurrence)?;
             }
             if let Some(supersession) = supersession {
-                let acks =
-                    supersede_pending_occurrences_in_txn(&tx, &committed_schedule, supersession)?;
+                let acks = supersede_outstanding_occurrences_in_txn(
+                    &tx,
+                    &committed_schedule,
+                    supersession,
+                )?;
                 committed_schedule = apply_supersession_feedback(committed_schedule, acks)
                     .map_err(|error| StoreError::Internal(error.to_string()))?;
                 write_schedule_in_txn(&tx, &committed_schedule)?;
@@ -571,7 +575,7 @@ impl ScheduleStore for SqliteScheduleStore {
         expected_attempt: u32,
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
-    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+    ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError> {
         let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -599,13 +603,16 @@ impl ScheduleStore for SqliteScheduleStore {
                 return Ok(None);
             }
 
-            let updated = current
-                .apply(transition)
-                .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
-                .into_occurrence();
+            let mutator =
+                current
+                    .apply(transition)
+                    .map_err(|error: OccurrenceLifecycleError| {
+                        StoreError::Internal(error.to_string())
+                    })?;
+            let (updated, effects) = mutator.into_parts();
             write_occurrence_in_txn(&tx, &updated)?;
             tx.commit()?;
-            Ok(Some(updated))
+            Ok(Some((updated, effects)))
         })
         .await
         .map_err(StoreError::Join)
@@ -891,7 +898,7 @@ fn claim_occurrence_for_sqlite(
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))
 }
 
-fn supersede_pending_occurrences_in_txn(
+fn supersede_outstanding_occurrences_in_txn(
     tx: &rusqlite::Transaction<'_>,
     schedule: &Schedule,
     supersession: PendingSupersession,
@@ -910,7 +917,12 @@ fn supersede_pending_occurrences_in_txn(
         let bytes = row?;
         let occurrence: Occurrence =
             serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-        if occurrence.phase != OccurrencePhase::Pending
+        // 0.7.2 D1: supersede every non-terminal row regardless of phase
+        // (Pending, Claimed, Dispatching, AwaitingCompletion). The old
+        // `phase != Pending → continue` filter was shell policy narrowing
+        // machine-declared acceptance; the machine's Supersede transition
+        // accepts all non-terminal phases.
+        if occurrence.is_terminal()
             || occurrence.schedule_revision >= supersession.superseded_by_revision()
         {
             continue;
@@ -922,6 +934,12 @@ fn supersede_pending_occurrences_in_txn(
             })
             .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
         let (updated, _effects, mutator_acks) = mutator.into_parts_with_supersession_feedback();
+        // The commit-time sweep is the sole receipt minter for supersession
+        // (0.7.2 D1): mint exactly one superseded receipt per swept row.
+        let receipt = updated
+            .delivery_receipt_from_authority(None)
+            .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
+        write_receipt_in_txn(tx, &receipt)?;
         acks.extend(mutator_acks);
         write_occurrence_in_txn(tx, &updated)?;
     }

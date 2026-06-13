@@ -433,13 +433,13 @@ struct PlannedScheduleOccurrences {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::OccurrenceLifecycleInput;
     use crate::types::{
         DeliveryReceipt, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MobTargetBinding,
         OccurrenceId, ResolvedSpawnSnapshot, ScheduleSpawnTooling, ScheduledSessionAction,
         SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
+    use crate::{OccurrenceLifecycleEffect, OccurrenceLifecycleInput};
     use chrono::Duration;
     use meerkat_core::{ContentInput, ToolNameSet};
     use std::collections::BTreeMap;
@@ -558,7 +558,8 @@ mod tests {
             expected_attempt: u32,
             expected_claim_token: Option<Uuid>,
             transition: OccurrenceLifecycleInput,
-        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError>
+        {
             self.inner
                 .transition_occurrence_if_current(
                     occurrence_id,

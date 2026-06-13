@@ -4414,6 +4414,12 @@ WitnessInjectNext_auth_lease_lifecycle_publication_round_trip ==
 WitnessInjectNext_auth_release_oauth_flow_drain_round_trip ==
     FALSE
 
+WitnessSatisfiedStutter_auth_lease_lifecycle_publication_round_trip ==
+    /\ FALSE
+
+WitnessSatisfiedStutter_auth_release_oauth_flow_drain_round_trip ==
+    /\ FALSE
+
 CoreNext ==
     \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis)
     \/ auth_machine_MarkExpiring
@@ -4596,10 +4602,12 @@ Next ==
 
 WitnessNext_auth_lease_lifecycle_publication_round_trip ==
     \/ CoreNext
+    \/ WitnessSatisfiedStutter_auth_lease_lifecycle_publication_round_trip
     \/ WitnessInjectNext_auth_lease_lifecycle_publication_round_trip
 
 WitnessNext_auth_release_oauth_flow_drain_round_trip ==
     \/ CoreNext
+    \/ WitnessSatisfiedStutter_auth_release_oauth_flow_drain_round_trip
     \/ WitnessInjectNext_auth_release_oauth_flow_drain_round_trip
 
 
@@ -4614,7 +4622,7 @@ NoOpenObligationsOnTerminal_auth_machine_auth_lease_lifecycle_publication == (au
 OwnerFeedback_auth_machine_auth_release_oauth_flow_drain ==
     /\ obligation_auth_machine_auth_release_oauth_flow_drain /= {}
     /\ \E token \in obligation_auth_machine_auth_release_oauth_flow_drain :
-        /\ (\E owner_ctx_one_drained_browser_flow_id_from_the_obligation_s__browser_flow_ids__set__the_owner_iterates_the_set \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token, payload |-> [flow_id |-> owner_ctx_one_drained_browser_flow_id_from_the_obligation_s__browser_flow_ids__set__the_owner_iterates_the_set]]) /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \/ \E owner_ctx_one_drained_device_flow_id_from_the_obligation_s__device_flow_ids__set__the_owner_iterates_the_set \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token, payload |-> [flow_id |-> owner_ctx_one_drained_device_flow_id_from_the_obligation_s__device_flow_ids__set__the_owner_iterates_the_set]]) /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token}))
+        /\ (\E owner_ctx_browser_flow_id \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token, payload |-> [flow_id |-> owner_ctx_browser_flow_id]]) /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \/ \E owner_ctx_device_flow_id \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token, payload |-> [flow_id |-> owner_ctx_device_flow_id]]) /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token}))
     /\ UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_lease_lifecycle_publication, model_step_count, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 CoverageInstrumentation == TRUE

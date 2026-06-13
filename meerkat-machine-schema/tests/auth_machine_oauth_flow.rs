@@ -564,7 +564,11 @@ fn auth_machine_post_release_oauth_observations_are_total_noops() {
             other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
         }
         assert_eq!(
-            transition.from.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            transition
+                .from
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
             vec!["Released"],
             "`{transition_name}` must fire only in Released"
         );

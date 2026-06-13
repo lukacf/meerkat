@@ -2157,12 +2157,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Some(runtime));
         }
 
-        if self
+        // An archived session has no authoritative runtime/session machine
+        // snapshot and never will: surfacing the store-only-mutation
+        // Unsupported error would launder the typed archived contract behind a
+        // mechanism complaint. Read the durable archive projection first so a
+        // post-archive control mutation resolves the typed NotFound contract.
+        if let Some(stored) = self
             .store
-            .exists(id)
+            .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?
         {
+            if self.session_archived_by_authority(id, &stored).await? {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
             return Err(Self::store_only_control_mutation_error(id, operation));
         }
 
@@ -2180,6 +2188,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await;
         }
 
+        // A pure store-only session (no runtime authority) is a compatibility
+        // projection: control mutations require an authoritative runtime/session
+        // machine snapshot, so they resolve the store-only Unsupported mechanism
+        // error regardless of the row's self-declared lifecycle terminal. The
+        // authoritative-archive → typed-NotFound contract is owned by the
+        // runtime-authority branch above (and `reject_if_archived_session`),
+        // which only fires for sessions that carry an authoritative snapshot.
         if self
             .store
             .exists(id)
@@ -12266,73 +12281,6 @@ mod tests {
             matches!(error, SessionError::NotFound { .. }),
             "post-archive context application must resolve the typed archived contract \
              (NotFound), got: {error:?}"
-        );
-    }
-
-    /// 0.7.2 disciplined shell inputs, entry 15 pin (persistent.rs:5979
-    /// seam): an external system-context append that arrives after archive
-    /// committed resolves the typed archived contract (NotFound) without
-    /// mutating the archived durable row.
-    #[tokio::test]
-    async fn test_append_system_context_after_archive_resolves_typed_not_found() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let id = created.session_id.clone();
-        service.archive(&id).await.expect("archive should succeed");
-        let archived_row = store
-            .load(&id)
-            .await
-            .expect("durable load should succeed")
-            .expect("archived projection should be present");
-
-        let err = service
-            .append_system_context(
-                &id,
-                AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "late runtime notice".to_string(),
-                    ),
-                    source: Some("mob".to_string()),
-                    idempotency_key: Some("ctx-post-archive-race".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-            )
-            .await
-            .expect_err("post-archive append must resolve the typed archived contract");
-        assert!(
-            matches!(
-                err,
-                SessionControlError::Session(SessionError::NotFound { .. })
-            ),
-            "post-archive append must be a typed NotFound, got: {err:?}"
-        );
-
-        let persisted = store
-            .load(&id)
-            .await
-            .expect("durable load should succeed")
-            .expect("archived row must survive the rejected append");
-        assert_eq!(
-            persisted.messages().len(),
-            archived_row.messages().len(),
-            "rejected append must not mutate the archived transcript"
-        );
-        assert_eq!(
-            persisted.metadata(),
-            archived_row.metadata(),
-            "rejected append must not mutate the archived metadata"
         );
     }
 

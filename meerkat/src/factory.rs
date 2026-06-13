@@ -5082,6 +5082,19 @@ impl AgentFactory {
             .model(model.clone())
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
+            // Config-owned LLM retry policy. Without this, every
+            // factory-built agent silently runs RetryPolicy::default()
+            // (3 attempts / 30s cap) regardless of Config.retry — under
+            // provider rate limiting this killed a 70-initiative production
+            // fan-out on 2026-06-12 (every worker retried with a ~36s budget
+            // instead of the configured 8 attempts / 120s cap).
+            // call_timeout stays None: the per-call deadline is owned by the
+            // with_call_timeout_override resolution below (build > config),
+            // not by the retry policy mapping.
+            .retry_policy(meerkat_core::retry::RetryPolicy {
+                call_timeout: None,
+                ..config.retry.clone().into()
+            })
             .structured_output_retries(resolved_structured_output_retries)
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {

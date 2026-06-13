@@ -11,6 +11,7 @@ use meerkat_core::{
     ToolDef, Usage,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use crate::block_assembler::BlockAssembler;
@@ -29,6 +30,10 @@ pub struct LlmClientAdapter {
     provider_params: Option<ProviderTag>,
     /// Per-interaction event tap for streaming events to subscribers.
     event_tap: meerkat_core::EventTap,
+    /// True after this adapter emitted user-visible streaming output for the
+    /// current call. The agent retry loop reads this to avoid cross-model
+    /// fallback after partial output has escaped.
+    stream_output_observed: Arc<AtomicBool>,
 }
 
 impl LlmClientAdapter {
@@ -39,6 +44,7 @@ impl LlmClientAdapter {
             event_tx: None,
             provider_params: None,
             event_tap: meerkat_core::new_event_tap(),
+            stream_output_observed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -54,6 +60,13 @@ impl LlmClientAdapter {
             event_tx: Some(event_tx),
             provider_params: None,
             event_tap: meerkat_core::new_event_tap(),
+            stream_output_observed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn mark_visible_stream_output(&self, text: &str) {
+        if !text.trim().is_empty() {
+            self.stream_output_observed.store(true, Ordering::SeqCst);
         }
     }
 
@@ -227,6 +240,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta, meta } => {
                         assembler.on_text_delta(&delta, meta);
+                        self.mark_visible_stream_output(&delta);
                         meerkat_core::tap_try_send(
                             &self.event_tap,
                             &AgentEvent::TextDelta {
@@ -242,6 +256,7 @@ impl AgentLlmClient for LlmClientAdapter {
                             reasoning_started = true;
                             assembler.on_reasoning_start();
                         }
+                        self.mark_visible_stream_output(&delta);
                         if let Err(e) = assembler.on_reasoning_delta(&delta) {
                             tracing::warn!(?e, "orphaned reasoning delta");
                         }
@@ -256,6 +271,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                     }
                     LlmEvent::ReasoningComplete { text, meta } => {
+                        self.mark_visible_stream_output(&text);
                         if !reasoning_started {
                             assembler.on_reasoning_start();
                             let _ = assembler.on_reasoning_delta(&text);
@@ -266,6 +282,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         let reasoning_text = assembler.current_reasoning_text();
                         assembler.on_reasoning_complete(meta);
                         reasoning_started = false;
+                        self.mark_visible_stream_output(&reasoning_text);
                         meerkat_core::tap_try_send(
                             &self.event_tap,
                             &AgentEvent::ReasoningComplete {
@@ -365,6 +382,7 @@ impl AgentLlmClient for LlmClientAdapter {
         if reasoning_started {
             let reasoning_text = assembler.current_reasoning_text();
             assembler.on_reasoning_complete(None);
+            self.mark_visible_stream_output(&reasoning_text);
             meerkat_core::tap_try_send(
                 &self.event_tap,
                 &AgentEvent::ReasoningComplete {
@@ -392,6 +410,14 @@ impl AgentLlmClient for LlmClientAdapter {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn begin_stream_output_observation(&self) {
+        self.stream_output_observed.store(false, Ordering::SeqCst);
+    }
+
+    fn stream_output_observed(&self) -> bool {
+        self.stream_output_observed.load(Ordering::SeqCst)
     }
 
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
@@ -584,6 +610,48 @@ mod tests {
         assert!(
             meerkat_core::assistant_blocks_have_visible_or_actionable_output(result.blocks()),
             "non-empty reasoning delta should survive to the core commit predicate"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adapter_marks_visible_stream_output_before_done_error() -> Result<(), String> {
+        let adapter = LlmClientAdapter::new(
+            Arc::new(ScriptedClient {
+                events: vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "partial answer".to_string(),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error {
+                            error: LlmError::ServerOverloaded,
+                        },
+                    }),
+                ],
+            }),
+            "scripted-model".to_string(),
+        );
+
+        adapter.begin_stream_output_observation();
+        let err = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("stream then fail"))],
+                &[],
+                1024,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => return Err("late done error should surface".to_string()),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, AgentError::Llm { .. }));
+        assert!(
+            adapter.stream_output_observed(),
+            "partial text delta should suppress cross-model fallback on the failed call"
         );
         Ok(())
     }

@@ -426,12 +426,7 @@ impl SessionAgent for FactoryAgent {
     }
 
     fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
-        self.agent
-            .tool_scope()
-            .visible_tools()
-            .iter()
-            .map(|tool| tool.as_ref().clone())
-            .collect()
+        self.agent.visible_tool_defs()
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {

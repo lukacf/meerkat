@@ -143,6 +143,46 @@ the connection itself are owned by a realm binding for
 run time. See [Self-hosting models](/guides/self-hosting-models) for the
 realm binding shape.
 
+## Model fallback config
+
+Model fallback is enabled by default for factory-built agents. If the active
+model fails at a recoverable LLM boundary, Meerkat can move through an ordered
+backup chain and retry with the next viable model:
+
+```toml
+[model_fallback]
+enabled = true
+
+[[model_fallback.chain]]
+model = "claude-opus-4-8"
+provider = "anthropic"
+
+[[model_fallback.chain]]
+model = "gpt-5.5"
+provider = "openai"
+auth_binding = { realm = "dev", binding = "openai_oauth" }
+```
+
+Omit `chain` to use the catalog default chain. Set `enabled = false` to fail
+closed on the original model error. Set `use_catalog_default_chain = true` in a
+higher-precedence config layer when you need to undo an inherited disabled or
+custom policy.
+
+Fallback targets include the auth binding identity. Use `auth_binding` on an
+explicit target to retry the same model/provider through a different configured
+credential. The catalog default chain only uses provider bindings available in
+the selected non-env realm.
+
+Fallback can change the effective model surface. Smaller backup models can
+reduce max output tokens, hide tools gated by model capabilities, and be skipped
+for context overflow if their context window is too small. The agent receives a
+hidden system notice when a switch happens, including the reason and any hidden
+tools.
+
+Fallback is only attempted before user-visible stream output has been emitted.
+Structured-output extraction retries keep their schema and provider-native web
+search remains disabled after a fallback switch.
+
 ## Session storage layout
 
 CLI realm storage lives under the active state root. By default, that is

@@ -86,6 +86,54 @@ pub trait AgentLlmClient: Send + Sync {
     /// after hot-swap.
     fn model(&self) -> &str;
 
+    /// Prepare the next prebuilt fallback model after the generated turn
+    /// authority has classified the LLM failure as recoverable.
+    ///
+    /// This method does not classify failures and must not call the provider.
+    /// It only selects an already-constructed candidate and returns the typed
+    /// state the agent loop must apply before the retry attempt.
+    fn prepare_model_fallback(&self, _failure: &AgentError) -> Option<AgentLlmFallbackSwitch> {
+        None
+    }
+
+    /// Commit a prepared fallback after the agent loop has applied the paired
+    /// request policy, identity, and tool-visibility state.
+    fn commit_model_fallback(&self, _identity: &crate::SessionLlmIdentity) {}
+
+    /// Capability base filter for the current active model.
+    ///
+    /// The agent loop composes this with the already-authorized tool set before
+    /// every provider call so sticky fallback models keep their downgraded tool
+    /// surface on later turns too.
+    fn active_capability_base_filter(&self) -> crate::ToolFilter {
+        crate::ToolFilter::All
+    }
+
+    /// Output-token ceiling for the current active model, if the catalog knows
+    /// one. Used on every provider call so a sticky fallback keeps respecting
+    /// the backup model's smaller output limit after the failover turn.
+    fn active_max_output_tokens(&self) -> Option<u32> {
+        None
+    }
+
+    /// Reset per-call observation of user-visible streaming output.
+    ///
+    /// Adapters that emit display/reasoning deltas before returning the final
+    /// stream result use this to let the retry loop distinguish a pre-stream
+    /// failure from a post-partial-output failure. The default is no-op for
+    /// clients that do not stream visible events outside the returned blocks.
+    fn begin_stream_output_observation(&self) {}
+
+    /// Whether the current LLM call has emitted user-visible streaming output.
+    ///
+    /// A `true` value suppresses model fallback for the failed call: retrying
+    /// against a different model after users already saw partial output can
+    /// produce duplicate assistant answers. Ordinary same-model retry policy is
+    /// still governed by the generated turn recovery authority.
+    fn stream_output_observed(&self) -> bool {
+        false
+    }
+
     /// Compile an output schema for this provider.
     ///
     /// Default implementation normalizes the schema without provider-specific lowering.
@@ -107,6 +155,29 @@ pub trait AgentLlmClient: Send + Sync {
 /// registry hooks.
 pub type AgentLlmClientDecorator =
     Arc<dyn Fn(Arc<dyn AgentLlmClient>) -> Arc<dyn AgentLlmClient> + Send + Sync + 'static>;
+
+/// One fallback target skipped while selecting a viable backup model.
+#[derive(Debug, Clone)]
+pub struct AgentLlmFallbackSkippedTarget {
+    pub identity: crate::SessionLlmIdentity,
+    pub reason: String,
+}
+
+/// Typed state produced when an agent-facing LLM client activates a fallback.
+///
+/// The client owns only prebuilt candidate selection. The agent loop owns
+/// applying request policy, durable identity metadata, and tool visibility
+/// before issuing the machine-authorized retry.
+#[derive(Debug, Clone)]
+pub struct AgentLlmFallbackSwitch {
+    pub previous_identity: crate::SessionLlmIdentity,
+    pub new_identity: crate::SessionLlmIdentity,
+    pub request_policy: crate::SessionLlmRequestPolicy,
+    pub capability_base_filter: crate::ToolFilter,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub skipped_targets: Vec<AgentLlmFallbackSkippedTarget>,
+}
 
 /// Result of streaming from the LLM
 pub struct LlmStreamResult {

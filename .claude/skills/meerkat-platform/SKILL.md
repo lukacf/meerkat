@@ -554,6 +554,51 @@ The model catalog (canonical data: `meerkat-models`; `meerkat_core::model_profil
 
 `rkat models` prints pretty JSON by default and has no `--json` flag. It returns the effective runtime model registry for the active realm: built-in catalog entries plus configured `self_hosted` aliases, providers, default models, and per-model profiles.
 
+### Model fallback chain
+
+Factory-built agents support runtime model fallback through `[model_fallback]`
+in realm config. Defaults are enabled with an empty `chain`, which means
+"build the catalog-owned default backup order" from provider defaults plus the
+global catalog default. A non-empty `[[model_fallback.chain]]` is a user-owned
+ordered policy:
+
+```toml
+[model_fallback]
+enabled = true
+
+[[model_fallback.chain]]
+model = "claude-opus-4-8"
+provider = "anthropic"
+
+[[model_fallback.chain]]
+model = "gpt-5.5"
+provider = "openai"
+auth_binding = { realm = "dev", binding = "openai_oauth" }
+```
+
+Operational rules to remember:
+
+- `enabled = false` disables failover; `use_catalog_default_chain = true`
+  restores the built-in chain over an inherited disabled/custom policy.
+- Fallback is only for machine-classified recoverable LLM failures and core
+  pre-stream-safe retries. Network/call timeouts do not trigger model fallback,
+  and any user-visible text/reasoning stream output suppresses cross-model
+  fallback for that failed call.
+- Fallback target identity includes `auth_binding`; same model/provider with a
+  different configured binding is a valid credential-failover target.
+- The switch updates session LLM identity, request policy, auth lease, provider
+  params, max-output clamp, and capability-based tool filtering before retry.
+- Structured-output extraction fallback must reapply the extraction schema for
+  the new provider and keep provider-native web search disabled.
+- The active agent receives a hidden `model_fallback` system notice explaining
+  the source model, fallback model, reason, skipped targets, limits, and hidden
+  tools.
+- A smaller-context backup target is skipped for a context-overflow failure
+  when its catalog context window cannot satisfy the requested size.
+- Catalog-default candidates stay in the selected non-env auth realm when that
+  realm has a provider binding. Explicit chains may set `auth_binding`; missing
+  explicit targets fail configuration instead of being silently skipped.
+
 ### Mid-session model hot-swap
 
 Model and provider can be changed on a running session without rebuilding the agent:

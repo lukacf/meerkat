@@ -553,6 +553,7 @@ async fn agent_llm_client_decorator_wraps_registry_resolved_provider_client() {
         "default".to_string(),
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]),
     );
+    config.model_fallback.enabled = false;
     let constructions = Arc::new(AtomicUsize::new(0));
     let stream_calls = Arc::new(AtomicUsize::new(0));
 

@@ -56,6 +56,19 @@ web_search = true
 [provider_tools.gemini]
 google_search = true
 
+[model_fallback]
+# When enabled, factory-built agents try an ordered backup model after typed
+# recoverable LLM failures such as rate limits, missing models, provider
+# overload, auth failures, and context overflow. Omit `chain` to use the
+# catalog-owned provider default chain.
+enabled = true
+# Set `use_catalog_default_chain = true` in a higher-precedence config layer to
+# restore the built-in catalog chain over an inherited disabled/custom policy.
+# [[model_fallback.chain]]
+# model = "claude-opus-4-8"
+# provider = "anthropic"
+# auth_binding = { realm = "anthropic", binding = "default" }
+
 [presentation.html]
 # Used by `rkat run --html` / `--browser` unless overridden per run.
 default_template = "polished"

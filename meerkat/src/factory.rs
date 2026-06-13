@@ -87,6 +87,8 @@ use tokio_with_wasm::alias::sync::RwLock;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
 
+use crate::model_fallback::{ModelFallbackCandidate, ModelFallbackClient};
+
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3028,6 +3030,145 @@ impl AgentFactory {
         })
     }
 
+    fn model_fallback_identities(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        current: &SessionLlmIdentity,
+    ) -> Result<Vec<SessionLlmIdentity>, BuildAgentError> {
+        if !config.model_fallback.enabled {
+            return Ok(Vec::new());
+        }
+
+        let catalog_default_chain = config.model_fallback.chain.is_empty();
+        let preferred_realm = current
+            .auth_binding
+            .as_ref()
+            .filter(|auth_binding| !auth_binding.is_env_default())
+            .map(|auth_binding| auth_binding.realm.clone());
+        let mut targets: Vec<(String, Option<Provider>, Option<AuthBindingRef>)> =
+            if catalog_default_chain {
+                let mut defaults = Vec::new();
+                for provider in meerkat_models::provider_priority() {
+                    let model = match provider {
+                        Provider::Anthropic => config.models.anthropic.clone(),
+                        Provider::OpenAI => config.models.openai.clone(),
+                        Provider::Gemini => config.models.gemini.clone(),
+                        _ => String::new(),
+                    };
+                    let model = if model.is_empty() {
+                        meerkat_models::default_model(*provider)
+                            .map(str::to_string)
+                            .unwrap_or_default()
+                    } else {
+                        model
+                    };
+                    if !model.is_empty() {
+                        defaults.push((model, Some(*provider), None));
+                    }
+                }
+                defaults.push((
+                    meerkat_models::global_default_model().to_string(),
+                    None,
+                    None,
+                ));
+                defaults
+            } else {
+                config
+                    .model_fallback
+                    .chain
+                    .iter()
+                    .map(|target| {
+                        (
+                            target.model.clone(),
+                            target.provider,
+                            target.auth_binding.clone(),
+                        )
+                    })
+                    .collect()
+            };
+
+        let mut identities = Vec::new();
+        for (model, provider_override, auth_binding) in targets.drain(..) {
+            let provider = if let Some(provider) = provider_override {
+                if let Some(reason) = registry.provider_override_mismatch_reason(provider, &model) {
+                    return Err(BuildAgentError::Config(reason));
+                }
+                provider
+            } else {
+                registry
+                    .entry(&model)
+                    .map(|entry| entry.provider)
+                    .ok_or_else(|| BuildAgentError::UnknownProvider {
+                        model: model.clone(),
+                    })?
+            };
+            let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
+                registry
+                    .entry_for_provider(Provider::SelfHosted, &model)
+                    .and_then(|entry| entry.self_hosted.as_ref())
+                    .map(|server| server.server_id.clone())
+            } else {
+                None
+            };
+            let auth_binding = match (auth_binding, preferred_realm.as_ref()) {
+                (Some(auth_binding), _) => Some(auth_binding),
+                (None, Some(realm)) => {
+                    let resolved = Self::resolve_realm_binding_candidates_for_provider(
+                        config,
+                        provider,
+                        None,
+                        Some(realm),
+                    )
+                    .ok()
+                    .and_then(|candidates| {
+                        candidates
+                            .into_iter()
+                            .find(|target| {
+                                if catalog_default_chain {
+                                    target.auth_binding.realm == *realm
+                                        && !target.auth_binding.is_env_default()
+                                } else {
+                                    true
+                                }
+                            })
+                            .map(|target| target.auth_binding)
+                    });
+                    if catalog_default_chain && resolved.is_none() {
+                        continue;
+                    }
+                    resolved
+                }
+                (None, None) => None,
+            };
+            let identity = SessionLlmIdentity {
+                model,
+                provider,
+                self_hosted_server_id,
+                provider_params: None,
+                auth_binding,
+            };
+            if identity.model == current.model
+                && identity.provider == current.provider
+                && identity.self_hosted_server_id == current.self_hosted_server_id
+                && identity.auth_binding == current.auth_binding
+            {
+                continue;
+            }
+            if identities.iter().any(|seen: &SessionLlmIdentity| {
+                seen.model == identity.model
+                    && seen.provider == identity.provider
+                    && seen.self_hosted_server_id == identity.self_hosted_server_id
+                    && seen.auth_binding == identity.auth_binding
+            }) {
+                continue;
+            }
+            identities.push(identity);
+        }
+
+        Ok(identities)
+    }
+
     #[cfg(feature = "openai")]
     fn self_hosted_client_spec_for_identity(
         &self,
@@ -4032,6 +4173,8 @@ impl AgentFactory {
                 })?;
         }
         let event_tap = meerkat_core::new_event_tap();
+        let agent_llm_client_was_overridden = build_config.agent_llm_client_override.is_some();
+        let raw_llm_client_was_overridden = build_config.llm_client_override.is_some();
         let llm_adapter: Arc<dyn AgentLlmClient> =
             if let Some(agent_client) = build_config.agent_llm_client_override.take() {
                 agent_client
@@ -4062,6 +4205,103 @@ impl AgentFactory {
             llm_adapter,
             build_config.agent_llm_client_decorator.as_ref(),
         );
+        let llm_adapter = if !agent_llm_client_was_overridden
+            && !raw_llm_client_was_overridden
+            && config.model_fallback.enabled
+        {
+            let explicit_fallback_chain = !config.model_fallback.chain.is_empty();
+            let primary_request_policy = self.request_policy_for_llm_identity(
+                config,
+                &resolved_llm_identity,
+                build_config.override_web_search,
+            )?;
+            let mut candidates = vec![ModelFallbackCandidate {
+                identity: resolved_llm_identity.clone(),
+                request_policy: primary_request_policy,
+                client: Arc::clone(&llm_adapter),
+                capability_base_filter: capability_base_filter_override
+                    .clone()
+                    .unwrap_or(ToolFilter::All),
+                context_window: registry
+                    .entry(&model)
+                    .and_then(|entry| entry.context_window),
+                max_output_tokens: registry
+                    .entry(&model)
+                    .and_then(|entry| entry.max_output_tokens),
+            }];
+            let auth_lease_handle = match &build_config.runtime_build_mode {
+                RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
+                RuntimeBuildMode::StandaloneEphemeral => None,
+            };
+            for identity in
+                self.model_fallback_identities(config, &registry, &resolved_llm_identity)?
+            {
+                let raw_client = match self
+                    .build_llm_client_for_identity_with_auth_lease(
+                        config,
+                        &identity,
+                        auth_lease_handle.clone(),
+                    )
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(error) if explicit_fallback_chain => {
+                        return Err(BuildAgentError::LlmClient(error));
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            model = %identity.model,
+                            provider = %identity.provider.as_str(),
+                            error = %error,
+                            "skipping unavailable catalog-default model fallback candidate"
+                        );
+                        continue;
+                    }
+                };
+                let mut adapter = match build_config.event_tx.clone() {
+                    Some(tx) => {
+                        LlmClientAdapter::with_event_channel(raw_client, identity.model.clone(), tx)
+                    }
+                    None => LlmClientAdapter::new(raw_client, identity.model.clone()),
+                };
+                adapter = adapter.with_event_tap(event_tap.clone());
+                let decorated = Self::decorate_agent_llm_client(
+                    Arc::new(adapter),
+                    build_config.agent_llm_client_decorator.as_ref(),
+                );
+                let capability_base_filter = registry
+                    .profile_for_provider(identity.provider, &identity.model)
+                    .map(|profile| {
+                        meerkat_core::capability_base_filter_for_image_tool_results(
+                            profile.image_tool_results,
+                        )
+                    })
+                    .unwrap_or(ToolFilter::All);
+                let request_policy = self.request_policy_for_llm_identity(
+                    config,
+                    &identity,
+                    build_config.override_web_search,
+                )?;
+                candidates.push(ModelFallbackCandidate {
+                    context_window: registry
+                        .entry_for_provider(identity.provider, &identity.model)
+                        .and_then(|entry| entry.context_window),
+                    max_output_tokens: registry
+                        .entry_for_provider(identity.provider, &identity.model)
+                        .and_then(|entry| entry.max_output_tokens),
+                    capability_base_filter,
+                    request_policy,
+                    identity,
+                    client: decorated,
+                });
+            }
+            match ModelFallbackClient::new(candidates) {
+                Some(client) => Arc::new(client) as Arc<dyn AgentLlmClient>,
+                None => llm_adapter,
+            }
+        } else {
+            llm_adapter
+        };
 
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
@@ -5379,6 +5619,7 @@ impl AgentFactory {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_core::config::ModelFallbackTarget;
     #[cfg(feature = "skills")]
     use meerkat_core::skills::{
         SkillDocument, SkillKey, SkillKeyRemap, SkillName, SkillRuntime, SourceIdentityLineage,
@@ -6080,6 +6321,231 @@ mod tests {
 
     fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
         RealmConfigSection::from_inline_api_keys(entries)
+    }
+
+    fn configured_auth_binding(realm: &str, binding: &str) -> AuthBindingRef {
+        AuthBindingRef {
+            realm: RealmId::parse(realm).expect("valid realm"),
+            binding: BindingId::parse(binding).expect("valid binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        }
+    }
+
+    fn openai_realm_with_bindings(bindings: &[(&str, &str)]) -> RealmConfigSection {
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        for (binding_id, secret) in bindings {
+            let auth_id = format!("{binding_id}_auth");
+            section.auth.insert(
+                auth_id.clone(),
+                meerkat_core::AuthProfileConfig {
+                    provider: "openai".to_string(),
+                    auth_method: "api_key".to_string(),
+                    source: CredentialSourceSpec::InlineSecret {
+                        secret: (*secret).to_string(),
+                    },
+                    constraints: Default::default(),
+                    metadata_defaults: Default::default(),
+                },
+            );
+            section.binding.insert(
+                (*binding_id).to_string(),
+                ProviderBindingConfig {
+                    backend_profile: "openai_api".to_string(),
+                    auth_profile: auth_id,
+                    default_model: None,
+                    policy: Default::default(),
+                    provider_default: false,
+                },
+            );
+        }
+        section
+    }
+
+    #[test]
+    fn model_fallback_keeps_same_model_provider_with_different_auth_binding() {
+        let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
+        let mut config = Config::default();
+        let primary = configured_auth_binding("dev", "primary_openai");
+        let secondary = configured_auth_binding("dev", "secondary_openai");
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: "gpt-5.5".to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(secondary.clone()),
+        }];
+        let registry = factory.model_registry(&config).expect("model registry");
+        let current = SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(primary),
+        };
+
+        let identities = factory
+            .model_fallback_identities(&config, &registry, &current)
+            .expect("fallback identities");
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].model, "gpt-5.5");
+        assert_eq!(identities[0].provider, Provider::OpenAI);
+        assert_eq!(identities[0].auth_binding, Some(secondary));
+    }
+
+    #[test]
+    fn catalog_model_fallback_uses_only_available_bindings_in_selected_realm() {
+        let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
+        let mut config = Config::default();
+        config.realm.insert(
+            "team".to_string(),
+            inline_realm_section(&[("openai", "sk-test-openai"), ("anthropic", "sk-ant-test")]),
+        );
+        let registry = factory.model_registry(&config).expect("model registry");
+        let current = SessionLlmIdentity {
+            model: meerkat_models::default_model(Provider::OpenAI)
+                .expect("OpenAI catalog default")
+                .to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(configured_auth_binding("team", "default_openai")),
+        };
+
+        let identities = factory
+            .model_fallback_identities(&config, &registry, &current)
+            .expect("catalog fallback identities");
+
+        assert!(
+            identities.iter().any(|identity| {
+                identity.provider == Provider::Anthropic
+                    && identity.auth_binding
+                        == Some(configured_auth_binding("team", "default_anthropic"))
+            }),
+            "catalog fallback should include providers registered in the selected realm: {identities:#?}"
+        );
+        assert!(
+            identities.iter().all(|identity| {
+                identity
+                    .auth_binding
+                    .as_ref()
+                    .is_some_and(|auth_binding| auth_binding.realm.as_str() == "team")
+            }),
+            "catalog fallback must not bleed into env/default realms when selected realm auth is in use"
+        );
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.provider != Provider::Gemini),
+            "providers not registered in the selected realm should be skipped for the catalog chain"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    struct RecordingOpenAiRuntime {
+        calls: Arc<std::sync::Mutex<Vec<AuthBindingRef>>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[async_trait::async_trait]
+    impl meerkat_llm_core::provider_runtime::ProviderRuntime for RecordingOpenAiRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn resolve_binding(
+            &self,
+            binding: &meerkat_llm_core::provider_runtime::ValidatedBinding,
+            _env: &meerkat_llm_core::provider_runtime::ResolverEnvironment,
+        ) -> Result<
+            meerkat_llm_core::provider_runtime::ResolvedConnection,
+            meerkat_llm_core::provider_runtime::ProviderAuthError,
+        > {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(binding.auth_binding_ref().clone());
+            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: Arc::clone(binding.backend_profile()),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                        "sk-test-openai".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test-openai",
+                    ),
+                ),
+            })
+        }
+
+        fn build_client(
+            &self,
+            _connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, meerkat_llm_core::provider_runtime::ProviderClientError>
+        {
+            Ok(Arc::new(meerkat_client::TestClient::default()))
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn explicit_model_fallback_resolves_secondary_auth_binding_for_same_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(RecordingOpenAiRuntime {
+                    calls: Arc::clone(&calls),
+                }),
+            ),
+        );
+
+        let primary = configured_auth_binding("dev", "primary_openai");
+        let secondary = configured_auth_binding("dev", "secondary_openai");
+        let mut config = Config::default();
+        config.realm.insert(
+            "dev".to_string(),
+            openai_realm_with_bindings(&[
+                ("primary_openai", "sk-primary"),
+                ("secondary_openai", "sk-secondary"),
+            ]),
+        );
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: "gpt-5.5".to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(secondary.clone()),
+        }];
+
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.auth_binding = Some(primary.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let _agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("agent should build primary plus fallback clients");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.contains(&primary),
+            "primary binding should be resolved for the active client"
+        );
+        assert!(
+            calls.contains(&secondary),
+            "same model/provider fallback must still resolve the secondary auth binding"
+        );
     }
 
     #[test]

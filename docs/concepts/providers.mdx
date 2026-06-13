@@ -218,6 +218,68 @@ match, so it works without `--provider`.
 
 You can still override this with `--provider` on the CLI or `provider` in API requests.
 
+## Model fallback chain
+
+Factory-built agents can use an ordered model fallback chain when the active
+model reaches a typed, recoverable LLM failure boundary. This protects long
+sessions from provider-side disruptions such as removed models, rate limits,
+provider overload, auth failures, and context-window overflow.
+
+Fallback is enabled by default. With no explicit chain, Meerkat builds a
+catalog-owned backup order from the configured provider defaults and the global
+catalog default, excluding the active model and duplicate targets. You can
+replace that order in realm config:
+
+```toml config.toml
+[model_fallback]
+enabled = true
+
+[[model_fallback.chain]]
+model = "claude-opus-4-8"
+provider = "anthropic"
+
+[[model_fallback.chain]]
+model = "gpt-5.5"
+provider = "openai"
+auth_binding = { realm = "dev", binding = "openai_oauth" }
+
+[[model_fallback.chain]]
+model = "gemma-4-31b"
+provider = "self_hosted"
+auth_binding = { realm = "lab", binding = "ollama" }
+```
+
+`provider` is optional when the model exists in the effective registry.
+`auth_binding` is optional; when omitted, the target resolves through the same
+provider-runtime registry used for normal session creation. The same
+model/provider with a different `auth_binding` is a distinct fallback target,
+so custom chains can fail over to another credential realm. For the catalog
+default chain, Meerkat keeps candidates inside the selected non-env realm when
+that realm has a matching provider binding; unavailable catalog-default
+candidates are skipped rather than silently bleeding into another realm. For an
+explicit custom chain, an unavailable target is a configuration error.
+
+When a switch is applied, Meerkat updates the session LLM identity, request
+policy, auth lease, provider parameters, output-token ceiling, and capability
+base filter before retrying. The agent receives a hidden system notice with the
+source model, fallback model, failure reason, skipped targets, active model
+limits, and any tools hidden by the fallback model's capabilities.
+
+For structured-output extraction turns, fallback keeps the extraction request
+deterministic: Meerkat reapplies the output schema for the new provider and
+keeps provider-native web search/grounding disabled on the retry.
+
+Capability changes are expected. For example, falling back from a 1M-context
+vision model to a 128K local model can clamp output tokens, hide image-result
+tools, and skip the local target entirely if the failure was a context overflow
+larger than that target's context window. Later turns remain sticky to the
+active fallback model until the session is explicitly hot-swapped or rebuilt.
+
+Meerkat does not fallback on call/network timeouts, and it suppresses
+cross-model fallback for any retryable error after user-visible text or
+reasoning stream output has been emitted. Ordinary same-model retry policy can
+still apply when the recovery authority permits it.
+
 ## See also
 
 - [Auth & bindings](/concepts/auth-and-bindings)

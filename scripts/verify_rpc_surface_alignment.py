@@ -56,11 +56,6 @@ STRING_LITERAL = re.compile(r'"([^"\n]*)"|\'([^\'\n]*)\'')
 # the `internal_exclusions` convention from verify_sdk_wrapper_freshness.py
 # with explicit per-entry reasons.
 SDK_STRING_ALLOWLIST: dict[str, str] = {
-    "tools/register": (
-        "callback-tool registration method handled directly by the RPC "
-        "server transport loop (meerkat-rpc/src/server.rs), deliberately "
-        "outside the catalog-driven router; both SDKs invoke it"
-    ),
     "tool/execute": (
         "server->client reverse request the SDKs *receive* to run a "
         "registered callback tool (meerkat-rpc/src/callback_dispatcher.rs); "
@@ -88,8 +83,15 @@ NON_RPC_SDK_SURFACES = [
     ("Web SDK", pathlib.Path("sdks") / "web" / "src", ".ts"),
 ]
 
+WEB_AUTH_WRAPPER = pathlib.Path("sdks") / "web" / "src" / "auth.ts"
+WEB_AUTH_METHODS = pathlib.Path("sdks") / "web" / "src" / "generated" / "auth.ts"
 
-def collect_sdk_source(sdk_root: pathlib.Path, suffix: str) -> tuple[set[str], str]:
+
+def collect_sdk_source(
+    sdk_root: pathlib.Path,
+    suffix: str,
+    excluded_paths: set[pathlib.Path] | None = None,
+) -> tuple[set[str], str]:
     """RPC-shaped string literals + concatenated hand-written SDK source.
 
     Generated mirrors (``generated/`` trees) are excluded on both sides: a
@@ -99,7 +101,11 @@ def collect_sdk_source(sdk_root: pathlib.Path, suffix: str) -> tuple[set[str], s
     """
     literals: set[str] = set()
     blob_parts: list[str] = []
+    excluded_paths = excluded_paths or set()
     for path in sorted(sdk_root.rglob(f"*{suffix}")):
+        rel_path = path.relative_to(sdk_root.parents[2])
+        if rel_path in excluded_paths:
+            continue
         if "generated" in path.parts or "__pycache__" in path.parts:
             continue
         try:
@@ -112,6 +118,54 @@ def collect_sdk_source(sdk_root: pathlib.Path, suffix: str) -> tuple[set[str], s
             if RPC_METHOD_SHAPE.match(value):
                 literals.add(value)
     return literals, "\n".join(blob_parts)
+
+
+def web_auth_rpc_methods(root: pathlib.Path) -> set[str]:
+    """RPC methods used by the Web SDK Auth wrapper via generated constants."""
+    methods_path = root / WEB_AUTH_METHODS
+    wrapper_path = root / WEB_AUTH_WRAPPER
+    try:
+        methods_text = methods_path.read_text(encoding="utf-8")
+        wrapper_text = wrapper_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+
+    constant_to_method = {
+        key: method
+        for key, method in re.findall(r"(\w+):\s*[\"']([^\"']+)[\"']", methods_text)
+        if RPC_METHOD_SHAPE.match(method)
+    }
+    used_constants = set(re.findall(r"\bAUTH_RPC_METHODS\.(\w+)\b", wrapper_text))
+    return {
+        method
+        for key, method in constant_to_method.items()
+        if key in used_constants
+    }
+
+
+def check_web_auth_surface(root: pathlib.Path, catalog_methods: set[str]) -> list[str]:
+    """The Web SDK Auth wrapper is intentionally RPC-shaped and must be gated."""
+    failures: list[str] = []
+    expected = {method for method in catalog_methods if method.startswith("auth/")}
+    actual = web_auth_rpc_methods(root)
+
+    missing = sorted(expected - actual)
+    if missing:
+        failures.append(
+            "Web SDK Auth wrapper (sdks/web/src/auth.ts) is missing generated "
+            "AUTH_RPC_METHODS coverage for auth catalog methods:"
+        )
+        failures.extend(f"  - {name}" for name in missing)
+
+    extra = sorted(actual - expected)
+    if extra:
+        failures.append(
+            "Web SDK Auth wrapper references generated AUTH_RPC_METHODS that "
+            "are not auth catalog methods:"
+        )
+        failures.extend(f"  - {name}" for name in extra)
+
+    return failures
 
 
 def check_sdk_surfaces(
@@ -147,8 +201,14 @@ def check_sdk_surfaces(
             )
             failures.extend(f"  - {name}" for name in missing)
 
+    failures.extend(check_web_auth_surface(root, catalog_methods))
+
     for label, rel_root, suffix in NON_RPC_SDK_SURFACES:
-        literals, _ = collect_sdk_source(root / rel_root, suffix)
+        literals, _ = collect_sdk_source(
+            root / rel_root,
+            suffix,
+            excluded_paths={WEB_AUTH_WRAPPER},
+        )
         stray = sorted(literals - set(SDK_STRING_ALLOWLIST))
         if stray:
             failures.append(

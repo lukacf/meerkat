@@ -36,7 +36,10 @@ use meerkat_core::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 // Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
 #[cfg(target_arch = "wasm32")]
@@ -155,11 +158,11 @@ enum SessionCommand {
     },
     ApplyRuntimeSystemContext {
         appends: Vec<PendingSystemContextAppend>,
-        reply_tx: oneshot::Sender<()>,
+        reply_tx: oneshot::Sender<Result<(), SessionError>>,
     },
     ApplyRuntimeSystemContextForTurn {
         appends: Vec<PendingSystemContextAppend>,
-        reply_tx: oneshot::Sender<()>,
+        reply_tx: oneshot::Sender<Result<(), SessionError>>,
     },
     PublishRuntimeSystemContextEvents {
         appends: Vec<PendingSystemContextAppend>,
@@ -238,6 +241,8 @@ struct SessionHandle {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: meerkat_core::SystemContextStateHandle,
+    /// Mechanical gate closed when an archive snapshot is taken.
+    archive_snapshot_gate: Arc<ArchiveSnapshotGate>,
     /// Runtime-owned turn phase handle for active-boundary probes.
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
@@ -253,6 +258,50 @@ struct SessionHandle {
     cancel_after_boundary_handle: Option<CancelAfterBoundarySender>,
     /// Broadcast channel for session-wide event subscription.
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+}
+
+struct ArchiveSnapshotGate {
+    closed: AtomicBool,
+    apply_lock: std::sync::Mutex<()>,
+}
+
+impl ArchiveSnapshotGate {
+    fn open() -> Arc<Self> {
+        Arc::new(Self {
+            closed: AtomicBool::new(false),
+            apply_lock: std::sync::Mutex::new(()),
+        })
+    }
+
+    fn enter_apply(&self) -> Result<std::sync::MutexGuard<'_, ()>, SessionError> {
+        let guard = self
+            .apply_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.closed.load(Ordering::Acquire) {
+            Err(session_archive_snapshot_taken_error())
+        } else {
+            Ok(guard)
+        }
+    }
+
+    fn close_for_snapshot(&self) {
+        let _guard = self
+            .apply_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+fn session_archive_snapshot_taken_error() -> SessionError {
+    SessionError::FailedWithData {
+        message: "session archive snapshot already taken; runtime system context rejected"
+            .to_string(),
+        data: serde_json::json!({
+            "reason": "archive_snapshot_taken",
+        }),
+    }
 }
 
 pub struct RuntimeContextAdmissionGuard {
@@ -340,6 +389,7 @@ struct SessionTaskControl {
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    archive_snapshot_gate: Arc<ArchiveSnapshotGate>,
     /// Session-context DSL handle (W2-E / issue #264). `None` on standalone
     /// / ephemeral builds that have no runtime-backed DSL authority. The
     /// session task's `publish_summary` helper fires
@@ -1423,6 +1473,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         // registry never retains a phantom record (or orphaned reservation)
         // for a session whose handle no longer exists.
         self.staged_registry.forget(id);
+        handle.archive_snapshot_gate.close_for_snapshot();
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.request_shutdown().ok().map(|_| slot.projection())
@@ -1457,7 +1508,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
             ))
-        })
+        })?
     }
 
     pub async fn apply_runtime_system_context_for_turn(
@@ -1483,7 +1534,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
             ))
-        })
+        })?
     }
 
     /// Stage runtime-owned context for the active turn's next model boundary.
@@ -2573,6 +2624,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let session_context = agent.session_context_handle();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
+        let archive_snapshot_gate = ArchiveSnapshotGate::open();
         let (state_tx, state_rx) = watch::channel(initial_session_state);
         let state_tx_handle = state_tx.clone();
         let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
@@ -2604,6 +2656,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 interrupt_notify: interrupt_notify.clone(),
                 session_event_tx: session_event_tx.clone(),
                 session_context: session_context.clone(),
+                archive_snapshot_gate: Arc::clone(&archive_snapshot_gate),
             },
         ));
         #[cfg(target_arch = "wasm32")]
@@ -2621,6 +2674,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 interrupt_notify: interrupt_notify.clone(),
                 session_event_tx: session_event_tx.clone(),
                 session_context: session_context.clone(),
+                archive_snapshot_gate: Arc::clone(&archive_snapshot_gate),
             },
         ));
 
@@ -2638,6 +2692,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             interaction_event_injector,
             comms_runtime,
             system_context_state,
+            archive_snapshot_gate,
             turn_state_handle,
             deferred_turn_state,
             active_capacity_lease,
@@ -3024,12 +3079,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let handle = sessions
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
         // Clear the singular typed materialization record with the handle; a
         // staged session's registry-held permit drops with it, freeing the
         // reserved capacity.
         self.staged_registry.forget(id);
+        handle.archive_snapshot_gate.close_for_snapshot();
+        let archived_view = Self::archived_view_from_handle(id, &handle);
         self.archived_views
             .write()
             .await
@@ -4071,18 +4127,30 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.external_tool_surface_snapshot());
             }
             SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
-                apply_runtime_system_context_and_publish(
-                    &mut agent,
-                    &appends,
-                    &control,
-                    &mut next_seq,
-                    &source,
-                );
-                let _ = reply_tx.send(());
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => {
+                        apply_runtime_system_context_and_publish(
+                            &mut agent,
+                            &appends,
+                            &control,
+                            &mut next_seq,
+                            &source,
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = reply_tx.send(result);
             }
             SessionCommand::ApplyRuntimeSystemContextForTurn { appends, reply_tx } => {
-                agent.apply_runtime_system_context(&appends);
-                let _ = reply_tx.send(());
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => {
+                        agent.apply_runtime_system_context(&appends);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = reply_tx.send(result);
             }
             SessionCommand::PublishRuntimeSystemContextEvents { appends, reply_tx } => {
                 publish_runtime_system_context_events(
@@ -5802,6 +5870,38 @@ mod runtime_turn_metadata_tests {
                 .expect("run context counts lock poisoned")
                 .is_empty(),
             "agent run must not start after setup failure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod archive_snapshot_gate_tests {
+    use super::*;
+
+    #[test]
+    fn archive_snapshot_gate_rejects_context_after_snapshot_close() {
+        let gate = ArchiveSnapshotGate::open();
+        let open_guard = gate.enter_apply();
+        assert!(open_guard.is_ok(), "open gate admits context apply");
+        drop(open_guard);
+
+        gate.close_for_snapshot();
+
+        let closed_guard = gate.enter_apply();
+        assert!(
+            closed_guard.is_err(),
+            "closed archive gate rejects queued context apply"
+        );
+        let err = match closed_guard {
+            Ok(_) => return,
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.structured_data()
+                .and_then(|data| data.get("reason").cloned()),
+            Some(serde_json::Value::String(
+                "archive_snapshot_taken".to_string()
+            ))
         );
     }
 }

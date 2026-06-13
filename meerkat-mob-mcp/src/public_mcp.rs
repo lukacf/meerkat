@@ -543,6 +543,7 @@ pub async fn handle_public_tools_call(
             let mobs = state
                 .mob_list()
                 .await
+                .map_err(|err| McpToolError::internal(err.to_string()))?
                 .into_iter()
                 .map(|(mob_id, status)| meerkat_contracts::MobStatusResult {
                     mob_id: mob_id.to_string(),

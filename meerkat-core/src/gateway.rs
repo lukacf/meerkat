@@ -55,6 +55,15 @@ enum GatewayRouting<'a> {
     NotFound,
 }
 
+/// Dynamic composite routing verdict. It uses dispatcher borrows directly
+/// because the dynamic compositor deliberately does not freeze ownership in a
+/// build-time routing table.
+enum DynamicRouting<'a> {
+    Dispatch(&'a dyn AgentToolDispatcher),
+    Unavailable(ToolUnavailableReason),
+    NotFound,
+}
+
 /// A tool dispatcher that composes multiple dispatchers into one.
 ///
 /// The gateway validates the initial child catalogs for collisions and records
@@ -63,8 +72,8 @@ enum GatewayRouting<'a> {
 /// already proves uniqueness, so the routing table is the canonical authority
 /// for build-known tools (deterministic owner per `ToolName`, stable regardless
 /// of insertion order). Dynamic dispatchers that surface newly connected tools
-/// after build time fall back to live catalog/list iteration, preserving
-/// first-dispatcher-wins for live duplicates without rebuilding the gateway.
+/// after build time fall back to live catalog/list iteration, failing closed
+/// when more than one dispatcher surfaces the same name.
 ///
 /// ## Dynamic Visibility
 ///
@@ -517,10 +526,9 @@ impl AgentToolDispatcher for ToolGateway {
 /// enabling children with dynamic tool lists (e.g. callback tool dispatchers
 /// backed by a shared registry) to surface additions/removals between turns.
 ///
-/// First-dispatcher-wins on name collision: this composite is a deliberate
-/// precedence-ordered overlay (callers choose the order and earlier children
-/// intentionally shadow later ones). This differs from [`ToolGateway`], which
-/// validates name uniqueness at build time and fails closed on live duplicates.
+/// Dynamic duplicate names fail closed. Callers that need legitimate profile
+/// priority should express that priority before composing children; the shared
+/// dynamic compositor is not a first-child ownership authority.
 pub struct DynamicToolComposite {
     dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
 }
@@ -529,65 +537,92 @@ impl DynamicToolComposite {
     pub fn new(dispatchers: Vec<Arc<dyn AgentToolDispatcher>>) -> Self {
         Self { dispatchers }
     }
+
+    fn duplicate_tool_error(name: &str) -> ToolError {
+        ToolError::Other(format!(
+            "tool name collision in dynamic composite: '{name}' surfaced by multiple dispatchers"
+        ))
+    }
+
+    fn live_catalog_for_dispatcher(
+        dispatcher: &dyn AgentToolDispatcher,
+    ) -> Arc<[ToolCatalogEntry]> {
+        ToolGateway::live_catalog_for_dispatcher(dispatcher)
+    }
+
+    fn entry_routing(dispatcher: &dyn AgentToolDispatcher, name: &str) -> EntryRouting {
+        Self::live_catalog_for_dispatcher(dispatcher)
+            .iter()
+            .find(|catalog_entry| catalog_entry.tool.name == name)
+            .map(
+                |catalog_entry| match catalog_entry.callability.unavailable_reason() {
+                    Some(reason) => EntryRouting::Unavailable(reason),
+                    None => EntryRouting::Callable,
+                },
+            )
+            .unwrap_or(EntryRouting::NotSurfaced)
+    }
+
+    fn resolve_live_routing(&self, name: &str) -> Result<DynamicRouting<'_>, ToolError> {
+        let mut surfaced: Option<(&dyn AgentToolDispatcher, EntryRouting)> = None;
+        for dispatcher in &self.dispatchers {
+            match Self::entry_routing(dispatcher.as_ref(), name) {
+                EntryRouting::NotSurfaced => {}
+                routing => {
+                    if surfaced.is_some() {
+                        return Err(Self::duplicate_tool_error(name));
+                    }
+                    surfaced = Some((dispatcher.as_ref(), routing));
+                }
+            }
+        }
+        Ok(match surfaced {
+            Some((dispatcher, EntryRouting::Callable)) => DynamicRouting::Dispatch(dispatcher),
+            Some((_, EntryRouting::Unavailable(reason))) => DynamicRouting::Unavailable(reason),
+            Some((_, EntryRouting::NotSurfaced)) | None => DynamicRouting::NotFound,
+        })
+    }
+
+    fn catalog_entries(&self) -> Vec<ToolCatalogEntry> {
+        let mut counts: HashMap<ToolName, usize> = HashMap::new();
+        let mut result = Vec::new();
+        for dispatcher in &self.dispatchers {
+            for entry in Self::live_catalog_for_dispatcher(dispatcher.as_ref()).iter() {
+                *counts.entry(entry.tool.name.clone()).or_default() += 1;
+                result.push(entry.clone());
+            }
+        }
+        result.retain(|entry| counts.get(&entry.tool.name).copied().unwrap_or(0) == 1);
+        result
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynamicToolComposite {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        if self.tool_catalog_capabilities().exact_catalog {
-            return self
-                .tool_catalog()
-                .iter()
-                .filter(|entry| entry.currently_callable())
-                .map(|entry| Arc::clone(&entry.tool))
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for d in &self.dispatchers {
-            for t in d.tools().iter() {
-                if seen.insert(t.name.clone()) {
-                    result.push(Arc::clone(t));
-                }
-            }
-        }
-        result.into()
+        self.catalog_entries()
+            .into_iter()
+            .filter(|entry| entry.currently_callable())
+            .map(|entry| entry.tool)
+            .collect::<Vec<_>>()
+            .into()
     }
 
     async fn dispatch(
         &self,
         call: crate::types::ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
-        if self.tool_catalog_capabilities().exact_catalog {
-            for d in &self.dispatchers {
-                if let Some(entry) = d
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(crate::error::ToolError::unavailable(call.name, reason));
-                    }
-                    return d.dispatch(call).await.map_err(|err| {
-                        ToolGateway::route_not_found_as_unavailable(call.name, err)
-                    });
-                }
+        match self.resolve_live_routing(call.name)? {
+            DynamicRouting::Dispatch(dispatcher) => dispatcher
+                .dispatch(call)
+                .await
+                .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err)),
+            DynamicRouting::Unavailable(reason) => {
+                Err(crate::error::ToolError::unavailable(call.name, reason))
             }
-            return Err(crate::error::ToolError::not_found(call.name));
+            DynamicRouting::NotFound => Err(crate::error::ToolError::not_found(call.name)),
         }
-
-        for d in &self.dispatchers {
-            if d.tools().iter().any(|t| t.name == call.name) {
-                return d
-                    .dispatch(call)
-                    .await
-                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
-            }
-        }
-        Err(crate::error::ToolError::not_found(call.name))
     }
 
     async fn dispatch_with_context(
@@ -595,33 +630,16 @@ impl AgentToolDispatcher for DynamicToolComposite {
         call: crate::types::ToolCallView<'_>,
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
-        if self.tool_catalog_capabilities().exact_catalog {
-            for d in &self.dispatchers {
-                if let Some(entry) = d
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(crate::error::ToolError::unavailable(call.name, reason));
-                    }
-                    return d.dispatch_with_context(call, context).await.map_err(|err| {
-                        ToolGateway::route_not_found_as_unavailable(call.name, err)
-                    });
-                }
+        match self.resolve_live_routing(call.name)? {
+            DynamicRouting::Dispatch(dispatcher) => dispatcher
+                .dispatch_with_context(call, context)
+                .await
+                .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err)),
+            DynamicRouting::Unavailable(reason) => {
+                Err(crate::error::ToolError::unavailable(call.name, reason))
             }
-            return Err(crate::error::ToolError::not_found(call.name));
+            DynamicRouting::NotFound => Err(crate::error::ToolError::not_found(call.name)),
         }
-
-        for d in &self.dispatchers {
-            if d.tools().iter().any(|t| t.name == call.name) {
-                return d
-                    .dispatch_with_context(call, context)
-                    .await
-                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
-            }
-        }
-        Err(crate::error::ToolError::not_found(call.name))
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
@@ -679,25 +697,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-        if !self.tool_catalog_capabilities().exact_catalog {
-            return self
-                .tools()
-                .iter()
-                .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for dispatcher in &self.dispatchers {
-            for entry in dispatcher.tool_catalog().iter() {
-                if seen.insert(entry.tool.name.clone()) {
-                    result.push(entry.clone());
-                }
-            }
-        }
-        result.into()
+        self.catalog_entries().into()
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
@@ -1636,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_composite_exact_catalog_keeps_first_winner_even_when_unavailable() {
+    fn dynamic_tool_composite_exact_catalog_omits_duplicate_names() {
         let first = Arc::new(ExactMockDispatcher::with_callability(
             "first",
             &[("shared", false)],
@@ -1660,17 +1660,35 @@ mod tests {
         assert_eq!(
             visible_names,
             vec!["other".to_string()],
-            "a later visible collision loser must not become the exported winner"
+            "collided tool names must not be exported through first-child ownership"
         );
 
         let catalog = composite.tool_catalog();
-        assert_eq!(catalog.len(), 2);
         assert!(
-            !catalog
-                .iter()
-                .find(|entry| entry.tool.name == "shared")
-                .expect("shared entry")
-                .currently_callable()
+            catalog.iter().all(|entry| entry.tool.name != "shared"),
+            "collided tool names must be omitted from the dynamic catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_composite_fails_closed_on_duplicate_dispatch() {
+        let first = Arc::new(MockDispatcher::new("first", &["shared"]));
+        let second = Arc::new(MockDispatcher::new("second", &["shared"]));
+        let composite = DynamicToolComposite::new(vec![first, second]);
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "collision-1",
+            name: "shared",
+            args: &args_raw,
+        };
+
+        let err = composite
+            .dispatch(call)
+            .await
+            .expect_err("duplicate dynamic tool names must fail closed");
+        assert!(
+            matches!(err, ToolError::Other(ref message) if message.contains("collision")),
+            "expected collision error, got {err:?}"
         );
     }
 

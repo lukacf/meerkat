@@ -3124,6 +3124,25 @@ fn normalize_mcp_comms_send_error(
                 })),
             )
         }
+        meerkat_core::comms::SendError::AdmissionDropped { reason } => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            ToolCallError::new(
+                -32603,
+                format!(
+                    "peer_admission_dropped: peer '{peer}' rejected envelope at ingress: {}",
+                    reason.as_code()
+                ),
+                Some(json!({
+                    "code": "peer_admission_dropped",
+                    "peer": peer,
+                    "reason": reason,
+                    "message": format!(
+                        "peer '{peer}' rejected envelope at ingress: {}",
+                        reason.as_code()
+                    ),
+                })),
+            )
+        }
         other => ToolCallError::new(
             -32603,
             other.to_string(),
@@ -5718,6 +5737,29 @@ mod tests {
         assert_eq!(
             data.get("details").and_then(Value::as_str),
             Some("Transport error: connection refused")
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_mcp_comms_send_error_preserves_admission_drop_reason() {
+        let err = normalize_mcp_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::ClassificationRejected,
+            },
+        );
+        assert_eq!(err.code, -32603);
+        assert!(err.message.starts_with("peer_admission_dropped:"));
+        let data = err.data.expect("structured error data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("peer_admission_dropped")
+        );
+        assert_eq!(data.get("peer").and_then(Value::as_str), Some("peer-a"));
+        assert_eq!(
+            data.get("reason").and_then(Value::as_str),
+            Some("classification_rejected")
         );
     }
 

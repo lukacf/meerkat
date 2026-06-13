@@ -40370,6 +40370,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::InvalidTransition { from, to } => {
             format!("invalid_transition:{}->{}", from.as_str(), to.as_str())
         }
+        MobError::MobMachineRejected { context, .. } => {
+            format!("mob_machine_rejected:{context}")
+        }
         MobError::WiringError(_) => "wiring_error".to_string(),
         MobError::SupervisorRotationIncomplete { .. } => {
             "supervisor_rotation_incomplete".to_string()

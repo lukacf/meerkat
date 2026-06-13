@@ -21,12 +21,15 @@ from typing import Any
 # initialize, skills/list). Schema-driven; the inventory-coverage ratchet
 # fails closed when a catalog type is missing from these rosters.
 K20_CATALOG_CONTRACT_TYPES = [
+    "CallbackToolDefinition",
     "ConfigEnvelope",
     "ConfigPatchParams",
     "ConfigWriteResult",
     "InterruptResult",
     "ServerCapabilities",
     "SkillListResponse",
+    "ToolsRegisterParams",
+    "ToolsRegisterResult",
     "WorkEventsResult",
     "WorkItemsResult",
 ]
@@ -424,6 +427,9 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
 def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
         "WireTrustedPeerIdentity",
+        # G5: keep `tools/register`'s callback-tool entry typed inside the
+        # public method params instead of widening the array entries to maps.
+        "CallbackToolDefinition",
         "McpServerConfig",
         # CC5/CC6: promote the live-adapter wire mirrors so SDK codegen
         # references them by name from `LiveOpenResult` instead of inlining

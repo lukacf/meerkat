@@ -64,10 +64,10 @@ pub use connection::{
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 pub use rpc_surface::{
-    ArchiveSessionParams, BlobGetParams, DeferredCreateResult, InjectSystemContextParams,
-    InjectSystemContextResult, InterruptParams, ListSessionsParams, ListSessionsResult,
-    ReadSessionHistoryParams, ReadSessionParams, ScheduleToolCallParams, ScheduleToolsResult,
-    ServerCapabilities, ServerInfo,
+    ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
+    InjectSystemContextParams, InjectSystemContextResult, InterruptParams, ListSessionsParams,
+    ListSessionsResult, ReadSessionHistoryParams, ReadSessionParams, ScheduleToolCallParams,
+    ScheduleToolsResult, ServerCapabilities, ServerInfo, ToolsRegisterParams, ToolsRegisterResult,
 };
 
 pub use artifact::{

@@ -5,8 +5,8 @@ use crate::lifecycle::{
     OccurrenceSupersessionAck, ScheduleLifecycleInput,
 };
 use crate::types::{
-    DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, Schedule, ScheduleId,
-    SchedulePhase, ScheduleRevision,
+    DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, RuntimeDeliveryOutcome, Schedule,
+    ScheduleId, SchedulePhase, ScheduleRevision,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -234,6 +234,15 @@ pub trait ScheduleStore: Send + Sync {
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
     ) -> Result<Option<Occurrence>, ScheduleStoreError>;
+
+    async fn transition_occurrence_with_receipt_if_current(
+        &self,
+        occurrence_id: &OccurrenceId,
+        expected_attempt: u32,
+        expected_claim_token: Option<Uuid>,
+        transition: OccurrenceLifecycleInput,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Result<Option<Occurrence>, ScheduleStoreError>;
 }
 
 #[derive(Default)]
@@ -323,6 +332,17 @@ impl ScheduleStore for DisabledScheduleStore {
         _expected_attempt: u32,
         _expected_claim_token: Option<Uuid>,
         _transition: OccurrenceLifecycleInput,
+    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn transition_occurrence_with_receipt_if_current(
+        &self,
+        _occurrence_id: &OccurrenceId,
+        _expected_attempt: u32,
+        _expected_claim_token: Option<Uuid>,
+        _transition: OccurrenceLifecycleInput,
+        _runtime_outcome: Option<RuntimeDeliveryOutcome>,
     ) -> Result<Option<Occurrence>, ScheduleStoreError> {
         Err(unsupported(self.kind()))
     }
@@ -727,6 +747,53 @@ impl ScheduleStore for MemoryScheduleStore {
             .apply(transition)
             .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
             .into_occurrence();
+        state
+            .occurrences
+            .insert(updated.occurrence_id.clone(), updated.clone());
+        Ok(Some(updated))
+    }
+
+    async fn transition_occurrence_with_receipt_if_current(
+        &self,
+        occurrence_id: &OccurrenceId,
+        expected_attempt: u32,
+        expected_claim_token: Option<Uuid>,
+        transition: OccurrenceLifecycleInput,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        let mut state = self.inner.write().await;
+        let Some(current) = state.occurrences.get(occurrence_id).cloned() else {
+            return Ok(None);
+        };
+        if current.attempt_count != expected_attempt
+            || current.claim_token() != expected_claim_token
+        {
+            return Ok(None);
+        }
+        let terminalized = current
+            .apply(transition)
+            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+            .into_occurrence();
+        let receipt = terminalized
+            .delivery_receipt_from_authority(runtime_outcome)
+            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+        let updated = terminalized
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                runtime_outcome: receipt.runtime_outcome.clone(),
+                receipt,
+            })
+            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+            .into_occurrence();
+        let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
+            ScheduleStoreError::Concurrency(
+                "generated occurrence authority did not produce a receipt".to_string(),
+            )
+        })?;
+        state
+            .receipts
+            .entry(updated.occurrence_id.clone())
+            .or_default()
+            .push(canonical_receipt);
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated.clone());

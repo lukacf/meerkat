@@ -1125,7 +1125,11 @@ impl AgentMobToolSurface {
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let authority_context = self.authority_context_snapshot();
-        let mobs = self.state.mob_list().await;
+        let mobs = self
+            .state
+            .mob_list()
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
         // Lower each per-mob visibility decision through MobMachine, exactly
         // as the mutating-dispatch siblings do (see `ensure_mob_scope_authority`).
         // MobMachine — not this surface — owns the Allow/Deny verdict; we extract

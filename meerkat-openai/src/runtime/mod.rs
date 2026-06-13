@@ -481,6 +481,54 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         }
     }
 
+    fn build_realtime_text_client(
+        &self,
+        connection: ResolvedConnection,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let backend_kind = match connection.backend {
+            NormalizedBackendKind::OpenAi(k) => k,
+            other => unreachable!(
+                "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
+                 — registry dispatch invariant violated"
+            ),
+        };
+        match backend_kind {
+            OpenAiBackendKind::OpenAiApi => {}
+            OpenAiBackendKind::ChatGptBackend => {
+                return Err(ProviderClientError::MissingFeature(
+                    "openai-realtime-chatgpt-backend",
+                ));
+            }
+            OpenAiBackendKind::AzureOpenAi => {
+                return Err(ProviderClientError::MissingFeature(
+                    "openai-realtime-azure-openai",
+                ));
+            }
+        }
+        if connection.resolved_authorizer().is_some() {
+            return Err(ProviderClientError::MissingFeature(
+                "openai-realtime-authorizer-auth",
+            ));
+        }
+        if connection.backend_profile.base_url.is_some() {
+            return Err(ProviderClientError::MissingFeature(
+                "openai-realtime-custom-base-url",
+            ));
+        }
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::NoCredentialMaterial)?;
+        #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
+        {
+            Ok(Arc::new(crate::OpenAiRealtimeTextAdapter::new(secret)))
+        }
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "realtime")))]
+        {
+            let _ = secret;
+            Err(ProviderClientError::MissingFeature("openai-realtime"))
+        }
+    }
+
     fn build_image_generation_executor(
         &self,
         connection: ResolvedConnection,
@@ -575,7 +623,8 @@ mod tests {
         OpenAiAuthMetadata, ProviderAuthMetadata,
     };
     use meerkat_llm_core::{
-        ProviderImageGenerationRequest, provider_runtime::ProviderRuntimeCatalog,
+        ProviderImageGenerationRequest,
+        provider_runtime::{ProviderRuntimeCatalog, binding::DynamicLease},
     };
     use std::sync::Mutex;
     use tokio::net::TcpListener;
@@ -680,6 +729,20 @@ mod tests {
         }
     }
 
+    fn resolved_openai_connection() -> ResolvedConnection {
+        ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
+            backend_profile: Arc::new(backend("openai_api")),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "sk-test".into(),
+                AuthMetadata::default(),
+                None,
+                "openai:test",
+            )),
+        }
+    }
+
     fn resolved_chatgpt_connection(
         metadata: AuthMetadata,
         base_url: Option<String>,
@@ -713,6 +776,32 @@ mod tests {
                 None,
                 "openai:azure",
             )),
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for TestAuthorizer {
+        async fn authorize(
+            &self,
+            _req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "test-authorizer"
+        }
+    }
+
+    fn expect_realtime_text_error(
+        result: Result<Arc<dyn LlmClient>, ProviderClientError>,
+    ) -> ProviderClientError {
+        match result {
+            Ok(_) => panic!("expected realtime text client construction to fail"),
+            Err(err) => err,
         }
     }
 
@@ -916,6 +1005,74 @@ mod tests {
         )
         .expect("allowed combination");
         assert_eq!(vb.policy(), &policy);
+    }
+
+    #[test]
+    fn realtime_text_client_is_constructed_by_openai_runtime_gate() {
+        let result = OpenAiProviderRuntime.build_realtime_text_client(resolved_openai_connection());
+
+        #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
+        assert!(
+            result.is_ok(),
+            "native realtime builds should construct the adapter inside the provider runtime"
+        );
+
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "realtime")))]
+        assert!(matches!(
+            result,
+            Err(ProviderClientError::MissingFeature("openai-realtime"))
+        ));
+    }
+
+    #[test]
+    fn realtime_text_client_rejects_provider_specific_unsupported_backends() {
+        let chatgpt = expect_realtime_text_error(OpenAiProviderRuntime.build_realtime_text_client(
+            resolved_chatgpt_connection(AuthMetadata::default(), None),
+        ));
+        assert!(matches!(
+            chatgpt,
+            ProviderClientError::MissingFeature("openai-realtime-chatgpt-backend")
+        ));
+
+        let azure = expect_realtime_text_error(
+            OpenAiProviderRuntime
+                .build_realtime_text_client(resolved_azure_connection(serde_json::Value::Null)),
+        );
+        assert!(matches!(
+            azure,
+            ProviderClientError::MissingFeature("openai-realtime-azure-openai")
+        ));
+    }
+
+    #[test]
+    fn realtime_text_client_rejects_runtime_owned_unsupported_auth_and_url_shapes() {
+        let mut custom_url = resolved_openai_connection();
+        custom_url.backend_profile = Arc::new(BackendProfile {
+            base_url: Some("https://example.test/openai".to_string()),
+            ..backend("openai_api")
+        });
+        let err = expect_realtime_text_error(
+            OpenAiProviderRuntime.build_realtime_text_client(custom_url),
+        );
+        assert!(matches!(
+            err,
+            ProviderClientError::MissingFeature("openai-realtime-custom-base-url")
+        ));
+
+        let mut dynamic_auth = resolved_openai_connection();
+        dynamic_auth.auth_lease = Arc::new(DynamicLease::new(
+            Arc::new(TestAuthorizer),
+            AuthMetadata::default(),
+            None,
+            "openai:dynamic",
+        ));
+        let err = expect_realtime_text_error(
+            OpenAiProviderRuntime.build_realtime_text_client(dynamic_auth),
+        );
+        assert!(matches!(
+            err,
+            ProviderClientError::MissingFeature("openai-realtime-authorizer-auth")
+        ));
     }
 
     #[test]

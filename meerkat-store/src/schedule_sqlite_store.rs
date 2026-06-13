@@ -6,8 +6,8 @@ use meerkat_schedule::{
     AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimDueRequest, ClaimDueResult,
     DeliveryReceipt, Occurrence, OccurrenceDueAction, OccurrenceFilter, OccurrenceId,
     OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrencePhase, OccurrenceSupersessionAck,
-    PendingSupersession, Schedule, ScheduleFilter, SchedulePhase, ScheduleStore,
-    ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
+    PendingSupersession, RuntimeDeliveryOutcome, Schedule, ScheduleFilter, SchedulePhase,
+    ScheduleStore, ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -604,6 +604,63 @@ impl ScheduleStore for SqliteScheduleStore {
                 .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
                 .into_occurrence();
             write_occurrence_in_txn(&tx, &updated)?;
+            tx.commit()?;
+            Ok(Some(updated))
+        })
+        .await
+        .map_err(StoreError::Join)
+        .and_then(|result| result)
+        .map_err(into_schedule_store_error)
+    }
+
+    async fn transition_occurrence_with_receipt_if_current(
+        &self,
+        occurrence_id: &OccurrenceId,
+        expected_attempt: u32,
+        expected_claim_token: Option<Uuid>,
+        transition: OccurrenceLifecycleInput,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        let path = self.path.clone();
+        let occurrence_id = occurrence_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = open_connection(&path)?;
+            ensure_schedule_schema(&conn)?;
+            let tx = begin_immediate_transaction(&mut conn)?;
+            let Some(current) = read_occurrence_in_txn(&tx, &occurrence_id)? else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            if current.attempt_count != expected_attempt
+                || current.claim_token() != expected_claim_token
+            {
+                tx.commit()?;
+                return Ok(None);
+            }
+
+            let terminalized = current
+                .apply(transition)
+                .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+                .into_occurrence();
+            let receipt = terminalized
+                .delivery_receipt_from_authority(runtime_outcome)
+                .map_err(|error: OccurrenceLifecycleError| {
+                    StoreError::Internal(error.to_string())
+                })?;
+            let updated = terminalized
+                .apply(OccurrenceLifecycleInput::RecordReceipt {
+                    runtime_outcome: receipt.runtime_outcome.clone(),
+                    receipt,
+                })
+                .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+                .into_occurrence();
+            let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
+                StoreError::Internal(
+                    "generated occurrence authority did not produce a receipt".to_string(),
+                )
+            })?;
+            write_occurrence_in_txn(&tx, &updated)?;
+            write_receipt_in_txn(&tx, &canonical_receipt)?;
             tx.commit()?;
             Ok(Some(updated))
         })

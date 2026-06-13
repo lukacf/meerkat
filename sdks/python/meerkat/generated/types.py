@@ -308,6 +308,17 @@ metadata only; `source_uuid` is the stable identity."""
 
 
 @dataclass
+class CallbackToolDefinition:
+    """Public callback tool definition accepted by `tools/register`.
+
+The server stamps callback provenance itself; clients provide only the
+model-facing definition."""
+    description: str
+    input_schema: Any
+    name: ToolName
+
+
+@dataclass
 class ConfigEnvelope:
     """Wire envelope returned by config APIs across surfaces."""
     config: Any
@@ -361,6 +372,18 @@ class ServerCapabilities:
 class SkillListResponse:
     """Wire response for listing skills with introspection data."""
     skills: list[SkillEntry]
+
+
+@dataclass
+class ToolsRegisterParams:
+    """Parameters for `tools/register`."""
+    tools: list[CallbackToolDefinition]
+
+
+@dataclass
+class ToolsRegisterResult:
+    """Result for `tools/register`."""
+    registered: int
 
 
 @dataclass

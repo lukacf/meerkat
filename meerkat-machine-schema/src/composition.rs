@@ -1622,6 +1622,39 @@ impl CompositionSchema {
                         },
                     );
                 }
+
+                let Some(declared_route) = self.routes.iter().find(|route| {
+                    route.name == dispatch.name
+                        && route.to.machine == dispatch.target_instance
+                        && route.to.kind == dispatch.target_kind
+                        && route.to.input_variant == dispatch.input_variant
+                }) else {
+                    return Err(
+                        CompositionSchemaError::CompositionDriverDispatchRouteMissingRoute {
+                            composition: self.name.as_str().to_owned(),
+                            driver: driver.name.to_string(),
+                            route: dispatch.name.as_str().to_owned(),
+                            target_instance: dispatch.target_instance.as_str().to_owned(),
+                            target_kind: dispatch.target_kind,
+                            variant: dispatch.input_variant.as_str().to_owned(),
+                        },
+                    );
+                };
+
+                if !driver.watched_effects.iter().any(|watched| {
+                    watched.producer_instance == declared_route.from_machine
+                        && watched.effect_variant == declared_route.effect_variant
+                }) {
+                    return Err(
+                        CompositionSchemaError::CompositionDriverDispatchRouteUnwatchedEffect {
+                            composition: self.name.as_str().to_owned(),
+                            driver: driver.name.to_string(),
+                            route: dispatch.name.as_str().to_owned(),
+                            producer_instance: declared_route.from_machine.as_str().to_owned(),
+                            effect_variant: declared_route.effect_variant.as_str().to_owned(),
+                        },
+                    );
+                }
             }
         }
 
@@ -1642,6 +1675,11 @@ impl CompositionSchema {
                 let input_variant = machine_schema
                     .inputs
                     .variant_named(preload.input_variant.as_str())
+                    .or_else(|_| {
+                        machine_schema
+                            .signals
+                            .variant_named(preload.input_variant.as_str())
+                    })
                     .map_err(CompositionSchemaError::MachineSchema)?;
 
                 for field in &preload.fields {
@@ -2697,6 +2735,21 @@ pub enum CompositionSchemaError {
         target_kind: RouteTargetKind,
         variant: String,
     },
+    CompositionDriverDispatchRouteMissingRoute {
+        composition: String,
+        driver: String,
+        route: String,
+        target_instance: String,
+        target_kind: RouteTargetKind,
+        variant: String,
+    },
+    CompositionDriverDispatchRouteUnwatchedEffect {
+        composition: String,
+        driver: String,
+        route: String,
+        producer_instance: String,
+        effect_variant: String,
+    },
     InvalidTransactionPlan {
         plan: String,
         detail: String,
@@ -3091,6 +3144,27 @@ impl fmt::Display for CompositionSchemaError {
                 f,
                 "composition `{composition}` driver `{driver}` dispatches unknown {target_kind:?} variant `{variant}` on machine instance `{instance}`"
             ),
+            Self::CompositionDriverDispatchRouteMissingRoute {
+                composition,
+                driver,
+                route,
+                target_instance,
+                target_kind,
+                variant,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` dispatch route `{route}` has no matching declared composition route to {target_instance}.{variant} ({target_kind:?})"
+            ),
+            Self::CompositionDriverDispatchRouteUnwatchedEffect {
+                composition,
+                driver,
+                route,
+                producer_instance,
+                effect_variant,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` dispatch route `{route}` is sourced by unwatched effect {producer_instance}.{effect_variant}"
+            ),
             Self::InvalidTransactionPlan { plan, detail } => {
                 write!(f, "invalid transaction plan `{plan}`: {detail}")
             }
@@ -3248,6 +3322,7 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::None
+        | Expr::EmptySet
         | Expr::EmptyMap => true,
         Expr::Some(inner) => route_literal_expr_allowed(inner),
         Expr::SeqLiteral(items) => items.iter().all(route_literal_expr_allowed),
@@ -3258,8 +3333,11 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
 fn literal_matches_type(schema: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bool {
     match (expr, ty) {
         (Expr::Bool(_), TypeRef::Bool) => true,
+        (Expr::Bool(_), TypeRef::Named(name)) => bool_literal_matches_named_type(schema, name),
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
+        (Expr::U64(_), TypeRef::Named(name)) => u64_literal_matches_named_type(schema, name),
         (Expr::U64Max, TypeRef::U64) => true,
+        (Expr::U64Max, TypeRef::Named(name)) => u64_max_literal_matches_named_type(schema, name),
         (Expr::String(_), TypeRef::String) => true,
         (Expr::String(value), TypeRef::Named(name)) => {
             string_literal_matches_named_type(schema, name, value)
@@ -3274,12 +3352,34 @@ fn literal_matches_type(schema: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bo
         (Expr::Some(inner), TypeRef::Option(inner_ty)) => {
             literal_matches_type(schema, inner, inner_ty)
         }
+        (Expr::EmptySet, TypeRef::Set(_)) => true,
         (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
         (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => items
             .iter()
             .all(|item| literal_matches_type(schema, item, inner)),
         _ => false,
     }
+}
+
+fn bool_literal_matches_named_type(schema: &MachineSchema, name: &NamedTypeId) -> bool {
+    matches!(
+        schema.named_type_binding(name).map(|binding| &binding.rust),
+        Some(RustTypeAtom::Bool)
+    )
+}
+
+fn u64_literal_matches_named_type(schema: &MachineSchema, name: &NamedTypeId) -> bool {
+    matches!(
+        schema.named_type_binding(name).map(|binding| &binding.rust),
+        Some(RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8)
+    )
+}
+
+fn u64_max_literal_matches_named_type(schema: &MachineSchema, name: &NamedTypeId) -> bool {
+    matches!(
+        schema.named_type_binding(name).map(|binding| &binding.rust),
+        Some(RustTypeAtom::U64)
+    )
 }
 
 fn string_literal_matches_named_type(

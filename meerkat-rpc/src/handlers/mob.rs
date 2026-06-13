@@ -299,9 +299,11 @@ pub async fn handle_create(
 }
 
 pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
-    let mobs = state
-        .mob_list()
-        .await
+    let mobs = match state.mob_list().await {
+        Ok(mobs) => mobs,
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    };
+    let mobs = mobs
         .into_iter()
         .map(|(mob_id, status)| MobStatusResult {
             mob_id: mob_id.to_string(),

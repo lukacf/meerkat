@@ -621,24 +621,42 @@ fn install_incoming_audio_handler(
                     continue;
                 }
                 if outgoing_audio_control.queued_packets() > 0 && pcm24k_le_has_speech(&pcm_24k) {
-                    let generation = outgoing_audio_control.discard_queued();
+                    // D223: lower the transport-local barge-in into the
+                    // canonical interrupt seam (the same `signal_turn_interrupt`
+                    // path adapter-observed barge-ins use) before discarding
+                    // queued output audio. If the typed seam rejects the
+                    // signal, there is no compensation path for already-lost
+                    // output, so fail closed through generated close feedback.
+                    let generation = match signal_barge_in_then_discard_output_audio(
+                        host.as_ref(),
+                        &channel_id,
+                        outgoing_audio_control.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(generation) => generation,
+                        Err(err) => {
+                            tracing::warn!(
+                                channel = %channel_id,
+                                error = %err,
+                                "failed to lower WebRTC barge-in into the interrupt seam; closing before discarding output audio"
+                            );
+                            reject_failed_audio_input_handoff(
+                                host.as_ref(),
+                                close_feedback.as_ref(),
+                                &peer_registry,
+                                &channel_id,
+                                peer.as_ref(),
+                            )
+                            .await;
+                            break;
+                        }
+                    };
                     tracing::debug!(
                         channel = %channel_id,
                         generation,
                         "discarding queued WebRTC output audio after local speech barge-in"
                     );
-                    // D223: lower the transport-local barge-in into the
-                    // canonical interrupt seam (the same `signal_turn_interrupt`
-                    // path adapter-observed barge-ins use) so the discarded
-                    // output audio is a typed truncation/interrupt fact the
-                    // session observes, not just a discarded queue + log line.
-                    if let Err(err) = host.signal_transport_barge_in(&channel_id).await {
-                        tracing::warn!(
-                            channel = %channel_id,
-                            error = %err,
-                            "failed to lower WebRTC barge-in into the interrupt seam"
-                        );
-                    }
                 }
                 let chunk = LiveInputChunk::Audio {
                     data: pcm_24k,
@@ -665,6 +683,15 @@ fn install_incoming_audio_handler(
         });
         Box::pin(async {})
     }));
+}
+
+async fn signal_barge_in_then_discard_output_audio(
+    host: &LiveAdapterHost,
+    channel_id: &LiveChannelId,
+    outgoing_audio_control: &OutgoingAudioControl,
+) -> Result<u64, LiveAdapterHostError> {
+    host.signal_transport_barge_in(channel_id).await?;
+    Ok(outgoing_audio_control.discard_queued())
 }
 
 async fn pump_observations_to_data_channel(
@@ -701,7 +728,11 @@ async fn pump_observations_to_data_channel(
             Ok(Some(obs)) => obs,
             Ok(None) => break,
             Err(err) => {
-                tracing::warn!(channel = %channel_id, error = %err, "WebRTC observation pump failed");
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "WebRTC observation pump failed"
+                );
                 break;
             }
         };
@@ -788,15 +819,22 @@ async fn pump_observations_to_data_channel(
                     // transport-local counter with no live reader. One signal
                     // per degraded chunk, carrying the cumulative drop count.
                     if let Some(dropped) = chunk_cumulative_dropped
-                        && let Err(err) = host
-                            .signal_output_audio_degraded(&channel_id, dropped)
-                            .await
+                        && !signal_output_audio_degraded_or_close(
+                            host.as_ref(),
+                            close_feedback.as_ref(),
+                            &channel_id,
+                            dropped,
+                        )
+                        .await
                     {
-                        tracing::warn!(
-                            channel = %channel_id,
-                            error = %err,
-                            "failed to lower WebRTC output-audio degradation into the host signal seam"
-                        );
+                        close_and_deregister_peer(
+                            &peer_registry,
+                            &channel_id,
+                            &data_channel,
+                            &peer,
+                        )
+                        .await;
+                        return;
                     }
                 }
                 Err(err) => {
@@ -960,6 +998,25 @@ async fn close_channel_with_generated_feedback(
             error = %err,
             "live WebRTC transport host close commit failed after generated feedback"
         );
+        return false;
+    }
+    true
+}
+
+async fn signal_output_audio_degraded_or_close(
+    host: &LiveAdapterHost,
+    close_feedback: &dyn LiveChannelCloseFeedback,
+    channel_id: &LiveChannelId,
+    dropped: u64,
+) -> bool {
+    if let Err(err) = host.signal_output_audio_degraded(channel_id, dropped).await {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %err,
+            dropped_output_audio_packets = dropped,
+            "failed to lower WebRTC output-audio degradation into the host signal seam; closing channel"
+        );
+        let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
         return false;
     }
     true
@@ -1301,13 +1358,130 @@ fn pcm24k_le_has_speech(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::host::NoOpProjectionSink;
+    use crate::host::{
+        LiveProjectionError, LiveProjectionSink, LiveTranscriptIdentity, NoOpProjectionSink,
+    };
     use async_trait::async_trait;
     use meerkat_core::live_adapter::{
-        LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterStatus,
+        LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode, LiveAdapterStatus,
     };
-    use meerkat_core::types::SessionId;
+    use meerkat_core::types::{SessionId, StopReason, Usage};
     use tokio::sync::mpsc;
+
+    struct FailingLiveProjectionSink;
+
+    #[async_trait]
+    impl LiveProjectionSink for FailingLiveProjectionSink {
+        async fn append_user_transcript(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_text_delta(
+            &self,
+            _session_id: &SessionId,
+            _delta: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_transcript_delta(
+            &self,
+            _session_id: &SessionId,
+            _delta: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_text_final(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+            _stop_reason: StopReason,
+            _usage: Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_transcript_final(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+            _stop_reason: StopReason,
+            _usage: Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn truncate_assistant_transcript(
+            &self,
+            _session_id: &SessionId,
+            _provider_item_id: Option<&str>,
+            _previous_item_id: Option<&str>,
+            _content_index: Option<u32>,
+            _response_id: Option<&str>,
+            _text: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_turn_interrupt(
+            &self,
+            _session_id: &SessionId,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Err(LiveProjectionError::Rejected(
+                "interrupt sink rejected".to_string(),
+            ))
+        }
+
+        async fn signal_output_audio_degraded(
+            &self,
+            _session_id: &SessionId,
+            _dropped: u64,
+        ) -> Result<(), LiveProjectionError> {
+            Err(LiveProjectionError::Rejected(
+                "output degradation sink rejected".to_string(),
+            ))
+        }
+
+        async fn signal_turn_completed(
+            &self,
+            _session_id: &SessionId,
+            _stop_reason: StopReason,
+            _usage: Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_terminal_error(
+            &self,
+            _session_id: &SessionId,
+            _code: LiveAdapterErrorCode,
+            _message: &str,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_realtime_transcript(
+            &self,
+            _session_id: &SessionId,
+            _event: &meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+    }
 
     /// rustls 0.23 requires a process-global default `CryptoProvider`. webrtc's
     /// DTLS handshake (driven at connect time by these tests) panics without one
@@ -1438,6 +1612,60 @@ mod tests {
         // record — the two facts are independent.
         let _ = control.discard_queued();
         assert_eq!(control.dropped_packets(), 2);
+    }
+
+    #[tokio::test]
+    async fn barge_in_signal_rejection_keeps_queued_output_audio() {
+        // The interrupt/truncate authority must be accepted before WebRTC
+        // discards queued output audio. If the interrupt signal is rejected,
+        // the queue remains intact so the transport has not silently lost
+        // output before command authority.
+        let host = LiveAdapterHost::new(Arc::new(FailingLiveProjectionSink));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let control = OutgoingAudioControl::default();
+        control.note_queued();
+        control.note_queued();
+
+        let result = signal_barge_in_then_discard_output_audio(&host, &channel_id, &control).await;
+
+        assert!(
+            matches!(result, Err(LiveAdapterHostError::ProjectionError(_))),
+            "barge-in rejection must surface instead of discarding output audio"
+        );
+        assert_eq!(
+            control.queued_packets(),
+            2,
+            "queued output audio must not be discarded before accepted interrupt authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_audio_degradation_signal_failure_closes_channel() {
+        // Once an output-audio packet is dropped, warning-only failure to
+        // record the degradation would lose truth. The WebRTC helper must
+        // force a typed/generated close outcome when the degradation signal
+        // cannot be projected.
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(FailingLiveProjectionSink)));
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id)
+            .await
+            .unwrap();
+        let close_feedback =
+            crate::transport::GeneratedTestMachineLiveChannelCloseFeedback::new(Arc::clone(&host));
+
+        let continued =
+            signal_output_audio_degraded_or_close(host.as_ref(), &close_feedback, &channel_id, 7)
+                .await;
+
+        assert!(!continued, "projection failure must stop the WebRTC pump");
+        assert_eq!(
+            host.channel_status(&channel_id).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
     }
 
     // -----------------------------------------------------------------

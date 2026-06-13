@@ -36,8 +36,7 @@ use meerkat_core::config::HookAdapterConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
-    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookOutcome, HookRunOverrides,
-    HooksConfig,
+    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookRunOverrides, HooksConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -510,11 +509,10 @@ impl DefaultHookEngine {
         }
 
         if entry.mode == HookExecutionMode::Background
-            && entry.point.is_pre()
             && entry.capability != HookCapability::Observe
         {
             return Err(HookEngineError::InvalidConfiguration(format!(
-                "pre_* background hooks must be observe-only: {}",
+                "background hooks must be observe-only: {}",
                 entry.id
             )));
         }
@@ -560,9 +558,6 @@ impl DefaultHookEngine {
         outcome.decision = runtime_decision_with_configured_hook_id(response.decision, &entry.id);
 
         if entry.mode == HookExecutionMode::Background {
-            if entry.point.is_pre() && matches!(outcome.decision, Some(HookDecision::Deny { .. })) {
-                outcome.failure_reason = Some(HookFailureReason::ObserveOnlyViolation);
-            }
             outcome.decision = None;
         }
 
@@ -1633,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_started_background_guardrail_is_rejected() {
+    async fn background_guardrail_is_rejected() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("run-start-bg-guardrail"),
@@ -1662,7 +1657,42 @@ mod tests {
                 None,
             )
             .await
-            .expect_err("invalid background pre hook must be rejected");
+            .expect_err("invalid background guardrail hook must be rejected");
+
+        assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn post_background_guardrail_is_rejected_before_deny_can_be_erased() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("post-bg-guardrail"),
+            point: HookPoint::PostToolExecution,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Guardrail,
+            runtime: runtime_in_process("guardrail"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let err = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PostToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt_input: None,
+                    error_report: None,
+                    error_class: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .expect_err("invalid post background guardrail hook must be rejected");
 
         assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
     }

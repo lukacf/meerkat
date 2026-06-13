@@ -58,8 +58,6 @@ pub struct RpcServer<R, W> {
     pending_callbacks: HashMap<RpcId, oneshot::Sender<RpcResponse>>,
     /// Counter for generating server-originated request IDs.
     callback_id_counter: Arc<AtomicU64>,
-    /// Tool definitions registered via `tools/register`.
-    registered_tools: Arc<std::sync::RwLock<Vec<meerkat_core::ToolDef>>>,
     long_running_tx: mpsc::Sender<LongRunningResponse>,
     long_running_rx: mpsc::Receiver<LongRunningResponse>,
     request_executor: SurfaceRequestExecutor,
@@ -106,7 +104,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         runtime.set_callback_channel(
             callback_request_tx.clone(),
             callback_id_counter.clone(),
-            registered_tools.clone(),
+            registered_tools,
         );
 
         let router = MethodRouter::new(runtime, config_store, notification_sink)
@@ -121,7 +119,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             callback_request_tx,
             pending_callbacks: HashMap::new(),
             callback_id_counter,
-            registered_tools,
             long_running_tx,
             long_running_rx,
             request_executor: SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5)),
@@ -197,7 +194,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             tx
         });
         let callback_id_counter = runtime.callback_id_counter();
-        let registered_tools = runtime.registered_tools();
 
         let router =
             MethodRouter::new_with_mob_state(runtime, config_store, notification_sink, mob_state)
@@ -212,7 +208,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             callback_request_tx,
             pending_callbacks: HashMap::new(),
             callback_id_counter,
-            registered_tools,
             long_running_tx,
             long_running_rx,
             request_executor: SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5)),
@@ -232,7 +227,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
     /// Get the shared registered tools list.
     pub fn registered_tools(&self) -> Arc<std::sync::RwLock<Vec<meerkat_core::ToolDef>>> {
-        self.registered_tools.clone()
+        self.router.runtime().registered_tools()
     }
 
     /// Run the server until EOF or a fatal I/O error.
@@ -279,19 +274,18 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                                 continue;
                             }
 
-                            // Handle `tools/register` synchronously (needs server state).
-                            if request.method == "tools/register" {
-                                let response = self.handle_tools_register(
-                                    request.id.clone(),
-                                    request.params.as_deref(),
-                                );
-                                self.transport.write_response(&response).await?;
-                                continue;
-                            }
-
                             if request.is_notification() && request.method == "cancel" {
                                 if let Some(target) = request_cancel_target(request.params.as_deref()) {
                                     let _ = self.request_executor.cancel_request(&target).await;
+                                }
+                                continue;
+                            }
+
+                            if requires_connection_ordered_dispatch(&request) {
+                                // Callback tool registration must commit before later
+                                // pipelined frames on this connection can observe tools.
+                                if let Some(response) = self.router.dispatch(request).await {
+                                    self.transport.write_response(&response).await?;
                                 }
                                 continue;
                             }
@@ -449,51 +443,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
         self.transport.write_response(&to_write).await.is_ok()
     }
-
-    /// Handle `tools/register` — register callback tool definitions.
-    fn handle_tools_register(
-        &self,
-        id: Option<RpcId>,
-        params: Option<&serde_json::value::RawValue>,
-    ) -> RpcResponse {
-        #[derive(serde::Deserialize)]
-        struct RegisterParams {
-            tools: Vec<meerkat_core::ToolDef>,
-        }
-
-        let params: RegisterParams = match crate::handlers::parse_params(params) {
-            Ok(p) => p,
-            Err(resp) => {
-                return resp.with_id(id);
-            }
-        };
-
-        match self.registered_tools.write() {
-            Ok(mut tools) => {
-                let count = params.tools.len();
-                for new_tool in params.tools {
-                    let stamped = meerkat_core::ToolDef {
-                        provenance: Some(meerkat_core::types::ToolProvenance {
-                            kind: meerkat_core::types::ToolSourceKind::Callback,
-                            source_id: "callback".into(),
-                        }),
-                        ..new_tool
-                    };
-                    if let Some(existing) = tools.iter_mut().find(|t| t.name == stamped.name) {
-                        *existing = stamped;
-                    } else {
-                        tools.push(stamped);
-                    }
-                }
-                RpcResponse::success(id, serde_json::json!({ "registered": count }))
-            }
-            Err(_) => RpcResponse::error(
-                id,
-                crate::error::INTERNAL_ERROR,
-                "Failed to acquire tool registry lock",
-            ),
-        }
-    }
 }
 
 fn request_key(id: &RpcId) -> String {
@@ -546,6 +495,10 @@ fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
         request.method.as_str(),
         request.params.as_deref().map(|params| params.get()),
     ))
+}
+
+fn requires_connection_ordered_dispatch(request: &RpcRequest) -> bool {
+    request.method == "tools/register"
 }
 
 /// Start the RPC server on stdin/stdout.
@@ -731,6 +684,21 @@ mod tests {
         };
 
         assert!(request_semantics(&request).requires_long_running_executor());
+    }
+
+    #[test]
+    fn tools_register_requires_connection_ordered_dispatch() {
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(1)),
+            method: "tools/register".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "tools": []
+            }))),
+        };
+
+        assert!(requires_connection_ordered_dispatch(&request));
+        assert!(!request_semantics(&request).requires_long_running_executor());
     }
 
     #[tokio::test]

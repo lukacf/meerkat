@@ -976,6 +976,11 @@ struct RuntimeSessionEntry {
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
     /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
     epoch_id: meerkat_core::RuntimeEpochId,
+    /// Mechanical close gate for handles minted from this session entry.
+    ///
+    /// The DSL still owns runtime terminality; this gate only invalidates cloned
+    /// cross-crate handles after the entry is torn down.
+    handle_teardown_gate: Arc<crate::handles::HandleTeardownGate>,
     /// Shared consumer cursor state for the epoch.
     cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
@@ -1060,6 +1065,14 @@ impl RuntimeSessionEntry {
             authority.state().registration_phase,
             dsl::RegistrationPhase::Active
         )
+    }
+
+    fn close_handle_teardown_gate(&self) {
+        let _guard = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.handle_teardown_gate.close();
     }
 
     fn generated_stop_deferred(&self) -> bool {
@@ -1312,6 +1325,23 @@ impl MeerkatMachine {
             })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    async fn session_handle_teardown_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<crate::handles::HandleTeardownGate>, String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(&entry.handle_teardown_gate))
+            .ok_or_else(|| {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                .to_string()
+            })
+    }
+
     /// Test-support: install the session's generated peer-comms handle (and its
     /// owner token) onto a comms runtime, so the runtime accepts generated trust
     /// mutations minted from THIS adapter's session dsl authority. Mirrors what
@@ -1329,7 +1359,13 @@ impl MeerkatMachine {
             .session_dsl_authority(session_id)
             .await
             .map_err(|error| format!("session dsl authority unavailable: {error}"))?;
-        let handle = std::sync::Arc::new(crate::handles::HandleDslAuthority::from_shared(dsl));
+        let teardown_gate = self
+            .session_handle_teardown_gate(session_id)
+            .await
+            .map_err(|error| format!("session handle teardown gate unavailable: {error}"))?;
+        let handle = std::sync::Arc::new(
+            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(dsl, teardown_gate),
+        );
         crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
     }
 

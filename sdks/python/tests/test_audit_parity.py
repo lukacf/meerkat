@@ -92,6 +92,7 @@ CANONICAL_APP_RPC_METHODS = {
     "schedule/tools",
     "schedule/call",
     "models/catalog",
+    "tools/register",
 }
 
 RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
@@ -169,11 +170,11 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "schedule/tools": (MeerkatClient, "list_schedule_tools"),
     "schedule/call": (MeerkatClient, "call_schedule_tool"),
     "models/catalog": (MeerkatClient, "get_models_catalog"),
+    "tools/register": (MeerkatClient, "tool"),
 }
 
 EXCLUSIONS = {
     "initialize",
-    "tools/register",
     "session/stream_open",
     "session/stream_close",
     "mob/stream_open",
@@ -192,7 +193,6 @@ def test_python_public_wrapper_inventory_is_complete():
 def test_parity_exclusion_set_is_small_and_justified():
     assert EXCLUSIONS == {
         "initialize",
-        "tools/register",
         "session/stream_open",
         "session/stream_close",
         "mob/stream_open",

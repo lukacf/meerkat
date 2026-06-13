@@ -1929,10 +1929,6 @@ pub async fn handle_live_interrupt(
                     .await;
             }
         };
-    #[cfg(feature = "live-webrtc")]
-    if let Some(state) = webrtc_state {
-        state.discard_output_audio(&channel_id).await;
-    }
 
     match host
         .send_command_observed(&channel_id, LiveAdapterCommand::Interrupt)
@@ -1954,7 +1950,13 @@ pub async fn handle_live_interrupt(
                 }
             };
             match live_command_result_from_machine_authority(&authority, command_kind) {
-                Ok(value) => RpcResponse::success(id, value),
+                Ok(value) => {
+                    #[cfg(feature = "live-webrtc")]
+                    if let Some(state) = webrtc_state {
+                        state.discard_output_audio(&channel_id).await;
+                    }
+                    RpcResponse::success(id, value)
+                }
                 Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
             }
         }
@@ -2001,10 +2003,6 @@ pub async fn handle_live_truncate(
                     .await;
             }
         };
-    #[cfg(feature = "live-webrtc")]
-    if let Some(state) = webrtc_state {
-        state.discard_output_audio(&channel_id).await;
-    }
     let command = LiveAdapterCommand::TruncateAssistantOutput {
         item_id: parsed.item_id.clone(),
         content_index: parsed.content_index,
@@ -2028,7 +2026,13 @@ pub async fn handle_live_truncate(
                 }
             };
             match live_command_result_from_machine_authority(&authority, command_kind) {
-                Ok(value) => RpcResponse::success(id, value),
+                Ok(value) => {
+                    #[cfg(feature = "live-webrtc")]
+                    if let Some(state) = webrtc_state {
+                        state.discard_output_audio(&channel_id).await;
+                    }
+                    RpcResponse::success(id, value)
+                }
                 Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
             }
         }

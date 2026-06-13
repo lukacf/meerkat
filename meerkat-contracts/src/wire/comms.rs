@@ -619,6 +619,11 @@ pub enum CommsSendErrorData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<String>,
     },
+    PeerAdmissionDropped {
+        peer: String,
+        reason: meerkat_core::comms::AdmissionDropReason,
+        message: String,
+    },
     SendFailed {
         message: String,
     },
@@ -634,6 +639,7 @@ impl CommsSendErrorData {
         match self {
             Self::PeerNotFoundOrNotTrusted { message, .. }
             | Self::PeerUnreachable { message, .. }
+            | Self::PeerAdmissionDropped { message, .. }
             | Self::SendFailed { message }
             | Self::InvalidCommand { message } => message,
         }
@@ -774,6 +780,30 @@ mod tests {
             message.contains("extra_behavior") || message.contains("unknown field"),
             "expected unknown result field error, got: {message}"
         );
+    }
+
+    #[test]
+    fn comms_send_error_data_preserves_admission_drop_reason() {
+        let value = serde_json::to_value(CommsSendErrorData::PeerAdmissionDropped {
+            peer: "peer-a".to_string(),
+            reason: meerkat_core::comms::AdmissionDropReason::InboxFull,
+            message: "peer 'peer-a' rejected envelope at ingress: inbox_full".to_string(),
+        })
+        .expect("admission drop error data should serialize");
+
+        assert_eq!(value["code"], "peer_admission_dropped");
+        assert_eq!(value["peer"], "peer-a");
+        assert_eq!(value["reason"], "inbox_full");
+
+        let roundtrip: CommsSendErrorData =
+            serde_json::from_value(value).expect("admission drop error data should deserialize");
+        assert!(matches!(
+            roundtrip,
+            CommsSendErrorData::PeerAdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::InboxFull,
+                ..
+            }
+        ));
     }
 
     #[test]

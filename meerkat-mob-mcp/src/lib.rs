@@ -672,19 +672,26 @@ impl MobMcpState {
         &self,
         definition: MobDefinition,
         packed_skills: BTreeMap<String, Vec<u8>>,
+        source_identity: meerkat_mob::MobDefinitionSourceIdentity,
     ) -> Result<MobId, MobError> {
+        let mut definition = MobBuilder::lower_mobpack_definition(definition, &packed_skills)?;
+        definition.source_identity = Some(source_identity);
         let mob_id = definition.id.clone();
         self.ensure_restored().await?;
-        if self.mobs.read().await.contains_key(&mob_id) {
-            return Ok(mob_id);
+        if let Some(existing) = self.mobs.read().await.get(&mob_id) {
+            let existing_definition = existing.handle.definition();
+            if existing_definition.source_identity == definition.source_identity
+                && existing_definition == &definition
+            {
+                return Ok(mob_id);
+            }
+            return Err(MobError::Internal(format!(
+                "duplicate mobpack create for mob id '{mob_id}' does not match existing verified pack identity"
+            )));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let handle = self
-            .configure_builder(MobBuilder::from_mobpack(
-                definition,
-                packed_skills,
-                storage,
-            )?)
+            .configure_builder(MobBuilder::new(definition, storage))
             .create()
             .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
@@ -706,7 +713,9 @@ impl MobMcpState {
                 if let Err(error) = Self::remove_storage_files(storage_path.as_deref()).await {
                     tracing::error!(error = %error, "duplicate mobpack storage cleanup failed");
                 }
-                Ok(mob_id)
+                Err(MobError::Internal(format!(
+                    "duplicate mobpack create raced for mob id '{mob_id}' before verified identity could be committed"
+                )))
             }
         }
     }
@@ -795,27 +804,24 @@ impl MobMcpState {
     /// Observation surfaces use this while child mobs are actively processing:
     /// a status query would queue behind the same actor work the UI is trying
     /// to observe.
-    pub async fn mob_handles_snapshot(&self) -> Vec<(MobId, MobHandle)> {
-        if !self
-            .ensure_restored_best_effort("mob_handles_snapshot")
-            .await
-        {
-            return Vec::new();
-        }
-        self.mobs
+    pub async fn mob_handles_snapshot(&self) -> Result<Vec<(MobId, MobHandle)>, MobError> {
+        self.ensure_restored().await?;
+        Ok(self
+            .mobs
             .read()
             .await
             .iter()
             .map(|(id, managed)| (id.clone(), managed.handle.clone()))
-            .collect()
+            .collect())
     }
 
-    pub async fn mob_list(&self) -> Vec<(MobId, MobState)> {
-        self.mob_handles_snapshot()
-            .await
+    pub async fn mob_list(&self) -> Result<Vec<(MobId, MobState)>, MobError> {
+        Ok(self
+            .mob_handles_snapshot()
+            .await?
             .into_iter()
             .map(|(id, handle)| (id, handle.status_observation_snapshot()))
-            .collect()
+            .collect())
     }
 
     pub async fn mob_status(&self, mob_id: &MobId) -> Result<MobState, MobError> {
@@ -3467,7 +3473,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map_err(|e| map_mob_err(call, e))?;
                     encode(call, json!({"status": wire_mob_lifecycle_status(status)}))
                 } else {
-                    let mobs = self.state.mob_list().await;
+                    let mobs = self
+                        .state
+                        .mob_list()
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?;
                     encode(
                         call,
                         json!({"mobs": mobs.into_iter().map(|(id, status)| json!({"mob_id": id, "status": wire_mob_lifecycle_status(status)})).collect::<Vec<_>>() }),
@@ -3912,7 +3922,7 @@ mod tests {
     use meerkat_core::{
         PeerMeta, Provider, Session, SessionMetadata, SessionTooling, ToolCategoryOverride,
     };
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
     use tokio::sync::Notify;
@@ -6312,6 +6322,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mobpack_duplicate_create_requires_same_verified_identity() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let definition = explicit_definition("dup-pack-mob");
+        let first_identity =
+            meerkat_mob::MobDefinitionSourceIdentity::mobpack("a".repeat(64), Vec::new());
+        let second_identity =
+            meerkat_mob::MobDefinitionSourceIdentity::mobpack("b".repeat(64), Vec::new());
+
+        let mob_id = state
+            .mob_create_from_mobpack(definition.clone(), BTreeMap::new(), first_identity.clone())
+            .await
+            .expect("initial mobpack create");
+        assert_eq!(mob_id.as_str(), "dup-pack-mob");
+
+        let same = state
+            .mob_create_from_mobpack(definition.clone(), BTreeMap::new(), first_identity)
+            .await
+            .expect("same verified mobpack identity should be idempotent");
+        assert_eq!(same, mob_id);
+
+        let err = state
+            .mob_create_from_mobpack(definition, BTreeMap::new(), second_identity)
+            .await
+            .expect_err("mismatched verified mobpack digest must fail closed");
+        assert!(
+            err.to_string().contains("verified pack identity"),
+            "expected verified identity mismatch error, got {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mob_create_rejects_missing_definition() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -6694,7 +6736,7 @@ mod tests {
             "restored member should still have a live bridge-session binding"
         );
 
-        let mobs = restored.mob_list().await;
+        let mobs = restored.mob_list().await.expect("restore mob list");
         assert_eq!(mobs.len(), 1);
         assert_eq!(mobs[0].0, mob_id);
     }
@@ -6729,8 +6771,38 @@ mod tests {
             MobMcpState::new(svc).with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         assert!(
-            restored.mob_list().await.is_empty(),
+            restored
+                .mob_list()
+                .await
+                .expect("list restored mobs")
+                .is_empty(),
             "destroyed persistent mobs must not reappear after restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_list_surfaces_persistent_restore_failure() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create mob root");
+        tokio::fs::write(mob_root.join("broken.db"), b"not a sqlite database")
+            .await
+            .expect("write invalid mob store");
+
+        let state = Arc::new(
+            MobMcpState::new(svc).with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        let err = state
+            .mob_list()
+            .await
+            .expect_err("restore failure must not be reported as an empty successful list");
+
+        assert!(
+            err.to_string().contains("broken.db") || err.to_string().contains("database"),
+            "restore failure should preserve the typed storage error, got {err}"
         );
     }
 
@@ -6824,7 +6896,7 @@ mod tests {
                 .any(|member| member.agent_identity == "worker-1"),
             "incomplete destroy must retain the failed member as retry work"
         );
-        let mobs = state.mob_list().await;
+        let mobs = state.mob_list().await.expect("list retained mobs");
         assert!(
             mobs.iter().any(|(id, _)| id == &mob_id),
             "incomplete destroy must retain in-memory retry anchor"
@@ -6847,7 +6919,11 @@ mod tests {
             "complete retry should remove persistent mob db"
         );
         assert!(
-            state.mob_list().await.is_empty(),
+            state
+                .mob_list()
+                .await
+                .expect("list mobs after retry")
+                .is_empty(),
             "complete retry should remove retry anchor"
         );
     }
@@ -7249,7 +7325,7 @@ mod tests {
         }
 
         // Only one mob should exist in the registry
-        let mobs = state.mob_list().await;
+        let mobs = state.mob_list().await.expect("list implicit mobs");
         let implicit_count = mobs.len();
         assert_eq!(implicit_count, 1, "only one implicit mob should exist");
     }

@@ -12742,6 +12742,7 @@ async fn execute_mob_run_pack(
 ) -> anyhow::Result<String> {
     let VerifiedMobpack {
         archive,
+        digest,
         trust_warnings: warnings,
         ..
     } = load_verified_mobpack(
@@ -12789,8 +12790,14 @@ async fn execute_mob_run_pack(
             Arc::clone(&surface.mob_state_cache),
         )
         .await?;
+        let source_identity =
+            meerkat_mob::MobDefinitionSourceIdentity::mobpack(digest.to_string(), warnings.clone());
         let mob_id = state
-            .mob_create_from_mobpack(archive.definition.clone(), archive.skills.clone())
+            .mob_create_from_mobpack(
+                archive.definition.clone(),
+                archive.skills.clone(),
+                source_identity,
+            )
             .await
             .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?;
         let run_id = state
@@ -20295,7 +20302,12 @@ capabilities = ["rpc"]
             .await
             .expect("rebuilt mob tools context should initialize");
         assert!(
-            ctx_b.state.mob_list().await.is_empty(),
+            ctx_b
+                .state
+                .mob_list()
+                .await
+                .expect("persistent mob list should restore after destroy")
+                .is_empty(),
             "destroyed mob must not be recovered from the persistent substrate"
         );
     }

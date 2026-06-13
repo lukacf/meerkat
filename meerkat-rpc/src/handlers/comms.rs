@@ -18,7 +18,7 @@ pub use meerkat_contracts::{CommsPeersParams, CommsSendParams};
 /// Project a typed comms `SendError` into the generated wire error-data
 /// contract. The error taxonomy is owned by `meerkat-contracts`
 /// (`CommsSendErrorData`), not hand-shaped JSON (K17).
-fn normalize_send_error(
+pub(crate) fn normalize_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
 ) -> CommsSendErrorData {
@@ -45,6 +45,17 @@ fn normalize_send_error(
                 reason: CommsPeerUnreachableReason::TransportError,
                 message: format!("peer '{peer}' is unreachable: transport_error"),
                 details: Some(details.clone()),
+            }
+        }
+        meerkat_core::comms::SendError::AdmissionDropped { reason } => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            CommsSendErrorData::PeerAdmissionDropped {
+                peer: peer.to_string(),
+                reason: *reason,
+                message: format!(
+                    "peer '{peer}' rejected envelope at ingress: {}",
+                    reason.as_code()
+                ),
             }
         }
         other => CommsSendErrorData::SendFailed {
@@ -298,6 +309,25 @@ mod tests {
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
         );
+    }
+
+    #[test]
+    fn normalize_send_error_preserves_admission_drop_reason() {
+        let data = normalize_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::InboxFull,
+            },
+        );
+
+        assert_eq!(
+            data.message(),
+            "peer 'peer-a' rejected envelope at ingress: inbox_full"
+        );
+        let json = serde_json::to_value(data).unwrap();
+        assert_eq!(json["code"], "peer_admission_dropped");
+        assert_eq!(json["peer"], "peer-a");
+        assert_eq!(json["reason"], "inbox_full");
     }
 
     // Gate (#62): `send_receipt_json` returns a typed `Result` and no longer

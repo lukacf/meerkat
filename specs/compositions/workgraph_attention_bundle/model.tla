@@ -7407,6 +7407,29 @@ WitnessInjectNext_close_stops_attention_route ==
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
+WitnessScriptComplete_close_stops_attention_route ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
+
+WitnessNoPrematureStutter_close_stops_attention_route ==
+    \/ WitnessScriptComplete_close_stops_attention_route
+    \/ model_step_count' # model_step_count
+
+WitnessSatisfiedStutter_close_stops_attention_route ==
+    /\ WitnessScriptComplete_close_stops_attention_route
+    /\ \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
 CoreNext ==
     \/ DeliverQueuedRoute
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -7751,14 +7774,18 @@ Next ==
     \/ CoreNext
 
 WitnessNext_close_stops_attention_route ==
-    \/ CoreNext
+    \/ DeliverQueuedRoute
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenCompleted(arg_expected_revision, arg_at_utc_ms)
+    \/ \E arg_expected_revision \in {attention_revision} : \E arg_at_utc_ms \in 0..2 : attention_StopActive(arg_expected_revision, arg_at_utc_ms)
+    \/ WitnessSatisfiedStutter_close_stops_attention_route
     \/ WitnessInjectNext_close_stops_attention_route
 
 
 closed_work_item_routes_to_attention_stop == \E route_name \in RouteNames : /\ RouteSource(route_name) = "workgraph" /\ RouteEffect(route_name) = "Closed" /\ RouteTargetMachine(route_name) = "attention" /\ RouteTargetInput(route_name) = "Stop"
 attention_stop_originates_from_work_item_close == \A input_packet \in observed_inputs : ((input_packet.machine = "attention" /\ input_packet.variant = "Stop" /\ input_packet.source_route = "work_item_close_stops_attention") => (/\ input_packet.source_kind = "route" /\ input_packet.source_machine = "workgraph" /\ input_packet.source_effect = "Closed" /\ \E effect_packet \in emitted_effects : /\ effect_packet.machine = "workgraph" /\ effect_packet.variant = "Closed" /\ effect_packet.effect_id = input_packet.effect_id /\ \E route_packet \in RoutePackets : /\ route_packet.route = "work_item_close_stops_attention" /\ route_packet.source_machine = "workgraph" /\ route_packet.effect = "Closed" /\ route_packet.target_machine = "attention" /\ route_packet.target_input = "Stop" /\ route_packet.effect_id = input_packet.effect_id /\ route_packet.payload = input_packet.payload))
 
-RouteObserved_work_item_close_stops_attention == \E packet \in RoutePackets : packet.route = "work_item_close_stops_attention"
+RouteObserved_work_item_close_stops_attention == \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
 RouteCoverage_work_item_close_stops_attention == (RouteObserved_work_item_close_stops_attention \/ ~RouteObserved_work_item_close_stops_attention)
 CoverageInstrumentation == RouteCoverage_work_item_close_stops_attention
 
@@ -7770,392 +7797,15 @@ Spec ==
     /\ Init
     /\ [][Next]_vars
 
-WitnessFairness_close_stops_attention_route_1 ==
-    /\ WF_vars(DeliverQueuedRoute)
-    /\ WF_vars(\E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_owner_key \in WorkOwnerKeyValues : \E arg_now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : workgraph_ClaimOpen(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_lease_expires_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_owner_key \in WorkOwnerKeyValues : \E arg_now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : workgraph_ClaimExpiredInProgress(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_lease_expires_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_ReleaseInProgress(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_BlockOpen(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_BlockInProgress(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_BlockBlocked(arg_expected_revision))
-    /\ WF_vars(\E arg_unresolved_blocker_count \in 0..2 : workgraph_RefreshEligibilityOpen(arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_unresolved_blocker_count \in 0..2 : workgraph_RefreshEligibilityInProgress(arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_unresolved_blocker_count \in 0..2 : workgraph_RefreshEligibilityBlocked(arg_unresolved_blocker_count))
-    /\ WF_vars(\E arg_kind \in WorkEdgeKindValues : \E arg_from_item_key \in WorkItemKeyValues : \E arg_to_item_key \in WorkItemKeyValues : \E arg_edge_key \in WorkEdgeKeyValues : \E arg_reverse_path_key \in WorkDependencyPathKeyValues : workgraph_ValidateLink(arg_kind, arg_from_item_key, arg_to_item_key, arg_edge_key, arg_reverse_path_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenCompleted(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseInProgressCompleted(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseBlockedCompleted(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenCancelled(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseInProgressCancelled(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseBlockedCancelled(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenFailed(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseInProgressFailed(arg_expected_revision, arg_at_utc_ms))
-
-WitnessFairness_close_stops_attention_route_2 ==
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceOpen(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceInProgress(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceBlocked(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundInProgress(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCancelled(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundFailed(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictInProgress(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCancelled(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictFailed(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionInProgress(arg_kind))
-
-WitnessFairness_close_stops_attention_route_3 ==
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCancelled(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionFailed(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableInProgress(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCancelled(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableFailed(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind))
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind))
-
-WitnessFairness_close_stops_attention_route_4 ==
-    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind))
-    /\ WF_vars(workgraph_ClassifyTerminalityTerminalCompleted)
-    /\ WF_vars(workgraph_ClassifyTerminalityTerminalCancelled)
-    /\ WF_vars(workgraph_ClassifyTerminalityTerminalFailed)
-    /\ WF_vars(workgraph_ClassifyTerminalityLiveAbsent)
-    /\ WF_vars(workgraph_ClassifyTerminalityLiveOpen)
-    /\ WF_vars(workgraph_ClassifyTerminalityLiveInProgress)
-    /\ WF_vars(workgraph_ClassifyTerminalityLiveBlocked)
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessOpenOpen(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessInProgressInProgress(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessNotClaimableAbsent(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessNotClaimableBlocked(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessNotClaimableCompleted(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessNotClaimableCancelled(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : workgraph_ClassifyReadinessNotClaimableFailed(arg_now_utc_ms))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionAbsent(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionOpen(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionInProgress(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionBlocked(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCompleted(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCancelled(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionFailed(arg_blocker_present, arg_blocker_lifecycle_phase))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenOpen(arg_requested_status))
-
-WitnessFairness_close_stops_attention_route_5 ==
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCompleted(arg_requested_status))
-
-WitnessFairness_close_stops_attention_route_6 ==
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestAbsent(arg_completion_policy))
-
-WitnessFairness_close_stops_attention_route_7 ==
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorBlocked(arg_completion_policy))
-
-WitnessFairness_close_stops_attention_route_8 ==
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCompletedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionCancelledFailed(arg_requested_status))
-
-WitnessFairness_close_stops_attention_route_9 ==
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionFailedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedAbsentFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedOpenFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressInProgress(arg_requested_status))
-
-WitnessFairness_close_stops_attention_route_10 ==
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedInProgressFailed(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedAbsent(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedOpen(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedInProgress(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedBlocked(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedCompleted(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedCancelled(arg_requested_status))
-    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCloseStatusAdmissionDeniedBlockedFailed(arg_requested_status))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy))
-
-WitnessFairness_close_stops_attention_route_11 ==
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedOpen(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-
-WitnessFairness_close_stops_attention_route_12 ==
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedFailed(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedAbsent(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedOpen(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedInProgress(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedBlocked(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedCompleted(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedCancelled(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_ClassifyCompletionPolicyMutationAdmissionChangedFailed(arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalRequiredFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-
-WitnessFairness_close_stops_attention_route_13 ==
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSupervisorMismatchFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionEvidenceKindFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedAbsent(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-
-WitnessFairness_close_stops_attention_route_14 ==
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedOpen(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedInProgress(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedBlocked(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E arg_at_utc_ms \in 0..2 : attention_SupersedeActive(arg_expected_revision, arg_superseded_by_binding_key, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E arg_at_utc_ms \in 0..2 : attention_SupersedePaused(arg_expected_revision, arg_superseded_by_binding_key, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_at_utc_ms \in 0..2 : attention_StopActive(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_at_utc_ms \in 0..2 : attention_StopPaused(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityActive(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityPausedElapsed(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityPausedPending(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilitySuperseded(arg_now_utc_ms))
-    /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityStopped(arg_now_utc_ms))
-    /\ WF_vars(\E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthorityActive(arg_mode, arg_delegated_authority))
-    /\ WF_vars(\E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthorityPaused(arg_mode, arg_delegated_authority))
-    /\ WF_vars(\E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthoritySuperseded(arg_mode, arg_delegated_authority))
-    /\ WF_vars(\E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthorityStopped(arg_mode, arg_delegated_authority))
-    /\ WF_vars(WitnessInjectNext_close_stops_attention_route)
-
 WitnessSpec_close_stops_attention_route ==
     /\ WitnessInit_close_stops_attention_route
     /\ [] [WitnessNext_close_stops_attention_route]_vars
-    /\ WitnessFairness_close_stops_attention_route_1
-    /\ WitnessFairness_close_stops_attention_route_2
-    /\ WitnessFairness_close_stops_attention_route_3
-    /\ WitnessFairness_close_stops_attention_route_4
-    /\ WitnessFairness_close_stops_attention_route_5
-    /\ WitnessFairness_close_stops_attention_route_6
-    /\ WitnessFairness_close_stops_attention_route_7
-    /\ WitnessFairness_close_stops_attention_route_8
-    /\ WitnessFairness_close_stops_attention_route_9
-    /\ WitnessFairness_close_stops_attention_route_10
-    /\ WitnessFairness_close_stops_attention_route_11
-    /\ WitnessFairness_close_stops_attention_route_12
-    /\ WitnessFairness_close_stops_attention_route_13
-    /\ WitnessFairness_close_stops_attention_route_14
 
-WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == <> RouteObserved_work_item_close_stops_attention
-WitnessTransitionObserved_close_stops_attention_route_workgraph_CreateOpen == <> (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
-WitnessTransitionObserved_close_stops_attention_route_workgraph_CloseOpenCompleted == <> (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
-WitnessTransitionObserved_close_stops_attention_route_attention_StopActive == <> (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
-WitnessTransitionOrder_close_stops_attention_route_1 == <> (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
+WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == WitnessScriptComplete_close_stops_attention_route => (RouteObserved_work_item_close_stops_attention)
+WitnessTransitionObserved_close_stops_attention_route_workgraph_CreateOpen == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_close_stops_attention_route_workgraph_CloseOpenCompleted == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
+WitnessTransitionObserved_close_stops_attention_route_attention_StopActive == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
+WitnessTransitionOrder_close_stops_attention_route_1 == WitnessScriptComplete_close_stops_attention_route => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
 
 THEOREM Spec => []closed_work_item_routes_to_attention_stop
 THEOREM Spec => []attention_stop_originates_from_work_item_close

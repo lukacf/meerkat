@@ -153,14 +153,20 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         wrapper.contains("machine-verify --all --skip-cargo-tests")
             && wrapper.contains("--skip-tlc-composition meerkat_mob_seam")
             && wrapper.contains("--skip-tlc-composition adaptive_mob_bundle")
+            && wrapper.contains(
+                "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
+            )
+            && wrapper.contains("witness-layer_terminal_feedback.cfg")
+            && wrapper.contains("tlc -workers")
+            && wrapper.contains("adaptive_mob_bundle` has a canonical route")
             && wrapper.contains("ci.cfg structural-invariant contract")
             && wrapper.contains("export RUSTFMT"),
-        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify with guarded broad-composition TLC skips"
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT, prove the bounded adaptive witness, and run hermetic machine-verify with documented broad-composition TLC scale skips"
     );
     assert!(
         doctor.contains("machine_verify_all_tlc_test")
             && doctor.contains("machine-verify --all")
-            && doctor.contains("broad-composition structural guards")
+            && doctor.contains("bounded adaptive witness")
             && doctor.contains("hermetic rustfmt"),
         "buildbuddy-doctor must guard the machine-authority TLC mapping and rustfmt runfiles"
     );

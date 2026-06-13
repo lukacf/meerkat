@@ -5075,6 +5075,38 @@ mod tests {
         assert_eq!(acceptance.acceptance_sequence(), 1);
     }
 
+    #[tokio::test]
+    async fn rejected_live_command_does_not_mint_acceptance_evidence() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::new(RejectingCommandAdapter))
+            .await
+            .unwrap();
+
+        let result = host
+            .send_command_observed(&ch, LiveAdapterCommand::Interrupt)
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(LiveAdapterHostError::AdapterError(
+                    LiveAdapterError::TransportError { .. }
+                ))
+            ),
+            "adapter rejection must surface before public command acceptance"
+        );
+        let inner = host.inner.lock().await;
+        let channel = inner.channels.get(&ch).unwrap();
+        assert_eq!(
+            channel.command_acceptance_sequence, 0,
+            "rejected command must not mint authority evidence that WebRTC could use to discard output"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // Test fakes
     // ---------------------------------------------------------------------
@@ -5127,6 +5159,31 @@ mod tests {
 
         fn status(&self) -> LiveAdapterStatus {
             LiveAdapterStatus::Closed
+        }
+
+        async fn close(&self) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    struct RejectingCommandAdapter;
+
+    #[async_trait]
+    impl LiveAdapter for RejectingCommandAdapter {
+        async fn send_command(&self, _command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            Err(LiveAdapterError::TransportError {
+                message: "command queue rejected".into(),
+            })
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(None)
+        }
+
+        fn status(&self) -> LiveAdapterStatus {
+            LiveAdapterStatus::Ready
         }
 
         async fn close(&self) -> Result<(), LiveAdapterError> {

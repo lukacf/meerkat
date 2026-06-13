@@ -42,12 +42,14 @@ import {
 } from './generated/auth.js';
 import type {
   AuthRpcMethod,
+  BindingIdParams,
   CreateProfileParams,
   DeviceCompleteParams,
   DeviceStartParams,
   LoginCompleteParams,
   LoginStartParams,
   ProvisionApiKeyParams,
+  RealmIdParams,
   WireAuthMethod,
   WireAuthProfile,
   WireAuthProfileCleared,
@@ -180,7 +182,7 @@ export class Auth {
 
   /** Persist credentials for a managed-store binding. */
   async createProfile(params: CreateProfileParams): Promise<AuthProfileCreated> {
-    const result = await this.transport.request<CreateProfileParams, unknown>(
+    const result = await this.transport.request<CreateProfileParams, WireAuthProfileCreated>(
       AUTH_RPC_METHODS.profileCreate,
       parseCreateProfileParams(params),
     );
@@ -189,21 +191,20 @@ export class Auth {
 
   /** Enumerate configured auth profiles for a realm. */
   async listProfiles(realm_id: string): Promise<AuthProfilesList> {
-    const result = await this.transport.request<{ realm_id: string }, unknown>(
+    const params: RealmIdParams = { realm_id };
+    const result = await this.transport.request<RealmIdParams, WireAuthProfilesList>(
       AUTH_RPC_METHODS.profileList,
-      { realm_id },
+      params,
     );
     return parseWireAuthProfilesList(result);
   }
 
   /** Fetch the profile resolved by a binding. */
   async getProfile(realm_id: string, binding_id: string): Promise<AuthProfileDetail> {
-    const result = await this.transport.request<
-      { realm_id: string; binding_id: string },
-      unknown
-    >(
+    const params: BindingIdParams = { realm_id, binding_id };
+    const result = await this.transport.request<BindingIdParams, WireAuthProfileDetail>(
       AUTH_RPC_METHODS.profileGet,
-      { realm_id, binding_id },
+      params,
     );
     return parseWireAuthProfileDetail(result);
   }
@@ -213,19 +214,17 @@ export class Auth {
     realm_id: string,
     binding_id: string,
   ): Promise<AuthCredentialsCleared> {
-    const result = await this.transport.request<
-      { realm_id: string; binding_id: string },
-      unknown
-    >(
+    const params: BindingIdParams = { realm_id, binding_id };
+    const result = await this.transport.request<BindingIdParams, WireAuthProfileCleared>(
       AUTH_RPC_METHODS.profileDelete,
-      { realm_id, binding_id },
+      params,
     );
     return parseWireAuthProfileCleared(result);
   }
 
   /** Begin an OAuth browser flow. */
   async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
-    const result = await this.transport.request<LoginStartParams, unknown>(
+    const result = await this.transport.request<LoginStartParams, WireLoginStart>(
       AUTH_RPC_METHODS.loginStart,
       parseLoginStartParams(params),
     );
@@ -234,7 +233,7 @@ export class Auth {
 
   /** Finalize an OAuth browser flow. */
   async loginComplete(params: LoginCompleteParams): Promise<AuthLoginReady> {
-    const result = await this.transport.request<LoginCompleteParams, unknown>(
+    const result = await this.transport.request<LoginCompleteParams, WireLoginReady>(
       AUTH_RPC_METHODS.loginComplete,
       parseLoginCompleteParams(params),
     );
@@ -243,7 +242,7 @@ export class Auth {
 
   /** Start a device-code flow for keyboardless hosts. */
   async loginDeviceStart(params: DeviceStartParams): Promise<AuthDeviceStart> {
-    const result = await this.transport.request<DeviceStartParams, unknown>(
+    const result = await this.transport.request<DeviceStartParams, WireDeviceStart>(
       AUTH_RPC_METHODS.loginDeviceStart,
       parseDeviceStartParams(params),
     );
@@ -254,7 +253,7 @@ export class Auth {
   async loginDeviceComplete(
     params: DeviceCompleteParams,
   ): Promise<AuthDeviceCompleteResult> {
-    const result = await this.transport.request<DeviceCompleteParams, unknown>(
+    const result = await this.transport.request<DeviceCompleteParams, WireDeviceCompleteResult>(
       AUTH_RPC_METHODS.loginDeviceComplete,
       parseDeviceCompleteParams(params),
     );
@@ -265,7 +264,7 @@ export class Auth {
   async loginProvisionApiKey(
     params: ProvisionApiKeyParams,
   ): Promise<AuthProvisionApiKeyResult> {
-    const result = await this.transport.request<ProvisionApiKeyParams, unknown>(
+    const result = await this.transport.request<ProvisionApiKeyParams, WireProvisionApiKeyResult>(
       AUTH_RPC_METHODS.loginProvisionApiKey,
       parseProvisionApiKeyParams(params),
     );
@@ -278,15 +277,12 @@ export class Auth {
     binding_id: string,
     profile_id?: string,
   ): Promise<AuthStatus> {
-    const params: { realm_id: string; binding_id: string; profile_id?: string } = {
+    const params: BindingIdParams = {
       realm_id,
       binding_id,
     };
     if (profile_id !== undefined) params.profile_id = profile_id;
-    const result = await this.transport.request<
-      typeof params,
-      unknown
-    >(
+    const result = await this.transport.request<BindingIdParams, WireAuthStatusDetail>(
       AUTH_RPC_METHODS.statusGet,
       params,
     );
@@ -299,15 +295,12 @@ export class Auth {
     binding_id: string,
     profile_id?: string,
   ): Promise<AuthCredentialsCleared> {
-    const params: { realm_id: string; binding_id: string; profile_id?: string } = {
+    const params: BindingIdParams = {
       realm_id,
       binding_id,
     };
     if (profile_id !== undefined) params.profile_id = profile_id;
-    const result = await this.transport.request<
-      typeof params,
-      unknown
-    >(
+    const result = await this.transport.request<BindingIdParams, WireAuthProfileCleared>(
       AUTH_RPC_METHODS.logout,
       params,
     );

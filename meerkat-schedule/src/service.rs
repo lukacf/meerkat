@@ -568,6 +568,25 @@ mod tests {
                 )
                 .await
         }
+
+        async fn transition_occurrence_with_receipt_if_current(
+            &self,
+            occurrence_id: &OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+            runtime_outcome: Option<crate::RuntimeDeliveryOutcome>,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner
+                .transition_occurrence_with_receipt_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                    runtime_outcome,
+                )
+                .await
+        }
     }
 
     #[tokio::test]

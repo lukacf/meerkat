@@ -122,6 +122,44 @@ pub struct ScheduleToolsResult {
     pub tools: Vec<Value>,
 }
 
+/// Public callback tool definition accepted by `tools/register`.
+///
+/// The server stamps callback provenance itself; clients provide only the
+/// model-facing definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CallbackToolDefinition {
+    pub name: meerkat_core::ToolName,
+    pub description: String,
+    #[cfg_attr(feature = "schema", schemars(with = "Value"))]
+    pub input_schema: Value,
+}
+
+impl From<CallbackToolDefinition> for meerkat_core::ToolDef {
+    fn from(value: CallbackToolDefinition) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            input_schema: value.input_schema,
+            provenance: None,
+        }
+    }
+}
+
+/// Parameters for `tools/register`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ToolsRegisterParams {
+    pub tools: Vec<CallbackToolDefinition>,
+}
+
+/// Result for `tools/register`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ToolsRegisterResult {
+    pub registered: usize,
+}
+
 /// Parameters for `schedule/call`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

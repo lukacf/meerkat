@@ -6294,6 +6294,552 @@ mod admission_window_tests {
     }
 }
 
+/// Shell-level interleaving tests for the 0.7.2 disciplined-shell-inputs
+/// archive/teardown seam (undisciplined-shell-inputs-072.json entries 15-20).
+///
+/// These drive the racy orders deterministically: teardown commits between an
+/// input's decision point and its delivery, and every pending waiter must
+/// resolve with a typed benign/terminal outcome — never a dropped reply
+/// channel, never an internal error for a legitimate interleaving.
+///
+/// Expected colors after Stage A codegen (DSL landed, shell not yet rewired):
+/// - `pending_start_turn_resolves_cancelled_when_archive_wins`: RED
+/// - `queued_context_application_resolves_after_archive_mid_turn`: RED
+/// - `begin_window_shutdown_yank_resolves_cancelled`: RED
+/// - `archive_closes_drain_obligation_before_task_exit`: RED
+/// - `post_archive_context_application_returns_typed_not_found`: GREEN (pin)
+/// - `start_turn_processed_after_archive_resolves_cancelled`: GREEN (pin)
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod archive_shutdown_drain_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use meerkat_core::service::{
+        InitialTurnPolicy, SessionBuildOptions, SessionService, StartTurnRequest,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    const WAITER_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn test_llm_identity(model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    /// Probe hooks shared between the test body and the agent running inside
+    /// the session task.
+    #[derive(Clone)]
+    struct DrainProbeHooks {
+        entered_run: Arc<tokio::sync::Notify>,
+        release_run: Arc<tokio::sync::Semaphore>,
+        /// When set, the next `discard_unapplied_active_turn_system_context`
+        /// call fires `request_shutdown` on the installed turn-admission slot
+        /// — deterministically simulating archive committing its teardown
+        /// transition between the admitted preflight and the begin step.
+        yank_shutdown_in_discard: Arc<AtomicBool>,
+        turn_admission: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<TurnAdmissionSlot>>>>>,
+    }
+
+    impl DrainProbeHooks {
+        fn new() -> Self {
+            Self {
+                entered_run: Arc::new(tokio::sync::Notify::new()),
+                release_run: Arc::new(tokio::sync::Semaphore::new(0)),
+                yank_shutdown_in_discard: Arc::new(AtomicBool::new(false)),
+                turn_admission: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+
+        async fn install_turn_admission<B: SessionAgentBuilder + 'static>(
+            &self,
+            service: &EphemeralSessionService<B>,
+            session_id: &SessionId,
+        ) {
+            let sessions = service.sessions.read().await;
+            let handle = sessions.get(session_id).expect("session handle");
+            *self
+                .turn_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Arc::clone(&handle.turn_admission));
+        }
+    }
+
+    #[derive(Clone)]
+    struct DrainProbeBuilder {
+        hooks: DrainProbeHooks,
+    }
+
+    struct DrainProbeAgent {
+        session_id: SessionId,
+        identity: SessionLlmIdentity,
+        hooks: DrainProbeHooks,
+        system_context_state: meerkat_core::SystemContextStateHandle,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for DrainProbeBuilder {
+        type Agent = DrainProbeAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(DrainProbeAgent {
+                session_id: SessionId::new(),
+                identity: test_llm_identity(&req.model),
+                hooks: self.hooks.clone(),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    SessionSystemContextState::default(),
+                )
+                .expect("default system-context state should restore"),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for DrainProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.hooks.entered_run.notify_one();
+            self.hooks
+                .release_run
+                .acquire()
+                .await
+                .expect("drain probe run release semaphore should stay open")
+                .forget();
+            Ok(RunResult {
+                text: "ran".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(meerkat_core::Session::new())
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
+        fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
+
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
+        }
+
+        fn discard_unapplied_active_turn_system_context(
+            &mut self,
+        ) -> Result<usize, SystemContextStateError> {
+            if self
+                .hooks
+                .yank_shutdown_in_discard
+                .swap(false, Ordering::SeqCst)
+            {
+                let slot_arc = self
+                    .hooks
+                    .turn_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .expect("turn admission slot installed before yank");
+                let mut slot = lock_turn_admission(&slot_arc);
+                slot.request_shutdown()
+                    .expect("admitted slot accepts the racing shutdown");
+            }
+            Ok(0)
+        }
+    }
+
+    fn create_request() -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "archive-drain-test".to_string(),
+            prompt: ContentInput::Text("defer".to_string()),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        }
+    }
+
+    fn start_turn_request() -> StartTurnRequest {
+        StartTurnRequest {
+            prompt: ContentInput::Text("go".to_string()),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+        }
+    }
+
+    async fn command_tx_for<B: SessionAgentBuilder + 'static>(
+        service: &EphemeralSessionService<B>,
+        session_id: &SessionId,
+    ) -> mpsc::Sender<SessionCommand> {
+        let sessions = service.sessions.read().await;
+        sessions
+            .get(session_id)
+            .expect("session handle")
+            .command_tx
+            .clone()
+    }
+
+    async fn turn_admission_for<B: SessionAgentBuilder + 'static>(
+        service: &EphemeralSessionService<B>,
+        session_id: &SessionId,
+    ) -> Arc<std::sync::Mutex<TurnAdmissionSlot>> {
+        let sessions = service.sessions.read().await;
+        Arc::clone(&sessions.get(session_id).expect("session handle").turn_admission)
+    }
+
+    /// Entry 16/18 ("Archive-Unregister-Command-Leapfrog"): a runtime context
+    /// application queued behind archive's `Shutdown` command must resolve
+    /// its waiter with a typed benign outcome — the appends are dropped with
+    /// the archived session — instead of the session task exiting and
+    /// dropping the reply channel.
+    #[tokio::test]
+    async fn queued_context_application_resolves_after_archive_mid_turn() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        let command_tx = command_tx_for(service.as_ref(), &session_id).await;
+
+        // Occupy the session task with a live run.
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_run.notified())
+            .await
+            .expect("turn should enter the probe run");
+
+        // Archive while the turn is running: deferred shutdown + queued
+        // Shutdown command; the live handle leaves the sessions map.
+        service.archive(&session_id).await.expect("archive");
+
+        // The racing context application was decided against the pre-archive
+        // handle; it queues BEHIND the Shutdown command.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ApplyRuntimeSystemContext {
+                appends: Vec::new(),
+                reply_tx,
+            })
+            .await
+            .expect("pre-archive handle accepts the queued command");
+
+        // Let the turn finish; finalize commits Completing -> ShuttingDown.
+        hooks.release_run.add_permits(1);
+        let run_result = tokio::time::timeout(WAITER_TIMEOUT, turn)
+            .await
+            .expect("turn task should finish")
+            .expect("turn task should not panic")
+            .expect("committed turn must succeed");
+        assert_eq!(run_result.text, "ran");
+
+        // The queued waiter must resolve benignly (typed archived no-op),
+        // never observe a dropped reply channel.
+        tokio::time::timeout(WAITER_TIMEOUT, reply_rx)
+            .await
+            .expect("context-application waiter should settle")
+            .expect(
+                "context application racing archive must resolve with the typed archived \
+                 outcome, not a dropped reply channel",
+            );
+    }
+
+    /// Entry 16 (StartTurn flavor): a pending start-turn request whose
+    /// processing the session task never reaches (it exits on the queued
+    /// `Shutdown`) must resolve with the typed cancellation, not a dropped
+    /// result channel.
+    #[tokio::test]
+    async fn pending_start_turn_resolves_cancelled_when_archive_wins() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        let command_tx = command_tx_for(service.as_ref(), &session_id).await;
+
+        // Occupy the session task with a live run.
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_run.notified())
+            .await
+            .expect("turn should enter the probe run");
+
+        // Archive (queues Shutdown), THEN deliver the racing start-turn via
+        // the pre-archive handle: it queues behind Shutdown.
+        service.archive(&session_id).await.expect("archive");
+        let (result_tx, result_rx) = oneshot::channel();
+        let request = start_turn_request();
+        command_tx
+            .send(SessionCommand::StartTurn {
+                prompt: request.prompt,
+                runtime: Box::new(request.runtime),
+                event_tx: request.event_tx,
+                result_tx,
+                active_admission: None,
+            })
+            .await
+            .expect("pre-archive handle accepts the queued start-turn");
+
+        hooks.release_run.add_permits(1);
+        let run_result = tokio::time::timeout(WAITER_TIMEOUT, turn)
+            .await
+            .expect("turn task should finish")
+            .expect("turn task should not panic")
+            .expect("committed turn must succeed");
+        assert_eq!(run_result.text, "ran");
+
+        let pending = tokio::time::timeout(WAITER_TIMEOUT, result_rx)
+            .await
+            .expect("pending start-turn waiter should settle")
+            .expect(
+                "start-turn racing archive must resolve with the typed cancellation, \
+                 not a dropped result channel",
+            );
+        assert!(
+            matches!(pending, Err(AgentError::Cancelled)),
+            "pending start-turn must resolve with the typed cancellation, got {pending:?}"
+        );
+    }
+
+    /// Pin (GREEN): a start-turn the task DOES dequeue after archive's
+    /// shutdown transition already resolves with the typed cancellation via
+    /// `AuthorizeStartTurnDispatchShuttingDown` -> `Cancelled`.
+    #[tokio::test]
+    async fn start_turn_processed_after_archive_resolves_cancelled() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        );
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        let command_tx = command_tx_for(&service, &session_id).await;
+        let turn_admission = turn_admission_for(&service, &session_id).await;
+
+        // Claim the admission (the start-turn decision point), then let the
+        // archive teardown transition commit BEFORE the command is delivered.
+        {
+            let sessions = service.sessions.read().await;
+            let handle = sessions.get(&session_id).expect("session handle");
+            EphemeralSessionService::<DrainProbeBuilder>::request_start_turn(&session_id, handle)
+                .expect("idle session admits the turn");
+        }
+        {
+            let mut slot = lock_turn_admission(&turn_admission);
+            slot.request_shutdown()
+                .expect("admitted slot accepts shutdown");
+        }
+
+        let (result_tx, result_rx) = oneshot::channel();
+        let request = start_turn_request();
+        command_tx
+            .send(SessionCommand::StartTurn {
+                prompt: request.prompt,
+                runtime: Box::new(request.runtime),
+                event_tx: request.event_tx,
+                result_tx,
+                active_admission: None,
+            })
+            .await
+            .expect("live handle accepts the start-turn command");
+
+        let pending = tokio::time::timeout(WAITER_TIMEOUT, result_rx)
+            .await
+            .expect("start-turn waiter should settle")
+            .expect("start-turn waiter must resolve");
+        assert!(
+            matches!(pending, Err(AgentError::Cancelled)),
+            "start-turn dispatched into ShuttingDown must cancel cleanly, got {pending:?}"
+        );
+    }
+
+    /// Entries 19/20 (begin-window flavor of the mid-arm yank): archive's
+    /// shutdown transition commits between the admitted preflight and the
+    /// begin step. The waiter must see the typed cancellation, not an
+    /// "illegal begin-run transition" internal error.
+    #[tokio::test]
+    async fn begin_window_shutdown_yank_resolves_cancelled() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        );
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        hooks.install_turn_admission(&service, &session_id).await;
+        hooks.yank_shutdown_in_discard.store(true, Ordering::SeqCst);
+
+        let result = service.start_turn(&session_id, start_turn_request()).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(SessionError::Agent(AgentError::Cancelled))
+            ),
+            "a start-turn yanked into ShuttingDown before begin must cancel cleanly, \
+             got {result:?}"
+        );
+    }
+
+    /// Pin (GREEN): once archive completed, a fresh context application is a
+    /// typed `NotFound` — the archived-session public contract — and never a
+    /// hung waiter.
+    #[tokio::test]
+    async fn post_archive_context_application_returns_typed_not_found() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(DrainProbeBuilder { hooks }, 1);
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        service.archive(&session_id).await.expect("archive");
+
+        let result = tokio::time::timeout(
+            WAITER_TIMEOUT,
+            service.apply_runtime_system_context(&session_id, Vec::new()),
+        )
+        .await
+        .expect("post-archive context application must settle");
+        assert!(
+            matches!(result, Err(SessionError::NotFound { .. })),
+            "post-archive context application must be a typed NotFound, got {result:?}"
+        );
+    }
+
+    /// D1: archive teardown is only complete once the machine-owned drain
+    /// obligation has closed — the session task must flush pending admission
+    /// work and fire `ResolvePendingAdmissionDrained` before it exits.
+    #[tokio::test]
+    async fn archive_closes_drain_obligation_before_task_exit() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(DrainProbeBuilder { hooks }, 1);
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        let command_tx = command_tx_for(&service, &session_id).await;
+        let turn_admission = turn_admission_for(&service, &session_id).await;
+
+        service.archive(&session_id).await.expect("archive");
+
+        // The session task exits once it has processed the Shutdown command;
+        // the command channel closes with it.
+        tokio::time::timeout(WAITER_TIMEOUT, command_tx.closed())
+            .await
+            .expect("session task should exit after archive");
+
+        let slot = lock_turn_admission(&turn_admission);
+        assert_eq!(slot.phase(), TurnAdmissionPhase::ShuttingDown);
+        assert!(
+            !slot.admission_drain_pending(),
+            "the session task must close the machine-owned drain obligation \
+             (ResolvePendingAdmissionDrained) before it exits"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod inline_video_admission_tests {

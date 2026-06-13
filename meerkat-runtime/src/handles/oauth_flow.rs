@@ -3725,4 +3725,236 @@ mod tests {
             })
         ));
     }
+
+    // --- 0.7.2 disciplined shell inputs (lane L3 auth-release) ---
+    //
+    // Shell-level interleaving pins for the release drain (D1) and the
+    // post-teardown totality of Expire*/Confirm*/Finish* (D2a). The
+    // release-with-pending-flow tests stay RED until Stage B wires
+    // BeginRelease + drain discharge into `release_lease`; the
+    // post-release no-op tests go GREEN with the DSL change alone.
+
+    /// D1 (Stage B RED): releasing a lease with a pending browser flow must
+    /// succeed by terminally cancelling the flow as a machine-owned drain
+    /// obligation — not leave a flow behind that later "expires" into a
+    /// Released machine, and not fail the release.
+    #[test]
+    fn release_lease_terminally_cancels_pending_browser_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending flow must drain it, not fail");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::Released)
+        );
+        assert!(
+            !lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "pending flow must be terminally cancelled by the release drain"
+        );
+
+        // The flow is dead: completing the login is a typed rejection.
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::LifecycleRejected { .. })
+        ));
+
+        // A late error-handler/prune compensation fire for the cancelled
+        // flow lands on the Released machine as a benign no-op
+        // (worklist entries 24, 25, 27, 30).
+        lifecycle
+            .apply_oauth_input(
+                &target,
+                auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                    flow_id: state.clone(),
+                },
+                "late_prune_expire_browser",
+                false,
+            )
+            .expect("post-release expire must be a benign no-op");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::Released)
+        );
+    }
+
+    /// D1 (Stage B RED): same drain obligation for pending device flows
+    /// (worklist entries 26, 28).
+    #[test]
+    fn release_lease_terminally_cancels_pending_device_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+
+        authority
+            .admit_device_code(
+                target.clone(),
+                provider,
+                "device-code-1".to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending device flow must drain it, not fail");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::Released)
+        );
+        assert!(
+            !lifecycle.has_oauth_device_flow_for_test(&target, "device-code-1"),
+            "pending device flow must be terminally cancelled by the release drain"
+        );
+
+        // Late prune/compensation expiry of the cancelled flow is benign.
+        lifecycle
+            .expire_device_flow(&target, "device-code-1")
+            .expect("post-release device expire must be a benign no-op");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::Released)
+        );
+    }
+
+    /// D2a (GREEN with the DSL change): the poll/prune producers and the
+    /// durable-admission confirmation legitimately fire at a Released
+    /// machine; every arrival is Ok-no-op through the shell dispatch path,
+    /// never an ERROR-class rejection (worklist entries 24-30).
+    #[test]
+    fn post_release_oauth_observations_through_shell_dispatch_are_benign() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("releasing an empty lease succeeds");
+        // Snapshot contract: a Released lease projects `phase: None` (Released
+        // means "no live lease phase"), so None is the released observation.
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+
+        lifecycle
+            .apply_oauth_input(
+                &target,
+                auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                    flow_id: "ghost-browser".to_string(),
+                },
+                "late_prune_expire_browser",
+                false,
+            )
+            .expect("post-release browser expire must be a benign no-op");
+        lifecycle
+            .expire_device_flow(&target, "ghost-device")
+            .expect("post-release device expire must be a benign no-op");
+        lifecycle
+            .finish_device_poll(&target, "ghost-poll")
+            .expect("post-release poll finish must be a benign no-op");
+        lifecycle
+            .confirm_oauth_durable_admission(
+                &target,
+                0,
+                16,
+                "late_confirm_oauth_durable_admission",
+            )
+            .expect("post-release durable-admission confirmation must be a benign no-op");
+
+        // The benign observations left the lease released (still projects None).
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+    }
+
+    /// D1 + D2a (Stage B RED): deterministic teardown interleave — the
+    /// prune-shaped expire fires at the exact release-acceptance point
+    /// (after the Release transition committed, before `release_lease`
+    /// returns) and must be a benign no-op, not a guard rejection.
+    #[test]
+    fn late_prune_expire_at_release_acceptance_is_benign() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                "http://127.0.0.1/callback".to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        let hook_result: Arc<StdMutex<Option<Result<(), String>>>> =
+            Arc::new(StdMutex::new(None));
+        let hook_result_for_hook = Arc::clone(&hook_result);
+        let lifecycle_for_hook = Arc::clone(&lifecycle);
+        let target_for_hook = target.clone();
+        let lease_key_for_hook = lease_key.clone();
+        let flow_for_hook = state.clone();
+        let _hook_guard = crate::handles::auth_lease::install_release_after_accept_hook_for_test(
+            Arc::new(move |released_key| {
+                if released_key != &lease_key_for_hook {
+                    return;
+                }
+                let outcome = lifecycle_for_hook
+                    .apply_oauth_input(
+                        &target_for_hook,
+                        auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                            flow_id: flow_for_hook.clone(),
+                        },
+                        "late_prune_expire_at_release_acceptance",
+                        false,
+                    )
+                    .map_err(|err| err.to_string());
+                *hook_result_for_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+            }),
+        );
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending flow must drain it, not fail");
+
+        let outcome = hook_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("release acceptance hook must have fired");
+        assert_eq!(
+            outcome,
+            Ok(()),
+            "expire fired at release acceptance must be a benign no-op"
+        );
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::Released)
+        );
+    }
 }

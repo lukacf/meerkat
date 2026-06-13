@@ -90,6 +90,21 @@ machine! {
 
         effect ScheduleLifecycleEffect {
             EmitScheduleNotice { new_state: ScheduleLifecycleState, revision: u64 },
+            // 0.7.2 D1 (disciplined shell inputs): this effect's sweep covers
+            // ALL outstanding (non-terminal) occurrences of the schedule —
+            // Pending AND driver-claimed in-flight ones (Claimed /
+            // Dispatching / AwaitingCompletion). A revision-affecting commit
+            // (Revise*, Delete*) revokes in-flight claims by superseding them
+            // through the occurrence authority's typed Supersede transition
+            // at commit time, so delete never leaves the driver holding a
+            // claim whose completion inputs get guard-rejected; late
+            // resolutions land as typed late-arrival facts on the occurrence
+            // machine. Each swept occurrence acks back via
+            // OccurrencesSuperseded → ConfirmOccurrencesSuperseded into
+            // `superseded_ack_ids`, which is the machine-owned account of the
+            // claims this commit revoked. (Effect name predates the broadened
+            // sweep — "Pending" reads historically; kept because the effect is
+            // routed in compositions.rs and a rename buys no semantics.)
             SupersedePendingOccurrences { superseding_revision: u64, at_utc_ms: u64 },
             PlanningWindowRecorded { planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64 },
         }
@@ -270,6 +285,19 @@ machine! {
         }
 
         // --- Pause / Resume (from Active or Paused) ---
+        //
+        // 0.7.2 D1: pause deliberately emits NO supersession. Pause is
+        // resumable: pre-dispatch claims are frozen and released through the
+        // existing machine-owned reconcile path (the occurrence authority's
+        // ClaimedDispatchDisposition::Frozen verdict →
+        // ReleaseLeaseForPausedSchedule typed transition), and in-flight
+        // dispatched deliveries legitimately complete under a paused schedule
+        // (the completion-supersession classification treats Paused as
+        // Proceed). A late resolution of a claim that was released (and
+        // possibly reclaimed) is screened by the store's claim-evidence check
+        // and fed back as the occurrence authority's
+        // ClassifyStaleCompletionArrival typed fact — never a silent drop,
+        // never an ERROR.
 
         transition PauseActiveOrPaused {
             on input Pause { at_utc_ms }

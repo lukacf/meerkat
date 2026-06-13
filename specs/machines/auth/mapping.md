@@ -90,6 +90,39 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseCredentialLifecycleWithoutOAuth`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginReleaseDrainingOAuthFlowsValid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseDrainingOAuthFlowsExpiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseDrainingOAuthFlowsExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseDrainingOAuthFlowsRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseDrainingOAuthFlowsReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseWithoutOAuthFlowsValid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseWithoutOAuthFlowsExpiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseWithoutOAuthFlowsExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseWithoutOAuthFlowsRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseWithoutOAuthFlowsReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginReleaseReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
@@ -240,6 +273,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExpireOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowAbsentValid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowAbsentExpiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowAbsentExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowAbsentRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowAbsentReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthBrowserFlowReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: (unclaimed)
@@ -271,6 +322,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConfirmOAuthDurableAdmissionReleased`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowValid`
@@ -318,6 +372,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishOAuthDevicePollReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: (unclaimed)
+- `FinishOAuthDevicePollAbsentValid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishOAuthDevicePollAbsentExpiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishOAuthDevicePollAbsentExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishOAuthDevicePollAbsentRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishOAuthDevicePollAbsentReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishOAuthDevicePollReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: (unclaimed)
@@ -347,6 +419,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowAbsentValid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowAbsentExpiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowAbsentExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowAbsentRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowAbsentReauthRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireOAuthDeviceFlowReleased`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionValidUseAuthorizedValid`
   - anchors: (unclaimed)
@@ -452,9 +542,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CredentialUseAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CancelOAuthFlowsForRelease`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `oauth_flow_membership_consistent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `released_oauth_membership_drained`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `released_not_release_draining`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

@@ -788,6 +788,22 @@ macro_rules! mob_catalog_machine_dsl {
             KickoffResolveFailed { member_id: AgentIdentity, error: String },
             KickoffCancelRequested { member_id: AgentIdentity },
             KickoffClear { member_id: AgentIdentity },
+            // 0.7.2 disciplined shell inputs (L5, rows 12/13): feedback input
+            // that closes the machine-owned kickoff-waiter drain obligation
+            // opened by member retire / destroy-retire transitions via the
+            // `RequestKickoffQuiesce` effect. TOTAL over kickoff state: an
+            // in-flight kickoff is recorded Cancelled (with persist + notice
+            // effects), an idle/terminal kickoff is an accepted no-op, and the
+            // Destroyed phase accepts it as a typed late arrival. The shell
+            // never probes kickoff state before firing it.
+            KickoffQuiesced { member_id: AgentIdentity },
+            // 0.7.2 disciplined shell inputs (L5, row 14): typed teardown
+            // closure for an in-flight pending spawn. Replaces the former
+            // shell habit of laundering teardown cancellation through the
+            // `CompleteSpawn` success signal. TOTAL: absent identities and the
+            // Destroyed phase are accepted no-ops, so idempotent re-drains
+            // and post-teardown stragglers never surface as guard rejections.
+            CancelPendingSpawn { agent_identity: AgentIdentity },
             // ---------------------------------------------------------------
             // Wave-G1 catalog folds (rows #14, #181, #260, #261, #293, #314,
             // #320). These lower duplicate-admission, respawn-generation,
@@ -1092,6 +1108,23 @@ macro_rules! mob_catalog_machine_dsl {
             PersistKickoffUpdate { member_id: AgentIdentity, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: AgentIdentity, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: AgentIdentity, intent: Enum<KickoffIntent> },
+            // 0.7.2 L5 (rows 12/13): machine-owned drain obligation for the
+            // autonomous-kickoff completion-waiter task. Emitted by every
+            // member retire / destroy-retire admission. The shell discharges
+            // it (abort + await the waiter task, resolve its waiters with a
+            // typed terminal outcome) and closes it with the `KickoffQuiesced`
+            // feedback input. Member retirement archival and mob destroy are
+            // guarded on closure (kickoff not in flight), mirroring the
+            // mob-destroy session-ingress-detach obligation shape.
+            RequestKickoffQuiesce { member_id: AgentIdentity },
+            // 0.7.2 L5 (row 14): machine-owned drain obligation for in-flight
+            // spawn-provisioning waiter tasks at destroy admission. Emitted by
+            // `AdmitDestroyCleanup`. The shell aborts + awaits every pending
+            // spawn task, fails its waiters with a typed cancellation, and
+            // closes each machine obligation with `CancelPendingSpawn`;
+            // `Destroy`/`DestroyMob` are guarded on the pending-spawn table
+            // being drained instead of silently wiping it.
+            RequestPendingSpawnQuiesceForDestroy,
             // Row #14: machine-owned duplicate-member admission verdict. The
             // actor mirrors this (Admitted -> Ok; DuplicateRejected ->
             // MemberAlreadyExists) instead of probing the PendingSpawnLineage map.
@@ -1345,6 +1378,14 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistKickoffUpdate => local seam NoOwnerRealization,
         disposition PersistKickoffFailureUpdate => local seam NoOwnerRealization,
         disposition EmitKickoffLifecycleNotice => external seam OwnerRealizationOnly,
+        // 0.7.2 L5 drain obligations: realized by the owning mob actor itself
+        // (same-machine effect→feedback shape; feedback inputs
+        // `KickoffQuiesced` / `CancelPendingSpawn` close them and teardown
+        // completion is guard-enforced on closure). Classified `local` like
+        // the sibling kickoff persistence effects; cross-machine C-F3 pairing
+        // is not required because no other machine participates.
+        disposition RequestKickoffQuiesce => local seam NoOwnerRealization,
+        disposition RequestPendingSpawnQuiesceForDestroy => local seam NoOwnerRealization,
         disposition MemberAdmissionProbed => local seam SurfaceResultAlignment,
         disposition RespawnGenerationComputed => local seam SurfaceResultAlignment,
         disposition StepOutputFaultClassified => local seam SurfaceResultAlignment,
@@ -3899,6 +3940,143 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // =====================================================================
+        // 0.7.2 disciplined shell inputs — L5 (rows 12/13).
+        //
+        // `KickoffQuiesced` closes the kickoff-waiter drain obligation opened
+        // by the member retire / destroy-retire transitions (the
+        // `RequestKickoffQuiesce` effect). It is TOTAL over kickoff state and
+        // lifecycle phase: quiescing an in-flight kickoff is a machine-recorded
+        // cancellation; quiescing an idle or already-terminal kickoff is an
+        // accepted no-op; a post-destroy arrival is an accepted no-op. The
+        // shell aborts + awaits the waiter task and fires this input without
+        // probing machine state first.
+        // =====================================================================
+
+        transition KickoffQuiescedInFlight {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffQuiesced { member_id }
+            guard "kickoff_in_flight" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id)
+                    || self.member_kickoff_callback_pending.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
+        }
+
+        transition KickoffQuiescedIdle {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffQuiesced { member_id }
+            guard "kickoff_not_in_flight" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_callback_pending.contains(member_id)
+            }
+            update {}
+            to Running
+        }
+
+        transition KickoffQuiescedDestroyed {
+            on input KickoffQuiesced { member_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // =====================================================================
+        // 0.7.2 L5 D2a — late kickoff resolutions are total typed no-ops.
+        //
+        // The autonomous-kickoff completion waiter is an in-process producer
+        // that can legitimately deliver its outcome after teardown quiesced
+        // the kickoff (or after the outcome was already in flight when
+        // teardown committed). A late `KickoffResolve*` / `KickoffCancel*`
+        // arrival must commit as an explicit no-op self-loop instead of a
+        // guard rejection the shell has to launder (`Err(_) => Ok(false)`).
+        // Precedent: `ObserveCredentialFreshnessValid` no-op self-loop
+        // (auth_machine.rs). The Destroyed-phase variants keep the inputs
+        // total even when the mob reached Destroyed without per-member
+        // quiesce (e.g. `ObserveRuntimeDestroyed` recovery).
+        // =====================================================================
+
+        transition KickoffResolveStartedLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveStarted { member_id }
+            guard "kickoff_not_starting" { !self.member_kickoff_starting.contains(member_id) }
+            update {}
+            to Running
+        }
+
+        transition KickoffResolveStartedDestroyed {
+            on input KickoffResolveStarted { member_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        transition KickoffResolveCallbackPendingLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveCallbackPending { member_id }
+            guard "kickoff_not_starting" { !self.member_kickoff_starting.contains(member_id) }
+            update {}
+            to Running
+        }
+
+        transition KickoffResolveCallbackPendingDestroyed {
+            on input KickoffResolveCallbackPending { member_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        transition KickoffResolveFailedLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveFailed { member_id, error }
+            guard "kickoff_not_active" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_callback_pending.contains(member_id)
+            }
+            update {}
+            to Running
+        }
+
+        transition KickoffResolveFailedDestroyed {
+            on input KickoffResolveFailed { member_id, error }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        transition KickoffCancelRequestedLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffCancelRequested { member_id }
+            guard "kickoff_not_active" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_callback_pending.contains(member_id)
+            }
+            update {}
+            to Running
+        }
+
+        transition KickoffCancelRequestedDestroyed {
+            on input KickoffCancelRequested { member_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // =====================================================================
         // Wave-G1 catalog folds: classification / probe / escalation transitions
         // =====================================================================
 
@@ -4386,6 +4564,10 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            // 0.7.2 L5: every member-retire admission opens the kickoff-waiter
+            // drain obligation; the shell closes it with `KickoffQuiesced`
+            // before the retirement archival observation can commit.
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireMemberPeerOnly {
@@ -4400,6 +4582,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Running
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetireLiveRunning {
@@ -4416,6 +4599,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetireLiveStopped {
@@ -4432,6 +4616,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Stopped
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetirePeerOnlyRunning {
@@ -4447,6 +4632,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Running
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetirePeerOnlyStopped {
@@ -4462,6 +4648,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Stopped
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetireAlreadyRetiringRunning {
@@ -4476,6 +4663,9 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
+            // Idempotent re-admission still re-requests the kickoff quiesce so
+            // a destroy retry can re-discharge a previously dropped obligation.
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetireAlreadyRetiringStopped {
@@ -4490,6 +4680,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Stopped
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition ObserveRuntimeRetired {
@@ -4516,6 +4707,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            // 0.7.2 L5: retirement archival is the member-level teardown
+            // completion; it may only commit after the kickoff-waiter drain
+            // obligation closed (`KickoffQuiesced` / a natural `KickoffResolve*`
+            // moved the kickoff out of the in-flight states).
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -4536,6 +4736,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -4556,6 +4761,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
             }
@@ -4568,6 +4778,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
             }
@@ -4625,6 +4840,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -4663,6 +4883,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -4701,6 +4926,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
@@ -4731,6 +4961,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
@@ -4944,6 +5179,13 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: None,
                 session_id: None
             }
+            // 0.7.2 L5 (row 14): destroy admission opens the pending-spawn
+            // drain obligation. The shell aborts + awaits every in-flight
+            // spawn-provisioning task, fails its waiters with a typed
+            // cancellation, and closes each machine obligation with
+            // `CancelPendingSpawn` before the `Destroy` transition (guarded on
+            // the drained pending-spawn table) can commit.
+            emit RequestPendingSpawnQuiesceForDestroy
         }
 
         transition AdmitDestroyStorageFinalizing {
@@ -4979,6 +5221,20 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Completed
             }
             guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
+            // 0.7.2 L5: destroy is the final teardown transition; it may only
+            // commit after every kickoff-waiter drain obligation closed (no
+            // member kickoff left in flight) and the pending-spawn table was
+            // drained via typed `CancelPendingSpawn` closures (instead of the
+            // former silent wipe, which erased open obligations).
+            guard "kickoff_waiters_quiesced" {
+                self.member_kickoff_pending == EmptySet
+                && self.member_kickoff_starting == EmptySet
+                && self.member_kickoff_callback_pending == EmptySet
+            }
+            guard "pending_spawns_drained" {
+                self.pending_spawn_count == 0
+                && self.pending_spawn_sessions == EmptyMap
+            }
             update {
                 self.destroy_admitted = true;
                 self.live_runtime_ids = EmptySet;
@@ -5003,8 +5259,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_revival_pending = EmptySet;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
-                self.pending_spawn_count = 0;
-                self.pending_spawn_sessions = EmptyMap;
                 self.coordinator_bound = false;
             }
             to Destroyed
@@ -8139,6 +8393,9 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+            // 0.7.2 L5: member retire opens the kickoff-waiter drain
+            // obligation; archival is guarded on its closure.
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireRunningPreservingBinding {
@@ -8168,6 +8425,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireRunningNoBinding {
@@ -8196,6 +8454,7 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: Some(generation),
                 session_id: None
             }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireStoppedReleasing {
@@ -8231,6 +8490,7 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         // MobMachine does not own a mob-id field, so feedback `mob_id` and
@@ -8317,6 +8577,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireStoppedNoBinding {
@@ -8345,6 +8606,7 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: Some(generation),
                 session_id: None
             }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition RetireAbsentRunning {
@@ -8404,6 +8666,66 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
+        // 0.7.2 L5 D2a (row 14): a spawn completion that arrives after its
+        // pending slot was already closed (teardown drained it, or a destroy
+        // retry re-observes a completion) is a legitimate late arrival, not a
+        // shell error. Accepted as an explicit typed no-op.
+        transition CompleteSpawnLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on signal CompleteSpawn { agent_identity }
+            guard "pending_identity_absent" { self.pending_spawn_sessions.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        transition CompleteSpawnDestroyed {
+            on signal CompleteSpawn { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // =====================================================================
+        // CancelPendingSpawn — 0.7.2 L5 (row 14)
+        //
+        // Typed teardown closure for an in-flight pending spawn. Fired by the
+        // shell while discharging `RequestPendingSpawnQuiesceForDestroy` (and
+        // by member-scoped pending-spawn cancellation), after the provisioning
+        // waiter task was aborted + awaited and its waiters failed with a
+        // typed cancellation. Replaces the former laundering of teardown
+        // cancellation through the `CompleteSpawn` success signal (which
+        // emitted a `Spawned` lifecycle notice for a spawn that never landed).
+        // Total: absent identities and the Destroyed phase are accepted
+        // no-ops so re-drains are idempotent.
+        // =====================================================================
+
+        transition CancelPendingSpawnPresent {
+            per_phase [Running, Stopped, Completed]
+            on input CancelPendingSpawn { agent_identity }
+            guard "pending_spawns_present" { self.pending_spawn_count > 0 }
+            guard "pending_identity_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
+            update {
+                self.pending_spawn_count -= 1;
+                self.pending_spawn_sessions.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition CancelPendingSpawnAbsent {
+            per_phase [Running, Stopped, Completed]
+            on input CancelPendingSpawn { agent_identity }
+            guard "pending_identity_absent" { self.pending_spawn_sessions.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        transition CancelPendingSpawnDestroyed {
+            on input CancelPendingSpawn { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
         // =====================================================================
         // Destroy (input)
         // =====================================================================
@@ -8416,6 +8738,18 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Completed
             }
             guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
+            // 0.7.2 L5: same teardown-completion gating as `DestroyMob` — no
+            // in-flight kickoff waiters, pending-spawn obligations closed via
+            // typed `CancelPendingSpawn` instead of a silent wipe.
+            guard "kickoff_waiters_quiesced" {
+                self.member_kickoff_pending == EmptySet
+                && self.member_kickoff_starting == EmptySet
+                && self.member_kickoff_callback_pending == EmptySet
+            }
+            guard "pending_spawns_drained" {
+                self.pending_spawn_count == 0
+                && self.pending_spawn_sessions == EmptyMap
+            }
             update {
                 self.destroy_admitted = true;
                 self.live_runtime_ids = EmptySet;
@@ -8434,8 +8768,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_endpoints = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
-                self.pending_spawn_count = 0;
-                self.pending_spawn_sessions = EmptyMap;
                 self.coordinator_bound = false;
             }
             to Destroyed

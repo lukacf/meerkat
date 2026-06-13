@@ -22,6 +22,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `oauth_device_flow_expires_at_millis`: `Map<String, u64>`
 - `oauth_device_poll_ids`: `Set<String>`
 - `oauth_outstanding_flow_count`: `u64`
+- `release_draining`: `Bool`
 
 ## Inputs
 - `Acquire`(expires_at_ts: Option<u64>, credential_published_at_millis: u64)
@@ -33,6 +34,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `ReleaseCredentialLifecycle`
+- `BeginRelease`
 - `Release`
 - `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
@@ -61,9 +63,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, expires_at: Option<u64>, credential_generation: u64, credential_published_at_millis: Option<u64>)
 - `WakeRefreshLoop`
 - `CredentialUseAdmissionResolved`(disposition: CredentialUseDisposition)
+- `CancelOAuthFlowsForRelease`(browser_flow_ids: Set<String>, device_flow_ids: Set<String>)
 
 ## Invariants
 - `oauth_flow_membership_consistent`
+- `released_oauth_membership_drained`
+- `released_not_release_draining`
 
 ## Transitions
 ### `Acquire`
@@ -230,9 +235,91 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `Released`
 
+### `BeginReleaseDrainingOAuthFlowsValid`
+- From: `Valid`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `CancelOAuthFlowsForRelease`
+- To: `Valid`
+
+### `BeginReleaseDrainingOAuthFlowsExpiring`
+- From: `Expiring`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `CancelOAuthFlowsForRelease`
+- To: `Expiring`
+
+### `BeginReleaseDrainingOAuthFlowsExpired`
+- From: `Expired`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `CancelOAuthFlowsForRelease`
+- To: `Expired`
+
+### `BeginReleaseDrainingOAuthFlowsRefreshing`
+- From: `Refreshing`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `CancelOAuthFlowsForRelease`
+- To: `Refreshing`
+
+### `BeginReleaseDrainingOAuthFlowsReauthRequired`
+- From: `ReauthRequired`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `CancelOAuthFlowsForRelease`
+- To: `ReauthRequired`
+
+### `BeginReleaseWithoutOAuthFlowsValid`
+- From: `Valid`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_absent`
+- To: `Valid`
+
+### `BeginReleaseWithoutOAuthFlowsExpiring`
+- From: `Expiring`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_absent`
+- To: `Expiring`
+
+### `BeginReleaseWithoutOAuthFlowsExpired`
+- From: `Expired`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_absent`
+- To: `Expired`
+
+### `BeginReleaseWithoutOAuthFlowsRefreshing`
+- From: `Refreshing`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_absent`
+- To: `Refreshing`
+
+### `BeginReleaseWithoutOAuthFlowsReauthRequired`
+- From: `ReauthRequired`
+- On: `BeginRelease`()
+- Guards:
+  - `oauth_membership_absent`
+- To: `ReauthRequired`
+
+### `BeginReleaseReleased`
+- From: `Released`
+- On: `BeginRelease`()
+- To: `Released`
+
 ### `Release`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
 - On: `Release`()
+- Guards:
+  - `oauth_release_drained`
 - Emits: `EmitLifecycleEvent`
 - To: `Released`
 
@@ -346,6 +433,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Valid`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `browser_restore_has_provider`
   - `browser_restore_has_redirect_uri`
   - `browser_restore_has_expiry`
@@ -356,6 +444,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expiring`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `browser_restore_has_provider`
   - `browser_restore_has_redirect_uri`
   - `browser_restore_has_expiry`
@@ -366,6 +455,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expired`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `browser_restore_has_provider`
   - `browser_restore_has_redirect_uri`
   - `browser_restore_has_expiry`
@@ -376,6 +466,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Refreshing`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `browser_restore_has_provider`
   - `browser_restore_has_redirect_uri`
   - `browser_restore_has_expiry`
@@ -386,6 +477,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ReauthRequired`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `browser_restore_has_provider`
   - `browser_restore_has_redirect_uri`
   - `browser_restore_has_expiry`
@@ -396,6 +488,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Valid`
 - On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `device_restore_has_provider`
   - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
@@ -405,6 +498,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expiring`
 - On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `device_restore_has_provider`
   - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
@@ -414,6 +508,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expired`
 - On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `device_restore_has_provider`
   - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
@@ -423,6 +518,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Refreshing`
 - On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `device_restore_has_provider`
   - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
@@ -432,6 +528,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ReauthRequired`
 - On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
 - Guards:
+  - `not_release_draining`
   - `device_restore_has_provider`
   - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
@@ -441,6 +538,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Valid`
 - On: `RestoreOAuthDevicePoll`(flow_id)
 - Guards:
+  - `not_release_draining`
   - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
@@ -449,6 +547,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expiring`
 - On: `RestoreOAuthDevicePoll`(flow_id)
 - Guards:
+  - `not_release_draining`
   - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
@@ -457,6 +556,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expired`
 - On: `RestoreOAuthDevicePoll`(flow_id)
 - Guards:
+  - `not_release_draining`
   - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `Expired`
@@ -465,6 +565,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Refreshing`
 - On: `RestoreOAuthDevicePoll`(flow_id)
 - Guards:
+  - `not_release_draining`
   - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
@@ -473,6 +574,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ReauthRequired`
 - On: `RestoreOAuthDevicePoll`(flow_id)
 - Guards:
+  - `not_release_draining`
   - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
@@ -481,6 +583,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Valid`
 - On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `browser_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -491,6 +594,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expiring`
 - On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `browser_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -501,6 +605,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expired`
 - On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `browser_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -511,6 +616,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Refreshing`
 - On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `browser_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -521,6 +627,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ReauthRequired`
 - On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `browser_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -688,10 +795,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
+### `ExpireOAuthBrowserFlowAbsentValid`
+- From: `Valid`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- Guards:
+  - `browser_flow_absent`
+- To: `Valid`
+
+### `ExpireOAuthBrowserFlowAbsentExpiring`
+- From: `Expiring`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- Guards:
+  - `browser_flow_absent`
+- To: `Expiring`
+
+### `ExpireOAuthBrowserFlowAbsentExpired`
+- From: `Expired`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- Guards:
+  - `browser_flow_absent`
+- To: `Expired`
+
+### `ExpireOAuthBrowserFlowAbsentRefreshing`
+- From: `Refreshing`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- Guards:
+  - `browser_flow_absent`
+- To: `Refreshing`
+
+### `ExpireOAuthBrowserFlowAbsentReauthRequired`
+- From: `ReauthRequired`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- Guards:
+  - `browser_flow_absent`
+- To: `ReauthRequired`
+
+### `ExpireOAuthBrowserFlowReleased`
+- From: `Released`
+- On: `ExpireOAuthBrowserFlow`(flow_id)
+- To: `Released`
+
 ### `AdmitOAuthDeviceFlowValid`
 - From: `Valid`
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `device_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -702,6 +850,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expiring`
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `device_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -712,6 +861,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Expired`
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `device_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -722,6 +872,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Refreshing`
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `device_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -732,6 +883,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ReauthRequired`
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
+  - `not_release_draining`
   - `device_flow_absent`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
@@ -783,6 +935,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `oauth_global_capacity_available`
 - To: `ReauthRequired`
+
+### `ConfirmOAuthDurableAdmissionReleased`
+- From: `Released`
+- On: `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows, max_outstanding_flows)
+- To: `Released`
 
 ### `VerifyOAuthDeviceFlowValid`
 - From: `Valid`
@@ -929,6 +1086,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
+### `FinishOAuthDevicePollAbsentValid`
+- From: `Valid`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_poll_absent`
+- To: `Valid`
+
+### `FinishOAuthDevicePollAbsentExpiring`
+- From: `Expiring`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_poll_absent`
+- To: `Expiring`
+
+### `FinishOAuthDevicePollAbsentExpired`
+- From: `Expired`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_poll_absent`
+- To: `Expired`
+
+### `FinishOAuthDevicePollAbsentRefreshing`
+- From: `Refreshing`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_poll_absent`
+- To: `Refreshing`
+
+### `FinishOAuthDevicePollAbsentReauthRequired`
+- From: `ReauthRequired`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_poll_absent`
+- To: `ReauthRequired`
+
+### `FinishOAuthDevicePollReleased`
+- From: `Released`
+- On: `FinishOAuthDevicePoll`(flow_id)
+- To: `Released`
+
 ### `ConsumeOAuthDeviceFlowValid`
 - From: `Valid`
 - On: `ConsumeOAuthDeviceFlow`(flow_id, provider, now_millis)
@@ -1018,6 +1215,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `device_flow_present`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
+
+### `ExpireOAuthDeviceFlowAbsentValid`
+- From: `Valid`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- Guards:
+  - `device_flow_absent`
+- To: `Valid`
+
+### `ExpireOAuthDeviceFlowAbsentExpiring`
+- From: `Expiring`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- Guards:
+  - `device_flow_absent`
+- To: `Expiring`
+
+### `ExpireOAuthDeviceFlowAbsentExpired`
+- From: `Expired`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- Guards:
+  - `device_flow_absent`
+- To: `Expired`
+
+### `ExpireOAuthDeviceFlowAbsentRefreshing`
+- From: `Refreshing`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- Guards:
+  - `device_flow_absent`
+- To: `Refreshing`
+
+### `ExpireOAuthDeviceFlowAbsentReauthRequired`
+- From: `ReauthRequired`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- Guards:
+  - `device_flow_absent`
+- To: `ReauthRequired`
+
+### `ExpireOAuthDeviceFlowReleased`
+- From: `Released`
+- On: `ExpireOAuthDeviceFlow`(flow_id)
+- To: `Released`
 
 ### `ResolveCredentialUseAdmissionValidUseAuthorizedValid`
 - From: `Valid`

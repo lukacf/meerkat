@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 7,
+        version: 8,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -46,6 +46,24 @@ machine! {
             completed_at_utc_ms: Option<u64>,
             attempt_count: u64,
             superseded_by_revision: Option<u64>,
+            // 0.7.2 D2a (disciplined shell inputs): typed late-arrival record.
+            // A delivery resolution (Complete / ResolveRuntimeCompletion /
+            // ResolveDeliveryCompletionFailure / ResolveDeliveryFailure) that
+            // arrives after this occurrence was superseded is a legitimate
+            // interleaving, not an error. The machine accepts it as a
+            // self-loop in Superseded and records what the delivery actually
+            // did as a machine-owned fact instead of guard-rejecting the
+            // completion waiter.
+            late_completion_recorded_at_utc_ms: Option<u64>,
+            late_completion_resolution: Option<Enum<LateCompletionResolutionClass>>,
+            late_completion_detail: Option<String>,
+            // 0.7.2 D2a: count of completion-shaped arrivals that bore a
+            // stale claim (attempt/claim-token no longer current). The store
+            // shell screens those arrivals before they can mutate lifecycle
+            // state; the screen verdict is fed back here as a typed
+            // classification so the abandonment is a machine fact, never a
+            // silent drop.
+            stale_completion_arrivals: u64,
         }
 
         init(Pending) {
@@ -87,6 +105,10 @@ machine! {
             completed_at_utc_ms = None,
             attempt_count = 0,
             superseded_by_revision = None,
+            late_completion_recorded_at_utc_ms = None,
+            late_completion_resolution = None,
+            late_completion_detail = None,
+            stale_completion_arrivals = 0,
         }
 
         terminal [Completed, Skipped, Misfired, Superseded, DeliveryFailed]
@@ -198,6 +220,19 @@ machine! {
                 refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
                 trigger: Enum<OccurrenceLifecycleInputVariant>
             },
+            // 0.7.2 D2a: typed classification of a completion-shaped arrival
+            // whose claim evidence (attempt count / claim token) is no longer
+            // current. The store shell screens such arrivals before they can
+            // reach lifecycle transitions; instead of dropping the screened
+            // arrival silently (`Ok(None)` → `Ok(false)`), the shell feeds the
+            // screen verdict back through this input so the occurrence
+            // authority records the abandonment as a machine fact. Total in
+            // every phase for completion-shaped triggers: stale arrivals can
+            // race any later lifecycle state (released lease, reclaim, pause,
+            // delete, terminal outcomes).
+            ClassifyStaleCompletionArrival {
+                trigger: Enum<OccurrenceLifecycleInputVariant>
+            },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -249,6 +284,21 @@ machine! {
                 trigger: Enum<OccurrenceLifecycleInputVariant>,
                 public_class: Enum<OccurrenceTransitionFailureClassKind>,
             },
+            // 0.7.2 D2a: a delivery resolution arrived after this occurrence
+            // was superseded and was recorded as a typed late-arrival fact.
+            // The driver shell mirrors this to know the arrival landed as a
+            // late record (no fresh terminal receipt is minted for it) instead
+            // of treating the machine's answer as a guard rejection.
+            LateCompletionResolutionRecorded {
+                resolution: Enum<LateCompletionResolutionClass>,
+            },
+            // 0.7.2 D2a: a completion-shaped arrival bearing stale claim
+            // evidence was classified. Pure observability for the shell
+            // (debug-level, never ERROR); the lifecycle state is untouched.
+            StaleCompletionArrivalClassified {
+                phase: Enum<OccurrenceLifecycleState>,
+                trigger: Enum<OccurrenceLifecycleInputVariant>,
+            },
         }
 
         helper is_live_claim_phase(phase: OccurrenceLifecycleState) -> bool {
@@ -271,6 +321,25 @@ machine! {
             self.misfire_deadline_utc_ms >= self.due_at_utc_ms
         }
 
+        // 0.7.2 D2a: late-arrival records only exist on superseded
+        // occurrences (Superseded is terminal, so once recorded the pairing
+        // holds forever).
+        invariant late_completion_only_after_supersession {
+            self.late_completion_resolution == None || self.lifecycle_phase == Phase::Superseded
+        }
+
+        invariant late_completion_resolution_requires_timestamp {
+            self.late_completion_resolution == None || self.late_completion_recorded_at_utc_ms != None
+        }
+
+        invariant late_completion_timestamp_requires_resolution {
+            self.late_completion_recorded_at_utc_ms == None || self.late_completion_resolution != None
+        }
+
+        invariant late_completion_detail_requires_resolution {
+            self.late_completion_detail == None || self.late_completion_resolution != None
+        }
+
         disposition Claimed => external seam SurfaceResultAlignment,
         disposition DispatchStarted => external seam SurfaceResultAlignment,
         disposition AwaitingCompletion => external seam SurfaceResultAlignment,
@@ -289,6 +358,13 @@ machine! {
         disposition DeliveryFailed => external seam SurfaceResultAlignment,
         disposition LeaseExpired => external seam SurfaceResultAlignment,
         disposition TransitionFailureClassified => local seam SurfaceResultAlignment,
+        // Late-arrival record: the driver mirrors it to align its receipt /
+        // waiter-resolution behavior with the machine's verdict (the arrival
+        // landed as a late record, not a fresh terminal transition).
+        disposition LateCompletionResolutionRecorded => local seam SurfaceResultAlignment,
+        // Stale-arrival classification: pure observability; no owner realizes
+        // it beyond debug-level logging in the driver shell.
+        disposition StaleCompletionArrivalClassified => local seam NoOwnerRealization,
 
         // --- Transition failure classification ---
         //
@@ -545,6 +621,59 @@ machine! {
             }
         }
 
+        transition ClassifyTransitionFailureStaleCompletionArrivalRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "stale_completion_arrival_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::ClassifyStaleCompletionArrival
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::StaleCompletionArrivalClassificationRejected
+            }
+        }
+
+        // --- Stale completion arrival classification (0.7.2 D2a) ---
+        //
+        // The store shell screens completion-shaped arrivals against the
+        // occurrence's current claim evidence (attempt count + claim token)
+        // before letting them mutate lifecycle state. When the screen finds
+        // the arrival stale (the claim was released for a paused schedule,
+        // expired and reclaimed, or the occurrence was superseded by a newer
+        // attempt), the shell feeds the verdict back through this input. The
+        // occurrence authority records the abandonment as a typed machine
+        // fact and emits a classification effect; lifecycle state is never
+        // mutated by a stale arrival. Total in every phase for
+        // completion-shaped triggers — stale arrivals can race anything.
+
+        transition ClassifyStaleCompletionArrivalObserved {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyStaleCompletionArrival { trigger }
+            guard "completion_shaped_trigger" {
+                trigger == OccurrenceLifecycleInputVariant::Complete
+                || trigger == OccurrenceLifecycleInputVariant::ResolveRuntimeCompletion
+                || trigger == OccurrenceLifecycleInputVariant::ResolveDeliveryCompletionFailure
+                || trigger == OccurrenceLifecycleInputVariant::ResolveDeliveryFailure
+                || trigger == OccurrenceLifecycleInputVariant::Supersede
+            }
+            update {
+                self.stale_completion_arrivals += 1;
+            }
+            to Pending
+            emit StaleCompletionArrivalClassified {
+                phase: self.lifecycle_phase,
+                trigger: trigger
+            }
+        }
+
         // --- Plan occurrence ---
         //
         // Occurrence creation is a semantic fact: id, schedule revision,
@@ -621,6 +750,10 @@ machine! {
                 self.completed_at_utc_ms = None;
                 self.attempt_count = 0;
                 self.superseded_by_revision = None;
+                self.late_completion_recorded_at_utc_ms = None;
+                self.late_completion_resolution = None;
+                self.late_completion_detail = None;
+                self.stale_completion_arrivals = 0;
             }
             to Pending
         }
@@ -925,6 +1058,24 @@ machine! {
             }
         }
 
+        // 0.7.2 D2a: the waiter's occurrence snapshot can already be
+        // Superseded when delete/update supersession landed between dispatch
+        // and completion. The classification stays total: the authority
+        // answers AlreadySuperseded (no superseding revision — the recorded
+        // supersession on this occurrence is the truth) instead of refusing
+        // to classify. The driver then delivers the completion outcome as a
+        // late-arrival record rather than a fresh terminal transition.
+        transition ClassifyCompletionSupersessionAlreadySuperseded {
+            on input ClassifyCompletionSupersession { schedule_phase, current_schedule_revision }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
+            emit CompletionSupersessionClassified {
+                disposition: CompletionSupersessionDisposition::AlreadySuperseded,
+                superseded_by_revision: None
+            }
+        }
+
         // --- Target snapshot sync ---
         //
         // Materialized session binding changes the dispatch target. Keep that
@@ -1224,6 +1375,20 @@ machine! {
             }
             to AwaitingCompletion
             emit AwaitingCompletion
+        }
+
+        // 0.7.2 D2a: a Supersede can land between the driver's
+        // DispatchStarted commit and its AwaitCompletion commit (schedule
+        // delete/update revokes the in-flight claim at commit time). The
+        // dispatch already happened; the await marker on an
+        // already-superseded occurrence is a benign no-op, not a guard
+        // rejection. The waiter still runs and its resolution lands as a
+        // typed late-arrival record below.
+        transition AwaitCompletionAfterSupersession {
+            on input AwaitCompletion { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
         }
 
         // --- Complete ---
@@ -1607,6 +1772,139 @@ machine! {
             emit OccurrencesSuperseded { occurrence_id: self.occurrence_id, superseding_revision: superseded_by_revision }
         }
 
+        // 0.7.2 D2a: idempotent no-op (precedent: DeleteDeleted in
+        // ScheduleLifecycleMachine). A driver's supersession verdict can race
+        // the schedule-commit supersession sweep; the second Supersede landing
+        // on an already-superseded occurrence is a benign duplicate. The first
+        // recorded supersession wins — state unchanged, zero effects, so the
+        // shell mints no duplicate receipt for it.
+        transition SupersedeAlreadySuperseded {
+            on input Supersede { superseded_by_revision, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
+        }
+
+        // --- Late delivery resolutions after supersession (0.7.2 D2a) ---
+        //
+        // Schedule delete (and revision-bumping update) revokes in-flight
+        // claims by superseding the occurrence at commit time. The completion
+        // waiter spawned for the dispatched delivery cannot be quiesced by
+        // that commit — it legitimately resolves afterwards. These inputs are
+        // therefore total in Superseded: each self-loops, leaves the recorded
+        // supersession (phase, receipt authority, claim evidence,
+        // superseded_by_revision) untouched, and records what the delivery
+        // actually did as the typed late-arrival fact. "Not allowed" stays
+        // meaningful everywhere else: the same inputs in Completed / Skipped /
+        // Misfired / DeliveryFailed are still refused and classified
+        // NotLiveForTerminal.
+
+        transition LateCompleteAfterSupersession {
+            on input Complete { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::DeliveryCompleted);
+                self.late_completion_detail = None;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::DeliveryCompleted
+            }
+        }
+
+        transition LateRuntimeCompletionCompletedAfterSupersession {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            guard "runtime_outcome_completed" { outcome == RuntimeCompletionOutcome::Completed }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::RuntimeCompleted);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::RuntimeCompleted
+            }
+        }
+
+        transition LateRuntimeCompletionRejectedAfterSupersession {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            guard "runtime_outcome_rejected" {
+                outcome == RuntimeCompletionOutcome::CallbackPending
+                || outcome == RuntimeCompletionOutcome::Cancelled
+                || outcome == RuntimeCompletionOutcome::Abandoned
+            }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::RuntimeRejected);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::RuntimeRejected
+            }
+        }
+
+        transition LateRuntimeCompletionTransportErrorAfterSupersession {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            guard "runtime_outcome_transport_error" { outcome == RuntimeCompletionOutcome::RuntimeTerminated }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::RuntimeTransportError);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::RuntimeTransportError
+            }
+        }
+
+        transition LateRuntimeCompletionInternalErrorAfterSupersession {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            guard "runtime_outcome_internal_error" { outcome == RuntimeCompletionOutcome::FinalizationFailed }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::RuntimeInternalError);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::RuntimeInternalError
+            }
+        }
+
+        transition LateDeliveryCompletionFailureAfterSupersession {
+            on input ResolveDeliveryCompletionFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::DeliveryCompletionFailed);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::DeliveryCompletionFailed
+            }
+        }
+
+        transition LateDeliveryFailureAfterSupersession {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {
+                self.late_completion_recorded_at_utc_ms = Some(at_utc_ms);
+                self.late_completion_resolution = Some(LateCompletionResolutionClass::DeliveryFailed);
+                self.late_completion_detail = detail;
+            }
+            to Superseded
+            emit LateCompletionResolutionRecorded {
+                resolution: LateCompletionResolutionClass::DeliveryFailed
+            }
+        }
+
         // --- Lease expired (one per source phase, returns to Pending) ---
 
         transition LeaseExpiredFromClaimed {
@@ -1721,6 +2019,19 @@ machine! {
             }
             to Pending
             emit LeaseExpired
+        }
+
+        // 0.7.2 D2a: the driver's Frozen disposition (observed under a paused
+        // schedule) can race a delete/update supersession that lands before
+        // the lease release applies. Releasing the lease of an
+        // already-superseded occurrence is a benign no-op — the supersession
+        // already revoked the claim's meaning. State unchanged, zero effects,
+        // so the shell mints no lease-expired receipt for it.
+        transition ReleaseLeaseForPausedScheduleAfterSupersession {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
         }
     }
 }
@@ -1908,6 +2219,33 @@ pub enum CompletionSupersessionDisposition {
     Supersede,
     /// Terminalize the completed occurrence on its delivery result.
     Proceed,
+    /// The occurrence is already Superseded (the schedule-commit supersession
+    /// sweep landed between dispatch and completion). The driver delivers the
+    /// completion outcome as a typed late-arrival record; no fresh terminal
+    /// transition or receipt is minted.
+    AlreadySuperseded,
+}
+
+/// Typed class of a delivery resolution that arrived after the occurrence
+/// was superseded (0.7.2 D2a). Mirrors the outcome classes the live terminal
+/// transitions distinguish, so a superseded occurrence still records what its
+/// dispatched delivery actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LateCompletionResolutionClass {
+    /// `Complete` — the delivery finished successfully.
+    DeliveryCompleted,
+    /// `ResolveRuntimeCompletion` with `Completed`.
+    RuntimeCompleted,
+    /// `ResolveRuntimeCompletion` with `CallbackPending`/`Cancelled`/`Abandoned`.
+    RuntimeRejected,
+    /// `ResolveRuntimeCompletion` with `RuntimeTerminated`.
+    RuntimeTransportError,
+    /// `ResolveRuntimeCompletion` with `FinalizationFailed`.
+    RuntimeInternalError,
+    /// `ResolveDeliveryCompletionFailure` — the completion future failed.
+    DeliveryCompletionFailed,
+    /// `ResolveDeliveryFailure` — the delivery adapter reported failure.
+    DeliveryFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1945,4 +2283,7 @@ pub enum OccurrenceTransitionFailureClassKind {
     NotDispatching,
     NotLeaseHolding,
     NotLiveForTerminal,
+    /// `ClassifyStaleCompletionArrival` was refused (its trigger was not a
+    /// completion-shaped input variant).
+    StaleCompletionArrivalClassificationRejected,
 }

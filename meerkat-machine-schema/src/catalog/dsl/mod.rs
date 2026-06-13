@@ -440,6 +440,15 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
                 "StartTurnDispatchAuthorization",
                 &["Authorized", "Cancelled"],
             ),
+            // 0.7.2 disciplined shell inputs (D2a): machine-owned legality
+            // verdict for runtime system-context application, and the typed
+            // "session archived" terminal for admission inputs that
+            // legitimately race archive/discard teardown.
+            NamedTypeBinding::string_enum(
+                "RuntimeSystemContextApplicationAuthorization",
+                &["Authorized", "SessionArchived"],
+            ),
+            NamedTypeBinding::string_enum("TurnAdmissionShutdownTerminal", &["SessionArchived"]),
             // Pending-continuation disposition is owned by the canonical
             // SessionDocumentMachine and consumed here as a typed input. The
             // meerkat-session shell drives SessionDocumentMachine first and
@@ -1097,7 +1106,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "Provider",
                 &["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],
             ),
-            NamedTypeBinding::string_enum("RegistrationPhase", &["Queuing", "Active"]),
+            NamedTypeBinding::string_enum("RegistrationPhase", &["Queuing", "Active", "Draining"]),
             NamedTypeBinding::string_enum(
                 "RoutingApprovalParentKind",
                 &["SwitchTurn", "ImageOperation"],
@@ -2484,6 +2493,10 @@ runtime_internal_inputs!(
         KickoffClear,
         KickoffMarkPending,
         KickoffMarkStarting,
+        // 0.7.2 L5 disciplined shell inputs: teardown drain-obligation
+        // closures fired by the mob actor, never by surfaces.
+        KickoffQuiesced,
+        CancelPendingSpawn,
         KickoffResolveCallbackPending,
         KickoffResolveFailed,
         KickoffResolveStarted,
@@ -2680,7 +2693,24 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "CompletionSupersessionDisposition",
-                &["Supersede", "Proceed"],
+                // 0.7.2 D2a: AlreadySuperseded keeps the post-completion
+                // classification total when the supersession sweep landed
+                // between dispatch and completion.
+                &["Supersede", "Proceed", "AlreadySuperseded"],
+            ),
+            // 0.7.2 D2a: typed class of a delivery resolution that arrived
+            // after the occurrence was superseded.
+            NamedTypeBinding::string_enum(
+                "LateCompletionResolutionClass",
+                &[
+                    "DeliveryCompleted",
+                    "RuntimeCompleted",
+                    "RuntimeRejected",
+                    "RuntimeTransportError",
+                    "RuntimeInternalError",
+                    "DeliveryCompletionFailed",
+                    "DeliveryFailed",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "OccurrenceLifecycleInputVariant",
@@ -2705,6 +2735,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "LeaseExpired",
                     "ReleaseLeaseForPausedSchedule",
                     "ClassifyTransitionFailure",
+                    "ClassifyStaleCompletionArrival",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -2722,6 +2753,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "NotDispatching",
                     "NotLeaseHolding",
                     "NotLiveForTerminal",
+                    "StaleCompletionArrivalClassificationRejected",
                 ],
             ),
             NamedTypeBinding::string_enum(

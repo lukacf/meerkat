@@ -16,6 +16,27 @@
 //! (`PendingContinuationDisposition`); the meerkat-session shell drives the
 //! SessionDocumentMachine first and MIRRORS that disposition into this
 //! machine's input.
+//!
+//! Teardown discipline (0.7.2, undisciplined-shell-inputs D1/D2a):
+//!
+//! - **D1 — machine-owned admission drain.** Every transition INTO
+//!   `ShuttingDown` mints a drain obligation (`admission_drain_pending`,
+//!   `PendingAdmissionDrainRequested`): the owning shell must flush the
+//!   session command queue, resolving every pending turn-admission waiter
+//!   with a typed terminal outcome instead of dropping reply channels, then
+//!   close the obligation with `ResolvePendingAdmissionDrained`. The final
+//!   teardown step (`AuthorizeSessionTeardown` -> `SessionTeardownAuthorized`)
+//!   is guarded on the drain obligation being closed, so "torn down" is
+//!   *defined* as "pending admission work resolved".
+//! - **D2a — total inputs in `ShuttingDown`.** Inputs that legitimately race
+//!   archive/discard teardown (`ClaimTurn`, `AbortClaim`, `BeginTurn`,
+//!   `ResolveStartTurnDisposition`, `ResolveRuntimeKeepAlive`, and the
+//!   runtime-system-context application authorization) are accepted in
+//!   `ShuttingDown` with an explicit no-op or typed
+//!   "session archived" terminal (`TurnAdmissionShutdownTerminalResolved`,
+//!   `RuntimeSystemContextApplicationResolved { SessionArchived }`) instead
+//!   of guard rejections, mirroring the existing
+//!   `AuthorizeStartTurnDispatchShuttingDown` -> `Cancelled` precedent.
 
 use meerkat_machine_dsl::machine;
 
@@ -96,6 +117,33 @@ pub enum RuntimeKeepAlivePersistenceDecision {
     PreserveExisting,
 }
 
+/// Authorization verdict for applying runtime-owned system context to the
+/// live session (the `ApplyRuntimeSystemContext` /
+/// `ApplyRuntimeSystemContextForTurn` session commands).
+///
+/// `SessionArchived` is the typed benign terminal for applications that
+/// arrive while the machine is `ShuttingDown` (archive/discard teardown won
+/// the race): the arrival is legitimate, the application is dropped with the
+/// archived session, and the caller resolves its waiter with the archived
+/// outcome instead of a guard rejection or a dropped reply channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeSystemContextApplicationAuthorization {
+    #[default]
+    Authorized,
+    SessionArchived,
+}
+
+/// Typed terminal disposition for turn-admission work that arrives while the
+/// machine is `ShuttingDown` (the session was archived or its live handle
+/// was discarded in favor of durable authority). This is the machine-owned
+/// answer for legitimately-racing inputs: never a guard rejection, never a
+/// generic internal error for a committed teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnAdmissionShutdownTerminal {
+    #[default]
+    SessionArchived,
+}
+
 machine! {
     machine SessionTurnAdmissionMachine {
         version: 1,
@@ -105,12 +153,18 @@ machine! {
             lifecycle_phase: TurnAdmissionPhase,
             interrupt_pending: bool,
             shutdown_pending: bool,
+            // D1 drain obligation: minted on every entry into ShuttingDown,
+            // closed by the owning shell's ResolvePendingAdmissionDrained
+            // feedback after it has flushed the session command queue and
+            // resolved every pending admission waiter with a typed terminal.
+            admission_drain_pending: bool,
             last_public_terminal: Option<Enum<StartTurnPublicTerminal>>,
         }
 
         init(Idle) {
             interrupt_pending = false,
             shutdown_pending = false,
+            admission_drain_pending = false,
             last_public_terminal = None,
         }
 
@@ -136,6 +190,9 @@ machine! {
             AuthorizeStartTurnDispatch,
             AuthorizeCancelAfterBoundary,
             ResolveLastStartTurnPublicTerminal,
+            AuthorizeRuntimeSystemContextApplication,
+            ResolvePendingAdmissionDrained,
+            AuthorizeSessionTeardown,
             ResolveRuntimeKeepAlive { keep_alive_request: Enum<RuntimeKeepAliveRequest> },
             ResolveStartTurnDisposition {
                 execution_kind_present: bool,
@@ -159,6 +216,12 @@ machine! {
             StartTurnDispositionResolved { disposition: Enum<StartTurnDisposition> },
             StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
             RuntimeKeepAliveResolved { decision: Enum<RuntimeKeepAlivePersistenceDecision> },
+            PendingAdmissionDrainRequested,
+            RuntimeSystemContextApplicationResolved {
+                authorization: Enum<RuntimeSystemContextApplicationAuthorization>,
+            },
+            TurnAdmissionShutdownTerminalResolved { terminal: Enum<TurnAdmissionShutdownTerminal> },
+            SessionTeardownAuthorized,
         }
 
         helper is_active_phase(phase: TurnAdmissionPhase) -> bool {
@@ -173,6 +236,14 @@ machine! {
             self.lifecycle_phase != Phase::ShuttingDown || is_active_phase(self.lifecycle_phase) == false
         }
 
+        // The drain obligation only exists while shutting down: it is minted
+        // exclusively on entries into ShuttingDown and ShuttingDown has no
+        // exits, so a pending obligation outside ShuttingDown is
+        // unrepresentable.
+        invariant drain_obligation_only_while_shutting_down {
+            self.admission_drain_pending == false || self.lifecycle_phase == Phase::ShuttingDown
+        }
+
         disposition TurnAdmissionProjected => local seam NoOwnerRealization,
         disposition TurnInterruptRequested => local seam NoOwnerRealization,
         disposition StartTurnDispatchResolved => local seam NoOwnerRealization,
@@ -180,6 +251,10 @@ machine! {
         disposition StartTurnDispositionResolved => local seam NoOwnerRealization,
         disposition StartTurnPublicTerminalResolved => local seam NoOwnerRealization,
         disposition RuntimeKeepAliveResolved => local seam NoOwnerRealization,
+        disposition PendingAdmissionDrainRequested => local seam NoOwnerRealization,
+        disposition RuntimeSystemContextApplicationResolved => local seam NoOwnerRealization,
+        disposition TurnAdmissionShutdownTerminalResolved => local seam NoOwnerRealization,
+        disposition SessionTeardownAuthorized => local seam NoOwnerRealization,
 
         transition ProjectTurnAdmission {
             per_phase [Idle, Admitted, Running, Completing, ShuttingDown]
@@ -227,6 +302,37 @@ machine! {
             }
         }
 
+        // D2a: a claim attempt that lost the race against archive/discard
+        // teardown gets the typed "session archived" terminal instead of a
+        // guard rejection. No admission is granted; the machine stays in
+        // ShuttingDown. (Deliberately no projection emit: pre-cutover mirrors
+        // that only understand projections keep failing closed.)
+        transition ClaimTurnShuttingDown {
+            on input ClaimTurn
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit TurnAdmissionShutdownTerminalResolved {
+                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+            }
+        }
+
+        // D2a: an abort for a claim that teardown already discarded
+        // (RequestShutdownImmediateAdmitted reset the claim state) is an
+        // explicit no-op, not an error to be swallowed by the shell.
+        transition AbortClaimShuttingDown {
+            on input AbortClaim
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit TurnAdmissionProjected {
+                phase: self.lifecycle_phase,
+                interrupt_pending: self.interrupt_pending,
+                shutdown_pending: self.shutdown_pending,
+                is_active: is_active_phase(self.lifecycle_phase),
+            }
+        }
+
         transition BeginTurn {
             on input BeginTurn
             guard { self.lifecycle_phase == Phase::Admitted }
@@ -237,6 +343,22 @@ machine! {
                 interrupt_pending: self.interrupt_pending,
                 shutdown_pending: self.shutdown_pending,
                 is_active: is_active_phase(self.lifecycle_phase),
+            }
+        }
+
+        // D2a: archive/discard committed RequestShutdownImmediateAdmitted
+        // between the admitted preflight and the begin step. The run must not
+        // start; the waiter resolves with the typed "session archived"
+        // terminal instead of an illegal-transition internal error.
+        // (Deliberately no projection emit: the run may only begin on a
+        // projected Running transition.)
+        transition BeginTurnShuttingDown {
+            on input BeginTurn
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit TurnAdmissionShutdownTerminalResolved {
+                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
             }
         }
 
@@ -258,8 +380,10 @@ machine! {
             guard { self.lifecycle_phase == Phase::Completing && self.shutdown_pending }
             update {
                 self.interrupt_pending = false;
+                self.admission_drain_pending = true;
             }
             to ShuttingDown
+            emit PendingAdmissionDrainRequested
             emit TurnAdmissionProjected {
                 phase: self.lifecycle_phase,
                 interrupt_pending: self.interrupt_pending,
@@ -350,8 +474,10 @@ machine! {
             update {
                 self.interrupt_pending = false;
                 self.shutdown_pending = true;
+                self.admission_drain_pending = true;
             }
             to ShuttingDown
+            emit PendingAdmissionDrainRequested
             emit TurnAdmissionProjected {
                 phase: self.lifecycle_phase,
                 interrupt_pending: self.interrupt_pending,
@@ -366,8 +492,10 @@ machine! {
             update {
                 self.interrupt_pending = false;
                 self.shutdown_pending = true;
+                self.admission_drain_pending = true;
             }
             to ShuttingDown
+            emit PendingAdmissionDrainRequested
             emit TurnAdmissionProjected {
                 phase: self.lifecycle_phase,
                 interrupt_pending: self.interrupt_pending,
@@ -419,6 +547,39 @@ machine! {
             }
         }
 
+        // D1 drain feedback: the owning shell flushed the session command
+        // queue and resolved every pending admission waiter with a typed
+        // terminal outcome; the obligation closes. A second feedback without
+        // an open obligation is a shell bug and stays rejected.
+        transition ResolvePendingAdmissionDrained {
+            on input ResolvePendingAdmissionDrained
+            guard { self.lifecycle_phase == Phase::ShuttingDown && self.admission_drain_pending }
+            update {
+                self.admission_drain_pending = false;
+            }
+            to ShuttingDown
+            emit TurnAdmissionProjected {
+                phase: self.lifecycle_phase,
+                interrupt_pending: self.interrupt_pending,
+                shutdown_pending: self.shutdown_pending,
+                is_active: is_active_phase(self.lifecycle_phase),
+            }
+        }
+
+        // D1 final teardown gate: dropping the session task / live state is
+        // only authorized once the drain obligation has closed, so "torn
+        // down" is defined as "pending admission work resolved".
+        transition AuthorizeSessionTeardown {
+            on input AuthorizeSessionTeardown
+            guard {
+                self.lifecycle_phase == Phase::ShuttingDown
+                && self.admission_drain_pending == false
+            }
+            update {}
+            to ShuttingDown
+            emit SessionTeardownAuthorized
+        }
+
         transition AuthorizeCancelAfterBoundaryAdmitted {
             on input AuthorizeCancelAfterBoundary
             guard { self.lifecycle_phase == Phase::Admitted }
@@ -441,6 +602,34 @@ machine! {
             update {}
             to ShuttingDown
             emit StartTurnDispatchResolved { authorization: StartTurnDispatchAuthorization::Cancelled }
+        }
+
+        // Machine-owned legality decision for applying runtime-owned system
+        // context to the live session (the ApplyRuntimeSystemContext /
+        // ApplyRuntimeSystemContextForTurn session commands). The shell fires
+        // this before touching the live agent; it decides nothing itself.
+        transition AuthorizeRuntimeSystemContextApplicationActive {
+            per_phase [Idle, Admitted, Running, Completing]
+            on input AuthorizeRuntimeSystemContextApplication
+            update {}
+            to Idle
+            emit RuntimeSystemContextApplicationResolved {
+                authorization: RuntimeSystemContextApplicationAuthorization::Authorized,
+            }
+        }
+
+        // D2a: a context application that lost the race against
+        // archive/discard teardown resolves with the typed SessionArchived
+        // verdict — the appends are dropped with the archived session and the
+        // caller's waiter resolves benignly instead of erroring or hanging.
+        transition AuthorizeRuntimeSystemContextApplicationShuttingDown {
+            on input AuthorizeRuntimeSystemContextApplication
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit RuntimeSystemContextApplicationResolved {
+                authorization: RuntimeSystemContextApplicationAuthorization::SessionArchived,
+            }
         }
 
         transition AuthorizeCancelAfterBoundaryRunning {
@@ -577,6 +766,28 @@ machine! {
             emit StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary }
         }
 
+        // D2a: a start-turn disposition request that lost the race against
+        // archive/discard teardown (RequestShutdownImmediateAdmitted landed
+        // between the dispatch authorization and this resolution) gets the
+        // typed "session archived" terminal instead of a guard rejection.
+        // (Deliberately no StartTurnDispositionResolved emit: no runnable
+        // disposition exists for a shutting-down session.)
+        transition ResolveStartTurnDispositionShuttingDown {
+            on input ResolveStartTurnDisposition {
+                execution_kind_present,
+                execution_kind,
+                prompt_trimmed_text_byte_count,
+                prompt_non_text_block_count,
+                pending_continuation
+            }
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit TurnAdmissionShutdownTerminalResolved {
+                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+            }
+        }
+
         transition ResolveRuntimeKeepAliveEnable {
             on input ResolveRuntimeKeepAlive { keep_alive_request }
             guard {
@@ -608,6 +819,20 @@ machine! {
             update {}
             to Admitted
             emit RuntimeKeepAliveResolved { decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting }
+        }
+
+        // D2a: a keep-alive resolution that lost the race against
+        // archive/discard teardown gets the typed "session archived" terminal
+        // instead of a guard rejection. No persistence decision is emitted —
+        // nothing may be persisted for a session whose teardown committed.
+        transition ResolveRuntimeKeepAliveShuttingDown {
+            on input ResolveRuntimeKeepAlive { keep_alive_request }
+            guard { self.lifecycle_phase == Phase::ShuttingDown }
+            update {}
+            to ShuttingDown
+            emit TurnAdmissionShutdownTerminalResolved {
+                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+            }
         }
 
         transition ResolveLastStartTurnPublicTerminalNoPending {

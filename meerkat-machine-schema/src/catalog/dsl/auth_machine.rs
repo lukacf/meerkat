@@ -85,6 +85,12 @@ macro_rules! auth_catalog_machine_dsl {
                 oauth_device_flow_expires_at_millis: Map<String, u64>,
                 oauth_device_poll_ids: Set<String>,
                 oauth_outstanding_flow_count: u64,
+                // Release-drain sub-state (0.7.2 D1): true between BeginRelease
+                // and the final Release commit. While draining, new OAuth flow
+                // admissions are refused so the drain obligation set cannot
+                // grow behind the shell's back; the Release transition is
+                // guarded on the drain being complete.
+                release_draining: bool,
             }
 
             init(Valid) {
@@ -103,6 +109,7 @@ macro_rules! auth_catalog_machine_dsl {
                 oauth_device_flow_expires_at_millis = EmptyMap,
                 oauth_device_poll_ids = EmptySet,
                 oauth_outstanding_flow_count = 0,
+                release_draining = false,
             }
 
             terminal [Released]
@@ -130,6 +137,14 @@ macro_rules! auth_catalog_machine_dsl {
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 ReleaseCredentialLifecycle,
+                // Release teardown is two-phase (0.7.2 D1). BeginRelease records
+                // the draining intent and emits the in-flight OAuth flow
+                // membership as a typed cancellation obligation
+                // (`CancelOAuthFlowsForRelease`). The shell discharges it by
+                // terminally cancelling each flow (ExpireOAuthBrowserFlow /
+                // ExpireOAuthDeviceFlow feedback inputs) and pruning the
+                // registry payloads; only then is Release legal.
+                BeginRelease,
                 Release,
                 RestoreAuthoritySnapshot {
                     lifecycle_phase: AuthLifecyclePhase,
@@ -228,11 +243,24 @@ macro_rules! auth_catalog_machine_dsl {
                 // user-reauth error, LeaseAbsent -> lease-absent error,
                 // AlreadyRefreshing -> a refresh is already in flight (no-op).
                 CredentialUseAdmissionResolved { disposition: Enum<CredentialUseDisposition> },
+                // Typed terminal-cancellation obligation for release teardown
+                // (0.7.2 D1). Emitted by BeginRelease while the flow membership
+                // is still intact: it carries exactly the in-flight browser and
+                // device flows the shell must terminally cancel (Expire*
+                // feedback inputs + registry payload pruning) before the final
+                // Release transition becomes legal. Machine-owned replacement
+                // for the shell's prior direct read of flow membership during
+                // release staging.
+                CancelOAuthFlowsForRelease {
+                    browser_flow_ids: Set<String>,
+                    device_flow_ids: Set<String>,
+                },
             }
 
             disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication seam SurfaceResultAlignment,
             disposition WakeRefreshLoop => local seam NoOwnerRealization,
             disposition CredentialUseAdmissionResolved => local seam SurfaceResultAlignment,
+            disposition CancelOAuthFlowsForRelease => external handoff auth_release_oauth_flow_drain seam NoOwnerRealization,
 
             invariant oauth_flow_membership_consistent {
                 self.oauth_browser_flow_providers.keys() == self.oauth_browser_flow_ids
@@ -242,6 +270,19 @@ macro_rules! auth_catalog_machine_dsl {
                 && self.oauth_device_flow_expires_at_millis.keys() == self.oauth_device_flow_ids
                 && for_all(flow_id in self.oauth_device_poll_ids, self.oauth_device_flow_ids.contains(flow_id))
                 && self.oauth_outstanding_flow_count == self.oauth_browser_flow_ids.len() + self.oauth_device_flow_ids.len()
+            }
+
+            // Release-drain soundness (0.7.2 D1): a Released machine can never
+            // hold OAuth flow membership — every in-flight flow received a
+            // typed terminal cancellation before Release committed — so no
+            // producer can hold a flow fact that later "expires" into a
+            // Released machine.
+            invariant released_oauth_membership_drained {
+                self.lifecycle_phase != Phase::Released || self.oauth_outstanding_flow_count == 0
+            }
+
+            invariant released_not_release_draining {
+                self.lifecycle_phase != Phase::Released || self.release_draining == false
             }
 
             // --- Transitions ---
@@ -629,6 +670,7 @@ macro_rules! auth_catalog_machine_dsl {
                 on input ReleaseCredentialLifecycle
                 guard "oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 }
                 update {
+                    self.release_draining = false;
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
@@ -653,9 +695,57 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            // --- Release drain (0.7.2 D1) ---
+            //
+            // release_lease teardown is two-phase and machine-owned. BeginRelease
+            // records the draining intent (`release_draining`) and, when OAuth
+            // flows are in flight, emits `CancelOAuthFlowsForRelease` carrying
+            // the exact membership to terminally cancel. The shell discharges
+            // the obligation with ExpireOAuthBrowserFlow / ExpireOAuthDeviceFlow
+            // feedback inputs (each one removes the flow and decrements the
+            // outstanding count) plus registry payload pruning. The final
+            // Release transition is guarded on the drain being complete, so a
+            // Released machine structurally cannot leave flows behind that a
+            // late prune/compensation producer would try to expire into it.
+            transition BeginReleaseDrainingOAuthFlows {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input BeginRelease
+                guard "oauth_membership_present" { self.oauth_outstanding_flow_count > 0 }
+                update {
+                    self.release_draining = true;
+                }
+                to Valid
+                emit CancelOAuthFlowsForRelease {
+                    browser_flow_ids: self.oauth_browser_flow_ids,
+                    device_flow_ids: self.oauth_device_flow_ids,
+                }
+            }
+
+            transition BeginReleaseWithoutOAuthFlows {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input BeginRelease
+                guard "oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 }
+                update {
+                    self.release_draining = true;
+                }
+                to Valid
+            }
+
+            // D2a: beginning release of an already-released lease is a
+            // legitimate arrival (release retry / unregister racing release);
+            // accepted as a no-op, never a guard rejection.
+            transition BeginReleaseReleased {
+                on input BeginRelease
+                guard { self.lifecycle_phase == Phase::Released }
+                update {}
+                to Released
+            }
+
             transition Release {
                 on input Release
+                guard "oauth_release_drained" { self.oauth_outstanding_flow_count == 0 }
                 update {
+                    self.release_draining = false;
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
@@ -881,6 +971,7 @@ macro_rules! auth_catalog_machine_dsl {
                 guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
                 guard "restore_oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 && restored_oauth_membership_observed == false }
                 update {
+                    self.release_draining = false;
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
@@ -1070,6 +1161,7 @@ macro_rules! auth_catalog_machine_dsl {
                 }
                 guard { lifecycle_phase == Phase::Released && credential_present == false && credential_published_at_millis == None && self.oauth_outstanding_flow_count == 0 }
                 update {
+                    self.release_draining = false;
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
@@ -1091,6 +1183,7 @@ macro_rules! auth_catalog_machine_dsl {
             transition RestoreOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis }
+                guard "not_release_draining" { self.release_draining == false }
                 guard "browser_restore_has_provider" { provider != None }
                 guard "browser_restore_has_redirect_uri" { redirect_uri != None }
                 guard "browser_restore_has_expiry" { expires_at_millis != None }
@@ -1115,6 +1208,7 @@ macro_rules! auth_catalog_machine_dsl {
             transition RestoreOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthDeviceFlow { flow_id, provider, expires_at_millis }
+                guard "not_release_draining" { self.release_draining == false }
                 guard "device_restore_has_provider" { provider != None }
                 guard "device_restore_has_expiry" { expires_at_millis != None }
                 update {
@@ -1138,6 +1232,7 @@ macro_rules! auth_catalog_machine_dsl {
             transition RestoreOAuthDevicePoll {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthDevicePoll { flow_id }
+                guard "not_release_draining" { self.release_draining == false }
                 guard "device_flow_present_for_poll_restore" { self.oauth_device_flow_ids.contains(flow_id) }
                 update {
                     self.oauth_device_poll_ids.insert(flow_id);
@@ -1159,6 +1254,7 @@ macro_rules! auth_catalog_machine_dsl {
             transition AdmitOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
+                guard "not_release_draining" { self.release_draining == false }
                 guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
                 guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
@@ -1261,9 +1357,31 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            // D2a (0.7.2): expiry is observation-shaped ("this flow is dead"),
+            // delivered by poll/prune producers and error-handler compensation
+            // that legitimately race flow consumption and lease release. A
+            // stale expiry for a flow that is no longer a member — or that
+            // arrives after the lease was Released — is a benign no-op, never
+            // a guard rejection (worklist entries 24, 25, 27, 30).
+            transition ExpireOAuthBrowserFlowAbsent {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input ExpireOAuthBrowserFlow { flow_id }
+                guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
+                update {}
+                to Valid
+            }
+
+            transition ExpireOAuthBrowserFlowReleased {
+                on input ExpireOAuthBrowserFlow { flow_id }
+                guard { self.lifecycle_phase == Phase::Released }
+                update {}
+                to Released
+            }
+
             transition AdmitOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
+                guard "not_release_draining" { self.release_draining == false }
                 guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
                 guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
@@ -1312,6 +1430,22 @@ macro_rules! auth_catalog_machine_dsl {
                 guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
                 update {}
                 to Valid
+            }
+
+            // D2a (0.7.2): the durable-admission confirmation fires from
+            // inside the store persistence callback and can legitimately
+            // arrive after a concurrent release_lease committed Release. The
+            // admitted flow was already terminally cancelled by the release
+            // drain, so the confirmation is a benign no-op — the previous
+            // guard rejection failed the whole persistence path for a
+            // committed teardown interleave (worklist entry 29). In live
+            // phases the capacity guard above remains the authoritative
+            // fail-closed admission check.
+            transition ConfirmOAuthDurableAdmissionReleased {
+                on input ConfirmOAuthDurableAdmission { observed_global_outstanding_flows, max_outstanding_flows }
+                guard { self.lifecycle_phase == Phase::Released }
+                update {}
+                to Released
             }
 
             transition VerifyOAuthDeviceFlow {
@@ -1365,6 +1499,27 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            // D2a (0.7.2): poll-finish is cleanup-shaped (poll-lease drop
+            // guards and error-handler compensation fire it) and shares the
+            // exact race shape of the Expire* inputs — the poll membership can
+            // have been removed by a concurrent consume/expire/release before
+            // the finish lands. Sibling-completeness of the worklist's
+            // Expire*/Confirm* totality.
+            transition FinishOAuthDevicePollAbsent {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input FinishOAuthDevicePoll { flow_id }
+                guard "device_poll_absent" { self.oauth_device_poll_ids.contains(flow_id) == false }
+                update {}
+                to Valid
+            }
+
+            transition FinishOAuthDevicePollReleased {
+                on input FinishOAuthDevicePoll { flow_id }
+                guard { self.lifecycle_phase == Phase::Released }
+                update {}
+                to Released
+            }
+
             transition ConsumeOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ConsumeOAuthDeviceFlow { flow_id, provider, now_millis }
@@ -1405,6 +1560,24 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
+            }
+
+            // D2a (0.7.2): same totality as browser-flow expiry — stale or
+            // post-release device-flow expiry observations are benign no-ops
+            // (worklist entries 26, 28, 30).
+            transition ExpireOAuthDeviceFlowAbsent {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input ExpireOAuthDeviceFlow { flow_id }
+                guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
+                update {}
+                to Valid
+            }
+
+            transition ExpireOAuthDeviceFlowReleased {
+                on input ExpireOAuthDeviceFlow { flow_id }
+                guard { self.lifecycle_phase == Phase::Released }
+                update {}
+                to Released
             }
 
             // --- Credential-use admission classification ---

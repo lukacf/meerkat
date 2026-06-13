@@ -21,6 +21,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `(none)`
 
 ### Invariants
+- `auth_release_oauth_flow_drain_protocol_covered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `auth_lease_lifecycle_publication_protocol_covered`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

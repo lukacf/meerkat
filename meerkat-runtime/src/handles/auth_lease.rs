@@ -898,6 +898,7 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::ReleaseCredentialLifecycle => {
                 "release_credential_lifecycle"
             }
+            auth_dsl::AuthMachineInput::BeginRelease => "begin_release_lease",
             auth_dsl::AuthMachineInput::Release => "release_lease",
             auth_dsl::AuthMachineInput::RestoreAuthoritySnapshot { .. } => {
                 "restore_authority_snapshot"
@@ -2483,5 +2484,270 @@ mod tests {
             snap.credential_present,
             "aborted clear must leave the live lease aligned with the retained durable record, got {snap:?}"
         );
+    }
+
+    // --- 0.7.2 disciplined shell inputs (lane L3 auth-release) ---
+    //
+    // Machine-level pins for the two-phase release drain (D1) and the
+    // post-teardown totality of observation/cleanup-shaped OAuth inputs
+    // (D2a). These drive the generated authority directly.
+
+    fn apply_machine(
+        authority: &mut auth_dsl::AuthMachineAuthority,
+        input: auth_dsl::AuthMachineInput,
+    ) -> Result<auth_dsl::AuthMachineTransition, auth_dsl::AuthMachineTransitionError> {
+        auth_dsl::AuthMachineMutator::apply(authority, input)
+    }
+
+    fn admit_browser_flow_input(flow_id: &str) -> auth_dsl::AuthMachineInput {
+        auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+            flow_id: flow_id.to_string(),
+            provider: "openai-chatgpt".to_string(),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+            expires_at_millis: u64::MAX,
+            max_outstanding_flows: 16,
+            observed_global_outstanding_flows: 0,
+        }
+    }
+
+    fn admit_device_flow_input(flow_id: &str) -> auth_dsl::AuthMachineInput {
+        auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+            flow_id: flow_id.to_string(),
+            provider: "openai-chatgpt".to_string(),
+            expires_at_millis: u64::MAX,
+            max_outstanding_flows: 16,
+            observed_global_outstanding_flows: 0,
+        }
+    }
+
+    /// D1: release is two-phase. With flows in flight, Release alone is
+    /// rejected (drain obligations open); BeginRelease records the draining
+    /// intent and emits the typed cancellation obligation carrying exactly
+    /// the in-flight membership; the Expire* feedback inputs close the
+    /// obligations; only then does Release commit.
+    #[test]
+    fn begin_release_emits_machine_owned_drain_obligation_and_guards_release() {
+        let mut machine = auth_dsl::AuthMachineAuthority::new();
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts: Some(2_000_000_000),
+                credential_published_at_millis: 1,
+            },
+        )
+        .expect("acquire");
+        apply_machine(&mut machine, admit_browser_flow_input("b-1")).expect("admit browser flow");
+        apply_machine(&mut machine, admit_device_flow_input("d-1")).expect("admit device flow");
+
+        // Release with in-flight flows is guard-rejected: the drain
+        // obligations are still open.
+        let err = apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release)
+            .expect_err("Release must not commit while flows are in flight");
+        assert!(
+            matches!(
+                err,
+                auth_dsl::AuthMachineTransitionError::GuardRejected { .. }
+            ),
+            "expected guard rejection, got: {err:?}"
+        );
+
+        // BeginRelease enters the draining sub-state and emits the typed
+        // cancellation obligation with the exact in-flight membership.
+        let transition = apply_machine(&mut machine, auth_dsl::AuthMachineInput::BeginRelease)
+            .expect("begin release");
+        assert!(machine.state().release_draining);
+        let cancel = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                auth_dsl::AuthMachineEffect::CancelOAuthFlowsForRelease {
+                    browser_flow_ids,
+                    device_flow_ids,
+                } => Some((browser_flow_ids.clone(), device_flow_ids.clone())),
+                _ => None,
+            })
+            .expect("BeginRelease with in-flight flows must emit CancelOAuthFlowsForRelease");
+        assert_eq!(
+            cancel.0.iter().collect::<Vec<_>>(),
+            vec!["b-1"],
+            "cancellation obligation must carry the in-flight browser flow"
+        );
+        assert_eq!(
+            cancel.1.iter().collect::<Vec<_>>(),
+            vec!["d-1"],
+            "cancellation obligation must carry the in-flight device flow"
+        );
+
+        // New admissions are refused while the drain is in flight, so the
+        // obligation set cannot grow behind the shell's back.
+        let err = apply_machine(&mut machine, admit_browser_flow_input("b-2"))
+            .expect_err("admission during release drain must be refused");
+        assert!(
+            matches!(
+                err,
+                auth_dsl::AuthMachineTransitionError::GuardRejected { .. }
+            ),
+            "expected guard rejection, got: {err:?}"
+        );
+
+        // Typed terminal cancellation closes each obligation.
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                flow_id: "b-1".to_string(),
+            },
+        )
+        .expect("terminal browser cancellation");
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow {
+                flow_id: "d-1".to_string(),
+            },
+        )
+        .expect("terminal device cancellation");
+        assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
+
+        // All drain obligations closed: Release commits.
+        apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release)
+            .expect("drained release");
+        assert!(matches!(
+            machine.state().lifecycle_phase,
+            auth_dsl::AuthLifecyclePhase::Released
+        ));
+        assert!(!machine.state().release_draining);
+        assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
+        assert!(machine.state().oauth_browser_flow_ids.is_empty());
+        assert!(machine.state().oauth_device_flow_ids.is_empty());
+    }
+
+    /// D1: with no flows in flight, BeginRelease records the drain intent
+    /// without emitting a cancellation obligation, and Release commits
+    /// immediately.
+    #[test]
+    fn begin_release_without_flows_emits_no_drain_obligation() {
+        let mut machine = auth_dsl::AuthMachineAuthority::new();
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts: Some(2_000_000_000),
+                credential_published_at_millis: 1,
+            },
+        )
+        .expect("acquire");
+
+        let transition = apply_machine(&mut machine, auth_dsl::AuthMachineInput::BeginRelease)
+            .expect("begin release");
+        assert!(machine.state().release_draining);
+        assert!(
+            transition.effects().iter().all(|effect| !matches!(
+                effect,
+                auth_dsl::AuthMachineEffect::CancelOAuthFlowsForRelease { .. }
+            )),
+            "no cancellation obligation without in-flight flows"
+        );
+
+        apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release).expect("release");
+        assert!(matches!(
+            machine.state().lifecycle_phase,
+            auth_dsl::AuthLifecyclePhase::Released
+        ));
+        assert!(!machine.state().release_draining);
+    }
+
+    /// D2a: late poll/prune/compensation arrivals after teardown — Expire*,
+    /// durable-admission Confirm, poll Finish, and a release retry — are
+    /// accepted as no-ops in Released with zero state change and zero
+    /// emitted effects, never a guard rejection (worklist entries 24-30).
+    #[test]
+    fn post_release_oauth_observation_inputs_are_total_noops() {
+        let mut machine = auth_dsl::AuthMachineAuthority::new();
+        apply_machine(&mut machine, auth_dsl::AuthMachineInput::Release).expect("release");
+        assert!(matches!(
+            machine.state().lifecycle_phase,
+            auth_dsl::AuthLifecyclePhase::Released
+        ));
+        let before = machine.state().clone();
+
+        for input in [
+            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                flow_id: "ghost-browser".to_string(),
+            },
+            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow {
+                flow_id: "ghost-device".to_string(),
+            },
+            auth_dsl::AuthMachineInput::FinishOAuthDevicePoll {
+                flow_id: "ghost-poll".to_string(),
+            },
+            auth_dsl::AuthMachineInput::ConfirmOAuthDurableAdmission {
+                observed_global_outstanding_flows: 0,
+                max_outstanding_flows: 16,
+            },
+            auth_dsl::AuthMachineInput::BeginRelease,
+        ] {
+            let description = format!("{input:?}");
+            let transition = apply_machine(&mut machine, input).unwrap_or_else(|err| {
+                panic!("`{description}` must be a total no-op in Released, got: {err:?}")
+            });
+            assert!(
+                transition.effects().is_empty(),
+                "`{description}` must not emit effects in Released"
+            );
+            assert_eq!(
+                machine.state(),
+                &before,
+                "`{description}` must not mutate Released state"
+            );
+        }
+    }
+
+    /// D2a: stale expiry/finish observations for flows that are no longer
+    /// members are total no-ops in live phases too — a consume or release
+    /// drain legitimately removes the flow between a producer's membership
+    /// observation and its input delivery.
+    #[test]
+    fn stale_oauth_cleanup_observations_are_total_noops_in_live_phases() {
+        let mut machine = auth_dsl::AuthMachineAuthority::new();
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts: Some(2_000_000_000),
+                credential_published_at_millis: 1,
+            },
+        )
+        .expect("acquire");
+        apply_machine(&mut machine, admit_browser_flow_input("b-1")).expect("admit browser flow");
+        let before = machine.state().clone();
+
+        for input in [
+            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                flow_id: "ghost-browser".to_string(),
+            },
+            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow {
+                flow_id: "ghost-device".to_string(),
+            },
+            auth_dsl::AuthMachineInput::FinishOAuthDevicePoll {
+                flow_id: "ghost-poll".to_string(),
+            },
+        ] {
+            let description = format!("{input:?}");
+            apply_machine(&mut machine, input).unwrap_or_else(|err| {
+                panic!("stale `{description}` must be a total no-op, got: {err:?}")
+            });
+            assert_eq!(
+                machine.state(),
+                &before,
+                "stale `{description}` must not mutate live-phase state"
+            );
+        }
+
+        // The genuine member is still expirable afterwards.
+        apply_machine(
+            &mut machine,
+            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                flow_id: "b-1".to_string(),
+            },
+        )
+        .expect("present flow still expires");
+        assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
     }
 }

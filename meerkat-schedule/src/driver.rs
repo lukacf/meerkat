@@ -517,6 +517,12 @@ async fn complete_dispatched_occurrence(
                 return Ok(());
             }
             CompletionSupersessionDisposition::Proceed => {}
+            // 0.7.2 D2a: the occurrence snapshot is already Superseded (the
+            // schedule-commit supersession sweep landed between dispatch and
+            // completion). Fall through: the delivery resolution below lands
+            // on the occurrence authority's late-arrival transitions as a
+            // typed record, never a guard rejection.
+            CompletionSupersessionDisposition::AlreadySuperseded => {}
         }
     }
 
@@ -2183,6 +2189,372 @@ mod tests {
 
         assert_eq!(superseded.superseded_by_revision, Some(updated.revision));
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.7.2 disciplined shell inputs (D1/D2a) — shell interleaving tests.
+    // Tests marked "STAGE B" assert the wired shell behavior and are expected
+    // RED after Stage A codegen (the DSL totality is in; the shell sequencing
+    // is not). The lead records them on the red list.
+    // -----------------------------------------------------------------------
+
+    /// STAGE B (RED until wired): `service.delete()` must revoke the
+    /// driver-claimed in-flight occurrence AT COMMIT by superseding it through
+    /// the occurrence authority's typed Supersede transition — not leave it
+    /// AwaitingCompletion for the completion waiter to discover later. The
+    /// waiter's late resolution then lands as the typed late-arrival record,
+    /// never a guard rejection and never a silent drop.
+    #[tokio::test]
+    async fn delete_revokes_in_flight_claim_at_commit_and_late_completion_lands_typed()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("delete-revokes-in-flight".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let awaiting = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+
+        // Teardown commits while the completion waiter is still in flight.
+        let deleted = service.delete(&schedule.schedule_id).await?;
+
+        // D1: the delete commit itself revokes the in-flight claim.
+        let at_commit = service
+            .list_occurrences(&schedule.schedule_id)
+            .await?
+            .into_iter()
+            .find(|item| item.occurrence_id == awaiting.occurrence_id)
+            .ok_or_else(|| {
+                ScheduleDomainError::Internal("occurrence should still exist".to_string())
+            })?;
+        assert_eq!(
+            at_commit.phase,
+            OccurrencePhase::Superseded,
+            "delete must supersede the driver-claimed in-flight occurrence at commit time"
+        );
+        assert_eq!(at_commit.superseded_by_revision, Some(deleted.revision));
+        assert!(
+            deleted
+                .superseded_ack_ids
+                .contains(&awaiting.occurrence_id),
+            "the revoked in-flight claim must be accounted in the schedule authority's ack set"
+        );
+
+        // The waiter resolves AFTER the teardown committed: typed late-arrival
+        // record, zero corruption of the recorded supersession.
+        let sender = delivery.senders.lock().await.remove(0);
+        sender
+            .send(DeliveryTerminal::completed(None))
+            .expect("completion receiver should be open");
+
+        let late = wait_for_late_completion_record(&service, &schedule.schedule_id).await?;
+        assert_eq!(late.phase, OccurrencePhase::Superseded);
+        assert_eq!(late.superseded_by_revision, Some(deleted.revision));
+        assert_eq!(
+            late.machine_state.late_completion_resolution,
+            Some(crate::machines::occurrence_lifecycle::LateCompletionResolutionClass::DeliveryCompleted)
+        );
+        Ok(())
+    }
+
+    /// STAGE B (RED until wired): delete supersedes a CLAIMED (pre-dispatch)
+    /// occurrence at commit; the driver's subsequent reconcile of its held
+    /// claim is a benign idempotent no-op — no probe, no delivery, no
+    /// duplicate superseded receipt.
+    #[tokio::test]
+    async fn delete_supersedes_claimed_occurrence_at_commit_without_duplicate_receipt()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("delete-claimed-at-commit".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let probe = Arc::new(CountingProbe::default());
+        let delivery = Arc::new(CountingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            probe.clone(),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+        let claimed = store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 1,
+                lease_duration: Duration::seconds(30),
+            })
+            .await?;
+        let occurrence = claimed
+            .claimed
+            .clone()
+            .into_iter()
+            .next()
+            .expect("claimed occurrence");
+
+        let deleted = service.delete(&schedule.schedule_id).await?;
+
+        // D1: revoked at commit, not on the driver's next decision point.
+        let at_commit = service
+            .list_occurrences(&schedule.schedule_id)
+            .await?
+            .into_iter()
+            .find(|item| item.occurrence_id == occurrence.occurrence_id)
+            .expect("occurrence should still exist");
+        assert_eq!(
+            at_commit.phase,
+            OccurrencePhase::Superseded,
+            "delete must supersede the driver-claimed occurrence at commit time"
+        );
+        assert_eq!(at_commit.superseded_by_revision, Some(deleted.revision));
+
+        // The driver still holds the pre-delete claim snapshot; handling it
+        // must stay benign (typed idempotent no-op): no probe, no delivery,
+        // no error, no duplicate superseded receipt.
+        driver
+            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc)
+            .await?;
+        assert_eq!(*probe.calls.lock().await, 0, "delete should block probes");
+        assert_eq!(
+            *delivery.calls.lock().await,
+            0,
+            "delete should block delivery"
+        );
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt.stage == DeliveryReceiptStage::Superseded)
+                .count(),
+            1,
+            "the commit-time sweep mints the canonical superseded receipt; the driver's \
+             idempotent reconcile path must not duplicate it"
+        );
+        Ok(())
+    }
+
+    /// STAGE B (RED until wired): a completion arrival whose claim evidence is
+    /// stale (lease expired and the occurrence was reclaimed for attempt 2)
+    /// must be recorded as the occurrence authority's typed
+    /// ClassifyStaleCompletionArrival fact — never silently dropped via
+    /// `Ok(false)`.
+    #[tokio::test]
+    async fn stale_completion_arrival_is_recorded_as_typed_machine_fact()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("stale-arrival-typed".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::milliseconds(25),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
+
+        sleep(std::time::Duration::from_millis(35)).await;
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 2).await;
+        wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
+
+        let first_attempt = delivery.senders.lock().await.remove(0);
+        first_attempt
+            .send(DeliveryTerminal::completed(None))
+            .expect("first attempt sender should be open");
+
+        let recorded = loop_until_stale_arrival_recorded(&service, &schedule.schedule_id).await?;
+        assert_eq!(
+            recorded.phase,
+            OccurrencePhase::AwaitingCompletion,
+            "the stale arrival must not disturb the reclaimed attempt"
+        );
+        assert_eq!(recorded.attempt_count, 2);
+        assert_eq!(
+            recorded.machine_state.stale_completion_arrivals, 1,
+            "the screened stale arrival must be recorded as a typed machine fact"
+        );
+        Ok(())
+    }
+
+    /// GREEN pin (by-design semantics): pause does NOT supersede an in-flight
+    /// dispatched delivery; its completion lands normally on the paused
+    /// schedule's occurrence.
+    #[tokio::test]
+    async fn pause_does_not_supersede_in_flight_delivery_completion_lands_normally()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("pause-in-flight-completes".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let awaiting = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+
+        service.pause(&schedule.schedule_id).await?;
+        let sender = delivery.senders.lock().await.remove(0);
+        sender
+            .send(DeliveryTerminal::completed(None))
+            .expect("completion receiver should be open");
+
+        let completed = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::Completed,
+        )
+        .await?;
+        assert_eq!(completed.occurrence_id, awaiting.occurrence_id);
+        let receipts = store.list_receipts(&completed.occurrence_id).await?;
+        assert_eq!(
+            receipts.last().map(|receipt| receipt.stage),
+            Some(DeliveryReceiptStage::Completed),
+            "in-flight delivery under a paused schedule completes and records normally"
+        );
+        Ok(())
+    }
+
+    async fn wait_for_late_completion_record(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        for _ in 0..50 {
+            let occurrences = service.list_occurrences(schedule_id).await?;
+            if let Some(occurrence) = occurrences.into_iter().find(|occurrence| {
+                occurrence
+                    .machine_state
+                    .late_completion_resolution
+                    .is_some()
+            }) {
+                return Ok(occurrence);
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(ScheduleDomainError::Internal(
+            "timed out waiting for typed late-completion record".to_string(),
+        ))
+    }
+
+    async fn loop_until_stale_arrival_recorded(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        for _ in 0..50 {
+            let occurrences = service.list_occurrences(schedule_id).await?;
+            if let Some(occurrence) = occurrences
+                .into_iter()
+                .find(|occurrence| occurrence.machine_state.stale_completion_arrivals > 0)
+            {
+                return Ok(occurrence);
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(ScheduleDomainError::Internal(
+            "timed out waiting for typed stale-completion-arrival record".to_string(),
+        ))
     }
 
     fn materialize_on_demand_target(prompt: &str) -> TargetBinding {

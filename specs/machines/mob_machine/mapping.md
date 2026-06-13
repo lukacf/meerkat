@@ -1020,6 +1020,75 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `KickoffClearCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `KickoffQuiescedInFlightRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedInFlightStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedInFlightCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedIdleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedIdleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedIdleCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffQuiescedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveStartedLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveStartedLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveStartedLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveStartedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveCallbackPendingLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveCallbackPendingLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveCallbackPendingLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveCallbackPendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveFailedLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveFailedLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveFailedLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffResolveFailedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffCancelRequestedLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffCancelRequestedLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffCancelRequestedLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffCancelRequestedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProbeMemberAdmissionDuplicateRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2082,6 +2151,39 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CompleteSpawnRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CompleteSpawnLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteSpawnLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteSpawnLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteSpawnDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnPresentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnPresentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnPresentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnAbsentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelPendingSpawnDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DestroyFromAny`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2244,6 +2346,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EmitKickoffLifecycleNotice`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestKickoffQuiesce`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPendingSpawnQuiesceForDestroy`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `MemberAdmissionProbed`

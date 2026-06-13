@@ -314,6 +314,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedDispatching`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedAwaitingCompletion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedSkipped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedMisfired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedSuperseded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTransitionFailureStaleCompletionArrivalRejectedDeliveryFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedDispatching`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedAwaitingCompletion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedSkipped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedMisfired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedSuperseded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStaleCompletionArrivalObservedDeliveryFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PlanOccurrenceFromPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
@@ -410,6 +464,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyCompletionSupersessionProceed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyCompletionSupersessionAlreadySuperseded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SyncTargetSnapshotPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
@@ -452,6 +509,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AwaitCompletionFromDispatching`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `AwaitCompletionAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteFromDispatchingOrAwaiting`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -515,6 +575,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupersedePendingOrLive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SupersedeAlreadySuperseded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateCompleteAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateRuntimeCompletionCompletedAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateRuntimeCompletionRejectedAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateRuntimeCompletionTransportErrorAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateRuntimeCompletionInternalErrorAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateDeliveryCompletionFailureAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LateDeliveryFailureAfterSupersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LeaseExpiredFromClaimed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
@@ -531,6 +615,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ReleaseLeaseForPausedScheduleFromAwaitingCompletion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseLeaseForPausedScheduleAfterSupersession`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
@@ -589,6 +676,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TransitionFailureClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LateCompletionResolutionRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StaleCompletionArrivalClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_claim_requires_owner`
@@ -601,6 +694,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: `occurrence_terminal_classification`
 - `misfire_deadline_not_before_due`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `late_completion_only_after_supersession`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `late_completion_resolution_requires_timestamp`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `late_completion_timestamp_requires_resolution`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `late_completion_detail_requires_resolution`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

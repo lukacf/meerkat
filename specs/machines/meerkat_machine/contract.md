@@ -73,6 +73,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `model_routing_approval_phases`: `Map<String, RoutingApprovalPhase>`
 - `model_routing_approval_parent_kind`: `Map<String, RoutingApprovalParentKind>`
 - `registration_phase`: `RegistrationPhase`
+- `unregister_runtime_loop_drain_pending`: `Bool`
+- `unregister_comms_drain_exit_pending`: `Bool`
+- `unregister_completion_waiter_drain_pending`: `Bool`
 - `staged_session_phase`: `StagedSessionPhase`
 - `staged_session_id`: `Option<SessionId>`
 - `staged_session_keep_alive`: `Option<Bool>`
@@ -268,6 +271,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
+- `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `RuntimeLoopStoppedForUnregister`(session_id: SessionId)
+- `CommsDrainExitedForUnregister`(session_id: SessionId)
+- `CompletionWaitersResolvedForUnregister`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -717,6 +724,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionLlmReconfigurePlanResolved`(previous_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface: Option<SessionLlmCapabilitySurface>, capability_changed: Bool, previous_capability_base_filter: ToolFilter, current_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool, revision_bumped: Bool, active_visibility_revision: u64)
 - `PeerProjectionChanged`(peer_projection_epoch: u64)
 - `CommsTrustReconcileRequested`(local_endpoint: Option<PeerEndpoint>, peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint>)
+- `RequestRuntimeLoopStopForUnregister`(session_id: SessionId)
+- `RequestCommsDrainExitForUnregister`(session_id: SessionId)
+- `RequestCompletionWaiterResolutionForUnregister`(session_id: SessionId)
 
 ## Helpers
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`
@@ -754,6 +764,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `runtime_binding_identity_is_typed`
 - `running_has_current_run`
 - `deferred_stop_requires_active_runtime_phase`
+- `unregister_drain_obligations_require_draining`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
 - `staged_surface_ops_are_known_and_sequenced`
@@ -1008,6 +1019,206 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `authority_present`
 - To: `Initializing`
 
+### `BeginUnregisterSessionIdle`
+- From: `Idle`
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `not_already_draining`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Idle`
+
+### `BeginUnregisterSessionAttached`
+- From: `Attached`
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `not_already_draining`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Attached`
+
+### `BeginUnregisterSessionRunning`
+- From: `Running`
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `not_already_draining`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Running`
+
+### `BeginUnregisterSessionRetired`
+- From: `Retired`
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `not_already_draining`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Retired`
+
+### `BeginUnregisterSessionStopped`
+- From: `Stopped`
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `not_already_draining`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Stopped`
+
+### `RuntimeLoopStoppedForUnregisterIdle`
+- From: `Idle`
+- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Idle`
+
+### `RuntimeLoopStoppedForUnregisterAttached`
+- From: `Attached`
+- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Attached`
+
+### `RuntimeLoopStoppedForUnregisterRunning`
+- From: `Running`
+- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Running`
+
+### `RuntimeLoopStoppedForUnregisterRetired`
+- From: `Retired`
+- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Retired`
+
+### `RuntimeLoopStoppedForUnregisterStopped`
+- From: `Stopped`
+- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Stopped`
+
+### `CommsDrainExitedForUnregisterIdle`
+- From: `Idle`
+- On: `CommsDrainExitedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Idle`
+
+### `CommsDrainExitedForUnregisterAttached`
+- From: `Attached`
+- On: `CommsDrainExitedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Attached`
+
+### `CommsDrainExitedForUnregisterRunning`
+- From: `Running`
+- On: `CommsDrainExitedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Running`
+
+### `CommsDrainExitedForUnregisterRetired`
+- From: `Retired`
+- On: `CommsDrainExitedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Retired`
+
+### `CommsDrainExitedForUnregisterStopped`
+- From: `Stopped`
+- On: `CommsDrainExitedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Stopped`
+
+### `CompletionWaitersResolvedForUnregisterIdle`
+- From: `Idle`
+- On: `CompletionWaitersResolvedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Idle`
+
+### `CompletionWaitersResolvedForUnregisterAttached`
+- From: `Attached`
+- On: `CompletionWaitersResolvedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Attached`
+
+### `CompletionWaitersResolvedForUnregisterRunning`
+- From: `Running`
+- On: `CompletionWaitersResolvedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Running`
+
+### `CompletionWaitersResolvedForUnregisterRetired`
+- From: `Retired`
+- On: `CompletionWaitersResolvedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Retired`
+
+### `CompletionWaitersResolvedForUnregisterStopped`
+- From: `Stopped`
+- On: `CompletionWaitersResolvedForUnregister`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `unregister_draining`
+  - `obligation_open`
+- To: `Stopped`
+
 ### `UnregisterSessionIdle`
 - From: `Idle`
 - On: `UnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
@@ -1017,6 +1228,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches_observation`
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
+  - `unregister_draining`
+  - `runtime_loop_drained`
+  - `comms_drain_exited`
+  - `completion_waiters_drained`
 - To: `Idle`
 
 ### `UnregisterSessionAttached`
@@ -1028,6 +1243,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches_observation`
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
+  - `unregister_draining`
+  - `runtime_loop_drained`
+  - `comms_drain_exited`
+  - `completion_waiters_drained`
 - To: `Idle`
 
 ### `UnregisterSessionRunning`
@@ -1039,6 +1258,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches_observation`
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
+  - `unregister_draining`
+  - `runtime_loop_drained`
+  - `comms_drain_exited`
+  - `completion_waiters_drained`
 - To: `Idle`
 
 ### `UnregisterSessionRetired`
@@ -1050,6 +1273,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches_observation`
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
+  - `unregister_draining`
+  - `runtime_loop_drained`
+  - `comms_drain_exited`
+  - `completion_waiters_drained`
 - To: `Idle`
 
 ### `UnregisterSessionStopped`
@@ -1061,6 +1288,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches_observation`
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
+  - `unregister_draining`
+  - `runtime_loop_drained`
+  - `comms_drain_exited`
+  - `completion_waiters_drained`
 - To: `Idle`
 
 ### `ResolveRuntimeOpsLifecycleDurabilityIdle`
@@ -5013,16 +5244,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `EnsureSessionWithExecutorIdle`
 - From: `Idle`
 - On: `EnsureSessionWithExecutor`(session_id)
+- Guards:
+  - `not_draining`
 - To: `Attached`
 
 ### `EnsureSessionWithExecutorAttached`
 - From: `Attached`
 - On: `EnsureSessionWithExecutor`(session_id)
+- Guards:
+  - `not_draining`
 - To: `Attached`
 
 ### `EnsureSessionWithExecutorRunning`
 - From: `Running`
 - On: `EnsureSessionWithExecutor`(session_id)
+- Guards:
+  - `not_draining`
 - To: `Running`
 
 ### `EnsureSessionWithExecutorRetired`
@@ -13955,6 +14192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerRequestSent`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
 - To: `Idle`
@@ -13963,6 +14201,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerRequestSent`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
 - To: `Attached`
@@ -13971,6 +14210,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerRequestSent`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
 - To: `Running`
@@ -13979,6 +14219,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerRequestSent`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
 - To: `Retired`
@@ -13987,6 +14228,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerRequestSent`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
 - To: `Stopped`
@@ -13995,6 +14237,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerResponseProgressArrived`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`
 - To: `Idle`
@@ -14003,6 +14246,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerResponseProgressArrived`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`
 - To: `Attached`
@@ -14011,6 +14255,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerResponseProgressArrived`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`
 - To: `Running`
@@ -14019,6 +14264,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerResponseProgressArrived`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`
 - To: `Retired`
@@ -14027,6 +14273,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerResponseProgressArrived`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`
 - To: `Stopped`
@@ -14035,6 +14282,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `completed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14044,6 +14292,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `completed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14053,6 +14302,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `completed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14062,6 +14312,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `completed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14071,6 +14322,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `completed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14080,6 +14332,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `failed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14089,6 +14342,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `failed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14098,6 +14352,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `failed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14107,6 +14362,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `failed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14116,6 +14372,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerResponseTerminalArrived`(corr_id, disposition)
 - Guards:
+  - `session_registered`
   - `pending_exists`
   - `failed`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
@@ -14125,6 +14382,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerResponseRejected`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Idle`
@@ -14133,6 +14391,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerResponseRejected`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Attached`
@@ -14141,6 +14400,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerResponseRejected`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Running`
@@ -14149,6 +14409,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerResponseRejected`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Retired`
@@ -14157,6 +14418,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerResponseRejected`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Stopped`
@@ -14165,6 +14427,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerRequestTimedOut`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Idle`
@@ -14173,6 +14436,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerRequestTimedOut`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Attached`
@@ -14181,6 +14445,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerRequestTimedOut`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Running`
@@ -14189,6 +14454,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerRequestTimedOut`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Retired`
@@ -14197,6 +14463,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerRequestTimedOut`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Stopped`
@@ -14205,6 +14472,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerRequestSendFailed`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Idle`
@@ -14213,6 +14481,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerRequestSendFailed`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Attached`
@@ -14221,6 +14490,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerRequestSendFailed`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Running`
@@ -14229,6 +14499,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerRequestSendFailed`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Retired`
@@ -14237,6 +14508,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerRequestSendFailed`(corr_id)
 - Guards:
+  - `session_registered`
   - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Stopped`
@@ -14245,6 +14517,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
+  - `session_registered`
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Idle`
@@ -14253,6 +14526,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
+  - `session_registered`
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Attached`
@@ -14261,6 +14535,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
+  - `session_registered`
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Running`
@@ -14269,6 +14544,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
+  - `session_registered`
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Retired`
@@ -14277,6 +14553,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
+  - `session_registered`
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Stopped`
@@ -14285,6 +14562,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PeerResponseReplied`(corr_id)
 - Guards:
+  - `session_registered`
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Idle`
@@ -14293,6 +14571,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PeerResponseReplied`(corr_id)
 - Guards:
+  - `session_registered`
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Attached`
@@ -14301,6 +14580,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PeerResponseReplied`(corr_id)
 - Guards:
+  - `session_registered`
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Running`
@@ -14309,6 +14589,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PeerResponseReplied`(corr_id)
 - Guards:
+  - `session_registered`
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Retired`
@@ -14317,6 +14598,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PeerResponseReplied`(corr_id)
 - Guards:
+  - `session_registered`
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Stopped`
@@ -14365,6 +14647,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `InteractionStreamReserved`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_reserved`
   - `not_attached`
 - Emits: `InteractionStreamStateChanged`
@@ -14374,6 +14657,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `InteractionStreamReserved`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_reserved`
   - `not_attached`
 - Emits: `InteractionStreamStateChanged`
@@ -14383,6 +14667,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `InteractionStreamReserved`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_reserved`
   - `not_attached`
 - Emits: `InteractionStreamStateChanged`
@@ -14392,6 +14677,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `InteractionStreamReserved`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_reserved`
   - `not_attached`
 - Emits: `InteractionStreamStateChanged`
@@ -14401,6 +14687,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `InteractionStreamReserved`(corr_id)
 - Guards:
+  - `session_registered`
   - `not_reserved`
   - `not_attached`
 - Emits: `InteractionStreamStateChanged`
@@ -14410,6 +14697,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `InteractionStreamAttached`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`
 - To: `Idle`
@@ -14418,6 +14706,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `InteractionStreamAttached`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`
 - To: `Attached`
@@ -14426,6 +14715,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `InteractionStreamAttached`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`
 - To: `Running`
@@ -14434,6 +14724,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `InteractionStreamAttached`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`
 - To: `Retired`
@@ -14442,6 +14733,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `InteractionStreamAttached`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`
 - To: `Stopped`
@@ -14450,6 +14742,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `InteractionStreamCompleted`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Idle`
@@ -14458,6 +14751,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `InteractionStreamCompleted`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Attached`
@@ -14466,6 +14760,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `InteractionStreamCompleted`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Running`
@@ -14474,6 +14769,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `InteractionStreamCompleted`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Retired`
@@ -14482,6 +14778,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `InteractionStreamCompleted`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Stopped`
@@ -14490,6 +14787,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `InteractionStreamExpired`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Idle`
@@ -14498,6 +14796,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `InteractionStreamExpired`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Attached`
@@ -14506,6 +14805,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `InteractionStreamExpired`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Running`
@@ -14514,6 +14814,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `InteractionStreamExpired`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Retired`
@@ -14522,6 +14823,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `InteractionStreamExpired`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_reserved`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Stopped`
@@ -14530,6 +14832,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `InteractionStreamClosedEarly`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Idle`
@@ -14538,6 +14841,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `InteractionStreamClosedEarly`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Attached`
@@ -14546,6 +14850,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `InteractionStreamClosedEarly`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Running`
@@ -14554,6 +14859,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `InteractionStreamClosedEarly`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Retired`
@@ -14562,9 +14868,143 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `InteractionStreamClosedEarly`(corr_id)
 - Guards:
+  - `session_registered`
   - `is_attached`
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Stopped`
+
+### `NotifyDrainExitedAfterUnregister`
+- From: `Idle`
+- On: `NotifyDrainExited`(reason)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `McpServerConnectPendingAfterUnregister`
+- From: `Idle`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `McpServerConnectedAfterUnregister`
+- From: `Idle`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `McpServerFailedAfterUnregister`
+- From: `Idle`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `McpServerDisconnectedAfterUnregister`
+- From: `Idle`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `McpServerReloadAfterUnregister`
+- From: `Idle`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerRequestSentAfterUnregister`
+- From: `Idle`
+- On: `PeerRequestSent`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerResponseProgressArrivedAfterUnregister`
+- From: `Idle`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerResponseTerminalArrivedAfterUnregister`
+- From: `Idle`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerResponseRejectedAfterUnregister`
+- From: `Idle`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerRequestTimedOutAfterUnregister`
+- From: `Idle`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerRequestSendFailedAfterUnregister`
+- From: `Idle`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerRequestReceivedAfterUnregister`
+- From: `Idle`
+- On: `PeerRequestReceived`(corr_id, handling_mode)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `PeerResponseRepliedAfterUnregister`
+- From: `Idle`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamReservedAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamAttachedAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamCompletedAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamExpiredAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamClosedEarlyAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
 
 ### `AttachSessionIngressIdle`
 - From: `Idle`

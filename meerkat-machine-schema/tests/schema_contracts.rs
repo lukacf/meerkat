@@ -2453,6 +2453,7 @@ fn occurrence_supersede_transition_emits_occurrences_superseded() {
         "OccurrenceLifecycleMachine must retain at least one Supersede transition"
     );
 
+    let mut saw_idempotent_noop = false;
     for transition in supersede_transitions {
         let emits = transition
             .emit
@@ -2460,11 +2461,25 @@ fn occurrence_supersede_transition_emits_occurrences_superseded() {
             .map(|emit| emit.variant.as_str())
             .collect::<Vec<_>>();
         let transition_name = &transition.name;
+        if transition_name.as_str() == "SupersedeAlreadySuperseded" {
+            // First supersession wins: the idempotent no-op in Superseded must
+            // NOT re-emit the reciprocal ack (receipt dedup contract).
+            saw_idempotent_noop = true;
+            assert!(
+                emits.is_empty(),
+                "SupersedeAlreadySuperseded must be a zero-effect idempotent no-op (found emits: {emits:?})",
+            );
+            continue;
+        }
         assert!(
             emits.contains(&"OccurrencesSuperseded"),
             "Supersede transition {transition_name} must emit OccurrencesSuperseded (found emits: {emits:?})",
         );
     }
+    assert!(
+        saw_idempotent_noop,
+        "OccurrenceLifecycleMachine must keep the SupersedeAlreadySuperseded idempotent no-op"
+    );
 }
 
 #[test]

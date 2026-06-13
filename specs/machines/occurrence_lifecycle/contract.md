@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `7`
+- Version: `8`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -45,6 +45,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completed_at_utc_ms`: `Option<u64>`
 - `attempt_count`: `u64`
 - `superseded_by_revision`: `Option<u64>`
+- `late_completion_recorded_at_utc_ms`: `Option<u64>`
+- `late_completion_resolution`: `Option<LateCompletionResolutionClass>`
+- `late_completion_detail`: `Option<String>`
+- `stale_completion_arrivals`: `u64`
 
 ## Inputs
 - `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, target_materialized_session_id: Option<SessionId>, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
@@ -67,6 +71,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LeaseExpired`(at_utc_ms: u64)
 - `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
 - `ClassifyTransitionFailure`(refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant)
+- `ClassifyStaleCompletionArrival`(trigger: OccurrenceLifecycleInputVariant)
 
 ## Signals
 
@@ -89,6 +94,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeliveryFailed`
 - `LeaseExpired`
 - `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
+- `LateCompletionResolutionRecorded`(resolution: LateCompletionResolutionClass)
+- `StaleCompletionArrivalClassified`(phase: OccurrenceLifecycleState, trigger: OccurrenceLifecycleInputVariant)
 
 ## Helpers
 - `is_live_claim_phase`(phase: OccurrenceLifecycleState) -> `Bool`
@@ -98,6 +105,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_records_revision`
 - `delivery_failed_records_failure_class`
 - `misfire_deadline_not_before_due`
+- `late_completion_only_after_supersession`
+- `late_completion_resolution_requires_timestamp`
+- `late_completion_timestamp_requires_resolution`
+- `late_completion_detail_requires_resolution`
 
 ## Transitions
 ### `ClassifyTransitionFailurePlanRejectedPending`
@@ -892,6 +903,150 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `TransitionFailureClassified`
 - To: `DeliveryFailed`
 
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureStaleCompletionArrivalRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `stale_completion_arrival_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyStaleCompletionArrivalObservedPending`
+- From: `Pending`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Pending`
+
+### `ClassifyStaleCompletionArrivalObservedClaimed`
+- From: `Claimed`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Claimed`
+
+### `ClassifyStaleCompletionArrivalObservedDispatching`
+- From: `Dispatching`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Dispatching`
+
+### `ClassifyStaleCompletionArrivalObservedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyStaleCompletionArrivalObservedCompleted`
+- From: `Completed`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Completed`
+
+### `ClassifyStaleCompletionArrivalObservedSkipped`
+- From: `Skipped`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Skipped`
+
+### `ClassifyStaleCompletionArrivalObservedMisfired`
+- From: `Misfired`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Misfired`
+
+### `ClassifyStaleCompletionArrivalObservedSuperseded`
+- From: `Superseded`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `Superseded`
+
+### `ClassifyStaleCompletionArrivalObservedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyStaleCompletionArrival`(trigger)
+- Guards:
+  - `completion_shaped_trigger`
+- Emits: `StaleCompletionArrivalClassified`
+- To: `DeliveryFailed`
+
 ### `PlanOccurrenceFromPending`
 - From: `Pending`
 - On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, target_materialized_session_id, due_at_utc_ms, misfire_deadline_utc_ms)
@@ -1119,6 +1274,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CompletionSupersessionClassified`
 - To: `AwaitingCompletion`
 
+### `ClassifyCompletionSupersessionAlreadySuperseded`
+- From: `Superseded`
+- On: `ClassifyCompletionSupersession`(schedule_phase, current_schedule_revision)
+- Emits: `CompletionSupersessionClassified`
+- To: `Superseded`
+
 ### `SyncTargetSnapshotPending`
 - From: `Pending`
 - On: `SyncTargetSnapshot`(target_binding_key, target_materialized_session_id)
@@ -1211,6 +1372,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AwaitCompletion`(at_utc_ms)
 - Emits: `AwaitingCompletion`
 - To: `AwaitingCompletion`
+
+### `AwaitCompletionAfterSupersession`
+- From: `Superseded`
+- On: `AwaitCompletion`(at_utc_ms)
+- To: `Superseded`
 
 ### `CompleteFromDispatchingOrAwaiting`
 - From: `Dispatching`, `AwaitingCompletion`
@@ -1378,6 +1544,61 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `Superseded`, `OccurrencesSuperseded`
 - To: `Superseded`
 
+### `SupersedeAlreadySuperseded`
+- From: `Superseded`
+- On: `Supersede`(superseded_by_revision, at_utc_ms)
+- To: `Superseded`
+
+### `LateCompleteAfterSupersession`
+- From: `Superseded`
+- On: `Complete`(at_utc_ms)
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateRuntimeCompletionCompletedAfterSupersession`
+- From: `Superseded`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_completed`
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateRuntimeCompletionRejectedAfterSupersession`
+- From: `Superseded`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_rejected`
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateRuntimeCompletionTransportErrorAfterSupersession`
+- From: `Superseded`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_transport_error`
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateRuntimeCompletionInternalErrorAfterSupersession`
+- From: `Superseded`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_internal_error`
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateDeliveryCompletionFailureAfterSupersession`
+- From: `Superseded`
+- On: `ResolveDeliveryCompletionFailure`(reason, detail, at_utc_ms)
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
+### `LateDeliveryFailureAfterSupersession`
+- From: `Superseded`
+- On: `ResolveDeliveryFailure`(reason, detail, at_utc_ms)
+- Emits: `LateCompletionResolutionRecorded`
+- To: `Superseded`
+
 ### `LeaseExpiredFromClaimed`
 - From: `Claimed`
 - On: `LeaseExpired`(at_utc_ms)
@@ -1413,6 +1634,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
 - Emits: `LeaseExpired`
 - To: `Pending`
+
+### `ReleaseLeaseForPausedScheduleAfterSupersession`
+- From: `Superseded`
+- On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
+- To: `Superseded`
 
 ## Coverage
 ### Code Anchors

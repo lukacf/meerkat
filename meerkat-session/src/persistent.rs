@@ -12217,6 +12217,125 @@ mod tests {
         );
     }
 
+    /// 0.7.2 disciplined shell inputs, entry 16 pin (persistent.rs:5068
+    /// seam): a runtime context application that arrives after archive
+    /// committed must resolve with the typed archived-session contract
+    /// (NotFound) — never an internal error and never a hung waiter.
+    #[tokio::test]
+    async fn test_runtime_context_appends_after_archive_resolve_typed_not_found() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+
+        // The racing producer acquired its admission BEFORE archive committed.
+        let admission = service
+            .inner
+            .acquire_runtime_context_admission(&id)
+            .await
+            .expect("live session should admit runtime context");
+
+        service.archive(&id).await.expect("archive should succeed");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.apply_runtime_context_appends_with_recoverable_reserved_admission(
+                &id,
+                RunId::new(),
+                Vec::new(),
+                RunApplyBoundary::RunStart,
+                Vec::new(),
+                admission,
+            ),
+        )
+        .await
+        .expect("post-archive context application must settle, not hang");
+        let (error, _recovered_admission) =
+            result.expect_err("post-archive context application must not fabricate success");
+        assert!(
+            matches!(error, SessionError::NotFound { .. }),
+            "post-archive context application must resolve the typed archived contract \
+             (NotFound), got: {error:?}"
+        );
+    }
+
+    /// 0.7.2 disciplined shell inputs, entry 15 pin (persistent.rs:5979
+    /// seam): an external system-context append that arrives after archive
+    /// committed resolves the typed archived contract (NotFound) without
+    /// mutating the archived durable row.
+    #[tokio::test]
+    async fn test_append_system_context_after_archive_resolves_typed_not_found() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+        service.archive(&id).await.expect("archive should succeed");
+        let archived_row = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("archived projection should be present");
+
+        let err = service
+            .append_system_context(
+                &id,
+                AppendSystemContextRequest {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "late runtime notice".to_string(),
+                    ),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-post-archive-race".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+            )
+            .await
+            .expect_err("post-archive append must resolve the typed archived contract");
+        assert!(
+            matches!(
+                err,
+                SessionControlError::Session(SessionError::NotFound { .. })
+            ),
+            "post-archive append must be a typed NotFound, got: {err:?}"
+        );
+
+        let persisted = store
+            .load(&id)
+            .await
+            .expect("durable load should succeed")
+            .expect("archived row must survive the rejected append");
+        assert_eq!(
+            persisted.messages().len(),
+            archived_row.messages().len(),
+            "rejected append must not mutate the archived transcript"
+        );
+        assert_eq!(
+            persisted.metadata(),
+            archived_row.metadata(),
+            "rejected append must not mutate the archived metadata"
+        );
+    }
+
     /// Direct generated-authority coverage for the lifecycle-terminal region:
     /// unseeded drives fail closed, Active archives with the realization
     /// action vector, re-archive is the explicit AlreadyArchived verdict with

@@ -283,6 +283,17 @@ fn auth_machine_oauth_durable_confirmation_has_generated_global_capacity_guard()
         "AuthMachine must route durable OAuth admission confirmation transitions"
     );
     for transition in transitions {
+        // 0.7.2 D2a: the post-release arrival is a deliberate total no-op
+        // (the admitted flow was already terminally cancelled by the release
+        // drain); the capacity guard stays the authoritative fail-closed
+        // check on every live-phase confirmation.
+        if transition.name.as_str() == "ConfirmOAuthDurableAdmissionReleased" {
+            assert!(
+                transition.updates.is_empty(),
+                "post-release durable confirmation must not mutate state"
+            );
+            continue;
+        }
         assert!(
             transition
                 .guards
@@ -401,5 +412,255 @@ fn auth_machine_restore_rejects_orphan_device_poll_in_generated_authority() {
             "{} must reject orphan restored device polls in generated authority",
             transition.name
         );
+    }
+}
+
+// --- 0.7.2 disciplined shell inputs (lane L3 auth-release) ---
+
+/// D1: release teardown is two-phase and machine-owned. `BeginRelease`
+/// records the draining intent and emits the in-flight flow membership as a
+/// typed `CancelOAuthFlowsForRelease` obligation; the final `Release`
+/// transition is guarded on the drain being complete.
+#[test]
+fn auth_machine_release_is_two_phase_with_machine_owned_oauth_drain() {
+    let schema = dsl_auth_machine();
+
+    let draining = schema
+        .state
+        .fields
+        .iter()
+        .find(|field| field.name.as_str() == "release_draining")
+        .expect("AuthMachine must declare release_draining drain sub-state");
+    assert_eq!(
+        draining.ty,
+        TypeRef::Bool,
+        "release_draining must be a machine-owned bool sub-state"
+    );
+
+    schema
+        .inputs
+        .variant_named("BeginRelease")
+        .expect("AuthMachine must declare BeginRelease drain input");
+
+    let cancel = schema
+        .effects
+        .variant_named("CancelOAuthFlowsForRelease")
+        .expect("AuthMachine must declare typed release-drain cancellation effect");
+    for field in ["browser_flow_ids", "device_flow_ids"] {
+        assert_eq!(
+            cancel
+                .field_named(field)
+                .unwrap_or_else(|_| panic!(
+                    "CancelOAuthFlowsForRelease must carry `{field}` membership"
+                ))
+                .ty,
+            TypeRef::Set(Box::new(TypeRef::String)),
+            "`{field}` must carry the machine-owned flow membership set"
+        );
+    }
+
+    // Each live phase routes a draining BeginRelease that emits the
+    // cancellation obligation while membership is still intact.
+    let draining_transitions = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition
+                .name
+                .as_str()
+                .starts_with("BeginReleaseDrainingOAuthFlows")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        draining_transitions.len(),
+        5,
+        "BeginRelease must drain from every live lifecycle phase"
+    );
+    for transition in draining_transitions {
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "oauth_membership_present"),
+            "{} must only emit a drain obligation when flows are in flight",
+            transition.name
+        );
+        assert!(
+            transition
+                .emit
+                .iter()
+                .any(|effect| effect.variant.as_str() == "CancelOAuthFlowsForRelease"),
+            "{} must emit the typed cancellation obligation",
+            transition.name
+        );
+        assert_eq!(
+            transition.from.len(),
+            1,
+            "{} must be a per-phase expansion",
+            transition.name
+        );
+        assert_eq!(
+            &transition.to, &transition.from[0],
+            "{} must not change lifecycle phase while draining",
+            transition.name
+        );
+    }
+
+    // The final Release transition is guarded on the drain being complete:
+    // a Released machine structurally cannot hold OAuth flow membership.
+    let release = schema
+        .transitions
+        .iter()
+        .find(|transition| transition.name.as_str() == "Release")
+        .expect("AuthMachine must declare the Release transition");
+    assert!(
+        release
+            .guards
+            .iter()
+            .any(|guard| guard.name == "oauth_release_drained"),
+        "Release must be guarded on all drain obligations closed"
+    );
+
+    for invariant in [
+        "released_oauth_membership_drained",
+        "released_not_release_draining",
+    ] {
+        assert!(
+            schema
+                .invariants
+                .iter()
+                .any(|candidate| candidate.name == invariant),
+            "AuthMachine must declare release-drain invariant `{invariant}`"
+        );
+    }
+}
+
+/// D2a: observation/cleanup-shaped OAuth inputs (Expire*, durable-admission
+/// Confirm, poll Finish, BeginRelease) are total in `Released` — late
+/// poll/prune/compensation arrivals after teardown are benign no-ops, never
+/// guard rejections (worklist entries 24-30).
+#[test]
+fn auth_machine_post_release_oauth_observations_are_total_noops() {
+    let schema = dsl_auth_machine();
+    for (transition_name, input_name) in [
+        ("ExpireOAuthBrowserFlowReleased", "ExpireOAuthBrowserFlow"),
+        ("ExpireOAuthDeviceFlowReleased", "ExpireOAuthDeviceFlow"),
+        (
+            "ConfirmOAuthDurableAdmissionReleased",
+            "ConfirmOAuthDurableAdmission",
+        ),
+        ("FinishOAuthDevicePollReleased", "FinishOAuthDevicePoll"),
+        ("BeginReleaseReleased", "BeginRelease"),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| {
+                panic!("AuthMachine must accept `{input_name}` in Released as `{transition_name}`")
+            });
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => assert_eq!(variant.as_str(), input_name),
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(
+            transition.from.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            vec!["Released"],
+            "`{transition_name}` must fire only in Released"
+        );
+        assert_eq!(
+            transition.to.as_str(),
+            "Released",
+            "`{transition_name}` must stay in Released"
+        );
+        assert!(
+            transition.updates.is_empty(),
+            "`{transition_name}` must not mutate state"
+        );
+        assert!(
+            transition.emit.is_empty(),
+            "`{transition_name}` must not emit effects"
+        );
+    }
+}
+
+/// D2a: stale expiry/finish observations for flows that are no longer
+/// members are total no-ops in every live phase too — a consume or release
+/// drain can legitimately remove the flow between a producer's membership
+/// observation and its input delivery.
+#[test]
+fn auth_machine_stale_oauth_cleanup_observations_are_total_noops_in_live_phases() {
+    let schema = dsl_auth_machine();
+    for (prefix, guard_name) in [
+        ("ExpireOAuthBrowserFlowAbsent", "browser_flow_absent"),
+        ("ExpireOAuthDeviceFlowAbsent", "device_flow_absent"),
+        ("FinishOAuthDevicePollAbsent", "device_poll_absent"),
+    ] {
+        let transitions = schema
+            .transitions
+            .iter()
+            .filter(|transition| transition.name.as_str().starts_with(prefix))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transitions.len(),
+            5,
+            "`{prefix}` must be total across every live lifecycle phase"
+        );
+        for transition in transitions {
+            assert!(
+                transition
+                    .guards
+                    .iter()
+                    .any(|guard| guard.name == guard_name),
+                "{} must be guarded on absent membership (`{guard_name}`)",
+                transition.name
+            );
+            assert!(
+                transition.updates.is_empty(),
+                "{} must not mutate state",
+                transition.name
+            );
+            assert!(
+                transition.emit.is_empty(),
+                "{} must not emit effects",
+                transition.name
+            );
+        }
+    }
+}
+
+/// D1: while the release drain is in flight, new OAuth flow admissions and
+/// membership restores are refused so the drain obligation set cannot grow
+/// behind the shell's back.
+#[test]
+fn auth_machine_oauth_admissions_refuse_release_draining() {
+    let schema = dsl_auth_machine();
+    for prefix in [
+        "AdmitOAuthBrowserFlow",
+        "AdmitOAuthDeviceFlow",
+        "RestoreOAuthBrowserFlow",
+        "RestoreOAuthDeviceFlow",
+        "RestoreOAuthDevicePoll",
+    ] {
+        let transitions = schema
+            .transitions
+            .iter()
+            .filter(|transition| transition.name.as_str().starts_with(prefix))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transitions.len(),
+            5,
+            "`{prefix}` must expand across exactly the five live lifecycle phases"
+        );
+        for transition in transitions {
+            assert!(
+                transition
+                    .guards
+                    .iter()
+                    .any(|guard| guard.name == "not_release_draining"),
+                "{} must refuse admission while the release drain is in flight",
+                transition.name
+            );
+        }
     }
 }

@@ -5233,6 +5233,28 @@ impl MobHandle {
         }
     }
 
+    /// 0.7.2 L5 test seam: deliver a kickoff completion outcome through the
+    /// REAL actor command path (`MobCommand::KickoffOutcomeResolved`), exactly
+    /// as the spawned completion-waiter task does. Used by the
+    /// teardown-interleaving tests to drive a deterministic "outcome arrives
+    /// after retire/destroy" ordering without racing task aborts.
+    #[cfg(all(test, feature = "runtime-adapter"))]
+    pub(crate) async fn debug_inject_kickoff_outcome(
+        &self,
+        agent_identity: AgentIdentity,
+        outcome: Result<
+            meerkat_runtime::completion::CompletionOutcome,
+            meerkat_runtime::completion::CompletionWaitError,
+        >,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|ack_tx| MobCommand::KickoffOutcomeResolved {
+            agent_identity,
+            outcome,
+            ack_tx,
+        })
+        .await
+    }
+
     /// Set or clear the spawn policy for automatic member provisioning.
     ///
     /// When set, external turns targeting an unknown member identity will

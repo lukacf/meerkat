@@ -616,11 +616,17 @@ pub enum TurnPhase {
 
 /// Typed registration substate. Closed set of literals previously assigned to
 /// `registration_phase`.
+///
+/// `Draining` is the two-phase-unregister window: `BeginUnregisterSession`
+/// committed, drain obligations open, final `UnregisterSession` not yet
+/// legal. While draining, in-flight runtime-loop work may still commit, but
+/// no new executor registration claim is granted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RegistrationPhase {
     #[default]
     Queuing,
     Active,
+    Draining,
 }
 
 /// Typed comms drain substate. Mirrors the closed set of literals the DSL
@@ -2514,6 +2520,15 @@ macro_rules! meerkat_catalog_machine_dsl {
 
             // --- Registration substate ---
             registration_phase: RegistrationPhase,
+            // Unregister drain obligations (D1 two-phase teardown). Opened by
+            // BeginUnregisterSession, each closed by its feedback input. The
+            // final UnregisterSession transition is guarded on all three
+            // being closed, so no in-process producer can fire at a
+            // torn-down session: teardown completion is defined as
+            // "producers quiesced".
+            unregister_runtime_loop_drain_pending: bool,
+            unregister_comms_drain_exit_pending: bool,
+            unregister_completion_waiter_drain_pending: bool,
             staged_session_phase: StagedSessionPhase,
             staged_session_id: Option<SessionId>,
             staged_session_keep_alive: Option<bool>,
@@ -2962,6 +2977,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_approval_parent_kind = EmptyMap,
             // Registration substate
             registration_phase = RegistrationPhase::Queuing,
+            unregister_runtime_loop_drain_pending = false,
+            unregister_comms_drain_exit_pending = false,
+            unregister_completion_waiter_drain_pending = false,
             staged_session_phase = StagedSessionPhase::NotStaged,
             staged_session_id = None,
             staged_session_keep_alive = None,
@@ -3180,6 +3198,21 @@ macro_rules! meerkat_catalog_machine_dsl {
         input MeerkatMachineInput {
             // Direct inputs
             RegisterSession { session_id: SessionId },
+            // Two-phase unregister (D1): BeginUnregisterSession opens the
+            // drain window and emits one drain-request effect per in-process
+            // producer class; the three feedback inputs close the
+            // obligations; UnregisterSession commits only once all drains
+            // are closed.
+            BeginUnregisterSession {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+            },
+            RuntimeLoopStoppedForUnregister { session_id: SessionId },
+            CommsDrainExitedForUnregister { session_id: SessionId },
+            CompletionWaitersResolvedForUnregister { session_id: SessionId },
             UnregisterSession {
                 session_id: SessionId,
                 agent_runtime_id: Option<AgentRuntimeId>,
@@ -4784,6 +4817,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             PeerProjectionChanged { peer_projection_epoch: u64 },
             CommsTrustReconcileRequested { local_endpoint: Option<PeerEndpoint>, peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint> },
+            // Unregister drain-request effects (D1). One per in-process
+            // producer class that must quiesce before the final
+            // UnregisterSession commit: the runtime loop task (turn/start/
+            // stop/completion inputs), the comms drain task (NotifyDrainExited
+            // and peer-interaction inputs), and the outstanding completion
+            // waiters (which must resolve with a typed terminal outcome,
+            // never a generic authority error for committed work).
+            RequestRuntimeLoopStopForUnregister { session_id: SessionId },
+            RequestCommsDrainExitForUnregister { session_id: SessionId },
+            RequestCompletionWaiterResolutionForUnregister { session_id: SessionId },
         }
 
         // =====================================================================
@@ -4943,6 +4986,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SessionLlmReconfigurePlanResolved => local seam SurfaceResultAlignment,
         disposition PeerProjectionChanged => external seam OwnerRealizationOnly,
         disposition CommsTrustReconcileRequested => external handoff comms_trust_reconcile seam OwnerRealizationOnly,
+        // Unregister drain requests: the owning shell realizes each by
+        // quiescing the producer (stop + await runtime loop task, abort +
+        // await comms drain task, resolve outstanding completion waiters
+        // with typed terminal outcomes) and closes the obligation with the
+        // matching *ForUnregister feedback input. Same-machine effect →
+        // feedback shape (mob-destroy ingress-detach precedent).
+        disposition RequestRuntimeLoopStopForUnregister => external seam OwnerRealizationOnly,
+        disposition RequestCommsDrainExitForUnregister => external seam OwnerRealizationOnly,
+        disposition RequestCompletionWaiterResolutionForUnregister => external seam OwnerRealizationOnly,
 
         // =====================================================================
         // Helpers
@@ -5375,6 +5427,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             self.runtime_stop_deferred == false
             || self.lifecycle_phase == Phase::Running
             || self.lifecycle_phase == Phase::Attached
+        }
+
+        invariant unregister_drain_obligations_require_draining {
+            self.registration_phase == RegistrationPhase::Draining
+            || (self.unregister_runtime_loop_drain_pending == false
+                && self.unregister_comms_drain_exit_pending == false
+                && self.unregister_completion_waiter_drain_pending == false)
         }
 
         invariant current_run_only_while_running_or_retired {
@@ -5813,8 +5872,90 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Initializing
         }
 
+        // 2b. Two-phase unregister (D1, 0.7.2 disciplined shell inputs).
+        //
+        // BeginUnregisterSession opens the drain window: registration moves
+        // to Draining and one drain-request effect is emitted per in-process
+        // producer class. The shell discharges each request (stop + await
+        // the runtime loop task, abort + await the comms drain task, resolve
+        // outstanding completion waiters from minted runtime-terminated
+        // authority) and closes the obligation with the matching feedback
+        // input. The final UnregisterSession below is guarded on all drains
+        // closed, so teardown commit *means* "producers quiesced" — the
+        // post-commit guard-rejection races (ResolveRuntimeCompletionResult,
+        // StopRuntimeExecutor, NotifyDrainExited, turn-state inputs) are
+        // structurally impossible from owned tasks.
+        //
+        // Self-loops: the drain window does not change the lifecycle phase;
+        // the runtime loop may still commit its in-flight run while
+        // Draining.
+        transition BeginUnregisterSession {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BeginUnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "not_already_draining" { self.registration_phase != RegistrationPhase::Draining }
+            update {
+                self.registration_phase = RegistrationPhase::Draining;
+                self.unregister_runtime_loop_drain_pending = true;
+                self.unregister_comms_drain_exit_pending = true;
+                self.unregister_completion_waiter_drain_pending = true;
+            }
+            to Idle
+            emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
+            emit RequestCommsDrainExitForUnregister { session_id: session_id }
+            emit RequestCompletionWaiterResolutionForUnregister { session_id: session_id }
+        }
+
+        transition RuntimeLoopStoppedForUnregister {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RuntimeLoopStoppedForUnregister { session_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "obligation_open" { self.unregister_runtime_loop_drain_pending == true }
+            update {
+                self.unregister_runtime_loop_drain_pending = false;
+            }
+            to Idle
+        }
+
+        transition CommsDrainExitedForUnregister {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CommsDrainExitedForUnregister { session_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "obligation_open" { self.unregister_comms_drain_exit_pending == true }
+            update {
+                self.unregister_comms_drain_exit_pending = false;
+                // An aborted drain task never reports its own NotifyDrainExited;
+                // the drain obligation closure settles the drain substate so the
+                // unregistered machine does not retain a Running drain fact.
+                if self.drain_phase == DrainPhase::Running {
+                    self.drain_phase = DrainPhase::Stopped;
+                }
+            }
+            to Idle
+        }
+
+        transition CompletionWaitersResolvedForUnregister {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CompletionWaitersResolvedForUnregister { session_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "obligation_open" { self.unregister_completion_waiter_drain_pending == true }
+            update {
+                self.unregister_completion_waiter_drain_pending = false;
+            }
+            to Idle
+        }
+
         // 3. UnregisterSession: per-phase → Idle (NOT a self-loop, goes to Idle)
         // Cannot use per_phase because target is always Idle, not source phase.
+        // Guarded on the drain window being open and all D1 obligations
+        // closed (see BeginUnregisterSession above).
         transition UnregisterSessionIdle {
             on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -5823,6 +5964,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
             guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
             guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
+            guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
+            guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -5856,6 +6001,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
             guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
             guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
+            guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
+            guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -5889,6 +6038,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
             guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
             guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
+            guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
+            guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -5922,6 +6075,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
             guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
             guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
+            guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
+            guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -5955,6 +6112,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
             guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
             guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
+            guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
+            guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
+            guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -8122,7 +8283,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = None;
                 self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
-                self.registration_phase = RegistrationPhase::Queuing;
+                // The unregister drain window survives the executor exit it
+                // requested: Draining is closed by UnregisterSession, never
+                // reset to Queuing by the quiescing producer itself.
+                if self.registration_phase != RegistrationPhase::Draining {
+                    self.registration_phase = RegistrationPhase::Queuing;
+                }
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -8135,7 +8301,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = None;
                 self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
-                self.registration_phase = RegistrationPhase::Queuing;
+                // The unregister drain window survives the executor exit it
+                // requested: Draining is closed by UnregisterSession, never
+                // reset to Queuing by the quiescing producer itself.
+                if self.registration_phase != RegistrationPhase::Draining {
+                    self.registration_phase = RegistrationPhase::Queuing;
+                }
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -8146,7 +8317,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
-                self.registration_phase = RegistrationPhase::Queuing;
+                // The unregister drain window survives the executor exit it
+                // requested: Draining is closed by UnregisterSession, never
+                // reset to Queuing by the quiescing producer itself.
+                if self.registration_phase != RegistrationPhase::Draining {
+                    self.registration_phase = RegistrationPhase::Queuing;
+                }
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -8159,7 +8335,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = None;
                 self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
-                self.registration_phase = RegistrationPhase::Queuing;
+                // The unregister drain window survives the executor exit it
+                // requested: Draining is closed by UnregisterSession, never
+                // reset to Queuing by the quiescing producer itself.
+                if self.registration_phase != RegistrationPhase::Draining {
+                    self.registration_phase = RegistrationPhase::Queuing;
+                }
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -8169,7 +8350,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
                 self.runtime_stop_deferred = false;
-                self.registration_phase = RegistrationPhase::Queuing;
+                if self.registration_phase != RegistrationPhase::Draining {
+                    self.registration_phase = RegistrationPhase::Queuing;
+                }
             }
             to Stopped
         }
@@ -8705,6 +8888,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
+                // Destroy supersedes an in-flight unregister drain: a
+                // Destroyed terminal must not retain open drain obligations.
+                self.unregister_runtime_loop_drain_pending = false;
+                self.unregister_comms_drain_exit_pending = false;
+                self.unregister_completion_waiter_drain_pending = false;
             }
             to Destroyed
             emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
@@ -8940,6 +9128,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition EnsureSessionWithExecutorIdle {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Idle }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
                 self.registration_phase = RegistrationPhase::Active;
             }
@@ -8949,6 +9138,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition EnsureSessionWithExecutorAttached {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Attached }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
                 self.registration_phase = RegistrationPhase::Active;
                 self.runtime_stop_deferred = false;
@@ -8958,6 +9148,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition EnsureSessionWithExecutorRunning {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
                 self.registration_phase = RegistrationPhase::Active;
             }
@@ -18582,6 +18773,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerRequestSent {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestSent { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "not_already_pending" { !self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.insert(corr_id, OutboundPeerRequestState::Sent);
@@ -18593,6 +18785,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerResponseProgressArrived {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerResponseProgressArrived { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.insert(corr_id, OutboundPeerRequestState::AcceptedProgress);
@@ -18604,6 +18797,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerResponseTerminalArrivedCompleted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerResponseTerminalArrived { corr_id, disposition }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             guard "completed" { disposition == PeerTerminalDisposition::Completed }
             update {
@@ -18617,6 +18811,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerResponseTerminalArrivedFailed {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerResponseTerminalArrived { corr_id, disposition }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             guard "failed" { disposition == PeerTerminalDisposition::Failed }
             update {
@@ -18630,6 +18825,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerResponseRejected {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerResponseRejected { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.remove(corr_id);
@@ -18642,6 +18838,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerRequestTimedOut {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestTimedOut { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.remove(corr_id);
@@ -18654,6 +18851,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerRequestSendFailed {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestSendFailed { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.remove(corr_id);
@@ -18666,6 +18864,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerRequestReceived {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestReceived { corr_id, handling_mode }
+            guard "session_registered" { self.session_id != None }
             guard "not_already_inbound" { !self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.insert(corr_id, InboundPeerRequestState::Received);
@@ -18678,6 +18877,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PeerResponseReplied {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerResponseReplied { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "inbound_exists" { self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.remove(corr_id);
@@ -18729,6 +18929,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition InteractionStreamReserved {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input InteractionStreamReserved { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "not_reserved" { !self.reserved_interaction_streams.contains(corr_id) }
             guard "not_attached" { !self.attached_interaction_streams.contains(corr_id) }
             update {
@@ -18741,6 +18942,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition InteractionStreamAttached {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input InteractionStreamAttached { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "is_reserved" { self.reserved_interaction_streams.contains(corr_id) }
             update {
                 self.reserved_interaction_streams.remove(corr_id);
@@ -18753,6 +18955,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition InteractionStreamCompleted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input InteractionStreamCompleted { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "is_attached" { self.attached_interaction_streams.contains(corr_id) }
             update {
                 self.attached_interaction_streams.remove(corr_id);
@@ -18765,6 +18968,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition InteractionStreamExpired {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input InteractionStreamExpired { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "is_reserved" { self.reserved_interaction_streams.contains(corr_id) }
             update {
                 self.reserved_interaction_streams.remove(corr_id);
@@ -18777,6 +18981,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition InteractionStreamClosedEarly {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input InteractionStreamClosedEarly { corr_id }
+            guard "session_registered" { self.session_id != None }
             guard "is_attached" { self.attached_interaction_streams.contains(corr_id) }
             update {
                 self.attached_interaction_streams.remove(corr_id);
@@ -18784,6 +18989,179 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::ClosedEarly }
             emit InteractionStreamCleanup { corr_id: corr_id }
+        }
+
+        // =====================================================================
+        // Post-unregister observation no-ops (D2a, 0.7.2 disciplined shell
+        // inputs)
+        // =====================================================================
+        //
+        // Producers that cannot be quiesced by the unregister drain
+        // obligations — MCP connect tasks mid-handshake, CommsRuntime-owned
+        // interaction-stream watchers, peer callbacks holding Arc'd handles —
+        // may legitimately deliver observations after UnregisterSession
+        // commits while the machine instance is still alive (handles keep
+        // the DSL authority Arc; the sessions-map entry is gone). These
+        // arrivals are facts about a session that no longer exists: the
+        // machine accepts them as explicit no-ops (self-loop, empty update)
+        // instead of guard-rejecting, so the shell sees Ok, never an
+        // ERROR-class rejection for a legitimate interleaving
+        // (no-op-transition precedent: ObserveCredentialFreshnessValid,
+        // auth_machine.rs). Post-unregister state is always Idle with
+        // session_id == None; the unregistered guard keeps these disjoint
+        // from the registered transitions above. Command-shaped inputs keep
+        // their hard rejections.
+
+        transition NotifyDrainExitedAfterUnregister {
+            on input NotifyDrainExited { reason }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition McpServerConnectPendingAfterUnregister {
+            on input McpServerConnectPending { server_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition McpServerConnectedAfterUnregister {
+            on input McpServerConnected { server_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition McpServerFailedAfterUnregister {
+            on input McpServerFailed { server_id, error }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition McpServerDisconnectedAfterUnregister {
+            on input McpServerDisconnected { server_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition McpServerReloadAfterUnregister {
+            on input McpServerReload { server_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerRequestSentAfterUnregister {
+            on input PeerRequestSent { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerResponseProgressArrivedAfterUnregister {
+            on input PeerResponseProgressArrived { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerResponseTerminalArrivedAfterUnregister {
+            on input PeerResponseTerminalArrived { corr_id, disposition }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerResponseRejectedAfterUnregister {
+            on input PeerResponseRejected { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerRequestTimedOutAfterUnregister {
+            on input PeerRequestTimedOut { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerRequestSendFailedAfterUnregister {
+            on input PeerRequestSendFailed { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerRequestReceivedAfterUnregister {
+            on input PeerRequestReceived { corr_id, handling_mode }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition PeerResponseRepliedAfterUnregister {
+            on input PeerResponseReplied { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamReservedAfterUnregister {
+            on input InteractionStreamReserved { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamAttachedAfterUnregister {
+            on input InteractionStreamAttached { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamCompletedAfterUnregister {
+            on input InteractionStreamCompleted { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamExpiredAfterUnregister {
+            on input InteractionStreamExpired { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamClosedEarlyAfterUnregister {
+            on input InteractionStreamClosedEarly { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
         }
 
         // =====================================================================

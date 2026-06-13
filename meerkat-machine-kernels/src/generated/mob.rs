@@ -5453,6 +5453,14 @@ pub mod inputs {
         pub member_id: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct KickoffQuiesced {
+        pub member_id: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelPendingSpawn {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProbeMemberAdmission {
         pub agent_identity: AgentIdentity,
     }
@@ -5779,6 +5787,8 @@ pub enum Input {
     KickoffResolveFailed(inputs::KickoffResolveFailed),
     KickoffCancelRequested(inputs::KickoffCancelRequested),
     KickoffClear(inputs::KickoffClear),
+    KickoffQuiesced(inputs::KickoffQuiesced),
+    CancelPendingSpawn(inputs::CancelPendingSpawn),
     ProbeMemberAdmission(inputs::ProbeMemberAdmission),
     ComputeRespawnGeneration(inputs::ComputeRespawnGeneration),
     ClassifyStepOutputFault(inputs::ClassifyStepOutputFault),
@@ -5944,6 +5954,8 @@ impl Input {
             Self::KickoffResolveFailed(_) => InputKind::KickoffResolveFailed,
             Self::KickoffCancelRequested(_) => InputKind::KickoffCancelRequested,
             Self::KickoffClear(_) => InputKind::KickoffClear,
+            Self::KickoffQuiesced(_) => InputKind::KickoffQuiesced,
+            Self::CancelPendingSpawn(_) => InputKind::CancelPendingSpawn,
             Self::ProbeMemberAdmission(_) => InputKind::ProbeMemberAdmission,
             Self::ComputeRespawnGeneration(_) => InputKind::ComputeRespawnGeneration,
             Self::ClassifyStepOutputFault(_) => InputKind::ClassifyStepOutputFault,
@@ -6090,6 +6102,8 @@ pub enum InputKind {
     KickoffResolveFailed,
     KickoffCancelRequested,
     KickoffClear,
+    KickoffQuiesced,
+    CancelPendingSpawn,
     ProbeMemberAdmission,
     ComputeRespawnGeneration,
     ClassifyStepOutputFault,
@@ -6670,6 +6684,12 @@ pub mod effects {
         pub intent: KickoffIntent,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestKickoffQuiesce {
+        pub member_id: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestPendingSpawnQuiesceForDestroy {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberAdmissionProbed {
         pub agent_identity: AgentIdentity,
         pub verdict: MemberAdmissionVerdictKind,
@@ -7136,6 +7156,8 @@ pub enum Effect {
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
+    RequestKickoffQuiesce(effects::RequestKickoffQuiesce),
+    RequestPendingSpawnQuiesceForDestroy(effects::RequestPendingSpawnQuiesceForDestroy),
     MemberAdmissionProbed(effects::MemberAdmissionProbed),
     RespawnGenerationComputed(effects::RespawnGenerationComputed),
     StepOutputFaultClassified(effects::StepOutputFaultClassified),
@@ -7246,6 +7268,8 @@ pub enum EffectKind {
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
+    RequestKickoffQuiesce,
+    RequestPendingSpawnQuiesceForDestroy,
     MemberAdmissionProbed,
     RespawnGenerationComputed,
     StepOutputFaultClassified,
@@ -7655,6 +7679,29 @@ pub enum TransitionId {
     KickoffClearRunning,
     KickoffClearStopped,
     KickoffClearCompleted,
+    KickoffQuiescedInFlightRunning,
+    KickoffQuiescedInFlightStopped,
+    KickoffQuiescedInFlightCompleted,
+    KickoffQuiescedIdleRunning,
+    KickoffQuiescedIdleStopped,
+    KickoffQuiescedIdleCompleted,
+    KickoffQuiescedDestroyed,
+    KickoffResolveStartedLateArrivalRunning,
+    KickoffResolveStartedLateArrivalStopped,
+    KickoffResolveStartedLateArrivalCompleted,
+    KickoffResolveStartedDestroyed,
+    KickoffResolveCallbackPendingLateArrivalRunning,
+    KickoffResolveCallbackPendingLateArrivalStopped,
+    KickoffResolveCallbackPendingLateArrivalCompleted,
+    KickoffResolveCallbackPendingDestroyed,
+    KickoffResolveFailedLateArrivalRunning,
+    KickoffResolveFailedLateArrivalStopped,
+    KickoffResolveFailedLateArrivalCompleted,
+    KickoffResolveFailedDestroyed,
+    KickoffCancelRequestedLateArrivalRunning,
+    KickoffCancelRequestedLateArrivalStopped,
+    KickoffCancelRequestedLateArrivalCompleted,
+    KickoffCancelRequestedDestroyed,
     ProbeMemberAdmissionDuplicateRunning,
     ProbeMemberAdmissionDuplicateStopped,
     ProbeMemberAdmissionDuplicateCompleted,
@@ -8009,6 +8056,17 @@ pub enum TransitionId {
     RetireAllStopped,
     RetireAllCompleted,
     CompleteSpawnRunning,
+    CompleteSpawnLateArrivalRunning,
+    CompleteSpawnLateArrivalStopped,
+    CompleteSpawnLateArrivalCompleted,
+    CompleteSpawnDestroyed,
+    CancelPendingSpawnPresentRunning,
+    CancelPendingSpawnPresentStopped,
+    CancelPendingSpawnPresentCompleted,
+    CancelPendingSpawnAbsentRunning,
+    CancelPendingSpawnAbsentStopped,
+    CancelPendingSpawnAbsentCompleted,
+    CancelPendingSpawnDestroyed,
     DestroyFromAny,
     RespawnRunning,
     CancelAllWorkRunning,

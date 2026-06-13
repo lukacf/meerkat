@@ -519,6 +519,98 @@ async fn deferred_inline_external_tools_accept_explicit_keep_alive_false_turn() 
 }
 
 #[tokio::test]
+async fn pipelined_tools_register_commits_before_session_create() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    let register_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/register",
+        "params": {
+            "tools": [{
+                "name": "pipelined_secret_lookup",
+                "description": "Look up a secret value registered immediately before create.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"}
+                    },
+                    "required": ["key"]
+                }
+            }]
+        }
+    });
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "session/create",
+        "params": {
+            "prompt": "Start after a pipelined callback tool registration.",
+            "enable_builtins": false,
+            "enable_shell": false,
+            "enable_memory": false,
+            "enable_mob": false
+        }
+    });
+    let pipelined = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&register_req).unwrap(),
+        serde_json::to_string(&create_req).unwrap()
+    );
+    writer.write_all(pipelined.as_bytes()).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let register_resp = read_response(&mut reader).await;
+    assert_eq!(
+        register_resp["id"], 2,
+        "tools/register must complete before the following pipelined create response: {register_resp}"
+    );
+    assert!(
+        register_resp["error"].is_null(),
+        "tools/register failed: {register_resp}"
+    );
+
+    let create_resp = read_response(&mut reader).await;
+    assert_eq!(create_resp["id"], 3);
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(
+        seen.len(),
+        1,
+        "expected exactly one LLM call from session/create, got {seen:?}"
+    );
+    assert!(
+        seen[0].iter().any(|name| name == "pipelined_secret_lookup"),
+        "session/create first turn must see the immediately preceding tools/register, got {:?}",
+        seen[0]
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_build() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());

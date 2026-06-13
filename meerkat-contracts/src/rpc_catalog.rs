@@ -94,6 +94,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "ServerCapabilities",
         ),
         RpcMethodDescriptor::typed(
+            "tools/register",
+            "Register callback tool definitions for server-to-client tool execution",
+            "ToolsRegisterParams",
+            "ToolsRegisterResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
             "CreateSessionParams",

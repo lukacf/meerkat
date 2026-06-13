@@ -1437,6 +1437,7 @@ describe("Session wrappers", () => {
       enableSchedule: true,
       enableWorkGraph: true,
       enableWebSearch: true,
+      authBinding: { realm: "dev", binding: "default_openai" },
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
     });
 
@@ -1451,6 +1452,7 @@ describe("Session wrappers", () => {
         enable_schedule: true,
         enable_workgraph: true,
         enable_web_search: true,
+        auth_binding: { realm: "dev", binding: "default_openai" },
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
       },
     });

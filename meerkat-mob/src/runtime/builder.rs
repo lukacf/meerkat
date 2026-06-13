@@ -1854,10 +1854,18 @@ impl MobBuilder {
     /// Any `SkillSource::Path` entries are resolved against `packed_skills` and
     /// converted to inline sources for runtime execution.
     pub fn from_mobpack(
-        mut definition: MobDefinition,
+        definition: MobDefinition,
         packed_skills: BTreeMap<String, Vec<u8>>,
         storage: MobStorage,
     ) -> Result<Self, MobError> {
+        let definition = Self::lower_mobpack_definition(definition, &packed_skills)?;
+        Ok(Self::new(definition, storage))
+    }
+
+    pub fn lower_mobpack_definition(
+        mut definition: MobDefinition,
+        packed_skills: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<MobDefinition, MobError> {
         for (skill_name, source) in &mut definition.skills {
             if let crate::definition::SkillSource::Path { path } = source {
                 let bytes = packed_skills.get(path).ok_or_else(|| {
@@ -1873,7 +1881,7 @@ impl MobBuilder {
                 *source = crate::definition::SkillSource::Inline { content };
             }
         }
-        Ok(Self::new(definition, storage))
+        Ok(definition)
     }
 
     /// Create a builder that resumes a mob from persisted events.

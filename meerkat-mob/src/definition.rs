@@ -107,6 +107,32 @@ pub enum DispatchMode {
     FanIn,
 }
 
+/// Source identity bound to a definition after it has been verified by an
+/// owning artifact format such as mobpack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobDefinitionSourceIdentity {
+    pub kind: MobDefinitionSourceKind,
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trust_warnings: Vec<String>,
+}
+
+impl MobDefinitionSourceIdentity {
+    pub fn mobpack(digest: impl Into<String>, trust_warnings: Vec<String>) -> Self {
+        Self {
+            kind: MobDefinitionSourceKind::Mobpack,
+            digest: digest.into(),
+            trust_warnings,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobDefinitionSourceKind {
+    Mobpack,
+}
+
 /// Aggregation policy for step outcomes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -612,6 +638,9 @@ pub struct MobDefinition {
     /// Optional declarative event router configuration.
     #[serde(default)]
     pub event_router: Option<EventRouterConfig>,
+    /// Verified artifact identity that produced this runtime definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<MobDefinitionSourceIdentity>,
 }
 
 impl Eq for MobDefinition {}
@@ -678,6 +707,7 @@ impl MobDefinition {
             limits: None,
             spawn_policy: None,
             event_router: None,
+            source_identity: None,
         }
     }
 
@@ -734,6 +764,7 @@ impl MobDefinition {
             limits: None,
             spawn_policy: None,
             event_router: None,
+            source_identity: None,
         }
     }
 
@@ -761,6 +792,7 @@ impl MobDefinition {
             limits: raw.limits,
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
+            source_identity: None,
         })
     }
 
@@ -1022,6 +1054,7 @@ comms = true
             limits: None,
             spawn_policy: None,
             event_router: None,
+            source_identity: None,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();

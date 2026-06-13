@@ -79,7 +79,7 @@ pub use coordination::{
     ResourceClaimId, ResourceClaimKind, ResourceClaimStatus, WorkIntent, WorkIntentId,
     WorkIntentStatus,
 };
-pub use definition::MobDefinition;
+pub use definition::{MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind};
 pub use error::{MobError, MobFailureClass};
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{

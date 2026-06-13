@@ -19,7 +19,10 @@
 //! on [`meerkat_core::SessionRuntimeBindings`], but no existing callsites
 //! dispatch through them yet. Phases 5F/1-5 flip callsites to the new handles.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput;
@@ -92,13 +95,61 @@ pub use turn_state::RuntimeTurnStateHandle;
 /// private initial DSL state only.
 pub struct HandleDslAuthority {
     inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+    teardown_gate: Arc<HandleTeardownGate>,
+}
+
+/// Mechanical validity witness for a prepared session-owned handle bundle.
+///
+/// The generated MeerkatMachine remains the semantic lifecycle authority. This
+/// gate only records whether the runtime owner has torn down the handle bundle
+/// that was minted for one session epoch, so detached async holders fail closed
+/// instead of applying through a stale `Arc<HandleDslAuthority>`.
+pub(crate) struct HandleTeardownGate {
+    closed: AtomicBool,
+}
+
+impl HandleTeardownGate {
+    pub(crate) fn open() -> Arc<Self> {
+        Arc::new(Self {
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    fn ensure_open(&self, context: &'static str) -> Result<(), DslTransitionError> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(DslTransitionError::no_matching(
+                context,
+                "session-owned runtime handle authority is closed by teardown",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl HandleDslAuthority {
     /// Wrap an existing shared DSL authority. The returned handle and the
     /// caller's `Arc` both point at the same underlying authority instance.
     pub fn from_shared(inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            teardown_gate: HandleTeardownGate::open(),
+        }
+    }
+
+    /// Wrap an existing shared DSL authority with a runtime-owned teardown gate.
+    pub(crate) fn from_shared_with_teardown_gate(
+        inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+        teardown_gate: Arc<HandleTeardownGate>,
+    ) -> Self {
+        Self {
+            inner,
+            teardown_gate,
+        }
     }
 
     /// Construct a handle with its own ephemeral DSL authority at the
@@ -111,6 +162,7 @@ impl HandleDslAuthority {
     pub fn ephemeral() -> Self {
         Self {
             inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new())),
+            teardown_gate: HandleTeardownGate::open(),
         }
     }
 
@@ -159,10 +211,12 @@ impl HandleDslAuthority {
     ) -> Result<mm_dsl::MeerkatMachineTransition, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
         mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
             .map_err(|err| map_kernel_error(err, context))
     }
@@ -204,10 +258,12 @@ impl HandleDslAuthority {
     ) -> Result<S, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
         let effects = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
             .map(|transition| transition.into_effects())
             .map_err(|err| map_kernel_error(err, context))?;
@@ -229,10 +285,12 @@ impl HandleDslAuthority {
         signal: mm_dsl::MeerkatMachineSignal,
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
         guard
             .apply_signal(signal)
             .map(|transition| transition.into_effects())
@@ -246,10 +304,12 @@ impl HandleDslAuthority {
         context: &'static str,
         sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
     ) -> Result<S, DslTransitionError> {
+        self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
         guard
             .apply_signal(signal)
             .map_err(|err| map_kernel_error(err, context))?;
@@ -303,5 +363,42 @@ impl HandleDslAuthority {
 impl std::fmt::Debug for HandleDslAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HandleDslAuthority").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teardown_gate_rejects_stale_handle_input_before_mutation() {
+        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new()));
+        let gate = HandleTeardownGate::open();
+        let handle = HandleDslAuthority::from_shared_with_teardown_gate(
+            Arc::clone(&authority),
+            Arc::clone(&gate),
+        );
+        gate.close();
+
+        let err = handle
+            .apply_input(
+                mm_dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: mm_dsl::SessionId::from("closed-session"),
+                },
+                "test::stale_handle",
+            )
+            .expect_err("closed handle must reject writes");
+
+        assert_eq!(
+            err.kind,
+            meerkat_core::handles::DslRejectionKind::NoMatchingTransition
+        );
+        assert!(err.reason.contains("closed by teardown"));
+        let state = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        assert_eq!(state.session_id, None);
     }
 }

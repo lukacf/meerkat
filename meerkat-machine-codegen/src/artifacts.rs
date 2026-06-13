@@ -44,9 +44,9 @@ use meerkat_machine_schema::{
     CompositionStateLimits, CompositionWitness, CoverageAnchor, CoverageSchemaTarget, EntryInput,
     EnumSchema, Expr, FeedbackFieldSource, FeedbackInputRef, Guard, HelperSchema,
     MachineCoverageManifest, MachineSchema, Quantifier, Route, RouteBindingSource, RouteDelivery,
-    RouteTarget, RouteTargetKind, SchedulerRule, TransitionSchema, TriggerKind,
-    TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypePathStructField,
-    TypePathStructFieldAtom, TypeRef, Update, VariantSchema, canonical_machine_schemas,
+    RouteTarget, RouteTargetKind, SchedulerRule, TransitionSchema, TypePathEnumPayloadAtom,
+    TypePathEnumStructuralVariant, TypePathStructField, TypePathStructFieldAtom, TypeRef, Update,
+    VariantSchema, canonical_machine_schemas,
 };
 
 /// Fail-closed error for composition/machine TLA model generation.
@@ -134,6 +134,29 @@ pub enum CompositionTlaError {
     UnknownRouteComponent {
         composition: String,
         component: &'static str,
+    },
+    /// A witness references a machine instance that is not part of the
+    /// composition. The renderer must not fall back to an arbitrary schema,
+    /// because that can make a liveness witness weaker than its catalog claim.
+    #[error(
+        "composition `{composition}`: witness `{witness}` references unknown machine instance `{machine}`"
+    )]
+    UnknownWitnessMachine {
+        composition: String,
+        witness: String,
+        machine: String,
+    },
+    /// A witness references a transition that is not declared on its machine.
+    /// Dropping the transition silently would let the generated witness omit
+    /// required progress while still rendering.
+    #[error(
+        "composition `{composition}`: witness `{witness}` references unknown transition `{transition}` on machine instance `{machine}`"
+    )]
+    UnknownWitnessTransition {
+        composition: String,
+        witness: String,
+        machine: String,
+        transition: String,
     },
     /// A machine declares a helper-call cycle, so no topological helper order
     /// exists. The previous fallback silently emitted the cyclic helpers in an
@@ -1204,16 +1227,6 @@ pub fn render_composition_witness_cfg(
             }
         }
     }
-    if !schema.invariants.is_empty() || !instance_invariants.is_empty() {
-        pushln!(&mut out, "INVARIANTS");
-        for invariant in &schema.invariants {
-            pushln!(&mut out, "  {}", invariant.name);
-        }
-        for invariant_name in instance_invariants {
-            pushln!(&mut out, "  {}", invariant_name);
-        }
-        pushln!(&mut out, "  CoverageInstrumentation");
-    }
     let witness_properties = witness
         .expected_routes
         .iter()
@@ -1248,11 +1261,38 @@ pub fn render_composition_witness_cfg(
                 }),
         )
         .collect::<Vec<_>>();
-    if !witness_properties.is_empty() {
+    let explicit_witness = CompositionTlaCompiler::witness_has_explicit_progress(witness);
+    if !schema.invariants.is_empty()
+        || !instance_invariants.is_empty()
+        || (explicit_witness && !witness_properties.is_empty())
+    {
+        pushln!(&mut out, "INVARIANTS");
+        for invariant in &schema.invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+        for invariant_name in instance_invariants {
+            pushln!(&mut out, "  {}", invariant_name);
+        }
+        pushln!(&mut out, "  CoverageInstrumentation");
+        if explicit_witness {
+            for property in &witness_properties {
+                pushln!(&mut out, "  {property}");
+            }
+        }
+    }
+    if !explicit_witness && !witness_properties.is_empty() {
         pushln!(&mut out, "PROPERTIES");
         for property in witness_properties {
             pushln!(&mut out, "  {property}");
         }
+    }
+    if explicit_witness {
+        pushln!(&mut out, "ACTION_CONSTRAINTS");
+        pushln!(
+            &mut out,
+            "  {}",
+            composition_witness_action_constraint_name(&witness.name)
+        );
     }
     pushln!(&mut out, "CONSTRAINTS");
     writeln!(
@@ -1518,6 +1558,14 @@ fn composition_witness_spec_name(name: impl AsRef<str>) -> String {
 
 fn composition_witness_fairness_name(name: impl AsRef<str>, index: usize) -> String {
     format!("WitnessFairness_{}_{}", tla_ident(name.as_ref()), index + 1)
+}
+
+fn composition_witness_completion_name(name: impl AsRef<str>) -> String {
+    format!("WitnessScriptComplete_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_action_constraint_name(name: impl AsRef<str>) -> String {
+    format!("WitnessNoPrematureStutter_{}", tla_ident(name.as_ref()))
 }
 
 fn composition_witness_state_constraint_name(name: impl AsRef<str>) -> String {
@@ -1964,6 +2012,154 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
     }
     pushln!(&mut out, "    None");
     pushln!(&mut out, "}}");
+    out.push('\n');
+
+    let driver_type = driver.rust.driver_type.as_ref();
+    let store_plan_type = driver.rust.store_plan_type.as_ref();
+    let work_type = driver.rust.work_type.as_ref();
+    let decision_type = driver.rust.decision_type.as_ref();
+
+    pushln!(
+        &mut out,
+        "/// Generated route target selected by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum GeneratedRouteTarget {{");
+    pushln!(&mut out, "    Input(TypedRoutedInput),");
+    pushln!(&mut out, "    Signal(TypedRoutedSignal),");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated store plan emitted by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {store_plan_type} {{");
+    pushln!(&mut out, "    pub target: GeneratedRouteTarget,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {store_plan_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn input(route: TypedRoutedInput) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ target: GeneratedRouteTarget::Input(route) }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "    pub fn signal(route: TypedRoutedSignal) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ target: GeneratedRouteTarget::Signal(route) }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(&mut out, "    pub fn route_id(&self) -> &RouteId {{");
+    pushln!(&mut out, "        match &self.target {{");
+    pushln!(
+        &mut out,
+        "            GeneratedRouteTarget::Input(route) => &route.route_id,"
+    );
+    pushln!(
+        &mut out,
+        "            GeneratedRouteTarget::Signal(route) => &route.route_id,"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated work packet consumed by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {work_type} {{");
+    pushln!(&mut out, "    pub producer_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub effect_variant: EffectVariantId,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {work_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn new(producer_instance: MachineInstanceId, effect_variant: EffectVariantId) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ producer_instance, effect_variant }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated routing decision emitted by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum {decision_type} {{");
+    pushln!(&mut out, "    DispatchInput(TypedRoutedInput),");
+    pushln!(&mut out, "    DispatchSignal(TypedRoutedSignal),");
+    pushln!(&mut out, "    NoRoute,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated composition driver constrained by the catalog driver descriptor."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {driver_type};");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {driver_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn decide(work: &{work_type}) -> {decision_type} {{"
+    );
+    pushln!(
+        &mut out,
+        "        if let Some(route) = route_to_input(&work.producer_instance, &work.effect_variant) {{"
+    );
+    pushln!(
+        &mut out,
+        "            return {decision_type}::DispatchInput(route);"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(
+        &mut out,
+        "        if let Some(route) = route_to_signal(&work.producer_instance, &work.effect_variant) {{"
+    );
+    pushln!(
+        &mut out,
+        "            return {decision_type}::DispatchSignal(route);"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "        {decision_type}::NoRoute");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "    pub fn store_plan(decision: {decision_type}) -> Option<{store_plan_type}> {{"
+    );
+    pushln!(&mut out, "        match decision {{");
+    pushln!(
+        &mut out,
+        "            {decision_type}::DispatchInput(route) => Some({store_plan_type}::input(route)),"
+    );
+    pushln!(
+        &mut out,
+        "            {decision_type}::DispatchSignal(route) => Some({store_plan_type}::signal(route)),"
+    );
+    pushln!(&mut out, "            {decision_type}::NoRoute => None,");
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
 
     Some(out)
 }
@@ -2345,7 +2541,11 @@ fn collect_composition_named_type_samples(
             let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
                 continue;
             };
-            let Ok(variant) = machine.inputs.variant_named(&preload.input_variant) else {
+            let Ok(variant) = machine
+                .inputs
+                .variant_named(&preload.input_variant)
+                .or_else(|_| machine.signals.variant_named(&preload.input_variant))
+            else {
                 continue;
             };
             let field_types = variant
@@ -2383,7 +2583,11 @@ fn collect_composition_witness_named_type_samples(
         let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
             continue;
         };
-        let Ok(variant) = machine.inputs.variant_named(&preload.input_variant) else {
+        let Ok(variant) = machine
+            .inputs
+            .variant_named(&preload.input_variant)
+            .or_else(|_| machine.signals.variant_named(&preload.input_variant))
+        else {
             continue;
         };
         let field_types = variant
@@ -4108,7 +4312,9 @@ mod tests {
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     };
     use meerkat_machine_schema::catalog::meerkat_mob_seam_composition;
-    use meerkat_machine_schema::identity::{EffectVariantId, MachineId, MachineInstanceId};
+    use meerkat_machine_schema::identity::{
+        EffectVariantId, MachineId, MachineInstanceId, TransitionId,
+    };
 
     #[test]
     #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -4151,6 +4357,29 @@ mod tests {
         assert!(
             matches!(result, Err(CompositionTlaError::UnknownRouteEffect { .. })),
             "expected UnknownRouteEffect, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_witness_transition() {
+        let mut schema = meerkat_mob_seam_composition();
+        schema
+            .witnesses
+            .first_mut()
+            .expect("seam composition has at least one witness")
+            .expected_transitions
+            .first_mut()
+            .expect("seam witness has at least one expected transition")
+            .transition = TransitionId::parse("UndeclaredWitnessTransition").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(
+                result,
+                Err(CompositionTlaError::UnknownWitnessTransition { .. })
+            ),
+            "expected UnknownWitnessTransition, got {result:?}"
         );
     }
 
@@ -4758,6 +4987,9 @@ impl<'a> CompositionTlaCompiler<'a> {
         self.render_reject_pending_entry_input_action(&mut out);
         self.render_quiescent_stutter(&mut out);
         self.render_witness_inject_actions(&mut out);
+        self.render_witness_completion_operators(&mut out);
+        self.render_witness_action_constraint_operators(&mut out);
+        self.render_witness_satisfied_stutter_actions(&mut out);
 
         let core_next_branches = self.core_next_branches();
 
@@ -4792,13 +5024,16 @@ impl<'a> CompositionTlaCompiler<'a> {
         pushln!(&mut out);
 
         for witness in &self.schema.witnesses {
+            let witness_branches = self.witness_next_branches(witness)?;
             writeln!(
                 &mut out,
                 "{} ==",
                 composition_witness_next_name(&witness.name)
             )
             .expect("write to string");
-            pushln!(&mut out, "    \\/ CoreNext");
+            for branch in &witness_branches {
+                pushln!(&mut out, "    \\/ {branch}");
+            }
             writeln!(
                 &mut out,
                 "    \\/ {}",
@@ -4871,7 +5106,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         pushln!(&mut out);
 
         for witness in &self.schema.witnesses {
-            let fairness_clauses = self.witness_fairness_clauses(witness);
+            let fairness_clauses = self.witness_fairness_clauses(witness)?;
             let fairness_chunk_names = fairness_clauses
                 .chunks(24)
                 .enumerate()
@@ -4911,51 +5146,56 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
         for witness in &self.schema.witnesses {
             for route in &witness.expected_routes {
+                let formula = composition_route_observed_operator_name(route);
                 writeln!(
                     &mut out,
-                    "{} == <> {}",
+                    "{} == {}",
                     composition_witness_route_property_name(&witness.name, route),
-                    composition_route_observed_operator_name(route)
+                    self.render_witness_obligation_formula(witness, formula)
                 )
                 .expect("write to string");
             }
             for rule in &witness.expected_scheduler_rules {
+                let formula = composition_scheduler_triggered_operator_name(rule);
                 writeln!(
                     &mut out,
-                    "{} == <> {}",
+                    "{} == {}",
                     composition_witness_scheduler_property_name(&witness.name, rule),
-                    composition_scheduler_triggered_operator_name(rule)
+                    self.render_witness_obligation_formula(witness, formula)
                 )
                 .expect("write to string");
             }
             for (idx, state) in witness.expected_states.iter().enumerate() {
+                let formula = self.render_witness_state_formula(state);
                 writeln!(
                     &mut out,
-                    "{} == <> ({})",
+                    "{} == {}",
                     composition_witness_state_property_name(&witness.name, idx),
-                    self.render_witness_state_formula(state)
+                    self.render_witness_obligation_formula(witness, formula)
                 )
                 .expect("write to string");
             }
             for transition in &witness.expected_transitions {
+                let formula = self.render_witness_transition_formula(transition);
                 writeln!(
                     &mut out,
-                    "{} == <> ({})",
+                    "{} == {}",
                     composition_witness_transition_property_name(
                         &witness.name,
                         &transition.machine,
                         &transition.transition,
                     ),
-                    self.render_witness_transition_formula(transition)
+                    self.render_witness_obligation_formula(witness, formula)
                 )
                 .expect("write to string");
             }
             for (idx, ordering) in witness.expected_transition_order.iter().enumerate() {
+                let formula = self.render_witness_transition_order_formula(ordering);
                 writeln!(
                     &mut out,
-                    "{} == <> ({})",
+                    "{} == {}",
                     composition_witness_transition_order_property_name(&witness.name, idx),
-                    self.render_witness_transition_order_formula(ordering)
+                    self.render_witness_obligation_formula(witness, formula)
                 )
                 .expect("write to string");
             }
@@ -5428,7 +5668,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         for route in &self.schema.routes {
             writeln!(
                 out,
-                "{} == \\E packet \\in RoutePackets : packet.route = {}",
+                "{} == \\E packet \\in delivered_routes : packet.route = {}",
                 composition_route_observed_operator_name(&route.name),
                 tla_string(&route.name)
             )
@@ -5942,7 +6182,6 @@ impl<'a> CompositionTlaCompiler<'a> {
             let branches = machine
                 .transitions
                 .iter()
-                .filter(|transition| transition.on.kind() == TriggerKind::Input)
                 .map(|transition| {
                     self.render_machine_packet_admissibility_branch(
                         &mut compiler,
@@ -6091,6 +6330,10 @@ impl<'a> CompositionTlaCompiler<'a> {
         format!("WitnessInjectNext_{}", tla_ident(&witness.name))
     }
 
+    fn render_witness_satisfied_stutter_call(&self, witness: &CompositionWitness) -> String {
+        format!("WitnessSatisfiedStutter_{}", tla_ident(&witness.name))
+    }
+
     fn core_next_branches(&self) -> Vec<String> {
         let mut branches = Vec::new();
         if !self.schema.routes.is_empty() {
@@ -6110,7 +6353,76 @@ impl<'a> CompositionTlaCompiler<'a> {
         branches
     }
 
-    fn witness_fairness_clauses(&self, witness: &CompositionWitness) -> Vec<String> {
+    fn witness_next_branches(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        if !Self::witness_has_explicit_progress(witness) {
+            let mut branches = vec!["CoreNext".into()];
+            branches.push(self.render_witness_satisfied_stutter_call(witness));
+            return Ok(branches);
+        }
+        let mut branches = self.witness_progress_branches(witness)?;
+        branches.push(self.render_witness_satisfied_stutter_call(witness));
+        Ok(branches)
+    }
+
+    fn witness_progress_branches(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        let mut branches = Vec::new();
+        if !witness.expected_routes.is_empty() {
+            branches.push("DeliverQueuedRoute".into());
+        }
+        for expected in &witness.expected_transitions {
+            branches.push(self.witness_transition_call(witness, expected)?);
+        }
+        Ok(branches)
+    }
+
+    fn witness_transition_call(
+        &self,
+        witness: &CompositionWitness,
+        expected: &meerkat_machine_schema::CompositionWitnessTransition,
+    ) -> Result<String, CompositionTlaError> {
+        let machine = self
+            .machine_by_instance
+            .get(expected.machine.as_str())
+            .ok_or_else(|| CompositionTlaError::UnknownWitnessMachine {
+                composition: self.schema.name.to_string(),
+                witness: witness.name.to_string(),
+                machine: expected.machine.to_string(),
+            })?;
+        let transition = machine
+            .transitions
+            .iter()
+            .find(|transition| transition.name == expected.transition)
+            .ok_or_else(|| CompositionTlaError::UnknownWitnessTransition {
+                composition: self.schema.name.to_string(),
+                witness: witness.name.to_string(),
+                machine: expected.machine.to_string(),
+                transition: expected.transition.to_string(),
+            })?;
+        Ok(self.machine_transition_call(expected.machine.as_str(), transition))
+    }
+
+    fn witness_fairness_clauses(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        if Self::witness_has_explicit_progress(witness) {
+            return Ok(Vec::new());
+        }
+
+        let mut clauses = self.core_fairness_clauses();
+        if witness.preload_inputs.len() > 1 {
+            clauses.push(self.render_witness_inject_next_call(witness));
+        }
+        Ok(clauses)
+    }
+
+    fn core_fairness_clauses(&self) -> Vec<String> {
         let mut clauses = Vec::new();
         if !self.schema.routes.is_empty() {
             clauses.push("DeliverQueuedRoute".into());
@@ -6128,10 +6440,11 @@ impl<'a> CompositionTlaCompiler<'a> {
                 })
                 .collect::<Vec<_>>()
         }));
-        if witness.preload_inputs.len() > 1 {
-            clauses.push(self.render_witness_inject_next_call(witness));
-        }
         clauses
+    }
+
+    fn witness_has_explicit_progress(witness: &CompositionWitness) -> bool {
+        !witness.preload_inputs.is_empty() || !witness.expected_transitions.is_empty()
     }
 
     fn entry_input_action_name(&self, entry_input: &EntryInput) -> String {
@@ -6366,6 +6679,121 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
     }
 
+    fn render_witness_satisfied_stutter_actions(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            let action_name = self.render_witness_satisfied_stutter_call(witness);
+            pushln!(out, "{action_name} ==");
+            let mut conditions = self.witness_satisfaction_conditions(witness);
+            if Self::witness_has_explicit_progress(witness) {
+                conditions.insert(0, composition_witness_completion_name(&witness.name));
+            }
+            if conditions.is_empty() {
+                pushln!(out, "    /\\ FALSE");
+            } else {
+                for condition in conditions {
+                    pushln!(out, "    /\\ {condition}");
+                }
+                pushln!(out, "    /\\ UNCHANGED vars");
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_witness_completion_operators(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            if !Self::witness_has_explicit_progress(witness) {
+                continue;
+            }
+            writeln!(
+                out,
+                "{} ==",
+                composition_witness_completion_name(&witness.name)
+            )
+            .expect("write to string");
+            pushln!(out, "    /\\ Len(witness_remaining_script_inputs) = 0");
+            pushln!(
+                out,
+                "    /\\ ~(witness_current_script_input \\in SeqElements(pending_inputs))"
+            );
+            pushln!(out, "    /\\ Len(pending_routes) = 0");
+            for condition in self.witness_satisfaction_conditions(witness) {
+                pushln!(out, "    /\\ {condition}");
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_witness_action_constraint_operators(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            if !Self::witness_has_explicit_progress(witness) {
+                continue;
+            }
+            writeln!(
+                out,
+                "{} ==",
+                composition_witness_action_constraint_name(&witness.name)
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    \\/ {}",
+                composition_witness_completion_name(&witness.name)
+            )
+            .expect("write to string");
+            pushln!(out, "    \\/ model_step_count' # model_step_count");
+            pushln!(out);
+        }
+    }
+
+    fn witness_satisfaction_conditions(&self, witness: &CompositionWitness) -> Vec<String> {
+        let mut conditions = Vec::new();
+        conditions.extend(witness.expected_routes.iter().map(|route| {
+            format!(
+                "\\E packet \\in delivered_routes : packet.route = {}",
+                tla_string(route)
+            )
+        }));
+        conditions.extend(
+            witness
+                .expected_scheduler_rules
+                .iter()
+                .map(render_scheduler_trigger_formula),
+        );
+        conditions.extend(
+            witness
+                .expected_states
+                .iter()
+                .map(|state| format!("({})", self.render_witness_state_formula(state))),
+        );
+        conditions.extend(
+            witness.expected_transitions.iter().map(|transition| {
+                format!("({})", self.render_witness_transition_formula(transition))
+            }),
+        );
+        conditions.extend(
+            witness
+                .expected_transition_order
+                .iter()
+                .map(|order| format!("({})", self.render_witness_transition_order_formula(order))),
+        );
+        conditions
+    }
+
+    fn render_witness_obligation_formula(
+        &self,
+        witness: &CompositionWitness,
+        formula: String,
+    ) -> String {
+        if Self::witness_has_explicit_progress(witness) {
+            format!(
+                "{} => ({formula})",
+                composition_witness_completion_name(&witness.name)
+            )
+        } else {
+            format!("<> ({formula})")
+        }
+    }
+
     fn render_literal_expr(&self, expr: &Expr) -> String {
         match expr {
             Expr::Bool(value) => {
@@ -6393,6 +6821,8 @@ impl<'a> CompositionTlaCompiler<'a> {
                     .join(", ");
                 format!("<<{rendered}>>")
             }
+            Expr::EmptySet => "{}".into(),
+            Expr::EmptyMap => "<< >>".into(),
             _ => "None".into(),
         }
     }

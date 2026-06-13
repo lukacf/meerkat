@@ -3665,6 +3665,9 @@ QuiescentStutter ==
 WitnessInjectNext_auth_lease_lifecycle_publication_round_trip ==
     FALSE
 
+WitnessSatisfiedStutter_auth_lease_lifecycle_publication_round_trip ==
+    /\ FALSE
+
 CoreNext ==
     \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis)
     \/ auth_machine_MarkExpiring
@@ -3817,6 +3820,7 @@ Next ==
 
 WitnessNext_auth_lease_lifecycle_publication_round_trip ==
     \/ CoreNext
+    \/ WitnessSatisfiedStutter_auth_lease_lifecycle_publication_round_trip
     \/ WitnessInjectNext_auth_lease_lifecycle_publication_round_trip
 
 

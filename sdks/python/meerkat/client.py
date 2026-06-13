@@ -20,7 +20,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 import json
 import logging
 import os
@@ -40,6 +40,7 @@ from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.version_compat import is_compatible_with as _generated_is_compatible_with
 from .generated.types import (
+    CallbackToolDefinition,
     SkillListResponse,
     AttentionListRequest,
     AttentionListResult,
@@ -66,10 +67,12 @@ from .generated.types import (
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
+    MobSpawnManyParams,
     MobSpawnManyFailedResult,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
+    MobSpawnSpecParams,
     MobRotateSupervisorResult,
     MobTurnStartParams,
     MobWireMembersBatchEdge,
@@ -85,6 +88,8 @@ from .generated.types import (
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
+    ToolsRegisterParams,
+    ToolsRegisterResult,
 )
 from .mob import (
     Mob,
@@ -230,11 +235,12 @@ RenderMetadata = TypedDict(
 
 def _wire_value(value: Any) -> Any:
     if is_dataclass(value):
-        return {
-            key: _wire_value(item)
-            for key, item in asdict(value).items()
-            if item is not None
-        }
+        converted: dict[str, Any] = {}
+        for field in fields(value):
+            item = getattr(value, field.name)
+            if item is not None:
+                converted[field.name] = _wire_value(item)
+        return converted
     if isinstance(value, dict):
         return {
             key: _wire_value(item)
@@ -410,11 +416,23 @@ class MeerkatClient:
         programmatically-distinguishable state, and re-raised.
         """
         try:
-            await self._request(
-                "tools/register",
-                {"tools": [{"name": name, "description": description or f"Tool: {name}",
-                             "input_schema": input_schema or {"type": "object"}}]},
+            params = ToolsRegisterParams(
+                tools=[
+                    CallbackToolDefinition(
+                        name=name,
+                        description=description or f"Tool: {name}",
+                        input_schema=input_schema or {"type": "object"},
+                    )
+                ]
             )
+            result: ToolsRegisterResult | dict[str, Any] = await self._request(
+                "tools/register",
+                _wire_value(params),
+            )
+            if isinstance(result, ToolsRegisterResult):  # pragma: no cover - typing aid
+                _ = result.registered
+            else:
+                _ = result.get("registered")
         except MeerkatError as exc:
             # Clean shutdown / disconnect is genuinely benign — the registry
             # already holds the definition and a future connect() will re-send it.
@@ -532,10 +550,23 @@ class MeerkatClient:
 
         # Register callback tools with the server if any were declared.
         if self._tool_registry:
-            await self._request(
+            tools = [
+                CallbackToolDefinition(
+                    name=tool["name"],
+                    description=tool["description"],
+                    input_schema=tool["input_schema"],
+                )
+                for tool in self._tool_registry.definitions()
+            ]
+            params = ToolsRegisterParams(tools=tools)
+            result: ToolsRegisterResult | dict[str, Any] = await self._request(
                 "tools/register",
-                {"tools": self._tool_registry.definitions()},
+                _wire_value(params),
             )
+            if isinstance(result, ToolsRegisterResult):  # pragma: no cover - typing aid
+                _ = result.registered
+            else:
+                _ = result.get("registered")
 
         # Always install the tool handler so post-connect @client.tool()
         # registrations can serve callback requests.
@@ -1825,11 +1856,16 @@ class MeerkatClient:
         mob_id: str,
         specs: list[MobSpawnSpec],
     ) -> MobSpawnManyResult:
-        params: dict[str, Any] = {
-            "mob_id": mob_id,
-            "specs": _wire_value(specs),
-        }
-        result = await self._request("mob/spawn_many", params)
+        params = MobSpawnManyParams(
+            mob_id=mob_id,
+            specs=[MobSpawnSpecParams(**_wire_value(spec)) for spec in specs],
+        )
+        result: MobSpawnManyResult | dict[str, Any] = await self._request(
+            "mob/spawn_many",
+            _wire_value(params),
+        )
+        if isinstance(result, MobSpawnManyResult):  # pragma: no cover - typing aid
+            return result
         entries = result.get("results")
         if not isinstance(entries, list):
             raise MeerkatError(

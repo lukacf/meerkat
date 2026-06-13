@@ -1,5 +1,6 @@
 use super::*;
 use crate::MobRuntimeMode;
+use crate::generated::adaptive_mob_bundle as adaptive_bundle;
 use crate::machines::mob_machine as mob_dsl;
 use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
@@ -37,6 +38,20 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn adaptive_bundle_layer_terminal_store_plan()
+-> Result<adaptive_bundle::AdaptiveMobBundleStorePlan, MobError> {
+    let work = adaptive_bundle::AdaptiveMobBundleWork::new(
+        adaptive_bundle::producers::layer_mob_instance_id(),
+        adaptive_bundle::effects::layer_mob::flow_run_public_result_classified(),
+    );
+    let decision = adaptive_bundle::AdaptiveMobBundleDriver::decide(&work);
+    adaptive_bundle::AdaptiveMobBundleDriver::store_plan(decision).ok_or_else(|| {
+        MobError::Internal(
+            "adaptive bundle generated driver has no route for layer terminal feedback".into(),
+        )
+    })
+}
 
 fn sanitize_flow_member_segment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -1127,6 +1142,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
             mob_dsl::MobSpawnManyFailureObservationKind::NotExternallyAddressable
         }
         MobError::InvalidTransition { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
+        MobError::MobMachineRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::WiringError(_) => mob_dsl::MobSpawnManyFailureObservationKind::WiringError,
@@ -6179,6 +6197,23 @@ impl MobHandle {
                 mob_dsl::FlowRunPublicResultClassKind::Failure
             }
         };
+        let store_plan = adaptive_bundle_layer_terminal_store_plan()?;
+        let adaptive_bundle::GeneratedRouteTarget::Input(route) = &store_plan.target else {
+            return Err(MobError::Internal(format!(
+                "adaptive bundle driver selected non-input route '{}'",
+                store_plan.route_id()
+            )));
+        };
+        if route.route_id
+            != adaptive_bundle::route_layer_terminal_reaches_adaptive_kernel().route_id
+            || route.instance_id != adaptive_bundle::producers::control_mob_instance_id()
+            || route.variant != adaptive_bundle::inputs::ingest_layer_terminal()
+        {
+            return Err(MobError::Internal(format!(
+                "adaptive bundle driver selected unexpected layer-terminal target '{}'",
+                route.route_id
+            )));
+        }
         self.apply_machine_input_effects(mob_dsl::MobMachineInput::IngestLayerTerminal {
             adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
             layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),

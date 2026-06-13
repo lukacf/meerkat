@@ -204,6 +204,7 @@ impl MeerkatMachine {
             cursor_state,
             tool_visibility_owner,
             dsl_authority_shared,
+            handle_teardown_gate,
         ) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -218,6 +219,7 @@ impl MeerkatMachine {
                 Arc::clone(&entry.cursor_state),
                 Arc::clone(&entry.tool_visibility_owner),
                 Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.handle_teardown_gate),
             )
         };
         let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
@@ -339,9 +341,12 @@ impl MeerkatMachine {
         // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
         // rely on this — parallel private authorities would silently
         // diverge from the session DSL.
-        let shared_handle_authority = Arc::new(crate::handles::HandleDslAuthority::from_shared(
-            dsl_authority_shared,
-        ));
+        let shared_handle_authority = Arc::new(
+            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(
+                dsl_authority_shared,
+                handle_teardown_gate,
+            ),
+        );
         let auth_lease = self.generated_auth_lease_handle();
         let runtime_authority = match preparation {
             SessionBindingPreparation::AuthoritativeRuntimeBinding => {

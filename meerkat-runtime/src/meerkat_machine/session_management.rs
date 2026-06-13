@@ -302,6 +302,7 @@ impl MeerkatMachine {
         );
         let control_projection = entry.control_projection_handle();
         let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
+        let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
@@ -311,6 +312,7 @@ impl MeerkatMachine {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
             epoch_id,
+            handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
@@ -432,6 +434,7 @@ impl MeerkatMachine {
         let control_projection = entry.control_projection_handle();
 
         let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
+        let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
@@ -441,6 +444,7 @@ impl MeerkatMachine {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
             epoch_id,
+            handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
@@ -618,6 +622,7 @@ impl MeerkatMachine {
         // trait calls route through the canonical DSL counter
         // `next_staged_visibility_revision` (dogma round 4, wave 2b #12).
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+        let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
@@ -625,6 +630,7 @@ impl MeerkatMachine {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
             epoch_id,
+            handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
@@ -1004,6 +1010,7 @@ impl MeerkatMachine {
                     driver: driver.clone(),
                     ops_lifecycle: recovered_ops.clone(),
                     epoch_id: recovered_epoch,
+                    handle_teardown_gate: crate::handles::HandleTeardownGate::open(),
                     cursor_state: recovered_cursors,
                     completions: completions.clone(),
                     tool_visibility_owner,
@@ -1399,6 +1406,7 @@ impl MeerkatMachine {
             // "slot keys are a subset of registered-session keys" invariant
             // is structural rather than enforced by ordering.
             if let Some(entry) = sessions.get_mut(session_id) {
+                entry.close_handle_teardown_gate();
                 abort_slot(&mut entry.drain_slot);
             }
             sessions.remove(session_id)

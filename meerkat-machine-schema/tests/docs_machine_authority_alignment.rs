@@ -36,6 +36,29 @@ fn documented_machine_names(mdx: &str) -> std::collections::BTreeSet<String> {
     names
 }
 
+/// Extract the first backtick-quoted token on each markdown table row whose
+/// token has a canonical composition slug shape. This binds the "Canonical
+/// Compositions" table to `canonical_composition_schemas()` instead of merely
+/// checking stale count claims.
+fn documented_composition_names(mdx: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for line in mdx.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        let first_cell = trimmed[1..].split('|').next().unwrap_or("").trim();
+        if let Some(inner) = first_cell
+            .strip_prefix('`')
+            .and_then(|s| s.strip_suffix('`'))
+            && (inner.ends_with("_bundle") || inner.ends_with("_seam"))
+        {
+            names.insert(inner.to_string());
+        }
+    }
+    names
+}
+
 #[test]
 fn machine_authority_doc_table_matches_canonical_registry() {
     let mdx_path = concat!(
@@ -62,6 +85,35 @@ fn machine_authority_doc_table_matches_canonical_registry() {
     assert!(
         extra_in_docs.is_empty(),
         "machine-authority.mdx lists machines not in the canonical registry: {extra_in_docs:?}"
+    );
+}
+
+#[test]
+fn machine_authority_doc_composition_table_matches_canonical_registry() {
+    let mdx_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/reference/machine-authority.mdx"
+    );
+    let mdx =
+        std::fs::read_to_string(mdx_path).unwrap_or_else(|err| panic!("read {mdx_path}: {err}"));
+
+    let documented = documented_composition_names(&mdx);
+    let canonical: std::collections::BTreeSet<String> = canonical_composition_schemas()
+        .into_iter()
+        .map(|schema| schema.name.as_str().to_owned())
+        .collect();
+
+    let missing_from_docs: Vec<&String> = canonical.difference(&documented).collect();
+    let extra_in_docs: Vec<&String> = documented.difference(&canonical).collect();
+
+    assert!(
+        missing_from_docs.is_empty(),
+        "machine-authority.mdx is missing canonical compositions from the registry \
+         (canonical_composition_schemas()): {missing_from_docs:?}"
+    );
+    assert!(
+        extra_in_docs.is_empty(),
+        "machine-authority.mdx lists compositions not in the canonical registry: {extra_in_docs:?}"
     );
 }
 

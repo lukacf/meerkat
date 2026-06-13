@@ -243,6 +243,12 @@ export interface SkillSourceProvenance {
   transport_kind: SourceTransportKind;
 }
 
+export interface CallbackToolDefinition {
+  description: string;
+  input_schema: unknown;
+  name: ToolName;
+}
+
 export interface ConfigEnvelope {
   backend?: string;
   config: unknown;
@@ -281,6 +287,14 @@ export interface ServerCapabilities {
 
 export interface SkillListResponse {
   skills: SkillEntry[];
+}
+
+export interface ToolsRegisterParams {
+  tools: CallbackToolDefinition[];
+}
+
+export interface ToolsRegisterResult {
+  registered: number;
 }
 
 export interface WorkEventsResult {

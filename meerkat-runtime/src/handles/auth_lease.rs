@@ -414,6 +414,13 @@ fn maybe_auth_lease_transition_from_generated_publication(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
+    fn begin_auth_lease_release<'a>(
+        &'a self,
+        _lease_key: &LeaseKey,
+    ) -> Result<Option<Box<dyn AuthLeaseReleasePermit + 'a>>, DslTransitionError> {
+        Ok(None)
+    }
+
     fn oauth_flows_for_release(
         &self,
         lease_key: &LeaseKey,
@@ -423,6 +430,9 @@ pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
 
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError>;
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait AuthLeaseReleasePermit {}
 
 #[cfg(test)]
 pub(crate) type ReleaseAfterAcceptHook = Arc<dyn Fn(&LeaseKey) + Send + Sync>;
@@ -436,6 +446,17 @@ static RELEASE_AFTER_ACCEPT_HOOK_SERIAL: std::sync::OnceLock<Mutex<()>> =
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+pub(crate) type ReleaseBeforeCommitHook = Arc<dyn Fn(&LeaseKey) + Send + Sync>;
+
+#[cfg(test)]
+static RELEASE_BEFORE_COMMIT_HOOK: std::sync::OnceLock<Mutex<Option<ReleaseBeforeCommitHook>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+static RELEASE_BEFORE_COMMIT_HOOK_SERIAL: std::sync::OnceLock<Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
 pub(crate) struct ReleaseAfterAcceptHookGuard {
     _serial: std::sync::MutexGuard<'static, ()>,
 }
@@ -444,6 +465,18 @@ pub(crate) struct ReleaseAfterAcceptHookGuard {
 impl Drop for ReleaseAfterAcceptHookGuard {
     fn drop(&mut self) {
         set_release_after_accept_hook_for_test(None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ReleaseBeforeCommitHookGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for ReleaseBeforeCommitHookGuard {
+    fn drop(&mut self) {
+        set_release_before_commit_hook_for_test(None);
     }
 }
 
@@ -460,6 +493,18 @@ pub(crate) fn install_release_after_accept_hook_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn install_release_before_commit_hook_for_test(
+    hook: ReleaseBeforeCommitHook,
+) -> ReleaseBeforeCommitHookGuard {
+    let serial = RELEASE_BEFORE_COMMIT_HOOK_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_release_before_commit_hook_for_test(Some(hook));
+    ReleaseBeforeCommitHookGuard { _serial: serial }
+}
+
+#[cfg(test)]
 fn set_release_after_accept_hook_for_test(hook: Option<ReleaseAfterAcceptHook>) {
     *RELEASE_AFTER_ACCEPT_HOOK
         .get_or_init(|| Mutex::new(None))
@@ -468,8 +513,28 @@ fn set_release_after_accept_hook_for_test(hook: Option<ReleaseAfterAcceptHook>) 
 }
 
 #[cfg(test)]
+fn set_release_before_commit_hook_for_test(hook: Option<ReleaseBeforeCommitHook>) {
+    *RELEASE_BEFORE_COMMIT_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(test)]
 fn run_release_after_accept_hook(lease_key: &LeaseKey) {
     let hook = RELEASE_AFTER_ACCEPT_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(lease_key);
+    }
+}
+
+#[cfg(test)]
+fn run_release_before_commit_hook(lease_key: &LeaseKey) {
+    let hook = RELEASE_BEFORE_COMMIT_HOOK
         .get_or_init(|| Mutex::new(None))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1084,8 +1149,14 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         // payloads, so a same-target flow admitted after this capture is
         // not removed by stale target-wide cleanup.
         #[cfg(not(target_arch = "wasm32"))]
+        let release_observers = self.live_release_observers();
+        #[cfg(not(target_arch = "wasm32"))]
+        let release_permits = release_observers
+            .iter()
+            .map(|observer| observer.begin_auth_lease_release(lease_key))
+            .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            let release_observers = self.live_release_observers();
             let mut released =
                 self.collect_release_observer_flows(&release_observers, lease_key)?;
             {
@@ -1105,6 +1176,8 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             }
             self.notify_release_observers(&release_observers, &released)?;
         }
+        #[cfg(test)]
+        run_release_before_commit_hook(lease_key);
         // Commit: the Release transition through generated machine authority.
         // Nothing fallible follows it.
         let (from_phase, to_phase) = {
@@ -1129,6 +1202,10 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(release_permits);
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(release_observers);
         emit_audit(lease_key, "release_lease", from_phase, to_phase);
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);

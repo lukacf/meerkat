@@ -7,6 +7,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `layer_mob`: `MobMachine` @ actor `layer_mob_authority`
 
 ## Routes
+- `layer_terminal_reaches_adaptive_kernel`: `layer_mob`.`FlowRunPublicResultClassified` -> `control_mob`.`IngestLayerTerminal` [Immediate]
 
 ## Target Selectors
 - `(none)`
@@ -19,12 +20,13 @@ _Generated from the Rust composition catalog. Do not edit by hand._
     - `layer_terminal_reaches_adaptive_kernel` → `control_mob::IngestLayerTerminal` (Input)
 
 ## Transaction Plans
-- `(none)`
+- `adaptive_layer_terminal_feedback` via `ingest_layer_terminal` / `AdaptiveMobBundleDriver::ingest_layer_terminal` — adaptive bundle driver enriches a terminal layer-mob result with the stored adaptive run/layer context before feeding the control mob kernel
 
 ## Scheduler Rules
 - `(none)`
 
 ## Structural Requirements
+- `layer_terminal_feedback_route_present` — terminal layer-mob public result classification feeds the adaptive control mob through the canonical generated route
 - `control_mob_destroying_session_ingress_protocol_covered` — control mob destroy keeps the canonical detach-before-destroy session ingress handoff explicit inside the adaptive bundle
 - `layer_mob_destroying_session_ingress_protocol_covered` — layer mob destroy keeps the canonical detach-before-destroy session ingress handoff explicit inside the adaptive bundle
 

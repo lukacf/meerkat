@@ -3,9 +3,9 @@
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_ci_cfg, render_composition_driver, render_composition_mapping_coverage,
-    render_composition_module, render_composition_semantic_model, render_generated_kernel_mod,
-    render_machine_ci_cfg, render_machine_kernel_module, render_machine_mapping_coverage,
-    render_machine_module, render_machine_semantic_model,
+    render_composition_module, render_composition_semantic_model, render_composition_witness_cfg,
+    render_generated_kernel_mod, render_machine_ci_cfg, render_machine_kernel_module,
+    render_machine_mapping_coverage, render_machine_module, render_machine_semantic_model,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
@@ -16,7 +16,7 @@ use meerkat_machine_schema::catalog::dsl::{
 use meerkat_machine_schema::catalog::{
     adaptive_mob_bundle_composition, canonical_composition_coverage_manifests,
     canonical_machine_coverage_manifests, meerkat_mob_seam_composition,
-    schedule_runtime_bundle_composition,
+    schedule_bundle_composition, schedule_runtime_bundle_composition,
 };
 use meerkat_machine_schema::identity::{EnumVariantId, RustTypeAtom};
 use meerkat_machine_schema::{
@@ -250,13 +250,147 @@ fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
     let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
         .expect("render composition semantic model");
 
-    assert!(rendered.contains("WitnessFairness_basic_round_trip_1 =="));
-    assert!(rendered.contains("    /\\ WitnessFairness_basic_round_trip_1"));
+    assert!(!rendered.contains("WitnessFairness_basic_round_trip_1 =="));
+    assert!(!rendered.contains("    /\\ WitnessFairness_basic_round_trip_1"));
+    assert!(rendered.contains("WitnessScriptComplete_basic_round_trip =="));
+    let basic_completion = rendered
+        .split("WitnessScriptComplete_basic_round_trip ==")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("WitnessNoPrematureStutter_basic_round_trip ==")
+                .next()
+        })
+        .expect("basic completion section");
     assert!(
-        !rendered.lines().any(
-            |line| line.contains("WitnessSpec_basic_round_trip ==") && line.contains("WF_vars")
+        basic_completion.contains("Len(witness_remaining_script_inputs) = 0")
+            && basic_completion
+                .contains("~(witness_current_script_input \\in SeqElements(pending_inputs))")
+            && basic_completion.contains("Len(pending_routes) = 0")
+            && basic_completion
+                .contains("\\E packet \\in delivered_routes : packet.route = \"runtime_bound_reaches_mob\"")
+            && basic_completion.contains(
+                "\\E packet \\in observed_transitions : /\\ packet.machine = \"meerkat\" /\\ packet.transition = \"IngestAttached\""
+            )
+            && !basic_completion.contains("Len(pending_inputs) = 0"),
+        "completion should prove the scripted inputs and routes are drained without requiring terminal routed inputs to be consumed:\n{basic_completion}"
+    );
+    assert!(rendered.contains(
+        "WitnessNoPrematureStutter_basic_round_trip ==\n    \\/ WitnessScriptComplete_basic_round_trip\n    \\/ model_step_count' # model_step_count"
+    ));
+    assert!(rendered.contains(
+        "WitnessSpec_basic_round_trip ==\n    /\\ WitnessInit_basic_round_trip\n    /\\ [] [WitnessNext_basic_round_trip]_vars"
+    ));
+    assert!(rendered.contains(
+        "WitnessSatisfiedStutter_basic_round_trip ==\n    /\\ WitnessScriptComplete_basic_round_trip"
+    ));
+    assert!(rendered.contains(
+        "WitnessRouteObserved_basic_round_trip_binding_request_reaches_meerkat == WitnessScriptComplete_basic_round_trip => (RouteObserved_binding_request_reaches_meerkat)"
+    ));
+    let seam = meerkat_mob_seam_composition();
+    let basic_witness = seam
+        .witnesses
+        .iter()
+        .find(|witness| witness.name.as_str() == "basic_round_trip")
+        .expect("basic round trip witness");
+    let basic_cfg = render_composition_witness_cfg(&seam, basic_witness);
+    assert!(
+        basic_cfg.contains("INVARIANTS")
+            && basic_cfg.contains(
+                "  WitnessRouteObserved_basic_round_trip_binding_request_reaches_meerkat"
+            )
+            && basic_cfg.contains("ACTION_CONSTRAINTS")
+            && basic_cfg.contains("  WitnessNoPrematureStutter_basic_round_trip")
+            && !basic_cfg.contains("PROPERTIES"),
+        "explicit seam witness cfg should check observations as guarded invariants and reject pre-completion stutter via an action constraint:\n{basic_cfg}"
+    );
+    let seam_witness_next = rendered
+        .split("WitnessNext_basic_round_trip ==")
+        .nth(1)
+        .and_then(|tail| tail.split("WitnessNext_retire_runtime_path ==").next())
+        .expect("seam basic witness next section");
+    assert!(
+        !seam_witness_next.contains("CoreNext")
+            && seam_witness_next.contains("meerkat_RecoverRuntimeAuthorityIdle")
+            && seam_witness_next.contains("mob_AuthorizeSpawnProfileRunning")
+            && seam_witness_next.contains("mob_SpawnRunningFresh")
+            && seam_witness_next.contains("meerkat_PrepareBindingsIdle")
+            && seam_witness_next.contains("mob_SubmitWorkRunningExternal")
+            && seam_witness_next.contains("meerkat_IngestAttached")
+            && seam_witness_next.contains("WitnessSatisfiedStutter_basic_round_trip"),
+        "meerkat_mob_seam witness must be scripted through concrete seam transitions, not CoreNext:\n{seam_witness_next}"
+    );
+    assert!(
+        rendered.contains(
+            "WitnessInit_basic_round_trip ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"meerkat\", variant |-> \"RecoverRuntimeAuthority\""
         ),
-        "WitnessSpec must reference fairness chunks instead of embedding every WF_vars clause on one line"
+        "seam witness must preload the runtime authority recovery input that creates the session"
+    );
+    let seam_destroy_witness_next = rendered
+        .split("WitnessNext_destroy_runtime_path ==")
+        .nth(1)
+        .and_then(|tail| tail.split("CiStateConstraint ==").next())
+        .expect("seam destroy witness next section");
+    assert!(
+        !seam_destroy_witness_next.contains("CoreNext")
+            && seam_destroy_witness_next.contains("mob_DestroyMob")
+            && seam_destroy_witness_next.contains("meerkat_Destroy")
+            && !seam_destroy_witness_next.contains("mob_ObserveRuntimeDestroyed"),
+        "destroy seam witness must use the signal transition that emits RequestRuntimeDestroy; RuntimeDestroyed is a delivered terminal route, not a consumable post-destroy mob transition:\n{seam_destroy_witness_next}"
+    );
+
+    let adaptive = render_composition_semantic_model(&adaptive_mob_bundle_composition())
+        .expect("render adaptive composition semantic model");
+    let witness_next = adaptive
+        .split("WitnessNext_layer_terminal_feedback ==")
+        .nth(1)
+        .and_then(|tail| tail.split("CiStateConstraint ==").next())
+        .expect("adaptive witness next section");
+    assert!(
+        !witness_next.contains("CoreNext"),
+        "witness specs must use a bounded transition relation instead of the full composition CoreNext"
+    );
+    assert!(
+        witness_next.contains("DeliverQueuedRoute")
+            && witness_next.contains("layer_mob_ClassifyFlowRunPublicResultSuccessRunning")
+            && !witness_next.contains("QuiescentStutter")
+            && witness_next.contains("WitnessSatisfiedStutter_layer_terminal_feedback"),
+        "adaptive witness next must include route delivery, expected source transition, and terminal witness stutter without a pre-satisfaction quiescent loop:\n{witness_next}"
+    );
+    assert!(
+        adaptive.contains(
+            "RouteObserved_layer_terminal_reaches_adaptive_kernel == \\E packet \\in delivered_routes : packet.route = \"layer_terminal_reaches_adaptive_kernel\""
+        ),
+        "witness route observation must require delivered route state, not merely declared coverage"
+    );
+    assert!(
+        !adaptive.contains("WitnessFairness_layer_terminal_feedback_1 =="),
+        "adaptive witness fairness should stay bounded to the scripted route proof"
+    );
+    assert!(adaptive.contains(
+        "WitnessNoPrematureStutter_layer_terminal_feedback ==\n    \\/ WitnessScriptComplete_layer_terminal_feedback\n    \\/ model_step_count' # model_step_count"
+    ));
+
+    let schedule = render_composition_semantic_model(&schedule_bundle_composition())
+        .expect("render schedule composition semantic model");
+    let route_only_witness = schedule
+        .split("WitnessNext_revision_supersede_route ==")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("WitnessNext_occurrence_supersede_ack_route ==")
+                .next()
+        })
+        .expect("schedule revision supersede witness next section");
+    assert!(
+        !route_only_witness.contains("CoreNext")
+            && route_only_witness.contains("schedule_ReviseActive")
+            && route_only_witness.contains("WitnessSatisfiedStutter_revision_supersede_route"),
+        "schedule route witnesses must be scripted through the producer transition, not the full composition CoreNext:\n{route_only_witness}"
+    );
+    assert!(
+        schedule.contains(
+            "WitnessInit_revision_supersede_route ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"schedule\", variant |-> \"Revise\""
+        ),
+        "revision supersede witness must preload the schedule Revise input that produces its expected route"
     );
 }
 
@@ -1034,6 +1168,30 @@ fn render_composition_driver_emits_generated_route_facts() {
         rendered.contains("pub struct TypedRoutedSignal"),
         "rendered module must declare TypedRoutedSignal:\n{rendered}"
     );
+    assert!(
+        rendered.contains("pub struct NoopStorePlan"),
+        "rendered module must declare the catalog-named store plan:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct NoopWork"),
+        "rendered module must declare the catalog-named work packet:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub enum NoopDecision"),
+        "rendered module must declare the catalog-named decision enum:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct NoopDriver"),
+        "rendered module must declare the catalog-named driver:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub fn decide(work: &NoopWork) -> NoopDecision"),
+        "rendered driver must expose generated production dispatch:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub fn store_plan(decision: NoopDecision) -> Option<NoopStorePlan>"),
+        "rendered driver must expose generated store-plan conversion:\n{rendered}"
+    );
     for forbidden in [
         "pub const WATCHED_EFFECTS",
         "pub const DISPATCH_ROUTES",
@@ -1125,5 +1283,44 @@ fn render_composition_driver_emission_is_composition_name_agnostic() {
     assert!(
         rendered.contains("pub fn route_to_input("),
         "route_to_input must stay available for renamed compositions:\n{rendered}"
+    );
+}
+
+#[test]
+fn render_adaptive_mob_bundle_driver_emits_layer_terminal_route() {
+    let rendered = render_composition_driver(&adaptive_mob_bundle_composition())
+        .expect("adaptive mob bundle emits driver facts");
+
+    assert!(
+        rendered
+            .contains("pub fn route_layer_terminal_reaches_adaptive_kernel() -> TypedRoutedInput"),
+        "adaptive bundle must emit its canonical layer-terminal route fact:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("effects::layer_mob::flow_run_public_result_classified()"),
+        "adaptive route_to_input must resolve the watched layer-mob terminal effect:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct AdaptiveMobBundleDriver"),
+        "adaptive bundle must emit its catalog-named driver type:\n{rendered}"
+    );
+    assert!(
+        rendered
+            .contains("pub fn decide(work: &AdaptiveMobBundleWork) -> AdaptiveMobBundleDecision"),
+        "adaptive bundle must emit generated driver dispatch:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "pub fn store_plan(decision: AdaptiveMobBundleDecision) -> Option<AdaptiveMobBundleStorePlan>"
+        ),
+        "adaptive bundle must emit generated store-plan conversion:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("InputVariantId::parse(\"IngestLayerTerminal\")"),
+        "adaptive route must target control_mob.IngestLayerTerminal:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(FieldId::parse(\"result\").expect(\"route producer field slug\"), FieldId::parse(\"result_class\").expect(\"route consumer field slug\")),"),
+        "adaptive route must carry the producer result into result_class while owner-provided context stays driver-owned:\n{rendered}"
     );
 }

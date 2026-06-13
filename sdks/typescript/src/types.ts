@@ -1056,6 +1056,7 @@ export interface SessionOptions {
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
+  authBinding?: WireAuthBindingRef;
   preloadSkills?: SkillRef[];
   skillRefs?: SkillRef[];
   labels?: Readonly<Record<string, string>>;

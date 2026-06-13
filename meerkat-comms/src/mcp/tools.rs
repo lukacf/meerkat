@@ -560,6 +560,13 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                     peer_for_errors.as_deref().unwrap_or("<unknown>")
                 )
             }
+            SendError::AdmissionDropped { reason } => {
+                format!(
+                    "peer_admission_dropped: peer '{}' rejected envelope at ingress: {}",
+                    peer_for_errors.as_deref().unwrap_or("<unknown>"),
+                    reason.as_code()
+                )
+            }
             other => other.to_string(),
         })?;
         return Ok(sent_result(&cmd_kind, receipt));
@@ -800,6 +807,21 @@ mod tests {
             "request_subject": subject,
             "token": token
         })
+    }
+
+    #[test]
+    fn router_admission_drop_error_keeps_typed_reason_code() {
+        let message = format_router_send_error(
+            "peer-a",
+            crate::router::SendError::AdmissionDropped {
+                reason: crate::inbox::DropReason::InboxFull,
+            },
+        );
+
+        assert_eq!(
+            message,
+            "peer_admission_dropped: peer 'peer-a' rejected envelope at ingress: inbox_full"
+        );
     }
 
     struct RecordingRuntime {

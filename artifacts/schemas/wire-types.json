@@ -9126,6 +9126,32 @@
     "title": "BridgeSupervisorPayload",
     "type": "object"
   },
+  "CallbackToolDefinition": {
+    "$defs": {
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public callback tool definition accepted by `tools/register`.\n\nThe server stamps callback provenance itself; clients provide only the\nmodel-facing definition.",
+    "properties": {
+      "description": {
+        "type": "string"
+      },
+      "input_schema": true,
+      "name": {
+        "$ref": "#/$defs/ToolName"
+      }
+    },
+    "required": [
+      "name",
+      "description",
+      "input_schema"
+    ],
+    "title": "CallbackToolDefinition",
+    "type": "object"
+  },
   "CommsChecksumTokenParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -12262,6 +12288,31 @@
   },
   "CommsSendErrorData": {
     "$defs": {
+      "AdmissionDropReason": {
+        "description": "Typed reason a peer rejected our envelope at its ingress admission gate.\n\nThis mirrors `meerkat_comms::DropReason` across the core boundary so\n`SendError::AdmissionDropped` can carry the typed cause all the way to\nREST/RPC/MCP error payloads. Callers distinguish transport-level failure\n(`PeerOffline`) from policy-level rejection (`AdmissionDropped { reason }`)\nwithout collapsing both into \"peer unreachable\".",
+        "oneOf": [
+          {
+            "const": "untrusted_sender",
+            "description": "`require_peer_auth` is on, the sender is not in the trusted set, and\nthe envelope is not auth-exempt (e.g. supervisor-bridge bootstrap).",
+            "type": "string"
+          },
+          {
+            "const": "classification_rejected",
+            "description": "Classification rejected the item before the admission gate ran.",
+            "type": "string"
+          },
+          {
+            "const": "session_closed",
+            "description": "The receiver's classified inbox is closed (receiver dropped).",
+            "type": "string"
+          },
+          {
+            "const": "inbox_full",
+            "description": "The receiver's classified inbox is at capacity.",
+            "type": "string"
+          }
+        ]
+      },
       "CommsPeerUnreachableReason": {
         "description": "Why a peer was unreachable for a `comms/send` dispatch.",
         "enum": [
@@ -12314,6 +12365,30 @@
           },
           "reason": {
             "$ref": "#/$defs/CommsPeerUnreachableReason"
+          }
+        },
+        "required": [
+          "code",
+          "peer",
+          "reason",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "code": {
+            "const": "peer_admission_dropped",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "peer": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/AdmissionDropReason"
           }
         },
         "required": [
@@ -36747,6 +36822,22 @@
       "public_peer_id"
     ],
     "title": "SupervisorRotationReportWire",
+    "type": "object"
+  },
+  "ToolsRegisterResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `tools/register`.",
+    "properties": {
+      "registered": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "registered"
+    ],
+    "title": "ToolsRegisterResult",
     "type": "object"
   },
   "TranscriptEditRunningBehavior": {

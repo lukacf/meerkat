@@ -1780,6 +1780,7 @@ pub use meerkat_contracts::wire::RestCreateSessionRequest as CreateSessionReques
 fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
     req.model.is_some()
         || req.provider.is_some()
+        || req.auth_binding.is_some()
         || req.max_tokens.is_some()
         || req.system_prompt.is_some()
         || req.output_schema.is_some()
@@ -1797,6 +1798,7 @@ fn create_session_resume_override_mask(
     ResumeOverrideMask {
         model: req.model.is_some(),
         provider: req.provider.is_some(),
+        auth_binding: req.auth_binding.is_some(),
         max_tokens: req.max_tokens.is_some(),
         structured_output_retries: req.structured_output_retries.is_some(),
         provider_params: req.provider_params.is_some(),
@@ -2637,6 +2639,25 @@ fn normalize_rest_comms_send_error(
                     "reason": "transport_error",
                     "message": format!("peer '{peer}' is unreachable: transport_error"),
                     "details": details,
+                }),
+            }
+        }
+        meerkat_core::comms::SendError::AdmissionDropped { reason } => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            ApiError::InternalWithData {
+                message: format!(
+                    "peer_admission_dropped: peer '{peer}' rejected envelope at ingress: {}",
+                    reason.as_code()
+                ),
+                code: "peer_admission_dropped".to_string(),
+                details: json!({
+                    "code": "peer_admission_dropped",
+                    "peer": peer,
+                    "reason": reason,
+                    "message": format!(
+                        "peer '{peer}' rejected envelope at ingress: {}",
+                        reason.as_code()
+                    ),
                 }),
             }
         }
@@ -4022,6 +4043,7 @@ fn help_request_to_create_session(
         model: req.model,
         provider,
         max_tokens: req.max_tokens,
+        auth_binding: None,
         output_schema: None,
         structured_output_retries: None,
         verbose: false,
@@ -4288,7 +4310,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
-        auth_binding: None,
+        auth_binding: req.auth_binding,
         // REST is not a mob runtime. On resume the factory preserves the
         // persisted mob_member_binding from the resumed session metadata.
         mob_member_binding: None,
@@ -5305,6 +5327,7 @@ async fn continue_session_inner(
                 )));
             }
         };
+        let auth_binding_override = req.auth_binding.clone();
         let mut build = SessionBuildOptions {
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
@@ -5343,7 +5366,7 @@ async fn continue_session_inner(
             instance_id: state.instance_id.clone(),
             backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
-            auth_binding: None,
+            auth_binding: auth_binding_override.clone(),
             mob_member_binding: None,
             keep_alive,
             checkpointer: None,
@@ -5357,6 +5380,7 @@ async fn continue_session_inner(
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
                 provider: llm_binding.provider_overridden,
+                auth_binding: auth_binding_override.is_some(),
                 max_tokens: req.max_tokens.is_some(),
                 structured_output_retries: req.structured_output_retries.is_some(),
                 keep_alive: keep_alive_override.is_some(),
@@ -7996,6 +8020,7 @@ mod tests {
                     verbose: false,
                     model: None,
                     provider: None,
+                    auth_binding: None,
                     max_tokens: None,
                     hooks_override: None,
                     enable_web_search: None,
@@ -8194,6 +8219,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -8256,6 +8282,7 @@ mod tests {
                     verbose: false,
                     model: None,
                     provider: None,
+                    auth_binding: None,
                     max_tokens: None,
                     hooks_override: None,
                     enable_web_search: None,
@@ -8402,6 +8429,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: Some(state.max_tokens.saturating_add(1)),
                 hooks_override: None,
                 enable_web_search: None,
@@ -8501,6 +8529,7 @@ mod tests {
                     verbose: false,
                     model: None,
                     provider: None,
+                    auth_binding: None,
                     max_tokens: Some(512),
                     hooks_override: None,
                     enable_web_search: None,
@@ -8629,6 +8658,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -8700,6 +8730,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -9300,6 +9331,33 @@ mod tests {
                 assert_eq!(
                     details.get("details").and_then(Value::as_str),
                     Some("Transport error: connection refused")
+                );
+            }
+            other => panic!("expected structured internal error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_rest_comms_send_error_preserves_admission_drop_reason() {
+        let err = normalize_rest_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::UntrustedSender,
+            },
+        );
+        match err {
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => {
+                assert!(message.starts_with("peer_admission_dropped:"));
+                assert_eq!(code, "peer_admission_dropped");
+                assert_eq!(details.get("peer").and_then(Value::as_str), Some("peer-a"));
+                assert_eq!(
+                    details.get("reason").and_then(Value::as_str),
+                    Some("untrusted_sender")
                 );
             }
             other => panic!("expected structured internal error, got {other:?}"),
@@ -10835,6 +10893,7 @@ mod tests {
             verbose: false,
             model: None,
             provider: None,
+            auth_binding: None,
             max_tokens: None,
             hooks_override: None,
             enable_web_search: None,
@@ -10847,6 +10906,15 @@ mod tests {
         req.model = Some("gpt-5.4".into());
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
+
+        req.auth_binding = Some(meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
+        });
+        assert!(rest_continue_requires_rebuild(&req));
+        req.auth_binding = None;
 
         req.flow_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
         assert!(
@@ -11005,6 +11073,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -11084,6 +11153,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -11174,6 +11244,7 @@ mod tests {
                 verbose: false,
                 model: None,
                 provider: None,
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -11264,6 +11335,7 @@ mod tests {
                 verbose: false,
                 model: Some("gpt-5.4".to_string()),
                 provider: Some(Provider::Anthropic),
+                auth_binding: None,
                 max_tokens: None,
                 hooks_override: None,
                 enable_web_search: None,
@@ -11344,6 +11416,7 @@ mod tests {
                     verbose: false,
                     model: Some("gpt-5.4".to_string()),
                     provider: Some(Provider::Anthropic),
+                    auth_binding: None,
                     max_tokens: None,
                     hooks_override: None,
                     enable_web_search: None,

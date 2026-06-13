@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{
-    BudgetLimits, Config, ContentInput, HookRunOverrides, OutputSchema, PeerCorrelationId,
-    PeerMeta, Provider, PublicTurnToolOverlay,
+    AuthBindingRef, BudgetLimits, Config, ContentInput, HookRunOverrides, OutputSchema,
+    PeerCorrelationId, PeerMeta, Provider, PublicTurnToolOverlay,
     comms::{PeerId, PeerName},
     config::SystemPromptOverride,
     connection::{BindingId, ProfileId, RealmId},
@@ -42,6 +42,10 @@ pub struct RestCreateSessionRequest {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// Realm-scoped provider credential binding. Same structural
+    /// `AuthBindingRef` used by RPC, SDKs, and session persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<AuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -149,6 +153,10 @@ pub struct RestContinueSessionRequest {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// Realm-scoped provider credential binding override for this resumed
+    /// turn. Omit to inherit the persisted session binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<AuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// Optional run-scoped hook overrides.
@@ -330,6 +338,46 @@ mod tests {
         }))
         .expect("create-session body parses");
         assert_eq!(parsed.enable_web_search, Some(true));
+    }
+
+    #[test]
+    fn create_session_request_carries_structural_auth_binding() {
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_openai",
+                "profile": "console"
+            }
+        }))
+        .expect("create-session body parses");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
+        assert_eq!(
+            auth_binding
+                .profile
+                .as_ref()
+                .map(|profile| profile.as_str()),
+            Some("console")
+        );
+    }
+
+    #[test]
+    fn continue_session_request_carries_structural_auth_binding() {
+        let parsed: RestContinueSessionRequest = serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello again",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_openai"
+            }
+        }))
+        .expect("continue-session body parses");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
+        assert!(auth_binding.profile.is_none());
     }
 
     #[test]

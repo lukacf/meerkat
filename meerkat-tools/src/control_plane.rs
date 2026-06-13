@@ -165,6 +165,15 @@ impl CatalogControlDispatcher {
     }
 
     pub fn should_compose_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        if session_dispatcher.tool_catalog_capabilities().exact_catalog {
+            let catalog = session_dispatcher.tool_catalog();
+            if catalog.iter().any(|entry| {
+                entry.plane == ToolPlaneClass::Control
+                    && (entry.tool.name == SEARCH_TOOL_NAME || entry.tool.name == LOAD_TOOL_NAME)
+            }) {
+                return false;
+            }
+        }
         should_compose_tool_catalog_control_plane(session_dispatcher)
     }
 
@@ -876,6 +885,49 @@ mod tests {
         assert!(
             !CatalogControlDispatcher::should_enable_for(&below_threshold_dynamic),
             "a single deferred tool should still stay inline until the adaptive threshold is crossed"
+        );
+    }
+
+    #[test]
+    fn should_compose_for_is_idempotent_when_control_plane_is_already_present() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let deferred_two = session_tool("deferred_mcp_tool_two", "Second deferred MCP tool");
+        let search = Arc::new(search_tool_def());
+        let load = Arc::new(load_tool_def());
+        let already_composed = ExactCatalogDispatcher {
+            tools: vec![
+                Arc::clone(&deferred),
+                Arc::clone(&deferred_two),
+                Arc::clone(&search),
+                Arc::clone(&load),
+            ]
+            .into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred),
+                    true,
+                    callback_provenance("test"),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred_two),
+                    true,
+                    callback_provenance("test"),
+                ),
+                ToolCatalogEntry::control_inline(search, true),
+                ToolCatalogEntry::control_inline(load, true),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        };
+
+        assert!(
+            CatalogControlDispatcher::should_enable_for(&already_composed),
+            "already-composed deferred catalogs should still project control tools"
+        );
+        assert!(
+            !CatalogControlDispatcher::should_compose_for(&already_composed),
+            "factory auto-hoisting must not add a second catalog control plane"
         );
     }
 

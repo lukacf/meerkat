@@ -23,7 +23,7 @@ use crate::auth_machine::dsl as auth_dsl;
 use crate::store::RuntimeStore;
 
 use super::RuntimeAuthLeaseHandle;
-use super::auth_lease::{AuthLeaseReleaseObserver, ReleasedOAuthFlows};
+use super::auth_lease::{AuthLeaseReleaseObserver, AuthLeaseReleasePermit, ReleasedOAuthFlows};
 
 type StoreSlot = Arc<Mutex<Option<Weak<dyn RuntimeStore>>>>;
 type PayloadLock = Arc<Mutex<()>>;
@@ -86,15 +86,30 @@ struct OAuthPayloadReleaseObserver {
     payload_lock: PayloadLock,
 }
 
+struct OAuthPayloadReleasePermit<'a> {
+    _payload_guard: std::sync::MutexGuard<'a, ()>,
+}
+
+impl AuthLeaseReleasePermit for OAuthPayloadReleasePermit<'_> {}
+
 impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
+    fn begin_auth_lease_release<'a>(
+        &'a self,
+        _lease_key: &LeaseKey,
+    ) -> Result<Option<Box<dyn AuthLeaseReleasePermit + 'a>>, DslTransitionError> {
+        let payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(Some(Box::new(OAuthPayloadReleasePermit {
+            _payload_guard: payload_guard,
+        })))
+    }
+
     fn oauth_flows_for_release(
         &self,
         lease_key: &LeaseKey,
     ) -> Result<ReleasedOAuthFlows, DslTransitionError> {
-        let _payload_guard = self
-            .payload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = AuthBindingRef {
             realm: lease_key.realm.clone(),
             binding: lease_key.binding.clone(),
@@ -129,10 +144,6 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
     }
 
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError> {
-        let _payload_guard = self
-            .payload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = AuthBindingRef {
             realm: released.lease_key.realm.clone(),
             binding: released.lease_key.binding.clone(),
@@ -1671,6 +1682,7 @@ mod tests {
     use std::sync::{
         Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     };
 
     use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
@@ -1684,22 +1696,21 @@ mod tests {
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
 
-    fn target() -> AuthBindingRef {
+    fn target_with_binding(binding: &str) -> AuthBindingRef {
         AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
-            binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
+            binding: meerkat_core::BindingId::parse(binding).expect("valid binding"),
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
+    fn target() -> AuthBindingRef {
+        target_with_binding("default_openai")
+    }
+
     fn alternate_target() -> AuthBindingRef {
-        AuthBindingRef {
-            realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
-            binding: meerkat_core::BindingId::parse("secondary_openai").expect("valid binding"),
-            profile: None,
-            origin: meerkat_core::connection::BindingOrigin::Configured,
-        }
+        target_with_binding("secondary_openai")
     }
 
     #[derive(Debug, Default)]
@@ -3519,7 +3530,7 @@ mod tests {
             Duration::from_secs(60),
             lifecycle.clone(),
         ));
-        let target = target();
+        let target = target_with_binding("release_after_accept_openai");
         let lease_key = LeaseKey::from_auth_binding(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
@@ -3564,6 +3575,79 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .expect("hook admitted replacement flow");
+        let flow = authority
+            .consume(&new_state, &target, provider, redirect_uri)
+            .expect("release observer must not prune newly admitted flow");
+        assert_eq!(flow.pkce_verifier, "new-verifier");
+        assert!(matches!(
+            authority.consume(&old_state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn release_precommit_admission_waits_for_release_commit() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+        ));
+        let target = target_with_binding("release_before_commit_openai");
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let old_state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "old-verifier".to_string(),
+            )
+            .expect("old browser flow admitted");
+        let (done_tx, done_rx) = mpsc::channel();
+        let admission_finished = Arc::new(AtomicBool::new(false));
+        let admission_finished_for_hook = Arc::clone(&admission_finished);
+        let authority_for_hook = Arc::clone(&authority);
+        let target_for_hook = target.clone();
+        let lease_key_for_hook = lease_key.clone();
+        let _hook_guard = crate::handles::auth_lease::install_release_before_commit_hook_for_test(
+            Arc::new(move |released_key| {
+                if released_key != &lease_key_for_hook {
+                    return;
+                }
+                let authority_for_thread = Arc::clone(&authority_for_hook);
+                let target_for_thread = target_for_hook.clone();
+                let done_tx = done_tx.clone();
+                let admission_finished_for_thread = Arc::clone(&admission_finished_for_hook);
+                std::thread::spawn(move || {
+                    let admitted = authority_for_thread.start(
+                        target_for_thread,
+                        provider,
+                        redirect_uri.to_string(),
+                        "new-verifier".to_string(),
+                    );
+                    admission_finished_for_thread.store(true, Ordering::Release);
+                    let _ = done_tx.send(admitted);
+                });
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(
+                    !admission_finished_for_hook.load(Ordering::Acquire),
+                    "OAuth admission must wait until release commits"
+                );
+            }),
+        );
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("credential lifecycle release succeeds");
+
+        let new_state = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pre-commit admission should finish after release commits")
+            .expect("new browser flow admitted after release commit");
         let flow = authority
             .consume(&new_state, &target, provider, redirect_uri)
             .expect("release observer must not prune newly admitted flow");

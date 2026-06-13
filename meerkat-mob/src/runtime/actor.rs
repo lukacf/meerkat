@@ -5191,6 +5191,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::KickoffClear {
                     member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 },
+                "clear_kickoff_state",
             )
             .await
         {
@@ -5239,10 +5240,11 @@ impl MobActor {
         &mut self,
         agent_identity: &AgentIdentity,
         input: mob_dsl::MobMachineInput,
+        context: &'static str,
     ) -> Result<bool, MobError> {
         let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
             Ok(transition) => transition,
-            Err(_) => return Ok(false),
+            Err(error) => return Err(Self::kickoff_rejection_error(context, error)),
         };
 
         // Wave-c C-6p — harvest routed seam effects from this transition
@@ -5306,6 +5308,13 @@ impl MobActor {
         }
 
         Ok(true)
+    }
+
+    fn kickoff_rejection_error(context: &'static str, error: impl ToString) -> MobError {
+        MobError::MobMachineRejected {
+            context,
+            reason: error.to_string(),
+        }
     }
 
     /// Count of in-flight flow runs tracked by the mob actor's shell,
@@ -6731,6 +6740,7 @@ impl MobActor {
                             member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                             error: format!("runtime completion waiter failed: {error}"),
                         },
+                        "resolve_kickoff_outcome_wait_error",
                     )
                     .await
                     .map(|_| ());
@@ -6789,6 +6799,7 @@ impl MobActor {
                         }
                     }
                 },
+                "resolve_kickoff_outcome",
             )
             .await?;
         Ok(())
@@ -6801,6 +6812,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::KickoffCancelRequested {
                     member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 },
+                "maybe_mark_kickoff_cancelled",
             )
             .await
         {
@@ -9751,6 +9763,7 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
+        let is_replacing = replacing.is_some();
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending preparing DSL Spawn"
@@ -10041,12 +10054,16 @@ impl MobActor {
         )?;
 
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            if is_replacing {
+                self.clear_kickoff_state(agent_identity).await;
+            }
             let _ = self
                 .apply_kickoff_input(
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkPending {
                         member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                     },
+                    "finalize_spawn_kickoff_mark_pending",
                 )
                 .await?;
         }
@@ -10142,6 +10159,7 @@ impl MobActor {
                     mob_dsl::MobMachineInput::KickoffMarkStarting {
                         member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                     },
+                    "finalize_spawn_kickoff_mark_starting",
                 )
                 .await?;
             // Spawn emits RequestRuntimeBinding. Drain it before startup can
@@ -19897,6 +19915,33 @@ mod runtime_observation_tests {
         };
 
         assert!(foreign_runtime_observation(authority.state(), &signal).is_none());
+    }
+}
+
+#[cfg(test)]
+mod kickoff_tests {
+    use super::*;
+
+    #[test]
+    fn kickoff_generated_rejection_maps_to_typed_mob_error() {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        let generated = mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::KickoffResolveStarted {
+                member_id: mob_dsl::AgentIdentity::from("worker-1"),
+            },
+        )
+        .expect_err("resolve without active kickoff must be generated rejection");
+
+        let error = MobActor::kickoff_rejection_error("test_kickoff", generated);
+
+        match error {
+            MobError::MobMachineRejected { context, reason } => {
+                assert_eq!(context, "test_kickoff");
+                assert!(reason.contains("KickoffResolveStarted"));
+            }
+            other => panic!("expected typed MobMachineRejected, got {other:?}"),
+        }
     }
 }
 

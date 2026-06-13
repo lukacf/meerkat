@@ -1355,7 +1355,7 @@ fn noop_driver_on_meerkat_mob_seam() -> CompositionDriver {
                 .expect("valid effect_variant"),
         }],
         dispatch_routes: vec![DriverDispatchRoute {
-            name: RouteId::parse("noop_dispatch").expect("valid route slug"),
+            name: RouteId::parse("binding_request_reaches_meerkat").expect("valid route slug"),
             target_instance: MachineInstanceId::parse("meerkat").expect("valid MachineInstanceId"),
             target_kind: RouteTargetKind::Input,
             input_variant: RouteVariantId::Input(
@@ -1457,6 +1457,45 @@ fn composition_driver_rejects_dispatch_route_input_variant_missing_on_target() {
             Err(CompositionSchemaError::UnknownCompositionDriverDispatchVariant { .. })
         ),
         "expected UnknownCompositionDriverDispatchVariant, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_dispatch_route_without_matching_declared_route() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.dispatch_routes[0].name = RouteId::parse("ghost_dispatch").expect("valid route slug");
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::CompositionDriverDispatchRouteMissingRoute { .. })
+        ),
+        "expected CompositionDriverDispatchRouteMissingRoute, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_dispatch_route_sourced_by_unwatched_effect() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.watched_effects[0].effect_variant =
+        EffectVariantId::parse("RequestRuntimeIngress").expect("valid effect_variant");
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::CompositionDriverDispatchRouteUnwatchedEffect { .. })
+        ),
+        "expected CompositionDriverDispatchRouteUnwatchedEffect, got {result:?}",
     );
 }
 

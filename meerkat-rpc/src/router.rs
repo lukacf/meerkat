@@ -35,6 +35,7 @@ use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
+use meerkat_contracts::wire::{ToolsRegisterParams, ToolsRegisterResult};
 
 struct RuntimeLiveToolDispatcher {
     runtime: Arc<SessionRuntime>,
@@ -1820,6 +1821,7 @@ impl MethodRouter {
             #[cfg(feature = "comms")]
             "comms/peers" => self.handle_comms_peers(id, params).await,
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
+            "tools/register" => self.handle_tools_register(id, params).await,
             "skills/inspect" => {
                 // Post-wave-a dogma: the shell-side skill inspection path was
                 // retired; callers consult canonical skill registry surfaces.
@@ -2078,6 +2080,46 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
+    }
+
+    async fn handle_tools_register(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: ToolsRegisterParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => {
+                return resp.with_id(id);
+            }
+        };
+
+        let registered_tools = self.runtime.registered_tools();
+        match registered_tools.write() {
+            Ok(mut tools) => {
+                let count = params.tools.len();
+                for new_tool in params.tools {
+                    let stamped = meerkat_core::ToolDef {
+                        provenance: Some(meerkat_core::types::ToolProvenance {
+                            kind: meerkat_core::types::ToolSourceKind::Callback,
+                            source_id: "callback".into(),
+                        }),
+                        ..new_tool.into()
+                    };
+                    if let Some(existing) = tools.iter_mut().find(|t| t.name == stamped.name) {
+                        *existing = stamped;
+                    } else {
+                        tools.push(stamped);
+                    }
+                }
+                RpcResponse::success(id, ToolsRegisterResult { registered: count })
+            }
+            Err(_) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "Failed to acquire tool registry lock",
+            ),
+        }
     }
 
     async fn handle_session_read(
@@ -2745,15 +2787,22 @@ impl MethodRouter {
         let cmd = match params.into_command().into_command(&session_id) {
             Ok(cmd) => cmd,
             Err(err) => {
-                return RpcResponse::error_with_data(
-                    id,
-                    error::INVALID_PARAMS,
-                    "Command validation failed",
-                    json!({
-                        "code": "invalid_command",
-                        "message": err.to_string(),
-                    }),
-                );
+                let data = meerkat_contracts::CommsSendErrorData::InvalidCommand {
+                    message: err.to_string(),
+                };
+                return match serde_json::to_value(&data) {
+                    Ok(data) => RpcResponse::error_with_data(
+                        id,
+                        error::INVALID_PARAMS,
+                        "Command validation failed",
+                        data,
+                    ),
+                    Err(serialize_error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("failed to serialize comms error data: {serialize_error}"),
+                    ),
+                };
             }
         };
         match comms.send(cmd).await {
@@ -2766,42 +2815,18 @@ impl MethodRouter {
                 ),
             },
             Err(e) => {
-                let normalized = match &e {
-                    meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
-                        "code": "peer_not_found_or_not_trusted",
-                        "peer": peer,
-                        "message": format!("peer '{peer}' is not found or not trusted"),
-                    }),
-                    meerkat_core::comms::SendError::PeerOffline => {
-                        let peer = peer_name.as_deref().unwrap_or("<unknown>");
-                        json!({
-                            "code": "peer_unreachable",
-                            "peer": peer,
-                            "reason": "offline_or_no_ack",
-                            "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
-                        })
+                let normalized = handlers::comms::normalize_send_error(peer_name.as_deref(), &e);
+                let message = normalized.message().to_string();
+                match serde_json::to_value(&normalized) {
+                    Ok(data) => {
+                        RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, data)
                     }
-                    meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
-                        let peer = peer_name.as_deref().unwrap_or("<unknown>");
-                        json!({
-                            "code": "peer_unreachable",
-                            "peer": peer,
-                            "reason": "transport_error",
-                            "message": format!("peer '{peer}' is unreachable: transport_error"),
-                            "details": details,
-                        })
-                    }
-                    _ => json!({
-                        "code": "send_failed",
-                        "message": e.to_string(),
-                    }),
-                };
-                let message = normalized
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Comms send failed")
-                    .to_string();
-                RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
+                    Err(serialize_error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("failed to serialize comms error data: {serialize_error}"),
+                    ),
+                }
             }
         }
     }

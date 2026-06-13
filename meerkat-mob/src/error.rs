@@ -224,6 +224,13 @@ pub enum MobError {
     #[error("reset barrier active")]
     ResetBarrier,
 
+    /// The generated MobMachine rejected an operation.
+    #[error("mob machine rejected {context}: {reason}")]
+    MobMachineRejected {
+        context: &'static str,
+        reason: String,
+    },
+
     /// A storage operation failed.
     #[error("storage error: {0}")]
     StorageError(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -662,6 +669,13 @@ mod tests {
             // A variant outside every explicit arm falls through to the
             // mob-rejected default.
             (MobError::ResetBarrier, MobFailureClass::MobRejected),
+            (
+                MobError::MobMachineRejected {
+                    context: "test",
+                    reason: "guard rejected".to_string(),
+                },
+                MobFailureClass::MobRejected,
+            ),
         ];
         for (err, expected) in &cases {
             assert_eq!(err.failure_class(), *expected, "{err} misclassified");

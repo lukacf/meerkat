@@ -33,7 +33,6 @@ def main() -> int:
 
     internal_exclusions = {
         "initialize",
-        "tools/register",
         "session/stream_open",
         "session/stream_close",
         "mob/stream_open",

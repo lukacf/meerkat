@@ -39,6 +39,33 @@ if ! command -v tlc >/dev/null 2>&1; then
   exit 1
 fi
 
+workspace_root="${PWD}"
+if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" && -d "${TEST_SRCDIR}/${TEST_WORKSPACE}" ]]; then
+  workspace_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+fi
+
+adaptive_model="${workspace_root}/specs/compositions/adaptive_mob_bundle/model.tla"
+adaptive_witness="${workspace_root}/specs/compositions/adaptive_mob_bundle/witness-layer_terminal_feedback.cfg"
+if [[ ! -f "${adaptive_model}" || ! -f "${adaptive_witness}" ]]; then
+  echo "error: adaptive_mob_bundle bounded TLC witness files are missing from workspace runfiles." >&2
+  echo "       model: ${adaptive_model}" >&2
+  echo "       cfg:   ${adaptive_witness}" >&2
+  exit 1
+fi
+
+tlc_workers="${TLC_WORKERS:-}"
+if [[ -z "${tlc_workers}" ]]; then
+  tlc_workers="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+fi
+
+# The full adaptive composition includes two complete MobMachine instances and
+# is too large for the CI TLC budget. Before applying that broad skip, prove the
+# generated route that matters for the adaptive bundle: terminal layer-mob
+# classification is emitted, delivered, and observed through the canonical
+# `layer_terminal_reaches_adaptive_kernel` route.
+echo "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
+tlc -workers "${tlc_workers}" -config "${adaptive_witness}" "${adaptive_model}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier
@@ -51,13 +78,10 @@ fi
 # CI budget. The per-machine specs still model-check, and `machine-check-drift`
 # (below + on the default cargo CI lane) keeps the generated kernels honest.
 #
-# `adaptive_mob_bundle` has the same scale shape: it composes two full
-# MobMachine instances and its closed contract is the generated driver handoff,
-# not a static route graph. The MobMachine adaptive transitions still run under
-# per-machine TLC, while codegen drift/schema tests and generated driver/runtime
-# tests guard the composition artifact and the layer-terminal feedback binding.
-# TODO(LUC-524 follow-up): land a bounded composition TLC config that fits the
-# CI budget and drop these skips to restore cross-machine model checking.
+# `adaptive_mob_bundle` has a canonical route for layer-terminal feedback,
+# generated driver, checked-in witness config, ci.cfg structural invariant, and
+# the bounded witness TLC proof above. It still composes two full MobMachine
+# instances, so the full composition TLC sweep exceeds the required CI budget.
 exec "${xtask_bin}" machine-verify --all --skip-cargo-tests \
   --skip-tlc-composition meerkat_mob_seam \
   --skip-tlc-composition adaptive_mob_bundle

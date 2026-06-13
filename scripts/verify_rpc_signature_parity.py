@@ -37,6 +37,7 @@ import json
 import pathlib
 import re
 import sys
+from datetime import date
 from dataclasses import dataclass, field
 
 # JSON pass-through markers that are intentionally untyped on the wire.
@@ -48,6 +49,7 @@ UNTYPED_REFS = {"Value"}
 SDK_SEND_SITE_EXCLUSIONS = {
     "ts": set(),
     "py": set(),
+    "web-auth": set(),
 }
 
 # ---------------------------------------------------------------------------
@@ -150,7 +152,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("py", "mob/spawn", "result"),
     ("py", "mob/spawn_helper", "params"),
     ("py", "mob/spawn_helper", "result"),
-    ("py", "mob/spawn_many", "params"),
     ("py", "mob/status", "params"),
     ("py", "mob/status", "result"),
     ("py", "mob/stream_close", "params"),
@@ -264,8 +265,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("ts", "mob/spawn", "result"),
     ("ts", "mob/spawn_helper", "params"),
     ("ts", "mob/spawn_helper", "result"),
-    ("ts", "mob/spawn_many", "params"),
-    ("ts", "mob/spawn_many", "result"),
     ("ts", "mob/status", "params"),
     ("ts", "mob/status", "result"),
     ("ts", "mob/stream_close", "params"),
@@ -308,6 +307,13 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("ts", "session/stream_open", "result"),
     ("ts", "turn/start", "result"),
 }
+
+# The remaining grandfathered wrappers are owned debt, not a permanent escape
+# hatch. New generated wrappers must remove entries; the whole baseline expires
+# unless renewed with an explicit owner decision.
+BASELINE_HAND_ROLLED_OWNER = "sdk-contracts"
+BASELINE_HAND_ROLLED_EXPIRES = "2026-07-31"
+BASELINE_HAND_ROLLED_MAX_ENTRIES = 247
 
 
 def split_type_refs(type_ref: str | None) -> list[str]:
@@ -428,6 +434,21 @@ def check_docs(
 def ts_generated_names(root: pathlib.Path) -> set[str]:
     names: set[str] = set()
     gen_dir = root / "sdks" / "typescript" / "src" / "generated"
+    for path in sorted(gen_dir.glob("*.ts")):
+        text = path.read_text(encoding="utf-8")
+        names.update(
+            re.findall(
+                r"export\s+(?:declare\s+)?(?:interface|type|enum|const enum|class)\s+"
+                r"([A-Za-z_$][\w$]*)",
+                text,
+            )
+        )
+    return names
+
+
+def web_generated_names(root: pathlib.Path) -> set[str]:
+    names: set[str] = set()
+    gen_dir = root / "sdks" / "web" / "src" / "generated"
     for path in sorted(gen_dir.glob("*.ts")):
         text = path.read_text(encoding="utf-8")
         names.update(
@@ -777,6 +798,46 @@ def ts_send_sites(
     return sites
 
 
+def web_auth_send_sites(
+    root: pathlib.Path,
+    catalog: dict[str, dict[str, str | None]],
+    generated_names: set[str],
+) -> dict[str, list[SendSite]]:
+    """Send-sites for the intentional Web SDK auth RPC wrapper."""
+    auth_path = root / "sdks" / "web" / "src" / "auth.ts"
+    methods_path = root / "sdks" / "web" / "src" / "generated" / "auth.ts"
+    text = auth_path.read_text(encoding="utf-8")
+    methods_text = methods_path.read_text(encoding="utf-8")
+    constant_to_method = {
+        key: method
+        for key, method in re.findall(r"(\w+):\s*[\"']([^\"']+)[\"']", methods_text)
+        if method in catalog
+    }
+
+    masked = mask_ts(text)
+    spans = ts_function_spans(masked)
+    resolved_imports = ts_import_map(text, generated_names, set())
+    sites: dict[str, list[SendSite]] = {}
+
+    for match in re.finditer(r"\bAUTH_RPC_METHODS\.(\w+)\b", text):
+        method = constant_to_method.get(match.group(1))
+        if method is None:
+            continue
+        func = innermost_ts_function(spans, match.start())
+        if func is None:
+            wrapper, referenced = "<module>", set()
+        else:
+            body = masked[func.start : func.body_end]
+            tokens = set(re.findall(r"[A-Za-z_$][\w$]*", body))
+            referenced = tokens & resolved_imports
+            wrapper = func.name
+        line = text.count("\n", 0, match.start()) + 1
+        sites.setdefault(method, []).append(
+            SendSite(auth_path.relative_to(root), line, wrapper, referenced)
+        )
+    return sites
+
+
 # ---------------------------------------------------------------------------
 # Python analysis (ast-based).
 # ---------------------------------------------------------------------------
@@ -995,15 +1056,26 @@ def main() -> int:
 
     ts_gen = ts_generated_names(root)
     py_gen = py_generated_names(root)
+    web_gen = web_generated_names(root)
     ts_sites = ts_send_sites(root, catalog, ts_gen)
     py_sites_map = py_send_sites(root, catalog, py_gen)
+    web_auth_sites = web_auth_send_sites(root, catalog, web_gen)
 
     ts_failures, ts_enforced, ts_untracked = check_sdk("ts", catalog, ts_sites, ts_gen)
     py_failures, py_enforced, py_untracked = check_sdk(
         "py", catalog, py_sites_map, py_gen
     )
+    auth_catalog = {
+        method: descriptor
+        for method, descriptor in catalog.items()
+        if method.startswith("auth/")
+    }
+    web_failures, web_enforced, web_untracked = check_sdk(
+        "web-auth", auth_catalog, web_auth_sites, web_gen
+    )
     failures.extend(ts_failures)
     failures.extend(py_failures)
+    failures.extend(web_failures)
 
     # Baseline keys must stay real: every entry must refer to a live method.
     for sdk, method, side in sorted(BASELINE_HAND_ROLLED):
@@ -1012,6 +1084,28 @@ def main() -> int:
                 f"{sdk}: baseline entry ({sdk!r}, {method!r}, {side!r}) refers "
                 "to a method that is no longer in the catalog — delete it"
             )
+
+    if not BASELINE_HAND_ROLLED_OWNER:
+        failures.append("baseline policy: BASELINE_HAND_ROLLED_OWNER must be set")
+    try:
+        expiry = date.fromisoformat(BASELINE_HAND_ROLLED_EXPIRES)
+    except ValueError:
+        failures.append(
+            "baseline policy: BASELINE_HAND_ROLLED_EXPIRES must be an ISO date"
+        )
+    else:
+        if date.today() > expiry:
+            failures.append(
+                "baseline policy: BASELINE_HAND_ROLLED expired on "
+                f"{BASELINE_HAND_ROLLED_EXPIRES}; remove entries or renew with "
+                "an explicit owner decision"
+            )
+    if len(BASELINE_HAND_ROLLED) > BASELINE_HAND_ROLLED_MAX_ENTRIES:
+        failures.append(
+            "baseline policy: BASELINE_HAND_ROLLED grew to "
+            f"{len(BASELINE_HAND_ROLLED)} entries, above the ratchet cap "
+            f"{BASELINE_HAND_ROLLED_MAX_ENTRIES}"
+        )
 
     if failures:
         print("RPC signature parity violations:")
@@ -1023,9 +1117,12 @@ def main() -> int:
     print(
         "RPC signature parity OK: "
         f"{len(catalog)} methods; docs typed columns match the catalog; "
-        f"ts={ts_enforced} py={py_enforced} generated-typed sides enforced "
+        f"ts={ts_enforced} py={py_enforced} web-auth={web_enforced} "
+        "generated-typed sides enforced "
         f"({baseline_count} grandfathered hand-rolled, "
-        f"ts={ts_untracked} py={py_untracked} sides untracked because the "
+        f"owner={BASELINE_HAND_ROLLED_OWNER} expires={BASELINE_HAND_ROLLED_EXPIRES}, "
+        f"ts={ts_untracked} py={py_untracked} web-auth={web_untracked} "
+        "sides untracked because the "
         "generated SDK type does not exist yet)."
     )
     return 0

@@ -314,7 +314,10 @@ async fn e2e_agent_tools_surface_present() {
     // mob_list was called (we can't verify the LLM saw the result, but the
     // implicit mob's existence proves delegate ran, and mob_list is dispatched
     // in the same turn).
-    let all_mobs = mob_state.mob_list().await;
+    let all_mobs = mob_state
+        .mob_list()
+        .await
+        .expect("mob list should restore for live mob tool smoke");
     assert!(
         !all_mobs.is_empty(),
         "mob_list should show at least the implicit mob"
@@ -565,7 +568,10 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     .await;
 
     // Assert: mob gone
-    let all = mob_state.mob_list().await;
+    let all = mob_state
+        .mob_list()
+        .await
+        .expect("mob list should restore after destroy");
     assert!(
         !all.iter().any(|(id, _)| id == &mob_id),
         "destroyed mob should not appear in mob_list"
@@ -632,6 +638,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
         mob_state
             .mob_list()
             .await
+            .expect("mob list should restore for session A existence check")
             .iter()
             .any(|(id, _)| id == &a_mob_id),
         "A's mob should still exist in global state"
@@ -650,6 +657,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
         mob_state
             .mob_list()
             .await
+            .expect("mob list should restore after rejected cross-session destroy")
             .iter()
             .any(|(id, _)| id == &a_mob_id),
         "A's mob should survive B's destroy attempt"
@@ -718,7 +726,10 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
     );
 
     // Neither mob in global list
-    let all = mob_state.mob_list().await;
+    let all = mob_state
+        .mob_list()
+        .await
+        .expect("mob list should restore after archive cleanup");
     for mob_id in &owned {
         assert!(
             !all.iter().any(|(id, _)| id == mob_id),

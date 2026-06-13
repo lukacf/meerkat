@@ -1942,7 +1942,7 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
-    let mobs = mob_state.mob_list().await;
+    let mobs = mob_state.mob_list().await.map_err(err_mob)?;
     let rows: Vec<meerkat_contracts::MobStatusResult> = mobs
         .into_iter()
         .map(|(id, state)| meerkat_contracts::MobStatusResult {

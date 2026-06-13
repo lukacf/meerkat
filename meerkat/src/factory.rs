@@ -94,16 +94,6 @@ use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
-#[cfg(all(feature = "openai", feature = "openai-realtime"))]
-fn is_azure_openai_connection(connection: &meerkat_providers::ResolvedConnection) -> bool {
-    matches!(
-        connection.backend,
-        meerkat_providers::NormalizedBackendKind::OpenAi(
-            meerkat_core::provider_matrix::OpenAiBackendKind::AzureOpenAi
-        )
-    )
-}
-
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
 #[derive(Default)]
@@ -1977,14 +1967,9 @@ impl AgentFactory {
             .resolve(&realm, &auth_binding, &env)
             .await
             .map_err(|e| BuildAgentError::LlmClient(FactoryError::ProviderAuth(e)))?;
-        if is_azure_openai_connection(&connection) {
-            return Err(BuildAgentError::LlmClient(
-                FactoryError::UnsupportedProvider(
-                    "azure_openai does not support the OpenAI realtime sideband in Meerkat v1"
-                        .to_string(),
-                ),
-            ));
-        }
+        self.provider_registry
+            .build_realtime_text_client(connection.clone())
+            .map_err(|e| BuildAgentError::LlmClient(FactoryError::ClientBuild(e)))?;
         let secret = connection
             .resolved_secret()
             .ok_or(BuildAgentError::LlmClient(FactoryError::ClientBuild(
@@ -4000,23 +3985,11 @@ impl AgentFactory {
                         }
                         #[cfg(feature = "openai-realtime")]
                         if realtime_route {
-                            if is_azure_openai_connection(&connection) {
-                                return Err(BuildAgentError::LlmClient(
-                                    FactoryError::UnsupportedProvider(format!(
-                                        "model '{}' advertises ModelCapabilities.realtime=true, \
-                                     but azure_openai does not support the OpenAI realtime \
-                                     text adapter in Meerkat v1",
-                                        build_config.model
-                                    )),
-                                ));
-                            }
-                            let secret = connection.resolved_secret().ok_or(
-                                BuildAgentError::LlmClient(FactoryError::ClientBuild(
-                                    meerkat_llm_core::provider_runtime::ProviderClientError::NoCredentialMaterial,
-                                )),
-                            )?;
-                            Arc::new(meerkat_openai::OpenAiRealtimeTextAdapter::new(secret))
-                                as Arc<dyn LlmClient>
+                            provider_registry
+                                .build_realtime_text_client(connection)
+                                .map_err(|e| {
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                                })?
                         } else {
                             provider_registry.build_client(connection).map_err(|e| {
                                 BuildAgentError::LlmClient(FactoryError::ClientBuild(e))

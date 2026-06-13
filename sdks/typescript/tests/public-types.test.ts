@@ -12,6 +12,7 @@ import type {
   PeerCorrelationId,
   PeerId,
   RunFailedEvent,
+  SessionOptions,
   SpawnManySpec,
   SpawnSpec,
   SupervisorRotationReportWire,
@@ -76,6 +77,12 @@ const spawnSpec: SpawnSpec = {
 };
 
 void spawnSpec;
+
+const sessionOptionsWithAuthBinding: SessionOptions = {
+  authBinding: { realm: "dev", binding: "default_openai" },
+};
+
+void sessionOptionsWithAuthBinding;
 
 const mobWireMembersBatchEdges: MobWireMembersBatchEdgeInput[] = [
   ["lead-1", "worker-1"],

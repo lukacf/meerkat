@@ -387,3 +387,89 @@ pub fn route_to_signal(
     }
     None
 }
+
+/// Generated route target selected by `MeerkatMobSeamDriver`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedRouteTarget {
+    Input(TypedRoutedInput),
+    Signal(TypedRoutedSignal),
+}
+
+/// Generated store plan emitted by `MeerkatMobSeamDriver`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeerkatMobSeamStorePlan {
+    pub target: GeneratedRouteTarget,
+}
+
+impl MeerkatMobSeamStorePlan {
+    pub fn input(route: TypedRoutedInput) -> Self {
+        Self {
+            target: GeneratedRouteTarget::Input(route),
+        }
+    }
+
+    pub fn signal(route: TypedRoutedSignal) -> Self {
+        Self {
+            target: GeneratedRouteTarget::Signal(route),
+        }
+    }
+
+    pub fn route_id(&self) -> &RouteId {
+        match &self.target {
+            GeneratedRouteTarget::Input(route) => &route.route_id,
+            GeneratedRouteTarget::Signal(route) => &route.route_id,
+        }
+    }
+}
+
+/// Generated work packet consumed by `MeerkatMobSeamDriver`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeerkatMobSeamWork {
+    pub producer_instance: MachineInstanceId,
+    pub effect_variant: EffectVariantId,
+}
+
+impl MeerkatMobSeamWork {
+    pub fn new(producer_instance: MachineInstanceId, effect_variant: EffectVariantId) -> Self {
+        Self {
+            producer_instance,
+            effect_variant,
+        }
+    }
+}
+
+/// Generated routing decision emitted by `MeerkatMobSeamDriver`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeerkatMobSeamDecision {
+    DispatchInput(TypedRoutedInput),
+    DispatchSignal(TypedRoutedSignal),
+    NoRoute,
+}
+
+/// Generated composition driver constrained by the catalog driver descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeerkatMobSeamDriver;
+
+impl MeerkatMobSeamDriver {
+    pub fn decide(work: &MeerkatMobSeamWork) -> MeerkatMobSeamDecision {
+        if let Some(route) = route_to_input(&work.producer_instance, &work.effect_variant) {
+            return MeerkatMobSeamDecision::DispatchInput(route);
+        }
+        if let Some(route) = route_to_signal(&work.producer_instance, &work.effect_variant) {
+            return MeerkatMobSeamDecision::DispatchSignal(route);
+        }
+        MeerkatMobSeamDecision::NoRoute
+    }
+
+    pub fn store_plan(decision: MeerkatMobSeamDecision) -> Option<MeerkatMobSeamStorePlan> {
+        match decision {
+            MeerkatMobSeamDecision::DispatchInput(route) => {
+                Some(MeerkatMobSeamStorePlan::input(route))
+            }
+            MeerkatMobSeamDecision::DispatchSignal(route) => {
+                Some(MeerkatMobSeamStorePlan::signal(route))
+            }
+            MeerkatMobSeamDecision::NoRoute => None,
+        }
+    }
+}

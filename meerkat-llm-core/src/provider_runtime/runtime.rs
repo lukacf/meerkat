@@ -41,6 +41,17 @@ pub trait ProviderRuntime: Send + Sync {
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError>;
 
+    /// Construct a realtime-capable text-turn client from a resolved
+    /// provider connection. Provider runtimes own the backend/auth mechanics
+    /// for this specialized transport; shared factory code only decides
+    /// whether the selected model requires realtime routing.
+    fn build_realtime_text_client(
+        &self,
+        _connection: ResolvedConnection,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        Err(ProviderClientError::MissingFeature("realtime-text"))
+    }
+
     /// Construct an optional image-generation executor from the same resolved
     /// provider connection used for the text client.
     fn build_image_generation_executor(

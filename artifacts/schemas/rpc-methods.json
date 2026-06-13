@@ -6,6 +6,12 @@
       "result_type": "ServerCapabilities"
     },
     {
+      "description": "Register callback tool definitions for server-to-client tool execution",
+      "name": "tools/register",
+      "params_type": "ToolsRegisterParams",
+      "result_type": "ToolsRegisterResult"
+    },
+    {
       "description": "Create session + run first turn",
       "name": "session/create",
       "params_type": "CreateSessionParams",

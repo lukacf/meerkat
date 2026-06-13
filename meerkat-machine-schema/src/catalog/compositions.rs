@@ -226,14 +226,8 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
             },
         ],
         witnesses: vec![
-            witness(
-                "revision_supersede_route",
-                &["revision_supersede_enters_occurrence_authority"],
-            ),
-            witness(
-                "occurrence_supersede_ack_route",
-                &["occurrence_supersede_ack_returns_to_schedule"],
-            ),
+            revision_supersede_route_witness(),
+            occurrence_supersede_ack_route_witness(),
             witness("pause_resume_without_revision", &[]),
         ],
         deep_domain_cardinality: 3,
@@ -321,14 +315,8 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             witness("runtime_delivery_feedback", &[]),
             witness("runtime_lease_expiry", &[]),
-            witness(
-                "revision_supersede_route",
-                &["revision_supersede_enters_occurrence_authority"],
-            ),
-            witness(
-                "occurrence_supersede_ack_route",
-                &["occurrence_supersede_ack_returns_to_schedule"],
-            ),
+            revision_supersede_route_witness(),
+            occurrence_supersede_ack_route_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -415,14 +403,8 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             witness("mob_delivery_feedback", &[]),
             witness("materialization_failure_classification", &[]),
-            witness(
-                "revision_supersede_route",
-                &["revision_supersede_enters_occurrence_authority"],
-            ),
-            witness(
-                "occurrence_supersede_ack_route",
-                &["occurrence_supersede_ack_returns_to_schedule"],
-            ),
+            revision_supersede_route_witness(),
+            occurrence_supersede_ack_route_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -659,28 +641,9 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         scheduler_rules: vec![],
         invariants: vec![],
         witnesses: vec![
-            witness(
-                "basic_round_trip",
-                &[
-                    "binding_request_reaches_meerkat",
-                    "work_request_reaches_meerkat",
-                    "runtime_bound_reaches_mob",
-                ],
-            ),
-            witness(
-                "retire_runtime_path",
-                &[
-                    "retire_request_reaches_meerkat",
-                    "runtime_retired_reaches_mob",
-                ],
-            ),
-            witness(
-                "destroy_runtime_path",
-                &[
-                    "destroy_request_reaches_meerkat",
-                    "runtime_destroyed_reaches_mob",
-                ],
-            ),
+            basic_round_trip_witness(),
+            retire_runtime_path_witness(),
+            destroy_runtime_path_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -886,7 +849,22 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
         ],
         handoff_protocols,
         entry_inputs: vec![],
-        routes: vec![],
+        routes: vec![route(
+            "layer_terminal_reaches_adaptive_kernel",
+            "layer_mob",
+            "FlowRunPublicResultClassified",
+            "control_mob",
+            RouteTargetKind::Input,
+            "IngestLayerTerminal",
+            &[
+                owner_bind("adaptive_run_id"),
+                owner_bind("layer_id"),
+                owner_bind("attempt"),
+                bind("result_class", "result"),
+                owner_bind("actual_tokens"),
+                owner_bind("actual_tool_calls"),
+            ],
+        )],
         route_target_selectors: vec![],
         driver: Some(CompositionDriver {
             name: driver_id("adaptive_mob_bundle_driver"),
@@ -909,10 +887,31 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
                 input_variant: RouteVariantId::Input(iv_id("IngestLayerTerminal")),
             }],
         }),
-        transaction_plans: vec![],
+        transaction_plans: vec![transaction_plan(
+            "adaptive_layer_terminal_feedback",
+            "ingest_layer_terminal",
+            "adaptive bundle driver enriches a terminal layer-mob result with the stored adaptive run/layer context before feeding the control mob kernel",
+            "AdaptiveMobBundleDriver::ingest_layer_terminal",
+            &["layer_terminal_reaches_adaptive_kernel"],
+        )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![
+            CompositionInvariant {
+                name: "layer_terminal_feedback_route_present".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("layer_mob"),
+                    effect_variant: ev_id("FlowRunPublicResultClassified"),
+                    to_machine: mi_id("control_mob"),
+                    input_variant: rv(RouteTargetKind::Input, "IngestLayerTerminal"),
+                },
+                statement: "terminal layer-mob public result classification feeds the adaptive control mob through the canonical generated route".into(),
+                references_machines: vec![mi_id("layer_mob"), mi_id("control_mob")],
+                references_actors: vec![
+                    act_id("layer_mob_authority"),
+                    act_id("control_mob_authority"),
+                ],
+            },
             CompositionInvariant {
                 name: "control_mob_destroying_session_ingress_protocol_covered".into(),
                 kind: CompositionInvariantKind::HandoffProtocolCovered {
@@ -942,11 +941,30 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
                 ],
             },
         ],
-        witnesses: vec![witness("layer_terminal_feedback", &[])],
+        witnesses: vec![CompositionWitness {
+            name: witness_id("layer_terminal_feedback"),
+            preload_inputs: vec![witness_input(
+                "layer_mob",
+                "ClassifyFlowRunPublicResult",
+                vec![
+                    witness_field("run_id", Expr::String("runid_1".into())),
+                    witness_field("status", named_variant("FlowRunStatus", "Completed")),
+                ],
+            )],
+            expected_routes: vec![route_id("layer_terminal_reaches_adaptive_kernel")],
+            expected_scheduler_rules: vec![],
+            expected_states: vec![],
+            expected_transitions: vec![witness_transition(
+                "layer_mob",
+                "ClassifyFlowRunPublicResultSuccessRunning",
+            )],
+            expected_transition_order: vec![],
+            state_limits: adaptive_mob_ci_limits(),
+        }],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
-        witness_domain_cardinality: 2,
-        ci_limits: Some(default_ci_limits()),
+        witness_domain_cardinality: 1,
+        ci_limits: Some(adaptive_mob_ci_limits()),
         // Adaptive bundles are dynamic: the driver provisions concrete
         // sessions/layer mobs through runtime surfaces, so the composition
         // declares the adaptive MobMachine handoff protocols and driver
@@ -1029,6 +1047,199 @@ fn named_variant(enum_name: &str, variant: &str) -> Expr {
     Expr::NamedVariant {
         enum_name: enum_type_id(enum_name),
         variant: enum_variant_id(variant),
+    }
+}
+
+fn some_string(value: &str) -> Expr {
+    Expr::Some(Box::new(Expr::String(value.into())))
+}
+
+fn seam_runtime_authority_idle_input() -> CompositionWitnessInput {
+    witness_input(
+        "meerkat",
+        "RecoverRuntimeAuthority",
+        vec![
+            witness_field("session_id", Expr::String("sessionid_1".into())),
+            witness_field(
+                "state",
+                named_variant("RuntimeLifecycleObservedState", "Idle"),
+            ),
+            witness_field("agent_runtime_id", Expr::None),
+            witness_field("fence_token", Expr::None),
+            witness_field("runtime_generation", Expr::None),
+            witness_field("runtime_epoch_id", Expr::None),
+            witness_field("current_run_id", Expr::None),
+            witness_field("pre_run_phase", Expr::None),
+            witness_field("silent_intent_overrides", Expr::EmptySet),
+        ],
+    )
+}
+
+fn seam_authorize_spawn_profile_input() -> CompositionWitnessInput {
+    witness_input(
+        "mob",
+        "AuthorizeSpawnProfile",
+        vec![
+            witness_field("agent_identity", Expr::String("agentidentity_1".into())),
+            witness_field("profile_name", Expr::String("profile_1".into())),
+            witness_field("model", Expr::String("model_1".into())),
+            witness_field("profile_material_digest", Expr::String("digest_1".into())),
+            witness_field("tool_config_digest", Expr::String("toolconfig_1".into())),
+            witness_field("skills_digest", Expr::String("skills_1".into())),
+            witness_field("provider_params_digest", Expr::None),
+            witness_field("output_schema_digest", Expr::None),
+            witness_field("external_addressable", Expr::Bool(true)),
+        ],
+    )
+}
+
+fn seam_spawn_input() -> CompositionWitnessInput {
+    witness_input(
+        "mob",
+        "Spawn",
+        vec![
+            witness_field("agent_identity", Expr::String("agentidentity_1".into())),
+            witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
+            witness_field("fence_token", Expr::U64(1)),
+            witness_field("generation", Expr::U64(1)),
+            witness_field("profile_material_digest", Expr::String("digest_1".into())),
+            witness_field("external_addressable", Expr::Bool(true)),
+            witness_field(
+                "runtime_mode",
+                named_variant("SpawnPolicyRuntimeMode", "AutonomousHost"),
+            ),
+            witness_field("bridge_session_id", some_string("sessionid_1")),
+            witness_field("replacing", Expr::None),
+        ],
+    )
+}
+
+fn seam_submit_work_input() -> CompositionWitnessInput {
+    witness_input(
+        "mob",
+        "SubmitWork",
+        vec![
+            witness_field("agent_identity", Expr::String("agentidentity_1".into())),
+            witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
+            witness_field("fence_token", Expr::U64(1)),
+            witness_field("work_id", Expr::String("workid_1".into())),
+            witness_field("origin", named_variant("WorkOrigin", "External")),
+        ],
+    )
+}
+
+fn seam_retire_input() -> CompositionWitnessInput {
+    witness_input(
+        "mob",
+        "Retire",
+        vec![
+            witness_field("mob_id", Expr::String("mobid_1".into())),
+            witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
+            witness_field("agent_identity", Expr::String("agentidentity_1".into())),
+            witness_field("generation", Expr::U64(1)),
+            witness_field("releasing", some_string("sessionid_1")),
+            witness_field("session_id", some_string("sessionid_1")),
+        ],
+    )
+}
+
+fn seam_destroy_mob_signal() -> CompositionWitnessInput {
+    witness_input(
+        "mob",
+        "DestroyMob",
+        vec![witness_field(
+            "session_id",
+            Expr::String("sessionid_1".into()),
+        )],
+    )
+}
+
+fn basic_round_trip_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("basic_round_trip"),
+        preload_inputs: vec![
+            seam_runtime_authority_idle_input(),
+            seam_authorize_spawn_profile_input(),
+            seam_spawn_input(),
+            seam_submit_work_input(),
+        ],
+        expected_routes: vec![
+            route_id("binding_request_reaches_meerkat"),
+            route_id("work_request_reaches_meerkat"),
+            route_id("runtime_bound_reaches_mob"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("mob", "AuthorizeSpawnProfileRunning"),
+            witness_transition("mob", "SpawnRunningFresh"),
+            witness_transition("meerkat", "PrepareBindingsIdle"),
+            witness_transition("mob", "ObserveRuntimeReady"),
+            witness_transition("mob", "SubmitWorkRunningExternal"),
+            witness_transition("meerkat", "IngestAttached"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: meerkat_mob_seam_witness_limits(3, 10),
+    }
+}
+
+fn retire_runtime_path_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("retire_runtime_path"),
+        preload_inputs: vec![
+            seam_runtime_authority_idle_input(),
+            seam_authorize_spawn_profile_input(),
+            seam_spawn_input(),
+            seam_retire_input(),
+        ],
+        expected_routes: vec![
+            route_id("retire_request_reaches_meerkat"),
+            route_id("runtime_retired_reaches_mob"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("mob", "AuthorizeSpawnProfileRunning"),
+            witness_transition("mob", "SpawnRunningFresh"),
+            witness_transition("meerkat", "PrepareBindingsIdle"),
+            witness_transition("mob", "ObserveRuntimeReady"),
+            witness_transition("mob", "RetireRunningReleasing"),
+            witness_transition("meerkat", "RetireRequestedFromIdle"),
+            witness_transition("mob", "ObserveRuntimeRetired"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: meerkat_mob_seam_witness_limits(4, 14),
+    }
+}
+
+fn destroy_runtime_path_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("destroy_runtime_path"),
+        preload_inputs: vec![
+            seam_runtime_authority_idle_input(),
+            seam_authorize_spawn_profile_input(),
+            seam_spawn_input(),
+            seam_destroy_mob_signal(),
+        ],
+        expected_routes: vec![
+            route_id("destroy_request_reaches_meerkat"),
+            route_id("runtime_destroyed_reaches_mob"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("mob", "AuthorizeSpawnProfileRunning"),
+            witness_transition("mob", "SpawnRunningFresh"),
+            witness_transition("meerkat", "PrepareBindingsIdle"),
+            witness_transition("mob", "ObserveRuntimeReady"),
+            witness_transition("mob", "DestroyMob"),
+            witness_transition("meerkat", "Destroy"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: meerkat_mob_seam_witness_limits(4, 12),
     }
 }
 
@@ -1149,6 +1360,61 @@ fn witness(name: &str, expected_routes: &[&str]) -> CompositionWitness {
     }
 }
 
+fn revision_supersede_route_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("revision_supersede_route"),
+        preload_inputs: vec![witness_input(
+            "schedule",
+            "Revise",
+            vec![
+                witness_field("trigger_key", Expr::String("triggerkey_1".into())),
+                witness_field(
+                    "target_binding_key",
+                    Expr::String("targetbindingid_1".into()),
+                ),
+                witness_field("misfire_policy", named_variant("MisfirePolicy", "Skip")),
+                witness_field(
+                    "overlap_policy",
+                    named_variant("OverlapPolicy", "SkipIfRunning"),
+                ),
+                witness_field(
+                    "missing_target_policy",
+                    named_variant("MissingTargetPolicy", "MarkMisfired"),
+                ),
+                witness_field("planning_horizon_days", Expr::U64(1)),
+                witness_field("planning_horizon_occurrences", Expr::U64(2)),
+                witness_field("at_utc_ms", Expr::U64(1)),
+            ],
+        )],
+        expected_routes: vec![route_id("revision_supersede_enters_occurrence_authority")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![witness_transition("schedule", "ReviseActive")],
+        expected_transition_order: vec![],
+        state_limits: schedule_supersede_route_witness_limits(),
+    }
+}
+
+fn occurrence_supersede_ack_route_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("occurrence_supersede_ack_route"),
+        preload_inputs: vec![witness_input(
+            "occurrence",
+            "Supersede",
+            vec![
+                witness_field("superseded_by_revision", Expr::U64(2)),
+                witness_field("at_utc_ms", Expr::U64(1)),
+            ],
+        )],
+        expected_routes: vec![route_id("occurrence_supersede_ack_returns_to_schedule")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![witness_transition("occurrence", "SupersedePendingOrLive")],
+        expected_transition_order: vec![],
+        state_limits: schedule_supersede_route_witness_limits(),
+    }
+}
+
 fn default_ci_limits() -> CompositionStateLimits {
     CompositionStateLimits {
         step_limit: 8,
@@ -1156,6 +1422,48 @@ fn default_ci_limits() -> CompositionStateLimits {
         pending_route_limit: 8,
         delivered_route_limit: 0,
         emitted_effect_limit: 0,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+fn meerkat_mob_seam_witness_limits(
+    delivered_route_limit: u32,
+    emitted_effect_limit: u32,
+) -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 18,
+        pending_input_limit: 2,
+        pending_route_limit: 1,
+        delivered_route_limit,
+        emitted_effect_limit,
+        seq_limit: 1,
+        set_limit: 8,
+        map_limit: 2,
+    }
+}
+
+fn schedule_supersede_route_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 3,
+        pending_input_limit: 2,
+        pending_route_limit: 1,
+        delivered_route_limit: 1,
+        emitted_effect_limit: 2,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+fn adaptive_mob_ci_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 1,
+        pending_input_limit: 2,
+        pending_route_limit: 1,
+        delivered_route_limit: 1,
+        emitted_effect_limit: 1,
         seq_limit: 0,
         set_limit: 0,
         map_limit: 0,

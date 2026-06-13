@@ -592,6 +592,10 @@ if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &
   grep -Fq 'machine-verify --all --skip-cargo-tests' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '--skip-tlc-composition adaptive_mob_bundle' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'witness-layer_terminal_feedback.cfg' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'tlc -workers' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'adaptive_mob_bundle` has a canonical route' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'ci.cfg structural-invariant contract' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'ci.cfg structural-invariant validation' xtask/src/machines.rs &&
   grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' xtask/tests/machine_verify_all_tlc_test.sh &&
@@ -600,9 +604,9 @@ if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' xtask/BUILD.bazel &&
   grep -Fq '"RUSTFMT": "$(rootpath tests/rustfmt_host.sh)"' xtask/BUILD.bazel &&
   grep -Fq 'export RUSTFMT' xtask/tests/machine_verify_all_tlc_test.sh; then
-  pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt, broad-composition structural guards, and fail-closed missing-TLC behavior"
+  pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt, bounded adaptive witness, broad-composition structural guards, and fail-closed missing-TLC behavior"
 else
-  bad "BuildBuddy machine-authority lane does not run hermetic machine-verify, lacks broad-composition structural guards, or still launders a silent no-TLC drift fallback as TLC verification"
+  bad "BuildBuddy machine-authority lane does not run hermetic machine-verify, lacks the bounded adaptive witness/broad-composition structural guards, or still launders a silent no-TLC drift fallback as TLC verification"
 fi
 
 if grep -Fq 'default_target="//:surface_feature_matrix_builds"' scripts/buildbuddy-bazel-poc &&

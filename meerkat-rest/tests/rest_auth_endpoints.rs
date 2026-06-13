@@ -258,8 +258,8 @@ async fn create_auth_profile_accepts_valid_body() {
     }
 }
 
-/// `POST /sessions` accepts a `auth_binding: {realm_id, binding_id}`
-/// field on the body. When the referenced realm doesn't exist, the
+/// `POST /sessions` accepts the structural `AuthBindingRef` field on the
+/// body. When the referenced realm doesn't exist, the
 /// server returns a structured error — not 404 or a panic.
 #[tokio::test]
 async fn post_sessions_accepts_auth_binding_field() {
@@ -267,7 +267,7 @@ async fn post_sessions_accepts_auth_binding_field() {
 
     let body = serde_json::json!({
         "prompt": "hi",
-        "auth_binding": {"realm_id": "test-realm", "binding_id": "default"}
+        "auth_binding": {"realm": "test-realm", "binding": "default"}
     });
 
     let req = Request::builder()

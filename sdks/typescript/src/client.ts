@@ -44,6 +44,7 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import { isCompatibleWith } from "./generated/version_compat.js";
 import {
   CONTRACT_VERSION,
+  type CallbackToolDefinition,
   type AttentionBindingRequest,
   type CapabilitiesResponse,
   type ConfigPatchParams,
@@ -69,7 +70,10 @@ import {
   type MobRunParams,
   type MobRunResult,
   type MobRunResultParams,
+  type MobSpawnManyParams,
+  type MobSpawnManyResult,
   type WireLiveAdapterObservation,
+  type MobSpawnSpecParams,
   type MobTurnStartParams,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRotateSupervisorResult,
@@ -80,6 +84,8 @@ import {
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
+  type ToolsRegisterParams,
+  type ToolsRegisterResult,
   SkillListResponse,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
@@ -330,8 +336,8 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   return payload;
 }
 
-function mobSpawnManySpecPayload(spec: SpawnManySpec): Record<string, unknown> {
-  const payload: Record<string, unknown> = {
+function mobSpawnManySpecPayload(spec: SpawnManySpec): MobSpawnSpecParams {
+  const payload: MobSpawnSpecParams = {
     profile: spec.profile,
     agent_identity: spec.agentIdentity,
   };
@@ -495,9 +501,14 @@ export class MeerkatClient {
     inputSchema: Record<string, unknown>,
   ): Promise<void> {
     try {
-      await this.request("tools/register", {
+      const params: ToolsRegisterParams = {
         tools: [{ name, description, input_schema: inputSchema }],
-      });
+      };
+      const result = await this.request<ToolsRegisterResult>(
+        "tools/register",
+        params,
+      );
+      void result.registered;
     } catch (error) {
       const fault =
         error instanceof MeerkatError
@@ -642,14 +653,19 @@ export class MeerkatClient {
 
     // Register callback tools if any were declared.
     if (this.toolHandlers.size > 0) {
-      const tools = Array.from(this.toolHandlers.entries()).map(
+      const tools: CallbackToolDefinition[] = Array.from(this.toolHandlers.entries()).map(
         ([name, { description, inputSchema }]) => ({
           name,
           description,
           input_schema: inputSchema,
         }),
       );
-      await this.request("tools/register", { tools });
+      const params: ToolsRegisterParams = { tools };
+      const result = await this.request<ToolsRegisterResult>(
+        "tools/register",
+        params,
+      );
+      void result.registered;
       // The bulk re-send confirmed every declared tool; drop stale per-tool faults.
       this.toolRegistrationErrors.clear();
     }
@@ -1532,10 +1548,14 @@ export class MeerkatClient {
     mobId: string,
     specs: SpawnManySpec[],
   ): Promise<MobSpawnManyResultEntry[]> {
-    const result = await this.request("mob/spawn_many", {
+    const params: MobSpawnManyParams = {
       mob_id: mobId,
       specs: specs.map(mobSpawnManySpecPayload),
-    });
+    };
+    const result = await this.request<MobSpawnManyResult>(
+      "mob/spawn_many",
+      params,
+    );
     if (!Array.isArray(result.results)) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
@@ -4229,6 +4249,7 @@ export class MeerkatClient {
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams != null) params.provider_params = options.providerParams;
+    if (options.authBinding != null) params.auth_binding = options.authBinding;
     if (options.preloadSkills != null) {
       params.preload_skills = skillKeysToWire(options.preloadSkills);
     }

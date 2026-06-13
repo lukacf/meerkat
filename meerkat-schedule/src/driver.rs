@@ -411,30 +411,51 @@ impl ScheduleDriver {
             ),
         };
 
-        let Some(updated) = self
-            .store
-            .transition_occurrence_if_current(
-                &occurrence.occurrence_id,
-                occurrence.attempt_count,
-                occurrence.claim_token(),
-                OccurrenceLifecycleInput::ResolveTargetProbe {
-                    outcome,
-                    detail,
-                    at_utc: store_now_utc,
-                },
-            )
-            .await?
-        else {
+        let lifecycle = OccurrenceLifecycleInput::ResolveTargetProbe {
+            outcome,
+            detail,
+            at_utc: store_now_utc,
+        };
+        let predicted = occurrence
+            .clone()
+            .apply(lifecycle.clone())
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .into_occurrence();
+        let updated = match predicted.phase {
+            OccurrencePhase::Claimed => {
+                self.store
+                    .transition_occurrence_if_current(
+                        &occurrence.occurrence_id,
+                        occurrence.attempt_count,
+                        occurrence.claim_token(),
+                        lifecycle,
+                    )
+                    .await?
+            }
+            OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
+                self.store
+                    .transition_occurrence_with_receipt_if_current(
+                        &occurrence.occurrence_id,
+                        occurrence.attempt_count,
+                        occurrence.claim_token(),
+                        lifecycle,
+                        None,
+                    )
+                    .await?
+            }
+            other => {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "generated occurrence authority resolved target probe to unsupported phase: {other:?}"
+                )));
+            }
+        };
+        let Some(updated) = updated else {
             return Ok(TargetProbeResolution::StaleClaim);
         };
 
         match updated.phase {
             OccurrencePhase::Claimed => Ok(TargetProbeResolution::Continue(Box::new(updated))),
             OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
-                let final_receipt = updated
-                    .delivery_receipt_from_authority(None)
-                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-                self.store.append_receipt(final_receipt).await?;
                 Ok(TargetProbeResolution::Terminalized)
             }
             other => Err(ScheduleDomainError::Internal(format!(
@@ -445,8 +466,16 @@ impl ScheduleDriver {
 
     fn spawn_completion_waiter(&self, occurrence: Occurrence, completion: DeliveryCompletion) {
         let store = self.store.clone();
+        let schedule_id = occurrence.schedule_id.clone();
+        let occurrence_id = occurrence.occurrence_id.clone();
         crate::tokio::spawn(async move {
-            let _ = complete_dispatched_occurrence(store, occurrence, completion.await).await;
+            if let Err(error) =
+                complete_dispatched_occurrence(store, occurrence, completion.await).await
+            {
+                eprintln!(
+                    "schedule completion waiter failed to append terminal receipt: schedule_id={schedule_id:?} occurrence_id={occurrence_id:?}: {error}"
+                );
+            }
         });
     }
 }
@@ -575,22 +604,17 @@ async fn terminalize_occurrence_inner(
     _receipt: Option<DeliveryReceipt>,
     runtime_outcome: Option<RuntimeDeliveryOutcome>,
 ) -> Result<bool, ScheduleDomainError> {
-    let Some(updated) = store
-        .transition_occurrence_if_current(
+    store
+        .transition_occurrence_with_receipt_if_current(
             &occurrence.occurrence_id,
             occurrence.attempt_count,
             occurrence.claim_token(),
             lifecycle,
+            runtime_outcome,
         )
-        .await?
-    else {
-        return Ok(false);
-    };
-    let final_receipt = updated
-        .delivery_receipt_from_authority(runtime_outcome.clone())
-        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    store.append_receipt(final_receipt).await?;
-    Ok(true)
+        .await
+        .map(|updated| updated.is_some())
+        .map_err(ScheduleDomainError::from)
 }
 
 #[cfg(test)]
@@ -611,6 +635,7 @@ mod tests {
     use std::collections::BTreeMap;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::sleep;
+    use uuid::Uuid;
 
     struct ReadyProbe;
 
@@ -766,6 +791,139 @@ mod tests {
                 materialized_session_id: None,
                 completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
             })
+        }
+    }
+
+    struct StandaloneReceiptFailingStore {
+        inner: Arc<dyn ScheduleStore>,
+    }
+
+    #[async_trait]
+    impl ScheduleStore for StandaloneReceiptFailingStore {
+        fn kind(&self) -> crate::ScheduleStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn commit_schedule_write(
+            &self,
+            write: crate::AuthorizedScheduleWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_schedule_write(write).await
+        }
+
+        async fn get_schedule(
+            &self,
+            schedule_id: &crate::ScheduleId,
+        ) -> Result<Option<crate::Schedule>, ScheduleStoreError> {
+            self.inner.get_schedule(schedule_id).await
+        }
+
+        async fn list_schedules(
+            &self,
+            filter: crate::ScheduleFilter,
+        ) -> Result<Vec<crate::Schedule>, ScheduleStoreError> {
+            self.inner.list_schedules(filter).await
+        }
+
+        async fn commit_occurrence_write(
+            &self,
+            write: crate::AuthorizedOccurrenceWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_occurrence_write(write).await
+        }
+
+        async fn commit_occurrence_writes(
+            &self,
+            writes: Vec<crate::AuthorizedOccurrenceWrite>,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_occurrence_writes(writes).await
+        }
+
+        async fn commit_schedule_mutation(
+            &self,
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<crate::AuthorizedOccurrenceWrite>,
+        ) -> Result<crate::Schedule, ScheduleStoreError> {
+            self.inner
+                .commit_schedule_mutation(schedule, occurrences)
+                .await
+        }
+
+        async fn get_occurrence(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner.get_occurrence(occurrence_id).await
+        }
+
+        async fn list_occurrences(
+            &self,
+            filter: crate::OccurrenceFilter,
+        ) -> Result<Vec<Occurrence>, ScheduleStoreError> {
+            self.inner.list_occurrences(filter).await
+        }
+
+        async fn append_receipt(
+            &self,
+            _receipt: DeliveryReceipt,
+        ) -> Result<(), ScheduleStoreError> {
+            Err(ScheduleStoreError::Internal(
+                "standalone receipt append disabled for regression".into(),
+            ))
+        }
+
+        async fn list_receipts(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Vec<DeliveryReceipt>, ScheduleStoreError> {
+            self.inner.list_receipts(occurrence_id).await
+        }
+
+        async fn claim_due_occurrences(
+            &self,
+            request: ClaimDueRequest,
+        ) -> Result<crate::ClaimDueResult, ScheduleStoreError> {
+            self.inner.claim_due_occurrences(request).await
+        }
+
+        async fn transition_occurrence_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner
+                .transition_occurrence_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                )
+                .await
+        }
+
+        async fn transition_occurrence_with_receipt_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+            runtime_outcome: Option<RuntimeDeliveryOutcome>,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner
+                .transition_occurrence_with_receipt_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                    runtime_outcome,
+                )
+                .await
         }
     }
 
@@ -1290,6 +1448,82 @@ mod tests {
             .ok_or_else(|| ScheduleDomainError::Internal("occurrence should exist".to_string()))?;
         assert_eq!(after.phase, OccurrencePhase::AwaitingCompletion);
         assert_eq!(after.failure_class, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completion_terminalizes_and_records_receipt_without_standalone_append()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("atomic-terminal-receipt".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let awaiting = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+
+        let terminal_store = Arc::new(StandaloneReceiptFailingStore {
+            inner: store.clone(),
+        }) as Arc<dyn ScheduleStore>;
+        let terminalized = terminalize_occurrence_inner(
+            terminal_store,
+            awaiting.clone(),
+            OccurrenceLifecycleInput::Complete { at_utc: Utc::now() },
+            None,
+            None,
+        )
+        .await?;
+
+        assert!(terminalized);
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
+        let receipts = store.list_receipts(&completed.occurrence_id).await?;
+        let last_receipt = receipts.last().ok_or_else(|| {
+            ScheduleDomainError::Internal(
+                "terminal completion should append generated receipt".to_string(),
+            )
+        })?;
+        assert_eq!(last_receipt.stage, DeliveryReceiptStage::Completed);
+        assert_eq!(
+            completed
+                .last_receipt
+                .as_ref()
+                .map(|receipt| receipt.receipt_id),
+            Some(last_receipt.receipt_id)
+        );
         Ok(())
     }
 

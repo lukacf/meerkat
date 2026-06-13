@@ -236,6 +236,22 @@ impl ProviderRuntimeRegistry {
         runtime.build_client(connection)
     }
 
+    /// Build a realtime-capable text client through the owning provider
+    /// runtime. The registry keeps realtime transport construction behind the
+    /// same provider/auth seam as ordinary clients.
+    pub fn build_realtime_text_client(
+        &self,
+        connection: ResolvedConnection,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let runtime =
+            self.runtimes
+                .get(&connection.provider)
+                .ok_or(ProviderClientError::MissingFeature(
+                    "runtime-not-registered",
+                ))?;
+        runtime.build_realtime_text_client(connection)
+    }
+
     /// Build the optional image-generation executor owned by the same
     /// provider runtime and resolved connection.
     pub fn build_image_generation_executor(

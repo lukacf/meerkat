@@ -678,6 +678,32 @@ impl ServerToolKind {
             ServerToolKind::ProviderNative { name } => name,
         }
     }
+
+    pub fn from_provider_name(name: impl Into<String>) -> Self {
+        let name = name.into();
+        match name.as_str() {
+            "web_search" => ServerToolKind::WebSearch,
+            "google_search" => ServerToolKind::GoogleSearch,
+            _ => ServerToolKind::ProviderNative { name },
+        }
+    }
+}
+
+fn deserialize_server_tool_kind<'de, D>(deserializer: D) -> Result<ServerToolKind, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ServerToolKindCompat {
+        Current(ServerToolKind),
+        LegacyName(String),
+    }
+
+    match ServerToolKindCompat::deserialize(deserializer)? {
+        ServerToolKindCompat::Current(kind) => Ok(kind),
+        ServerToolKindCompat::LegacyName(name) => Ok(ServerToolKind::from_provider_name(name)),
+    }
 }
 
 impl fmt::Display for ServerToolKind {
@@ -747,6 +773,7 @@ pub enum AssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// Typed semantic tool kind, parsed once at the provider adapter.
+        #[serde(alias = "name", deserialize_with = "deserialize_server_tool_kind")]
         kind: ServerToolKind,
         /// Provider-native JSON payload, preserved for citations and grounding evidence.
         content: Value,

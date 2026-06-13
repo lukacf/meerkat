@@ -862,6 +862,77 @@ fn apply_seeded_member_session_binding(
     )
 }
 
+async fn latest_persisted_session_for_member(
+    session_service: &dyn MobSessionService,
+    listed_sessions: &[meerkat_core::service::SessionSummary],
+    missing_session_id: &meerkat_core::types::SessionId,
+    mob_id: &crate::ids::MobId,
+    role: &crate::ids::ProfileName,
+    agent_identity: &crate::ids::AgentIdentity,
+) -> Result<Option<(meerkat_core::types::SessionId, meerkat_core::Session)>, MobError> {
+    let canonical_comms_name = super::actor::render_member_comms_name(
+        mob_id.as_str(),
+        role.as_str(),
+        agent_identity.as_str(),
+    )?;
+    let mut best: Option<(
+        meerkat_core::time_compat::SystemTime,
+        meerkat_core::types::SessionId,
+        meerkat_core::Session,
+    )> = None;
+
+    for summary in listed_sessions {
+        if &summary.session_id == missing_session_id {
+            continue;
+        }
+        let Some(session) = session_service
+            .load_persisted_session(&summary.session_id)
+            .await?
+        else {
+            continue;
+        };
+        if !persisted_session_matches_member(
+            &session,
+            mob_id,
+            role,
+            agent_identity,
+            &canonical_comms_name,
+        ) {
+            continue;
+        }
+        let replace = best
+            .as_ref()
+            .is_none_or(|(updated_at, _, _)| summary.updated_at > *updated_at);
+        if replace {
+            best = Some((summary.updated_at, summary.session_id.clone(), session));
+        }
+    }
+
+    Ok(best.map(|(_, session_id, session)| (session_id, session)))
+}
+
+fn persisted_session_matches_member(
+    session: &meerkat_core::Session,
+    mob_id: &crate::ids::MobId,
+    role: &crate::ids::ProfileName,
+    agent_identity: &crate::ids::AgentIdentity,
+    canonical_comms_name: &str,
+) -> bool {
+    let Some(metadata) = session.session_metadata() else {
+        return false;
+    };
+    if metadata.mob_member_binding.as_ref().is_some_and(|binding| {
+        binding.mob_id == mob_id.as_str()
+            && binding.role == role.as_str()
+            && binding.member == agent_identity.as_str()
+    }) {
+        return true;
+    }
+    metadata.comms_name.as_deref().is_some_and(|comms_name| {
+        crate::build::resumed_comms_name_matches_current_or_legacy(canonical_comms_name, comms_name)
+    })
+}
+
 fn authorize_seeded_session_provision_operation_owner(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &crate::ids::AgentIdentity,
@@ -1324,6 +1395,21 @@ fn seed_mob_authority_sync_from_events(
                         generation: mob_dsl::Generation::from_domain(agent_runtime_id.generation),
                     },
                     "recover_member_reset",
+                )?;
+            }
+            MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                let Some(bridge_session_id) = recovered.bridge_session_id() else {
+                    return Err(MobError::Internal(format!(
+                        "stored member-session binding recovery event for '{}' is missing bridge_session_id",
+                        recovered.agent_identity
+                    )));
+                };
+                apply_seeded_member_session_binding(
+                    authority,
+                    &recovered.agent_identity,
+                    &recovered.agent_runtime_id,
+                    bridge_session_id,
+                    "recover_member_session_binding_recovered",
                 )?;
             }
             MobEventKind::MemberRetired {
@@ -2583,7 +2669,7 @@ impl MobBuilder {
         for entry in &roster_entries {
             let dsl_identity =
                 crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
-            let Some(bridge_session_id) = dsl_authority
+            let Some(mut bridge_session_id) = dsl_authority
                 .state()
                 .member_session_bindings
                 .get(&dsl_identity)
@@ -2594,11 +2680,12 @@ impl MobBuilder {
             if active_ids.contains(&bridge_session_id) {
                 continue;
             }
-            let record_restore_failure = |reason: String| async {
+            let record_restore_failure = |bridge_session_id: meerkat_core::types::SessionId,
+                                          reason: String| async {
                 tool_handle.restore_diagnostics.write().await.insert(
                     entry.agent_identity.clone(),
                     super::handle::RestoreFailureDiagnostic {
-                        bridge_session_id: Some(bridge_session_id.clone()),
+                        bridge_session_id: Some(bridge_session_id),
                         reason,
                     },
                 );
@@ -2643,15 +2730,64 @@ impl MobBuilder {
             if matches!(entry.member_ref, MemberRef::Session { .. })
                 && session_service.supports_persistent_sessions()
             {
-                let Some(stored_session) = session_service
+                let stored_session = match session_service
                     .load_persisted_session(&bridge_session_id)
                     .await?
-                else {
-                    record_restore_failure(format!(
-                        "missing durable session snapshot for '{bridge_session_id}'"
-                    ))
-                    .await;
-                    continue;
+                {
+                    Some(stored_session) => stored_session,
+                    None => {
+                        if let Some((replacement_session_id, replacement_session)) =
+                            latest_persisted_session_for_member(
+                                session_service.as_ref(),
+                                &listed_sessions,
+                                &bridge_session_id,
+                                &definition.id,
+                                &entry.role,
+                                &entry.agent_identity,
+                            )
+                            .await?
+                        {
+                            apply_seeded_member_session_binding(
+                                dsl_authority,
+                                &entry.agent_identity,
+                                &entry.agent_runtime_id,
+                                &replacement_session_id,
+                                "resume_repoint_missing_member_session_binding",
+                            )?;
+                            tool_handle
+                                .events
+                                .append(crate::event::NewMobEvent {
+                                    mob_id: definition.id.clone(),
+                                    timestamp: None,
+                                    kind: MobEventKind::MemberSessionBindingRecovered(
+                                        crate::event::MemberSessionBindingRecoveredEvent::new(
+                                            entry.agent_identity.clone(),
+                                            entry.agent_runtime_id.clone(),
+                                            replacement_session_id.clone(),
+                                        ),
+                                    ),
+                                })
+                                .await?;
+                            bridge_session_id = replacement_session_id;
+                            let _ = roster.set_bridge_session_id(
+                                &entry.agent_identity,
+                                bridge_session_id.clone(),
+                            );
+                            if active_ids.contains(&bridge_session_id) {
+                                continue;
+                            }
+                            replacement_session
+                        } else {
+                            record_restore_failure(
+                                bridge_session_id.clone(),
+                                format!(
+                                    "missing durable session snapshot for '{bridge_session_id}'"
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                 };
                 // Prefer customizer/roster effective_profile_override on restore for lifecycle safety.
                 let mut profile = if let Some(ref p) = restore_profile_override {
@@ -2706,7 +2842,7 @@ impl MobBuilder {
                 let mut resumed_config = match resumed_config {
                     Ok(config) => config,
                     Err(error) => {
-                        record_restore_failure(error.to_string()).await;
+                        record_restore_failure(bridge_session_id.clone(), error.to_string()).await;
                         continue;
                     }
                 };
@@ -2731,10 +2867,13 @@ impl MobBuilder {
                 ) {
                     Ok(name) => name,
                     Err(error) => {
-                        record_restore_failure(format!(
-                            "failed to render comms name for resumed member '{}': {error}",
-                            entry.agent_identity
-                        ))
+                        record_restore_failure(
+                            bridge_session_id.clone(),
+                            format!(
+                                "failed to render comms name for resumed member '{}': {error}",
+                                entry.agent_identity
+                            ),
+                        )
                         .await;
                         continue;
                     }
@@ -2745,7 +2884,7 @@ impl MobBuilder {
                     ) {
                         Ok(authority) => authority,
                         Err(error) => {
-                            record_restore_failure(format!(
+                            record_restore_failure(bridge_session_id.clone(), format!(
                                 "failed to recover MobMachine authority for session provision owner '{}': {error}",
                                 entry.agent_identity
                             ))
@@ -2763,7 +2902,7 @@ impl MobBuilder {
                     ) {
                         Ok(owner) => owner,
                         Err(error) => {
-                            record_restore_failure(format!(
+                            record_restore_failure(bridge_session_id.clone(), format!(
                                 "failed to authorize recovered session provision owner '{}': {error}",
                                 entry.agent_identity
                             ))
@@ -2806,7 +2945,7 @@ impl MobBuilder {
                             profile.external_addressable,
                             "resume_recovered_member_addressability",
                         ) {
-                            record_restore_failure(format!(
+                            record_restore_failure(bridge_session_id.clone(), format!(
                                 "MobMachine rejected recovered member addressability for '{}': {error}",
                                 entry.agent_identity
                             ))
@@ -2820,7 +2959,7 @@ impl MobBuilder {
                             &created_bridge_session_id,
                             "resume_recovered_member_session_binding",
                         ) {
-                            record_restore_failure(format!(
+                            record_restore_failure(bridge_session_id.clone(), format!(
                                 "MobMachine rejected recovered bridge session '{created_bridge_session_id}': {error}"
                             ))
                             .await;
@@ -2837,9 +2976,12 @@ impl MobBuilder {
                             .remove(&entry.agent_identity);
                     }
                     Err(error) => {
-                        record_restore_failure(format!(
-                            "failed to restore durable session '{bridge_session_id}': {error}"
-                        ))
+                        record_restore_failure(
+                            bridge_session_id.clone(),
+                            format!(
+                                "failed to restore durable session '{bridge_session_id}': {error}"
+                            ),
+                        )
                         .await;
                     }
                 }

@@ -2603,6 +2603,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberSpawned(..) => "MemberSpawned",
             MobEventKind::MemberRetired { .. } => "MemberRetired",
             MobEventKind::MemberReset { .. } => "MemberReset",
+            MobEventKind::MemberSessionBindingRecovered(..) => "MemberSessionBindingRecovered",
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
             MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::MembersWiredBatch { .. } => "MembersWiredBatch",
@@ -14012,6 +14013,134 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
         crate::runtime::handle::MobMemberStatus::Broken
     );
     assert!(broken_including_retiring.is_final);
+}
+
+#[tokio::test]
+async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_session() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("mk--rt_creview_csingleton_c0");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&identity)
+        .await
+        .unwrap()
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
+        .await
+        .expect("discard old live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let replacement = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "replacement".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/rt:review:singleton:0".to_string()),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create replacement");
+    service
+        .session_comms_names
+        .write()
+        .await
+        .remove(&replacement.session_id);
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should self-heal snapshotless head");
+
+    let snapshot = resumed
+        .member_status(&identity)
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert_eq!(
+        snapshot.current_session_id,
+        Some(replacement.session_id.clone())
+    );
+
+    let machine_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after self-heal");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
+    let dsl_session_id =
+        crate::machines::mob_machine::SessionId::from_domain(&replacement.session_id);
+    assert_eq!(
+        machine_state.member_session_bindings.get(&dsl_identity),
+        Some(&dsl_session_id),
+        "snapshotless continuity heads should be repointed through MobMachine recovery"
+    );
+
+    let resumed_again = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("repeat resume should replay durable self-heal");
+    let repeated_snapshot = resumed_again
+        .member_status(&identity)
+        .await
+        .expect("repeat member status");
+    assert_eq!(
+        repeated_snapshot.current_session_id,
+        Some(replacement.session_id.clone()),
+        "durable self-heal should survive the next restart without fresh-spawn churn"
+    );
+
+    let stored_events = events.replay_all().await.expect("replay events");
+    assert_eq!(
+        stored_events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MemberSessionBindingRecovered(..)))
+            .count(),
+        1,
+        "self-heal should persist exactly one recovered binding event"
+    );
+    assert_eq!(
+        stored_events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MemberSpawned(..)))
+            .count(),
+        1,
+        "repeat resume should not fresh-spawn a replacement member"
+    );
 }
 
 #[tokio::test]
@@ -26262,6 +26391,10 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
     assert!(
         body.contains("protocol_supervisor_trust_publish::extract_obligations"),
         "supervisor private trust publication must realize the generated supervisor_trust_publish handoff obligation"
+    );
+    assert!(
+        body.contains("Box::pin(self.install_supervisor_private_trust_for_session_authority"),
+        "the supervisor private-trust authority future must be boxed before awaiting so the spawn finalization chain does not live on the worker stack"
     );
     assert!(
         body.contains("stage_supervisor_trust_publish_request"),

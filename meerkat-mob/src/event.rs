@@ -324,6 +324,14 @@ pub enum MobEventKind {
         agent_runtime_id: AgentRuntimeId,
     },
 
+    /// A session-backed member's durable bridge-session binding was recovered.
+    ///
+    /// Replay feeds this through `MobMachineSignal::RecoverMemberSessionBinding`
+    /// and updates the roster read model. The MobMachine remains the behavior
+    /// authority; this event is the crash-recovery fact that preserves a
+    /// machine-authorized rebind across the next process restart.
+    MemberSessionBindingRecovered(MemberSessionBindingRecoveredEvent),
+
     /// Kickoff state for an existing member changed.
     MemberKickoffUpdated {
         /// Member whose kickoff state changed.
@@ -571,6 +579,40 @@ impl MemberSpawnedEvent {
     }
 }
 
+/// Public identity-native payload for a recovered session binding.
+///
+/// The bridge session id is kept as crate-internal replay metadata only;
+/// it is intentionally not serialized on the public event surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemberSessionBindingRecoveredEvent {
+    /// Stable member identity whose bridge binding was recovered.
+    pub agent_identity: AgentIdentity,
+    /// Runtime incarnation the recovered binding belongs to.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Recovered bridge session id for the member.
+    /// Not part of the public identity-native contract.
+    #[serde(skip, default)]
+    pub(crate) bridge_session_id: Option<SessionId>,
+}
+
+impl MemberSessionBindingRecoveredEvent {
+    pub(crate) fn new(
+        agent_identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        bridge_session_id: SessionId,
+    ) -> Self {
+        Self {
+            agent_identity,
+            agent_runtime_id,
+            bridge_session_id: Some(bridge_session_id),
+        }
+    }
+
+    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
+        self.bridge_session_id.as_ref()
+    }
+}
+
 fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
     matches!(intent, crate::runtime::SpawnContinuityIntent::Ephemeral)
 }
@@ -590,6 +632,24 @@ impl MobEventKind {
             _ => None,
         }
     }
+
+    pub(crate) fn member_session_binding_recovered(
+        &self,
+    ) -> Option<&MemberSessionBindingRecoveredEvent> {
+        match self {
+            Self::MemberSessionBindingRecovered(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn member_session_binding_recovered_mut(
+        &mut self,
+    ) -> Option<&mut MemberSessionBindingRecoveredEvent> {
+        match self {
+            Self::MemberSessionBindingRecovered(event) => Some(event),
+            _ => None,
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -604,6 +664,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert(
             "bridge_member_ref".to_string(),
             serde_json::to_value(bridge_member_ref)?,
+        );
+    }
+    if let Some(recovered) = event.kind.member_session_binding_recovered()
+        && let Some(bridge_session_id) = recovered.bridge_session_id()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "bridge_session_id".to_string(),
+            serde_json::to_value(bridge_session_id)?,
         );
     }
     serde_json::to_vec(&serde_json::json!({
@@ -642,11 +711,29 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| kind.remove("bridge_member_ref"))
         .map(serde_json::from_value)
         .transpose()?;
+    let recovered_bridge_session_id = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_session_binding_recovered")
+            {
+                kind.remove("bridge_session_id")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
+    }
+    if let Some(bridge_session_id) = recovered_bridge_session_id
+        && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
+    {
+        recovered.bridge_session_id = Some(bridge_session_id);
     }
     Ok(event)
 }
@@ -705,6 +792,37 @@ mod tests {
             destroy_on_owner_archive: true,
             implicit_delegation_mob: true,
         });
+    }
+
+    #[test]
+    fn test_stored_mob_event_roundtrip_preserves_owner_bridge_session_bound() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MobOwnerBridgeSessionBound {
+                bridge_session_id: sid.clone(),
+                destroy_on_owner_archive: true,
+                implicit_delegation_mob: true,
+            },
+        };
+
+        let encoded = encode_stored_mob_event(&event).unwrap();
+        let decoded = decode_stored_mob_event(&encoded).unwrap();
+
+        match decoded.kind {
+            MobEventKind::MobOwnerBridgeSessionBound {
+                bridge_session_id,
+                destroy_on_owner_archive,
+                implicit_delegation_mob,
+            } => {
+                assert_eq!(bridge_session_id, sid);
+                assert!(destroy_on_owner_archive);
+                assert!(implicit_delegation_mob);
+            }
+            other => panic!("expected MobOwnerBridgeSessionBound, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1009,6 +1127,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_stored_mob_event_roundtrip_preserves_recovered_member_session_binding() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("researcher");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                MemberSessionBindingRecoveredEvent::new(
+                    identity.clone(),
+                    AgentRuntimeId::initial(identity),
+                    sid.clone(),
+                ),
+            ),
+        };
+
+        let encoded = encode_stored_mob_event(&event).unwrap();
+        let decoded = decode_stored_mob_event(&encoded).unwrap();
+
+        match decoded.kind {
+            MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                assert_eq!(recovered.bridge_session_id(), Some(&sid));
+            }
+            other => panic!("expected MemberSessionBindingRecovered, got {other:?}"),
+        }
+    }
+
     /// DELETE_ME A6 regression: `MemberSpawned(MemberSpawnedEvent)` uses
     /// a named struct variant while every other `Member*` variant uses
     /// inline fields. The reason is load-bearing: `bridge_member_ref` is
@@ -1055,6 +1201,29 @@ mod tests {
         assert!(
             payload_object.contains_key("agent_identity") || serialized.contains("agent_identity"),
             "public MemberSpawned must carry agent_identity: {serialized}",
+        );
+    }
+
+    #[test]
+    fn member_session_binding_recovered_public_wire_shape_excludes_bridge_session_id() {
+        let identity = AgentIdentity::from("researcher");
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let kind =
+            MobEventKind::MemberSessionBindingRecovered(MemberSessionBindingRecoveredEvent::new(
+                identity.clone(),
+                AgentRuntimeId::initial(identity),
+                sid,
+            ));
+
+        let value = serde_json::to_value(&kind).expect("serialize mob event kind");
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            !serialized.contains("bridge_session_id"),
+            "public MemberSessionBindingRecovered must not expose bridge_session_id: {serialized}",
+        );
+        assert!(
+            serialized.contains("agent_identity"),
+            "public MemberSessionBindingRecovered must carry agent_identity: {serialized}",
         );
     }
 

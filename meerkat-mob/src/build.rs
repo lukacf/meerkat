@@ -358,17 +358,19 @@ fn apply_resumed_session_metadata(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
 ) -> Result<(), MobError> {
-    let current_comms_name = config.comms_name.clone();
+    let Some(current_comms_name) = config.comms_name.clone() else {
+        return Err(MobError::Internal(
+            "missing current comms_name for resumed mob member".to_string(),
+        ));
+    };
     let Some(stored_comms_name) = metadata.comms_name.clone() else {
         return Err(MobError::Internal(
             "missing durable comms_name for resumed mob member".to_string(),
         ));
     };
-    if current_comms_name.as_deref() != Some(stored_comms_name.as_str()) {
+    if !resumed_comms_name_matches_current_or_legacy(&current_comms_name, &stored_comms_name) {
         return Err(MobError::Internal(format!(
-            "persisted comms_name '{}' does not match current mob identity '{}'",
-            stored_comms_name,
-            current_comms_name.unwrap_or_else(|| "<none>".to_string())
+            "persisted comms_name '{stored_comms_name}' does not match current mob identity '{current_comms_name}'"
         )));
     }
 
@@ -403,9 +405,43 @@ fn apply_resumed_session_metadata(
     config.preload_skills = metadata.tooling.active_skills.clone();
     // keep_alive is NOT restored from metadata — mob runtime owns it
     // (determined by runtime_mode == AutonomousHost). §1: one owner.
-    config.comms_name = Some(stored_comms_name);
+    config.comms_name = Some(current_comms_name);
     config.peer_meta = metadata.peer_meta.clone();
     Ok(())
+}
+
+pub(crate) fn resumed_comms_name_matches_current_or_legacy(current: &str, stored: &str) -> bool {
+    if current == stored {
+        return true;
+    }
+    legacy_raw_alias_comms_name(current).is_some_and(|legacy| stored == legacy)
+}
+
+pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
+    let mut parts = current.split('/');
+    let (Some(mob_id), Some(role), Some(member), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let legacy_member = member
+        .strip_prefix("mk--")
+        .map(decode_legacy_member_alias_segment)?;
+    Some(format!("{mob_id}/{role}/{legacy_member}"))
+}
+
+fn decode_legacy_member_alias_segment(encoded: &str) -> String {
+    let mut decoded = String::with_capacity(encoded.len());
+    let mut chars = encoded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '_' && chars.peek() == Some(&'c') {
+            chars.next();
+            decoded.push(':');
+        } else {
+            decoded.push(ch);
+        }
+    }
+    decoded
 }
 
 /// Bridge an [`AgentBuildConfig`] to a [`CreateSessionRequest`].
@@ -2362,6 +2398,39 @@ mod tests {
         apply_resumed_session_metadata(&mut config, &metadata).expect("metadata applies");
         assert_eq!(config.model, "gpt-5.4");
         assert_eq!(config.provider, Some(meerkat_core::Provider::OpenAI));
+    }
+
+    #[test]
+    fn test_resumed_metadata_accepts_legacy_raw_alias_comms_name() {
+        let mut config = AgentBuildConfig::new("gpt-5.4");
+        config.comms_name = Some("ob3/review/mk--rt_creview_csingleton_c0".to_string());
+
+        let metadata = SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.4".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: Default::default(),
+            keep_alive: false,
+            comms_name: Some("ob3/review/rt:review:singleton:0".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        };
+
+        apply_resumed_session_metadata(&mut config, &metadata).expect("legacy metadata applies");
+        assert_eq!(
+            config.comms_name.as_deref(),
+            Some("ob3/review/mk--rt_creview_csingleton_c0"),
+            "resume should rehydrate to the canonical encoded comms name"
+        );
     }
 
     #[tokio::test]

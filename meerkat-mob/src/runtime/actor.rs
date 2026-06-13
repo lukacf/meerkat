@@ -1520,28 +1520,14 @@ impl MobActor {
     ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
         let authority = self.supervisor_bridge.authority().await;
         let spec = Self::supervisor_spec_for_authority(&self.definition.id, &authority)?;
-        #[cfg(target_arch = "wasm32")]
-        {
-            Box::pin(self.install_supervisor_private_trust_for_session_authority(
-                session_id,
-                comms,
-                &authority,
-                spec,
-                previous_private_trust_removal_key,
-            ))
-            .await
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.install_supervisor_private_trust_for_session_authority(
-                session_id,
-                comms,
-                &authority,
-                spec,
-                previous_private_trust_removal_key,
-            )
-            .await
-        }
+        Box::pin(self.install_supervisor_private_trust_for_session_authority(
+            session_id,
+            comms,
+            &authority,
+            spec,
+            previous_private_trust_removal_key,
+        ))
+        .await
     }
 
     async fn install_supervisor_private_trust_for_session_authority(

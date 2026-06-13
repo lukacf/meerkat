@@ -1121,6 +1121,34 @@ mod ordered_transcript_types {
         }
     }
 
+    #[test]
+    fn test_assistant_block_server_tool_content_reads_legacy_name_shape() {
+        let value = serde_json::json!({
+            "block_type": "server_tool_content",
+            "data": {
+                "id": "tool-1",
+                "name": "web_search",
+                "content": { "query": "meerkat" }
+            }
+        });
+
+        let parsed: AssistantBlock = serde_json::from_value(value).unwrap();
+        match parsed {
+            AssistantBlock::ServerToolContent {
+                id,
+                kind,
+                content,
+                meta,
+            } => {
+                assert_eq!(id.as_deref(), Some("tool-1"));
+                assert_eq!(kind, ServerToolKind::WebSearch);
+                assert_eq!(content["query"], "meerkat");
+                assert!(meta.is_none());
+            }
+            other => panic!("Expected ServerToolContent, got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // AssistantBlock::Transcript variant
     // -----------------------------------------------------------------------

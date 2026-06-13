@@ -227,6 +227,7 @@ pub use meerkat_workgraph::{
 
 // AgentFactory and build_agent types
 mod factory;
+mod model_fallback;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,

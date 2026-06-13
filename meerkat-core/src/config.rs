@@ -46,6 +46,7 @@ pub struct Config {
     pub skills: crate::skills_config::SkillsConfig,
     pub self_hosted: SelfHostedConfig,
     pub provider_tools: ProviderToolsConfig,
+    pub model_fallback: ModelFallbackConfig,
     pub presentation: PresentationConfig,
     /// Realm-scoped connection sets (backend profiles, auth profiles,
     /// bindings). TOML keys use the singular `[realm.<id>.*]` namespace
@@ -82,6 +83,7 @@ impl Default for Config {
             skills: crate::skills_config::SkillsConfig::default(),
             self_hosted: SelfHostedConfig::default(),
             provider_tools: ProviderToolsConfig::default(),
+            model_fallback: ModelFallbackConfig::default(),
             presentation: PresentationConfig::default(),
             realm: BTreeMap::new(),
         }
@@ -346,6 +348,11 @@ impl Config {
                 self.hooks.background_max_concurrency = other.hooks.background_max_concurrency;
             }
             self.hooks.entries.extend(other.hooks.entries);
+        }
+        if other.model_fallback.use_catalog_default_chain {
+            self.model_fallback = ModelFallbackConfig::default();
+        } else if other.model_fallback != ModelFallbackConfig::default() {
+            self.model_fallback = other.model_fallback;
         }
     }
 
@@ -1192,6 +1199,54 @@ pub struct ProviderToolsConfig {
     pub anthropic: AnthropicProviderToolsConfig,
     pub openai: OpenAiProviderToolsConfig,
     pub gemini: GeminiProviderToolsConfig,
+}
+
+/// Ordered model failover policy used when a turn reaches a recoverable LLM
+/// failure boundary.
+///
+/// Empty `chain` means "use the catalog-owned default fallback chain" at the
+/// factory seam. Core keeps this provider-data-free; the `meerkat` facade
+/// resolves catalog defaults and builds concrete clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ModelFallbackConfig {
+    /// Enables runtime model failover for factory-built agents.
+    pub enabled: bool,
+    /// When true in a higher-precedence layer, restore the catalog-owned
+    /// default chain (`enabled = true`, empty `chain`) over an inherited
+    /// disabled/custom fallback policy.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_catalog_default_chain: bool,
+    /// Ordered operator-provided backup targets.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<ModelFallbackTarget>,
+}
+
+impl Default for ModelFallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_catalog_default_chain: false,
+            chain: Vec::new(),
+        }
+    }
+}
+
+/// One configured model fallback target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFallbackTarget {
+    /// Model id, resolved through the effective [`crate::ModelRegistry`].
+    pub model: String,
+    /// Optional typed provider override. When omitted, registry ownership of
+    /// `model` supplies the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::Provider>,
+    /// Optional realm-scoped auth binding for this target. When omitted, the
+    /// provider's default binding is resolved by the existing provider-runtime
+    /// registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<crate::AuthBindingRef>,
 }
 
 /// Anthropic provider-native tool defaults.
@@ -2043,6 +2098,10 @@ pub struct CommandRuntimeConfig {
 
 fn default_http_method() -> String {
     "POST".to_string()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Typed payload for a [`HookRuntimeKind::Http`] adapter.
@@ -3272,6 +3331,70 @@ call_timeout = "30s"
         let toml_str = toml::to_string(&config.provider_tools).unwrap();
         let parsed: ProviderToolsConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed, config.provider_tools);
+    }
+
+    #[test]
+    fn test_model_fallback_defaults_enabled_with_catalog_chain() {
+        let config = Config::default();
+        assert!(config.model_fallback.enabled);
+        assert!(config.model_fallback.chain.is_empty());
+    }
+
+    #[test]
+    fn test_model_fallback_chain_parses_typed_targets() {
+        let config: Config = toml::from_str(
+            r#"
+[model_fallback]
+enabled = true
+
+[[model_fallback.chain]]
+model = "backup-openai"
+provider = "openai"
+
+[[model_fallback.chain]]
+model = "backup-anthropic"
+provider = "anthropic"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.model_fallback.enabled);
+        assert_eq!(config.model_fallback.chain.len(), 2);
+        assert_eq!(config.model_fallback.chain[0].model, "backup-openai");
+        assert_eq!(
+            config.model_fallback.chain[0].provider,
+            Some(crate::Provider::OpenAI)
+        );
+        assert_eq!(
+            config.model_fallback.chain[1].provider,
+            Some(crate::Provider::Anthropic)
+        );
+    }
+
+    #[test]
+    fn test_model_fallback_catalog_default_reset_overrides_custom_layer() {
+        let mut config: Config = toml::from_str(
+            r#"
+[model_fallback]
+enabled = false
+
+[[model_fallback.chain]]
+model = "backup-openai"
+provider = "openai"
+"#,
+        )
+        .unwrap();
+        let reset: Config = toml::from_str(
+            r"
+[model_fallback]
+use_catalog_default_chain = true
+",
+        )
+        .unwrap();
+
+        config.merge(reset);
+
+        assert_eq!(config.model_fallback, ModelFallbackConfig::default());
     }
 
     #[test]

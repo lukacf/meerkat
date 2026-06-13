@@ -111,6 +111,44 @@ min_turns_between_compactions = 3
 
 When `session-compaction` is enabled, `AgentFactory` maps these values into the runtime `CompactionConfig`.
 
+## Model fallback settings
+
+The model fallback chain is realm-scoped configuration. Empty `chain` means
+"use the catalog default chain"; a non-empty chain is an explicit ordered
+operator policy:
+
+```toml
+[model_fallback]
+enabled = true
+
+[[model_fallback.chain]]
+model = "claude-opus-4-8"
+provider = "anthropic"
+
+[[model_fallback.chain]]
+model = "gpt-5.5"
+provider = "openai"
+auth_binding = { realm = "dev", binding = "openai_oauth" }
+```
+
+A fallback target is identified by model, provider, self-hosted server, and
+`auth_binding`. This means an explicit custom chain can retry the same
+model/provider through a different credential binding. Catalog-default chains
+stay inside the selected non-env auth realm and skip providers that are not
+registered there.
+
+Use `enabled = false` to disable runtime model failover. If a lower-precedence
+layer disabled fallback or supplied a custom chain, set
+`use_catalog_default_chain = true` in a higher-precedence layer to restore the
+built-in catalog chain.
+
+Fallback activation is still runtime-governed: the generated recovery
+authority must classify the LLM failure as recoverable, and the core run loop
+must decide the retry is pre-stream safe. Network/call timeouts never trigger
+model fallback, and cross-model fallback is suppressed after user-visible text
+or reasoning stream output has been emitted. On activation, Meerkat recomputes
+the active model's tool capability filter and token limits before retrying.
+
 ## See also
 
 - [Realms](/concepts/realms)

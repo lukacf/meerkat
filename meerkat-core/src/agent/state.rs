@@ -1,7 +1,7 @@
 //! Agent state machine internals.
 
 use crate::budget::{BudgetDimension, BudgetExceeded};
-use crate::error::{AgentError, ToolError};
+use crate::error::{AgentError, LlmFailureReason, ToolError};
 use crate::event::{
     AgentEvent, BackgroundJobTerminalStatus, BudgetType, DeferredCatalogDelta, ToolCallArguments,
     ToolCallArgumentsError, ToolConfigChangeDomain, ToolConfigChangeOperation,
@@ -16,7 +16,7 @@ use crate::hooks::{
 };
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
-use crate::lifecycle::run_primitive::ProviderParamsOverride;
+use crate::lifecycle::run_primitive::{ProviderParamsCarrier, ProviderParamsOverride};
 use crate::ops_lifecycle::OperationCompletionWakeClass;
 use crate::session::TranscriptRewriteReason;
 #[cfg(target_arch = "wasm32")]
@@ -38,8 +38,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{
-    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
-    select_tool_catalog_mode,
+    Agent, AgentLlmClient, AgentLlmFallbackSwitch, AgentSessionStore, AgentToolDispatcher,
+    LlmStreamResult, select_tool_catalog_mode,
 };
 
 /// Pre-selected timeout source — determined before the LLM await, not inferred after.
@@ -62,8 +62,16 @@ struct LlmRetryRequest<'a> {
     max_tokens: u32,
     temperature: Option<f32>,
     provider_params: Option<&'a ProviderParamsOverride>,
+    extraction_output_schema: Option<crate::types::OutputSchema>,
     allow_empty_success: bool,
 }
+
+type AppliedModelFallbackSwitch = (
+    Arc<[Arc<ToolDef>]>,
+    Option<ProviderParamsOverride>,
+    u32,
+    Message,
+);
 
 fn turn_input_failure_source(input: &TurnExecutionInput) -> Option<&TurnFailureSource> {
     match input {
@@ -142,6 +150,22 @@ fn synthetic_notice_block_message(
 ) -> Message {
     let body = body.into();
     Message::SystemNotice(SystemNoticeMessage::with_block(kind, Some(body), block))
+}
+
+fn fallback_activation_is_pre_stream_safe(
+    error: &AgentError,
+    stream_output_observed: bool,
+) -> bool {
+    if stream_output_observed {
+        return false;
+    }
+    match error {
+        AgentError::Llm { reason, .. } => !matches!(
+            reason,
+            LlmFailureReason::NetworkTimeout { .. } | LlmFailureReason::CallTimeout { .. }
+        ),
+        _ => false,
+    }
 }
 
 /// Test-only predicate; production notice refresh goes through the atomic
@@ -242,6 +266,140 @@ where
         if let Err(e) = self.store.save(&self.session).await {
             tracing::warn!("Failed to save session: {}", e);
         }
+    }
+
+    fn apply_model_fallback_switch(
+        &mut self,
+        switch: AgentLlmFallbackSwitch,
+        failure: &AgentError,
+        previous_tools: &[Arc<ToolDef>],
+    ) -> Result<AppliedModelFallbackSwitch, AgentError> {
+        self.rotate_auth_lease_auth_binding(
+            switch.previous_identity.auth_binding.as_ref(),
+            switch.new_identity.auth_binding.as_ref(),
+        )?;
+        self.apply_llm_request_policy(switch.request_policy.clone());
+
+        if let Some(mut metadata) = self.session.session_metadata() {
+            metadata.apply_llm_identity(&switch.new_identity);
+            self.session.set_session_metadata(metadata).map_err(|err| {
+                AgentError::ConfigError(format!("failed to persist fallback LLM identity: {err}"))
+            })?;
+        }
+
+        let capability_filter = crate::tool_scope::ToolScope::compose(std::slice::from_ref(
+            &switch.capability_base_filter,
+        ));
+        let next_tools: Arc<[Arc<ToolDef>]> = previous_tools
+            .iter()
+            .filter(|tool| capability_filter.allows(tool.name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let next_names = next_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<BTreeSet<_>>();
+        let hidden_tools = previous_tools
+            .iter()
+            .filter(|tool| !next_names.contains(&tool.name))
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        let carrier = ProviderParamsCarrier {
+            params: switch
+                .request_policy
+                .provider_params
+                .clone()
+                .unwrap_or_default(),
+            tool_defaults: switch.request_policy.provider_tool_defaults.clone(),
+        };
+        let provider_params = carrier
+            .effective_params()
+            .map_err(|err| AgentError::ConfigError(err.to_string()))?;
+        let provider_params = (!provider_params.is_empty()).then_some(provider_params);
+        let max_tokens = switch
+            .max_output_tokens
+            .map(|limit| self.config.max_tokens_per_turn.min(limit))
+            .unwrap_or(self.config.max_tokens_per_turn);
+
+        let skipped_targets = switch
+            .skipped_targets
+            .iter()
+            .map(|target| {
+                serde_json::json!({
+                    "model": target.identity.model,
+                    "provider": target.identity.provider.as_str(),
+                    "reason": target.reason,
+                })
+            })
+            .collect::<Vec<_>>();
+        let hidden_detail = if hidden_tools.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Hidden tools for the fallback model: {}.",
+                hidden_tools.join(", ")
+            )
+        };
+        let body = format!(
+            "The runtime switched from model '{}' ({}) to fallback model '{}' ({}) after an LLM failure: {}. Active model limits are context_window={:?}, max_output_tokens={:?}.{} Adapt to the active model and visible tools.",
+            switch.previous_identity.model,
+            switch.previous_identity.provider.as_str(),
+            switch.new_identity.model,
+            switch.new_identity.provider.as_str(),
+            failure,
+            switch.context_window,
+            switch.max_output_tokens,
+            hidden_detail,
+        );
+        let payload = serde_json::json!({
+            "event": "model_fallback",
+            "from": {
+                "model": switch.previous_identity.model,
+                "provider": switch.previous_identity.provider.as_str(),
+            },
+            "to": {
+                "model": switch.new_identity.model,
+                "provider": switch.new_identity.provider.as_str(),
+                "context_window": switch.context_window,
+                "max_output_tokens": switch.max_output_tokens,
+            },
+            "hidden_tools": hidden_tools,
+            "skipped_targets": skipped_targets,
+            "reason": failure.to_string(),
+        });
+        let notice = Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::Generic,
+            Some(body),
+            crate::types::SystemNoticeBlock::RuntimeNotice {
+                category: "model_fallback".to_string(),
+                detail: Some(
+                    "active LLM model changed after recoverable provider failure".to_string(),
+                ),
+                payload: Some(payload),
+            },
+        ));
+        self.session.push(notice.clone());
+
+        Ok((next_tools, provider_params, max_tokens, notice))
+    }
+
+    fn apply_extraction_request_overrides(
+        provider: crate::Provider,
+        mut provider_params: Option<ProviderParamsOverride>,
+        output_schema: Option<&crate::types::OutputSchema>,
+    ) -> Result<Option<ProviderParamsOverride>, AgentError> {
+        let Some(output_schema) = output_schema.cloned() else {
+            return Ok(provider_params);
+        };
+
+        let mut effective = provider_params.take().unwrap_or_default();
+        effective
+            .set_structured_output(provider, output_schema)
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        effective.clear_web_search();
+        Ok((!effective.is_empty()).then_some(effective))
     }
 
     /// Snapshot the runtime-backed turn-state authority.
@@ -399,6 +557,7 @@ where
             max_tokens,
             temperature,
             provider_params,
+            extraction_output_schema,
             allow_empty_success,
         } = request;
 
@@ -426,7 +585,21 @@ where
         } else {
             None
         };
-        let messages = hydrated_messages.as_deref().unwrap_or(messages);
+        let mut current_messages = hydrated_messages.unwrap_or_else(|| messages.to_vec());
+        let active_capability_filter =
+            crate::tool_scope::ToolScope::compose(&[self.client.active_capability_base_filter()]);
+        let mut current_tools: Arc<[Arc<ToolDef>]> = tools
+            .iter()
+            .filter(|tool| active_capability_filter.allows(tool.name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let mut current_max_tokens = self
+            .client
+            .active_max_output_tokens()
+            .map(|limit| max_tokens.min(limit))
+            .unwrap_or(max_tokens);
+        let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
 
         loop {
@@ -447,11 +620,18 @@ where
             }
 
             // 4. Determine whether to wrap the call and select timeout source
+            self.client.begin_stream_output_observation();
             let call_result = match (effective_call_timeout, remaining_turn) {
                 (None, None) => {
                     // No timeout wrapper needed
                     self.client
-                        .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                        .stream_response(
+                            &current_messages,
+                            &current_tools,
+                            current_max_tokens,
+                            temperature,
+                            current_provider_params.as_ref(),
+                        )
                         .await
                 }
                 (call_to, turn_remaining) => {
@@ -472,11 +652,11 @@ where
                     match tokio::time::timeout(
                         effective_timeout,
                         self.client.stream_response(
-                            messages,
-                            tools,
-                            max_tokens,
+                            &current_messages,
+                            &current_tools,
+                            current_max_tokens,
                             temperature,
-                            provider_params,
+                            current_provider_params.as_ref(),
                         ),
                     )
                     .await
@@ -540,6 +720,29 @@ where
                             self.retry_policy.max_retries,
                         )?;
                         if let LlmFailureRecoveryKind::Recover = recovery {
+                            if fallback_activation_is_pre_stream_safe(
+                                &error,
+                                self.client.stream_output_observed(),
+                            ) && let Some(switch) = self.client.prepare_model_fallback(&error)
+                            {
+                                let new_identity = switch.new_identity.clone();
+                                let (next_tools, next_params, next_max_tokens, notice) = self
+                                    .apply_model_fallback_switch(
+                                        switch,
+                                        &error,
+                                        current_tools.as_ref(),
+                                    )?;
+                                let next_params = Self::apply_extraction_request_overrides(
+                                    new_identity.provider,
+                                    next_params,
+                                    extraction_output_schema.as_ref(),
+                                )?;
+                                self.client.commit_model_fallback(&new_identity);
+                                current_tools = next_tools;
+                                current_provider_params = next_params;
+                                current_max_tokens = next_max_tokens;
+                                current_messages.push(notice);
+                            }
                             let retry_schedule = self
                                 .retry_policy
                                 .schedule_retry(&error, attempt, self.budget.remaining_duration())
@@ -599,6 +802,25 @@ where
                         self.retry_policy.max_retries,
                     )?;
                     if let LlmFailureRecoveryKind::Recover = recovery {
+                        if fallback_activation_is_pre_stream_safe(
+                            &e,
+                            self.client.stream_output_observed(),
+                        ) && let Some(switch) = self.client.prepare_model_fallback(&e)
+                        {
+                            let new_identity = switch.new_identity.clone();
+                            let (next_tools, next_params, next_max_tokens, notice) = self
+                                .apply_model_fallback_switch(switch, &e, current_tools.as_ref())?;
+                            let next_params = Self::apply_extraction_request_overrides(
+                                new_identity.provider,
+                                next_params,
+                                extraction_output_schema.as_ref(),
+                            )?;
+                            self.client.commit_model_fallback(&new_identity);
+                            current_tools = next_tools;
+                            current_provider_params = next_params;
+                            current_max_tokens = next_max_tokens;
+                            current_messages.push(notice);
+                        }
                         let retry_schedule = self
                             .retry_policy
                             .schedule_retry(&e, attempt, self.budget.remaining_duration())
@@ -1959,6 +2181,11 @@ where
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
                             provider_params: typed_provider_params.as_ref(),
+                            extraction_output_schema: if in_extraction {
+                                self.config.output_schema.clone()
+                            } else {
+                                None
+                            },
                             allow_empty_success: run_has_visible_or_actionable_output,
                         })
                         .await
@@ -3194,6 +3421,12 @@ mod tests {
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
+    }
+
+    fn explicit_test_visibility_owner() -> crate::GeneratedToolVisibilityOwner {
+        let owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        crate::tool_scope::generated_test_tool_visibility_owner_from(owner)
     }
 
     struct StaticLlmClient;
@@ -8499,6 +8732,300 @@ mod tests {
         }
     }
 
+    struct FallbackActivatingClient {
+        active: std::sync::atomic::AtomicUsize,
+        seen_tools: Mutex<Vec<Vec<String>>>,
+        seen_notice_bodies: Mutex<Vec<Vec<String>>>,
+        seen_max_tokens: Mutex<Vec<u32>>,
+        seen_provider_params:
+            Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
+    }
+
+    impl FallbackActivatingClient {
+        fn new() -> Self {
+            Self {
+                active: std::sync::atomic::AtomicUsize::new(0),
+                seen_tools: Mutex::new(Vec::new()),
+                seen_notice_bodies: Mutex::new(Vec::new()),
+                seen_max_tokens: Mutex::new(Vec::new()),
+                seen_provider_params: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_tools(&self) -> Vec<Vec<String>> {
+            self.seen_tools.lock().unwrap().clone()
+        }
+
+        fn seen_notice_bodies(&self) -> Vec<Vec<String>> {
+            self.seen_notice_bodies.lock().unwrap().clone()
+        }
+
+        fn seen_max_tokens(&self) -> Vec<u32> {
+            self.seen_max_tokens.lock().unwrap().clone()
+        }
+
+        fn seen_provider_params(
+            &self,
+        ) -> Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>> {
+            self.seen_provider_params.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for FallbackActivatingClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_max_tokens.lock().unwrap().push(max_tokens);
+            self.seen_provider_params
+                .lock()
+                .unwrap()
+                .push(provider_params.cloned());
+            self.seen_tools.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect::<Vec<_>>(),
+            );
+            self.seen_notice_bodies.lock().unwrap().push(
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::SystemNotice(notice) => notice.body.clone(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+
+            if self.active.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::retryable(
+                            crate::error::LlmProviderErrorKind::ServerOverloaded,
+                            serde_json::json!({"message": "busy"}),
+                        ),
+                    ),
+                    "mock overloaded",
+                ));
+            }
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok after fallback".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            if self.active.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                "primary"
+            } else {
+                "backup"
+            }
+        }
+
+        fn prepare_model_fallback(
+            &self,
+            _failure: &AgentError,
+        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            if self.active.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                return None;
+            }
+            Some(crate::AgentLlmFallbackSwitch {
+                previous_identity: crate::SessionLlmIdentity {
+                    model: "primary".to_string(),
+                    provider: crate::provider::Provider::Other,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                new_identity: crate::SessionLlmIdentity {
+                    model: "backup".to_string(),
+                    provider: crate::provider::Provider::Other,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                request_policy: crate::SessionLlmRequestPolicy {
+                    model: "backup".to_string(),
+                    provider_params: Some(
+                        crate::lifecycle::run_primitive::ProviderParamsOverride {
+                            temperature: Some(0.37),
+                            max_output_tokens: Some(777),
+                            ..Default::default()
+                        },
+                    ),
+                    provider_tool_defaults: None,
+                },
+                capability_base_filter: ToolFilter::Deny(
+                    [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
+                context_window: Some(128_000),
+                max_output_tokens: Some(2048),
+                skipped_targets: Vec::new(),
+            })
+        }
+
+        fn commit_model_fallback(&self, identity: &crate::SessionLlmIdentity) {
+            if identity.model == "backup" {
+                self.active.store(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn active_capability_base_filter(&self) -> ToolFilter {
+            if self.active.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                ToolFilter::All
+            } else {
+                ToolFilter::Deny(
+                    [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                        .into_iter()
+                        .collect(),
+                )
+            }
+        }
+
+        fn active_max_output_tokens(&self) -> Option<u32> {
+            (self.active.load(std::sync::atomic::Ordering::SeqCst) != 0).then_some(2048)
+        }
+    }
+
+    struct PartialOutputThenRecoverClient {
+        calls: std::sync::atomic::AtomicUsize,
+        stream_output_observed: std::sync::atomic::AtomicBool,
+        fallback_committed: std::sync::atomic::AtomicBool,
+    }
+
+    impl PartialOutputThenRecoverClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                stream_output_observed: std::sync::atomic::AtomicBool::new(false),
+                fallback_committed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn fallback_committed(&self) -> bool {
+            self.fallback_committed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for PartialOutputThenRecoverClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call == 1 {
+                self.stream_output_observed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::retryable(
+                            crate::error::LlmProviderErrorKind::ServerOverloaded,
+                            serde_json::json!({"message": "late stream error"}),
+                        ),
+                    ),
+                    "late stream error",
+                ));
+            }
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok after same-model retry".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            if self.fallback_committed() {
+                "backup"
+            } else {
+                "primary"
+            }
+        }
+
+        fn prepare_model_fallback(
+            &self,
+            _failure: &AgentError,
+        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            Some(crate::AgentLlmFallbackSwitch {
+                previous_identity: crate::SessionLlmIdentity {
+                    model: "primary".to_string(),
+                    provider: crate::provider::Provider::Other,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                new_identity: crate::SessionLlmIdentity {
+                    model: "backup".to_string(),
+                    provider: crate::provider::Provider::Other,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                request_policy: crate::SessionLlmRequestPolicy {
+                    model: "backup".to_string(),
+                    provider_params: None,
+                    provider_tool_defaults: None,
+                },
+                capability_base_filter: ToolFilter::All,
+                context_window: None,
+                max_output_tokens: None,
+                skipped_targets: Vec::new(),
+            })
+        }
+
+        fn commit_model_fallback(&self, _identity: &crate::SessionLlmIdentity) {
+            self.fallback_committed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn begin_stream_output_observation(&self) {
+            self.stream_output_observed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn stream_output_observed(&self) -> bool {
+            self.stream_output_observed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
     #[tokio::test]
     async fn retry_exhaustion_surfaces_typed_terminal_failure() {
         use crate::retry::RetryPolicy;
@@ -8572,6 +9099,182 @@ mod tests {
             actual_delay >= hint,
             "retry delay ({actual_delay:?}) must be at least the server hint ({hint:?})",
         );
+    }
+
+    #[tokio::test]
+    async fn model_fallback_activation_filters_tools_before_retry() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&[
+            crate::VIEW_IMAGE_TOOL_NAME,
+            "shell",
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("trigger fallback".to_string().into())
+            .await
+            .expect("fallback retry should succeed");
+
+        assert_eq!(result.text, "ok after fallback");
+        let seen_tools = client.seen_tools();
+        assert_eq!(seen_tools.len(), 2);
+        assert!(
+            seen_tools[0].contains(&crate::VIEW_IMAGE_TOOL_NAME.to_string()),
+            "primary should see the initial visible tool set"
+        );
+        assert!(
+            !seen_tools[1].contains(&crate::VIEW_IMAGE_TOOL_NAME.to_string()),
+            "fallback retry should hide view_image for a downgraded model"
+        );
+        assert!(
+            seen_tools[1].contains(&"shell".to_string()),
+            "non-filtered tools should remain visible"
+        );
+        let notices = client.seen_notice_bodies();
+        assert!(
+            notices.get(1).is_some_and(|bodies| {
+                bodies.iter().any(|body| {
+                    body.contains("switched from model")
+                        && body.contains("Hidden tools for the fallback model: view_image")
+                })
+            }),
+            "fallback retry should inform the active model about the switch and hidden tool"
+        );
+        let seen_max_tokens = client.seen_max_tokens();
+        assert_eq!(seen_max_tokens.len(), 2);
+        assert_eq!(seen_max_tokens[1], 2048);
+        assert!(
+            seen_max_tokens[0] >= seen_max_tokens[1],
+            "fallback retry should clamp max tokens to the backup model limit"
+        );
+        let seen_provider_params = client.seen_provider_params();
+        assert_eq!(seen_provider_params.len(), 2);
+        assert_eq!(seen_provider_params[0], None);
+        assert_eq!(
+            seen_provider_params[1]
+                .as_ref()
+                .and_then(|params| params.temperature),
+            Some(0.37)
+        );
+        assert_eq!(
+            seen_provider_params[1]
+                .as_ref()
+                .and_then(|params| params.max_output_tokens),
+            Some(777)
+        );
+        let snapshot = agent
+            .tool_scope_snapshot()
+            .expect("effective tool scope snapshot");
+        assert!(
+            !snapshot
+                .visible_names
+                .iter()
+                .any(|name| name.as_str() == crate::VIEW_IMAGE_TOOL_NAME),
+            "reported live tool scope should match active fallback model visibility"
+        );
+        assert_eq!(
+            snapshot.capability_base_filter,
+            ToolFilter::Deny(
+                [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                    .into_iter()
+                    .collect()
+            )
+        );
+
+        let second = agent
+            .run("sticky fallback".to_string().into())
+            .await
+            .expect("subsequent turn should keep using fallback model");
+        assert_eq!(second.text, "ok after fallback");
+        let seen_tools = client.seen_tools();
+        assert_eq!(seen_tools.len(), 3);
+        assert!(
+            !seen_tools[2].contains(&crate::VIEW_IMAGE_TOOL_NAME.to_string()),
+            "subsequent fallback turn should keep the downgraded tool surface"
+        );
+        let seen_max_tokens = client.seen_max_tokens();
+        assert_eq!(seen_max_tokens.len(), 3);
+        assert_eq!(
+            seen_max_tokens[2], 2048,
+            "subsequent fallback turn should keep the backup model max-token clamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_fallback_does_not_switch_after_visible_stream_output() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(PartialOutputThenRecoverClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("partial stream then late error".to_string().into())
+            .await
+            .expect("same-model retry should recover after post-stream error");
+
+        assert_eq!(result.text, "ok after same-model retry");
+        assert_eq!(client.calls(), 2);
+        assert!(
+            !client.fallback_committed(),
+            "fallback must not activate after user-visible stream output escaped"
+        );
+    }
+
+    #[test]
+    fn model_fallback_safety_gate_rejects_timeout_failures() {
+        assert!(!super::fallback_activation_is_pre_stream_safe(
+            &AgentError::llm(
+                "mock",
+                LlmFailureReason::CallTimeout { duration_ms: 1000 },
+                "call timed out",
+            ),
+            false,
+        ));
+        assert!(!super::fallback_activation_is_pre_stream_safe(
+            &AgentError::llm(
+                "mock",
+                LlmFailureReason::NetworkTimeout { duration_ms: 1000 },
+                "network timed out",
+            ),
+            false,
+        ));
+        assert!(super::fallback_activation_is_pre_stream_safe(
+            &AgentError::llm(
+                "mock",
+                LlmFailureReason::InvalidModel("removed".to_string()),
+                "model removed",
+            ),
+            false,
+        ));
+        assert!(!super::fallback_activation_is_pre_stream_safe(
+            &AgentError::llm(
+                "mock",
+                LlmFailureReason::InvalidModel("removed".to_string()),
+                "model removed after partial output",
+            ),
+            true,
+        ));
     }
 
     /// Integration test: rate-limited error WITHOUT a hint uses the 30s floor,
@@ -8823,6 +9526,147 @@ mod tests {
         }
     }
 
+    struct ExtractionFallbackOverrideClient {
+        active_fallback: std::sync::atomic::AtomicBool,
+        call_count: std::sync::atomic::AtomicUsize,
+        seen_provider_params:
+            Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
+    }
+
+    impl ExtractionFallbackOverrideClient {
+        fn new() -> Self {
+            Self {
+                active_fallback: std::sync::atomic::AtomicBool::new(false),
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+                seen_provider_params: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_provider_params(
+            &self,
+        ) -> Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>> {
+            self.seen_provider_params.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ExtractionFallbackOverrideClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_provider_params
+                .lock()
+                .unwrap()
+                .push(provider_params.cloned());
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+
+            match call {
+                1 => Ok(text_response("main answer")),
+                2 => Err(AgentError::llm(
+                    "openai",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::retryable(
+                            crate::error::LlmProviderErrorKind::ServerOverloaded,
+                            serde_json::json!({"message": "extraction retryable failure"}),
+                        ),
+                    ),
+                    "extraction retryable failure",
+                )),
+                3 => Ok(text_response(r#"{"answer": "42"}"#)),
+                _ => Err(AgentError::InternalError(
+                    "ExtractionFallbackOverrideClient: unexpected extra call".to_string(),
+                )),
+            }
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            if self
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::provider::Provider::Anthropic
+            } else {
+                crate::provider::Provider::OpenAI
+            }
+        }
+
+        fn model(&self) -> &'static str {
+            if self
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                "claude-backup"
+            } else {
+                "gpt-primary"
+            }
+        }
+
+        fn prepare_model_fallback(
+            &self,
+            _failure: &AgentError,
+        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            use crate::lifecycle::run_primitive::{
+                AnthropicProviderTag, OpaqueProviderBody, ProviderParamsOverride, ProviderTag,
+            };
+
+            if self
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return None;
+            }
+
+            Some(crate::AgentLlmFallbackSwitch {
+                previous_identity: crate::SessionLlmIdentity {
+                    model: "gpt-primary".to_string(),
+                    provider: crate::provider::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                new_identity: crate::SessionLlmIdentity {
+                    model: "claude-backup".to_string(),
+                    provider: crate::provider::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                request_policy: crate::SessionLlmRequestPolicy {
+                    model: "claude-backup".to_string(),
+                    provider_params: Some(ProviderParamsOverride {
+                        provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                            web_search: Some(OpaqueProviderBody::from_value(
+                                &serde_json::json!({"type": "web_search"}),
+                            )),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }),
+                    provider_tool_defaults: None,
+                },
+                capability_base_filter: ToolFilter::All,
+                context_window: Some(128_000),
+                max_output_tokens: Some(4096),
+                skipped_targets: Vec::new(),
+            })
+        }
+
+        fn commit_model_fallback(&self, identity: &crate::SessionLlmIdentity) {
+            if identity.provider == crate::provider::Provider::Anthropic {
+                self.active_fallback
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
     fn text_response(text: &str) -> super::LlmStreamResult {
         super::LlmStreamResult::new(
             vec![AssistantBlock::Text {
@@ -8885,6 +9729,79 @@ mod tests {
             2,
             "expect 1 agentic + 1 extraction call"
         );
+    }
+
+    #[tokio::test]
+    async fn extraction_fallback_reapplies_structured_output_and_clears_native_search() {
+        use crate::lifecycle::run_primitive::ProviderTag;
+        use crate::retry::RetryPolicy;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ExtractionFallbackOverrideClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("extract after fallback".to_string().into())
+            .await
+            .expect("extraction fallback should retry and validate structured output");
+
+        assert_eq!(result.structured_output.unwrap()["answer"], "42");
+        let seen_params = client.seen_provider_params();
+        assert_eq!(
+            seen_params.len(),
+            3,
+            "expected main call, failed extraction call, and fallback extraction retry"
+        );
+        match seen_params[1]
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::OpenAi(tag)) => {
+                assert!(
+                    tag.structured_output.is_some(),
+                    "primary extraction call should carry structured output"
+                );
+                assert_eq!(
+                    tag.web_search, None,
+                    "primary extraction call must disable provider-native web search"
+                );
+            }
+            other => panic!("expected OpenAI extraction params, got {other:?}"),
+        }
+        match seen_params[2]
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::Anthropic(tag)) => {
+                assert!(
+                    tag.structured_output.is_some(),
+                    "fallback extraction retry should carry structured output for the new provider"
+                );
+                assert_eq!(
+                    tag.web_search, None,
+                    "fallback extraction retry must not re-enable provider-native web search"
+                );
+            }
+            other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
+        }
     }
 
     #[tokio::test]

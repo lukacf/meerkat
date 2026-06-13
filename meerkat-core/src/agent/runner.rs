@@ -705,7 +705,26 @@ where
 
     /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
     pub fn tool_scope_snapshot(&self) -> Option<crate::ToolScopeSnapshot> {
-        self.tool_scope.snapshot()
+        let mut snapshot = self.tool_scope.snapshot()?;
+        let capability_filter =
+            crate::ToolScope::compose(&[self.client.active_capability_base_filter()]);
+        snapshot
+            .visible_names
+            .retain(|name| capability_filter.allows(name.as_str()));
+        snapshot.capability_base_filter = self.client.active_capability_base_filter();
+        Some(snapshot)
+    }
+
+    /// Snapshot the provider-visible tool definitions for the active LLM model.
+    pub fn visible_tool_defs(&self) -> Vec<crate::ToolDef> {
+        let capability_filter =
+            crate::ToolScope::compose(&[self.client.active_capability_base_filter()]);
+        self.tool_scope
+            .visible_tools()
+            .iter()
+            .filter(|tool| capability_filter.allows(tool.name.as_str()))
+            .map(|tool| tool.as_ref().clone())
+            .collect()
     }
 
     /// Snapshot the live external tool-surface state, if supported by the dispatcher chain.

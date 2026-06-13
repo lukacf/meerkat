@@ -39,6 +39,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 33. **Trust is PeerId-keyed.** `TrustStore` (meerkat-comms/src/trust.rs) keys entries on `PeerId` and rejects duplicates with a typed error. Recipient-side wiring trust is a MobMachine obligation (`pending_recipient_trust: Set<PeerId>`), not fire-and-forget shell work.
 34. **Member revival is machine-authorized.** Post-discard revival flows observe → classify → realize through MobMachine (`member_revival_pending`, `MemberLiveMaterializationClassified`, `ResolveMemberRevival*`). `Broken` is terminal — the `not_broken` guard refuses retry and `member()` returns typed `MobError::MemberRestoreFailed`. Do not add shell-side retry loops.
 35. **Image-gen routing follows session identity.** The planner resolves the image target from `SessionModelRoutingStatus.session_provider` (typed session provider identity); model-name inference (`infer_from_model`) was deleted from the planner path. Do not reintroduce provider-prefix sniffing in image routing.
+36. **Model fallback is a core-applied switch, not a hidden client retry.** Generated recovery authority classifies the LLM failure; core decides pre-stream retry safety and applies identity, auth lease, request policy, token limits, and tool visibility before retry. The fallback client only selects a prebuilt candidate from the factory-resolved chain.
 
 ## Gotchas to check on every non-trivial change
 

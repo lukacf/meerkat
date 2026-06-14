@@ -2158,6 +2158,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "SpawnExecPhase",
+                &["Opened", "MembershipCommitted", "Activated"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LoopIterationReducerCommandKind",
                 &[
                     "StartLoop",

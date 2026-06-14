@@ -91,6 +91,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_kickoff_error`: `Map<AgentIdentity, String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
 - `member_revival_pending`: `Set<AgentIdentity>`
+- `spawn_exec_phase`: `Map<AgentIdentity, SpawnExecPhase>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
@@ -197,7 +198,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
+- `BeginSpawnExec`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
+- `CommitSpawnMembership`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
+- `CommitSpawnActivation`(agent_identity: AgentIdentity)
+- `AbortSpawnExec`(agent_identity: AgentIdentity)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -508,6 +512,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `bindings_require_known_identity`
 - `identity_runtime_material_matches_runtime_binding`
 - `member_spawn_material_matches_runtime_binding`
+- `spawn_exec_membership_commit_requires_runtime`
 - `external_peer_edges_are_keyed_coherently`
 - `supervisor_authority_tuple_consistent`
 - `supervisor_pending_authority_tuple_consistent`
@@ -2858,11 +2863,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SpawnManyFailureClassified`
 - To: `Destroyed`
 
-### `SpawnRunningFresh`
+### `CommitSpawnMembershipFresh`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- Guards:
+  - `spawn_exec_opened`
+  - `no_prior_session_binding`
+  - `replacing_absent`
+  - `bridge_session_present`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `CommitSpawnMembershipFreshPeerOnly`
+- From: `Running`
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- Guards:
+  - `spawn_exec_opened`
+  - `no_prior_session_binding`
+  - `replacing_absent`
+  - `bridge_session_absent`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `CommitSpawnMembershipReplacing`
+- From: `Running`
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- Guards:
+  - `spawn_exec_opened`
+  - `prior_session_binding_present`
+  - `replacing_present`
+  - `replacing_matches_current`
+  - `bridge_session_present`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `BeginSpawnExecFresh`
+- From: `Running`
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
+  - `spawn_exec_settled`
   - `no_prior_session_binding`
   - `replacing_absent`
   - `identity_not_external_peer`
@@ -2870,14 +2910,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `spawn_profile_authorized`
   - `spawn_profile_addressability_authorized`
   - `bridge_session_present`
-- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
-### `SpawnRunningFreshPeerOnly`
+### `BeginSpawnExecFreshPeerOnly`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
+  - `spawn_exec_settled`
   - `no_prior_session_binding`
   - `replacing_absent`
   - `identity_not_external_peer`
@@ -2885,14 +2925,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `spawn_profile_authorized`
   - `spawn_profile_addressability_authorized`
   - `bridge_session_absent`
-- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
-### `SpawnRunningReplacing`
+### `BeginSpawnExecReplacing`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
+  - `spawn_exec_settled`
   - `prior_session_binding_present`
   - `replacing_present`
   - `replacing_matches_current`
@@ -2901,8 +2941,101 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `spawn_profile_authorized`
   - `spawn_profile_addressability_authorized`
   - `bridge_session_present`
-- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
+
+### `CommitSpawnActivationFinalRunning`
+- From: `Running`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `spawn_exec_membership_committed`
+- To: `Running`
+
+### `CommitSpawnActivationFinalStopped`
+- From: `Stopped`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `spawn_exec_membership_committed`
+- To: `Stopped`
+
+### `CommitSpawnActivationFinalCompleted`
+- From: `Completed`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `spawn_exec_membership_committed`
+- To: `Completed`
+
+### `CommitSpawnActivationLateArrivalRunning`
+- From: `Running`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `not_committed`
+- To: `Running`
+
+### `CommitSpawnActivationLateArrivalStopped`
+- From: `Stopped`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `not_committed`
+- To: `Stopped`
+
+### `CommitSpawnActivationLateArrivalCompleted`
+- From: `Completed`
+- On: `CommitSpawnActivation`(agent_identity)
+- Guards:
+  - `not_committed`
+- To: `Completed`
+
+### `CommitSpawnActivationDestroyed`
+- From: `Destroyed`
+- On: `CommitSpawnActivation`(agent_identity)
+- To: `Destroyed`
+
+### `AbortSpawnExecActiveRunning`
+- From: `Running`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_in_flight`
+- To: `Running`
+
+### `AbortSpawnExecActiveStopped`
+- From: `Stopped`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_in_flight`
+- To: `Stopped`
+
+### `AbortSpawnExecActiveCompleted`
+- From: `Completed`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_in_flight`
+- To: `Completed`
+
+### `AbortSpawnExecLateArrivalRunning`
+- From: `Running`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_settled`
+- To: `Running`
+
+### `AbortSpawnExecLateArrivalStopped`
+- From: `Stopped`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_settled`
+- To: `Stopped`
+
+### `AbortSpawnExecLateArrivalCompleted`
+- From: `Completed`
+- On: `AbortSpawnExec`(agent_identity)
+- Guards:
+  - `spawn_exec_settled`
+- To: `Completed`
+
+### `AbortSpawnExecDestroyed`
+- From: `Destroyed`
+- On: `AbortSpawnExec`(agent_identity)
+- To: `Destroyed`
 
 ### `AuthorizeSpawnProfileRunning`
 - From: `Running`

@@ -104,6 +104,18 @@ macro_rules! mob_catalog_machine_dsl {
             // transition that replaces or clears the member's restore
             // classification. The session-registry cache never owns this fact.
             member_revival_pending: Set<AgentIdentity>,
+            // --- Spawn-execution phase ladder (machine owns the phase ORDER) ---
+            // A lightweight per-identity phase ladder: `BeginSpawnExec` opens
+            // the window (Opened), `CommitSpawnMembership` commits the membership
+            // facts (Opened -> MembershipCommitted), `CommitSpawnActivation`
+            // closes it (-> Settled, the entry is removed). The shell still runs
+            // each individual finalization step; the machine only OWNS + VALIDATES
+            // the phase order (Begin before Commit before Activate). No
+            // per-obligation tracking and no per-step request effects (those
+            // exploded the mob x meerkat composition state space). Absence of an
+            // entry == Settled (no spawn in flight), making every late-arrival /
+            // post-teardown input total.
+            spawn_exec_phase: Map<AgentIdentity, Enum<SpawnExecPhase>>,
             // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
             // draining/retiring sub-state independently of the mob-level
             // lifecycle phase so generated SubmitWork authority can decide
@@ -357,6 +369,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_error = EmptyMap,
             member_restore_failures = EmptyMap,
             member_revival_pending = EmptySet,
+            spawn_exec_phase = EmptyMap,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
@@ -584,7 +597,33 @@ macro_rules! mob_catalog_machine_dsl {
             ClassifyFlowStepTerminality { run_id: RunId, step_id: StepId, status: Enum<StepRunStatus> },
             ClassifyFlowFrameTerminalStatus { frame_id: FrameId },
             ClassifyFlowRunPublicResult { run_id: RunId, status: Enum<FlowRunStatus> },
-            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: Option<SessionId>, replacing: Option<SessionId> },
+            // Spawn-execution phase ladder (machine owns the phase ORDER).
+            // A lightweight 3-step ladder, NOT a per-obligation drain: the
+            // machine validates Begin-before-Commit-before-Activate, while the
+            // shell still executes the individual finalization steps. The
+            // per-obligation feedback inputs + per-step request effects were
+            // removed because they exploded the mob x meerkat composition state
+            // space. `BeginSpawnExec` opens the per-identity window (carrying the
+            // original Spawn authority guards); `CommitSpawnMembership` (renamed
+            // `Spawn`, full membership field set retained — the verbatim
+            // SpawnRunning* update/emit blocks consume those fields) commits the
+            // membership facts; `CommitSpawnActivation` closes the window;
+            // `AbortSpawnExec` clears it. Activation/abort are total over an
+            // absent (Settled) phase entry, mirroring `KickoffQuiesced`.
+            BeginSpawnExec {
+                agent_identity: AgentIdentity,
+                agent_runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                profile_material_digest: String,
+                external_addressable: bool,
+                runtime_mode: Enum<SpawnPolicyRuntimeMode>,
+                bridge_session_id: Option<SessionId>,
+                replacing: Option<SessionId>,
+            },
+            CommitSpawnMembership { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: Option<SessionId>, replacing: Option<SessionId> },
+            CommitSpawnActivation { agent_identity: AgentIdentity },
+            AbortSpawnExec { agent_identity: AgentIdentity },
             AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             ClassifySpawnManyFailure { observation: Enum<MobSpawnManyFailureObservationKind> },
             ClassifyMemberWait { agent_identity: AgentIdentity },
@@ -1127,6 +1166,8 @@ macro_rules! mob_catalog_machine_dsl {
             // `Destroy`/`DestroyMob` are guarded on the pending-spawn table
             // being drained instead of silently wiping it.
             RequestPendingSpawnQuiesceForDestroy,
+            // (Spawn-execution phase ladder emits NO request effects — the
+            // machine only owns the phase order; the shell realizes each step.)
             // Row #14: machine-owned duplicate-member admission verdict. The
             // actor mirrors this (Admitted -> Ok; DuplicateRejected ->
             // MemberAlreadyExists) instead of probing the PendingSpawnLineage map.
@@ -1489,6 +1530,19 @@ macro_rules! mob_catalog_machine_dsl {
             && for_all(id in self.identity_to_runtime.keys(), self.member_runtime_modes.contains_key(id))
             && for_all(id in self.member_profile_names.keys(), self.identity_to_runtime.contains_key(id))
             && for_all(id in self.member_runtime_modes.keys(), self.identity_to_runtime.contains_key(id))
+        }
+
+        // Spawn-exec phase ladder: once a spawn-exec has committed membership
+        // (phase == MembershipCommitted), the identity must already appear in
+        // identity_to_runtime (the membership commit inserts it in the same
+        // atomic step). The Opened phase precedes the membership commit, so it
+        // is exempt. This documents + verifies the ladder's commit ordering; it
+        // is NOT a duplicate of bindings_require_known_identity (which keys off
+        // member_session_bindings, not the spawn_exec phase).
+        invariant spawn_exec_membership_commit_requires_runtime {
+            for_all(id in self.spawn_exec_phase.keys(),
+                self.spawn_exec_phase.get_cloned(id) != Some(SpawnExecPhase::MembershipCommitted)
+                || self.identity_to_runtime.contains_key(id))
         }
 
         invariant external_peer_edges_are_keyed_coherently {
@@ -3242,16 +3296,23 @@ macro_rules! mob_catalog_machine_dsl {
         // enforces caller/state consistency, and a mismatched caller fails
         // loudly with "no transition matched" rather than silently picking a
         // wrong branch.
-        transition SpawnRunningFresh {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+        // CommitSpawnMembership{Fresh,FreshPeerOnly,Replacing} (renamed from the
+        // old SpawnRunning* transitions): the membership-commit rung of the
+        // phase ladder. The original authority guards (coordinator_bound,
+        // addressability/digest authorization, identity_not_external_peer) moved
+        // to the BeginSpawnExec opener; these commit transitions guard on the
+        // per-identity phase == Opened plus the branch discriminator
+        // (no_prior_session_binding/replacing/bridge present|absent). The
+        // membership update + 4 emits are preserved verbatim from the originals,
+        // so the membership facts still mutate atomically in one transition (no
+        // torn state, bindings_require_known_identity invariant preserved). The
+        // update additionally flips spawn_exec_phase -> MembershipCommitted.
+        transition CommitSpawnMembershipFresh {
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "replacing_absent" { replacing == None }
-            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
-            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
-            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
-            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             guard "bridge_session_present" { bridge_session_id != None }
             update {
                 // Spawn is the "member joined live_runtime_ids" fact. The
@@ -3291,6 +3352,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
                 self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Phase ladder: Opened -> MembershipCommitted.
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: bridge_session_id.get("value") }
@@ -3306,16 +3369,12 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
-        transition SpawnRunningFreshPeerOnly {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+        transition CommitSpawnMembershipFreshPeerOnly {
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "replacing_absent" { replacing == None }
-            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
-            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
-            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
-            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             guard "bridge_session_absent" { bridge_session_id == None }
             update {
                 self.live_runtime_ids.insert(agent_runtime_id);
@@ -3345,6 +3404,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
                 self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Phase ladder: Opened -> MembershipCommitted.
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -3358,17 +3419,13 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
-        transition SpawnRunningReplacing {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+        transition CommitSpawnMembershipReplacing {
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
             guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "replacing_present" { replacing != None }
             guard "replacing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(replacing.get("value")) }
-            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
-            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
-            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
-            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             guard "bridge_session_present" { bridge_session_id != None }
             update {
                 self.live_runtime_ids.insert(agent_runtime_id);
@@ -3398,6 +3455,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
                 self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
+                // Phase ladder: Opened -> MembershipCommitted.
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: bridge_session_id.get("value") }
@@ -3411,6 +3470,142 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: bridge_session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+        }
+
+        // =====================================================================
+        // Spawn-execution phase ladder: opener + final activation commit + abort.
+        // A lightweight 3-rung ladder (Begin -> Commit -> Activate). The machine
+        // OWNS + VALIDATES the phase ORDER; the shell still runs each individual
+        // finalization step. NO per-obligation tracking and NO per-step request
+        // effects (those exploded the mob x meerkat composition state space). The
+        // opener carries the original Spawn authority guards; activation/abort are
+        // total over an absent (Settled) phase entry via LateArrival/Destroyed
+        // no-op variants, mirroring KickoffQuiescedIdle/Destroyed.
+        // =====================================================================
+
+        // 1. Opener. Three guarded variants carrying the ORIGINAL Spawn authority
+        // guards (the guards the renamed CommitSpawnMembership* no longer carry) +
+        // a `spawn_exec_settled` guard (no window already open for this id). Sets
+        // ONLY spawn_exec_phase[id] = Opened; emits nothing. Does NOT mutate
+        // membership and does NOT consume the single-shot spawn_profile_authority_*
+        // material (that happens at CommitSpawnMembership). Self-loops to Running.
+        transition BeginSpawnExecFresh {
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "replacing_absent" { replacing == None }
+            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "bridge_session_present" { bridge_session_id != None }
+            update {
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::Opened);
+            }
+            to Running
+        }
+
+        transition BeginSpawnExecFreshPeerOnly {
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "replacing_absent" { replacing == None }
+            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "bridge_session_absent" { bridge_session_id == None }
+            update {
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::Opened);
+            }
+            to Running
+        }
+
+        transition BeginSpawnExecReplacing {
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "replacing_present" { replacing != None }
+            guard "replacing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(replacing.get("value")) }
+            guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "bridge_session_present" { bridge_session_id != None }
+            update {
+                self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::Opened);
+            }
+            to Running
+        }
+
+        // (removed) Per-step obligation feedback closers
+        // (SpawnTrustInstalled/SpawnOverlayUpserted/SpawnMemberEventAppended/
+        // SpawnPeerRegistered/SpawnKickoffMarked/SpawnWired/SpawnBindingDrained/
+        // SpawnActivated and their *Closed/*LateArrival/*Destroyed variants):
+        // the phase ladder tracks no per-step obligations, so the shell runs each
+        // step without a per-step machine handshake.
+
+        // 2. Final commit (Opened-membership -> Settled). Guarded ONLY on phase ==
+        // MembershipCommitted; removes the spawn_exec_phase entry (-> Settled),
+        // leaving no spawn-exec residue (membership facts persist independently).
+        // LateArrival/Destroyed keep the input total over an absent entry.
+        transition CommitSpawnActivationFinal {
+            per_phase [Running, Stopped, Completed]
+            on input CommitSpawnActivation { agent_identity }
+            guard "spawn_exec_membership_committed" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MembershipCommitted) }
+            update {
+                self.spawn_exec_phase.remove(agent_identity);
+            }
+            to Running
+        }
+        transition CommitSpawnActivationLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input CommitSpawnActivation { agent_identity }
+            // Exact complement of the Final guard: total over Settled (absent)
+            // AND a premature arrival while still Opened (membership not yet
+            // committed) — both are accepted no-ops.
+            guard "not_committed" { self.spawn_exec_phase.get_cloned(agent_identity) != Some(SpawnExecPhase::MembershipCommitted) }
+            update {}
+            to Running
+        }
+        transition CommitSpawnActivationDestroyed {
+            on input CommitSpawnActivation { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // 3. Abort (any non-Destroyed phase). Clears the spawn_exec_phase entry
+        // (-> Settled); the shell decides which compensator to run from its own
+        // step position. No machine-owned compensation routing or request effects.
+        // LateArrival (already Settled) + Destroyed keep the input total.
+        transition AbortSpawnExecActive {
+            per_phase [Running, Stopped, Completed]
+            on input AbortSpawnExec { agent_identity }
+            guard "spawn_exec_in_flight" { self.spawn_exec_phase.contains_key(agent_identity) == true }
+            update {
+                self.spawn_exec_phase.remove(agent_identity);
+            }
+            to Running
+        }
+        transition AbortSpawnExecLateArrival {
+            per_phase [Running, Stopped, Completed]
+            on input AbortSpawnExec { agent_identity }
+            guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+        transition AbortSpawnExecDestroyed {
+            on input AbortSpawnExec { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
         }
 
         transition AuthorizeSpawnProfileRunning {
@@ -4564,6 +4759,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Spawn-exec phase ladder: retire drops this identity's window to
+                // Settled (any late CommitSpawnActivation/AbortSpawnExec becomes a
+                // no-op; the membership-commit invariant stays satisfied).
+                self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeRetire { session_id: session_id.get("value") }
@@ -4583,6 +4782,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Spawn-exec phase ladder: retire drops this identity's window to
+                // Settled (see RetireMember).
+                self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
             emit RequestKickoffQuiesce { member_id: agent_identity }
@@ -5260,6 +5462,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
                 self.member_revival_pending = EmptySet;
+                // Spawn-exec phase ladder: total teardown — clear the whole phase
+                // map so no in-flight spawn-exec survives into Destroyed (every
+                // late CommitSpawnActivation/AbortSpawnExec becomes a Settled no-op).
+                self.spawn_exec_phase = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.coordinator_bound = false;
@@ -5284,6 +5490,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
                 self.member_revival_pending = EmptySet;
+                // Spawn-exec phase ladder: total teardown (see DestroyMob).
+                self.spawn_exec_phase = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
@@ -10211,6 +10419,21 @@ pub enum KickoffPhase {
     Started,
     Failed,
     Cancelled,
+}
+
+/// Per-identity spawn-execution phase ladder. Absence of an entry in
+/// `spawn_exec_phase` == Settled (no spawn-exec in flight for that identity),
+/// which makes every late/post-teardown CommitSpawnActivation/AbortSpawnExec
+/// input a total no-op. `Opened`: `BeginSpawnExec` committed, membership not yet
+/// committed. `MembershipCommitted`: `CommitSpawnMembership` committed the
+/// membership facts atomically. `Activated`: terminal rung — reserved for an
+/// explicit "activated" marker; the current ladder removes the entry directly at
+/// `CommitSpawnActivation` (Settled) rather than parking in `Activated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpawnExecPhase {
+    Opened,
+    MembershipCommitted,
+    Activated,
 }
 
 /// Dependency satisfaction mode for a step or frame node.

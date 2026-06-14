@@ -873,13 +873,64 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifySpawnManyFailureInternalDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SpawnRunningFresh`
+- `CommitSpawnMembershipFresh`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SpawnRunningFreshPeerOnly`
+- `CommitSpawnMembershipFreshPeerOnly`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `SpawnRunningReplacing`
+- `CommitSpawnMembershipReplacing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecFreshPeerOnly`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecReplacing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationFinalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationFinalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationFinalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitSpawnActivationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecActiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecActiveCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeSpawnProfileRunning`
@@ -2585,6 +2636,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `member_spawn_material_matches_runtime_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `spawn_exec_membership_commit_requires_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `external_peer_edges_are_keyed_coherently`

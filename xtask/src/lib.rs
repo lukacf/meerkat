@@ -92,9 +92,21 @@ pub fn run() -> Result<()> {
         Commands::ProtocolCodegen => {
             run_machine_authority_task(protocol_codegen::run_protocol_codegen)
         }
-        Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
-        Commands::EffectAuthority => effect_authority::run_effect_authority(),
-        Commands::BridgeClassifier => bridge_classifier::run_bridge_classifier(),
+        // rmat-audit, effect-authority, and bridge-classifier all walk the
+        // whole workspace's syn ASTs — including the large generated machine
+        // kernels, whose transition dispatch nests deeply — so they need the
+        // same deep stack as the other machine-authority tasks. The default
+        // ~8 MiB main-thread stack overflows syn's recursive visitor once the
+        // mob kernel grows (the spawn-exec ladder pushed it over the edge).
+        Commands::RmatAudit(args) => {
+            run_machine_authority_task(move || rmat_audit::rmat_audit(args))
+        }
+        Commands::EffectAuthority => {
+            run_machine_authority_task(effect_authority::run_effect_authority)
+        }
+        Commands::BridgeClassifier => {
+            run_machine_authority_task(bridge_classifier::run_bridge_classifier)
+        }
         // The ownership ledger resolves anchors against the canonical machine
         // catalog; constructing the DSL schemas needs the same deep stack as
         // the other machine-authority tasks.

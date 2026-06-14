@@ -1560,15 +1560,37 @@ impl MeerkatMachine {
                 }
             }
         }
-        if let Some(drain_handle) = drain_handle
-            && let Err(join_error) = drain_handle.await
-            && !join_error.is_cancelled()
-        {
-            tracing::warn!(
-                %session_id,
-                error = %join_error,
-                "comms drain task ended abnormally during unregister drain"
-            );
+        if let Some(drain_handle) = drain_handle {
+            // The comms drain task was already aborted via
+            // `abort_keeping_handle()` above; await its quiescence, but BOUND
+            // the wait exactly like the runtime-loop handle. An external member
+            // (e.g. a TCP transport drain) whose task is parked in an operation
+            // that does not observe the cooperative abort promptly would
+            // otherwise wedge teardown forever on an unbounded `.await`
+            // (regression: `external_tcp_production_drain` hung past 900s). The
+            // grace is far above any realistic cancel latency; on elapse we
+            // abort the handle and proceed — the task is already aborted and
+            // will unwind, and teardown must not stall on it.
+            const COMMS_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+            let drain_abort = drain_handle.abort_handle();
+            match crate::tokio::time::timeout(COMMS_DRAIN_GRACE, drain_handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_error)) if join_error.is_cancelled() => {}
+                Ok(Err(join_error)) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %join_error,
+                        "comms drain task ended abnormally during unregister drain"
+                    );
+                }
+                Err(_elapsed) => {
+                    drain_abort.abort();
+                    tracing::warn!(
+                        %session_id,
+                        "comms drain task did not quiesce within the unregister drain grace window; abandoning the already-aborted drain task so teardown cannot stall"
+                    );
+                }
+            }
         }
 
         // Phase 5: re-acquire the gate. If the session vanished while the gate

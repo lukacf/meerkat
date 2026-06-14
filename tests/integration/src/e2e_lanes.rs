@@ -4271,7 +4271,12 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 package: "rkat",
                 test_target: "system_cli_resume",
                 test_name: "integration_real_cli_resume_tools",
-                features: &["integration-real-tests"],
+                // yolo's Full preset enables `memory` only when the build
+                // supports it (`cfg!(feature = "memory-store-session")`), so the
+                // scenario must build rkat with memory or the
+                // `memory should be recorded for yolo` assertion degrades to
+                // Disable and fails.
+                features: &["integration-real-tests", "memory-store-session"],
                 all_features: false,
             },
         }),

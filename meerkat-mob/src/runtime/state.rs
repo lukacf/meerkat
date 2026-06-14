@@ -172,6 +172,13 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::SessionId,
     >,
+    // Machine-driven spawn-exec ladder phase per in-flight identity, projected
+    // from `MobMachineAuthority.state.spawn_exec_phase`. Exposed so the runtime
+    // parity field evaluator covers the formal `spawn_exec_phase` state field.
+    pub spawn_exec_phase: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SpawnExecPhase,
+    >,
     pub pending_spawn_sessions: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::SessionId,

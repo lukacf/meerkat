@@ -32569,7 +32569,26 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
     .expect("authorize stale local member");
     crate::machines::mob_machine::MobMachineMutator::apply(
         &mut stale_authority,
-        crate::machines::mob_machine::MobMachineInput::Spawn {
+        crate::machines::mob_machine::MobMachineInput::BeginSpawnExec {
+            agent_identity: stale_edge.local.clone(),
+            agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId(
+                "stale-l-1-runtime".to_string(),
+            ),
+            fence_token: crate::machines::mob_machine::FenceToken(1),
+            generation: crate::machines::mob_machine::Generation(1),
+            profile_material_digest: "stale-profile-digest".to_string(),
+            external_addressable: true,
+            runtime_mode: crate::machines::mob_machine::SpawnPolicyRuntimeMode::AutonomousHost,
+            bridge_session_id: Some(crate::machines::mob_machine::SessionId(
+                "stale-l-1-session".to_string(),
+            )),
+            replacing: None,
+        },
+    )
+    .expect("begin spawn exec for stale local member");
+    crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::CommitSpawnMembership {
             agent_identity: stale_edge.local.clone(),
             agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId(
                 "stale-l-1-runtime".to_string(),
@@ -38816,6 +38835,7 @@ struct MobRuntimeParitySnapshotSummary {
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
     member_session_bindings: BTreeMap<String, String>,
+    spawn_exec_phase: BTreeMap<String, String>,
     member_profile_names: BTreeMap<String, String>,
     member_runtime_modes: BTreeMap<String, String>,
     pending_spawn_sessions: BTreeMap<String, String>,
@@ -39359,7 +39379,14 @@ fn mob_runtime_parity_probe_for_input_variant(
     input_variant: SchemaMobMachineInputVariant,
 ) -> Option<MobRuntimeParityProbeInput> {
     match input_variant {
-        SchemaMobMachineInputVariant::Spawn => Some(MobRuntimeParityProbeInput::Spawn),
+        // The runtime spawn probe drives the full spawn-exec ladder; its
+        // membership-establishing `CommitSpawnMembership` step is the
+        // probe-required executable variant. `BeginSpawnExec`,
+        // `CommitSpawnActivation`, and `AbortSpawnExec` are runtime-internal
+        // sub-steps (see the runtime-internal manifest) and need no probe.
+        SchemaMobMachineInputVariant::CommitSpawnMembership => {
+            Some(MobRuntimeParityProbeInput::Spawn)
+        }
         SchemaMobMachineInputVariant::AuthorizeSpawnProfile => {
             Some(MobRuntimeParityProbeInput::AuthorizeSpawnProfile)
         }
@@ -39613,6 +39640,7 @@ async fn mob_runtime_parity_snapshot_summary(
         supervisor_pending_authority_accepted_peer_ids,
         pending_recipient_trust,
         member_session_bindings,
+        spawn_exec_phase,
         member_profile_names,
         member_runtime_modes,
         pending_spawn_sessions,
@@ -39709,6 +39737,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|peer_id| format!("{peer_id:?}"))
                     .collect::<BTreeSet<_>>(),
                 snap.member_session_bindings
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_exec_phase
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
@@ -39827,6 +39859,7 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeMap::new(),
                 BTreeSet::new(),
                 0,
                 false,
@@ -39908,6 +39941,7 @@ async fn mob_runtime_parity_snapshot_summary(
         supervisor_pending_authority_accepted_peer_ids,
         pending_recipient_trust,
         member_session_bindings,
+        spawn_exec_phase,
         member_profile_names,
         member_runtime_modes,
         pending_spawn_sessions,
@@ -40096,6 +40130,13 @@ fn mob_runtime_parity_field_value(
         "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_session_bindings
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_exec_phase" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_exec_phase
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
@@ -41584,7 +41625,9 @@ fn mob_runtime_parity_probe_input_variant(
     probe: MobRuntimeParityProbeInput,
 ) -> Option<SchemaMobMachineInputVariant> {
     match probe {
-        MobRuntimeParityProbeInput::Spawn => Some(SchemaMobMachineInputVariant::Spawn),
+        MobRuntimeParityProbeInput::Spawn => {
+            Some(SchemaMobMachineInputVariant::CommitSpawnMembership)
+        }
         MobRuntimeParityProbeInput::AuthorizeSpawnProfile => {
             Some(SchemaMobMachineInputVariant::AuthorizeSpawnProfile)
         }

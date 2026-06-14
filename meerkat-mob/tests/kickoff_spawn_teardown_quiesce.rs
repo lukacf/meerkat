@@ -68,9 +68,28 @@ fn authorize_spawn_profile(
 
 fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge_sid: &str) {
     authorize_spawn_profile(authority, identity_name, 1);
+    // Drive the full machine-driven spawn ladder the way the actor does:
+    // `BeginSpawnExec` opens the per-identity phase, `CommitSpawnMembership`
+    // establishes the live member, and `CommitSpawnActivation` settles the
+    // phase.
     MobMachineMutator::apply(
         authority,
-        MobMachineInput::Spawn {
+        MobMachineInput::BeginSpawnExec {
+            agent_identity: identity(identity_name),
+            agent_runtime_id: runtime_id(identity_name, 1),
+            fence_token: FenceToken(1),
+            generation: Generation(1),
+            profile_material_digest: profile_material_digest(identity_name, 1),
+            external_addressable: false,
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            bridge_session_id: Some(session_id(bridge_sid)),
+            replacing: None,
+        },
+    )
+    .expect("begin spawn exec must be accepted");
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::CommitSpawnMembership {
             agent_identity: identity(identity_name),
             agent_runtime_id: runtime_id(identity_name, 1),
             fence_token: FenceToken(1),
@@ -83,6 +102,13 @@ fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge
         },
     )
     .expect("fresh spawn must be accepted");
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::CommitSpawnActivation {
+            agent_identity: identity(identity_name),
+        },
+    )
+    .expect("commit spawn activation must settle the spawn-exec phase");
 }
 
 /// Drive the member's kickoff into the in-flight `Starting` state through the

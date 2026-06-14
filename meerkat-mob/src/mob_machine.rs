@@ -324,7 +324,7 @@ impl MobMachineCommandVariant {
             Self::RunFlow => Some(MobMachineCatalogInput::RunFlow),
             Self::CancelFlow => Some(MobMachineCatalogInput::CancelFlow),
             Self::FlowStatus => Some(MobMachineCatalogInput::FlowStatus),
-            Self::Spawn => Some(MobMachineCatalogInput::Spawn),
+            Self::Spawn => Some(MobMachineCatalogInput::CommitSpawnMembership),
             Self::EnsureMember => Some(MobMachineCatalogInput::EnsureMember),
             Self::Reconcile => Some(MobMachineCatalogInput::Reconcile),
             Self::Retire => Some(MobMachineCatalogInput::Retire),
@@ -388,6 +388,12 @@ pub enum MobMachineRuntimeInternalReason {
     TrustHandoffAuthority,
     CoordinationBoardAuthority,
     AdaptiveFlowAuthority,
+    /// Spawn-exec ladder sub-steps (`BeginSpawnExec`, `CommitSpawnActivation`,
+    /// `AbortSpawnExec`) that the runtime drives internally inside
+    /// `finalize_spawn_*`. The membership-establishing `CommitSpawnMembership`
+    /// step is the surfaced spawn command target; these three are internal
+    /// phase transitions with no independent surface command or runtime probe.
+    SpawnExecLadderAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,6 +410,18 @@ pub struct MobMachineRuntimeInternalClassificationRecord {
 
 const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     &[MobMachineRuntimeInternalClassificationRecord] = &[
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginSpawnExec,
+        reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CommitSpawnActivation,
+        reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AbortSpawnExec,
+        reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::SubscribeStructuralEvents,
         reason: MobMachineRuntimeInternalReason::EventObservationAuthority,
@@ -933,7 +951,13 @@ const fn mob_machine_command_classification(
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::FlowStatus)
         }
         MobMachineCommandVariant::Spawn => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::Spawn)
+            // The public spawn command drives the spawn-exec ladder; its
+            // membership-establishing step (`CommitSpawnMembership`) is the
+            // surfaced catalog target. The other ladder steps are runtime
+            // internal (see `MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS`).
+            MobMachineCommandClassification::CatalogInput(
+                MobMachineCatalogInput::CommitSpawnMembership,
+            )
         }
         MobMachineCommandVariant::EnsureMember => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::EnsureMember)

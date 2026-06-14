@@ -7056,7 +7056,22 @@ mod tests {
         .expect("profile authority should admit");
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
-            mob_dsl::MobMachineInput::Spawn {
+            mob_dsl::MobMachineInput::BeginSpawnExec {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(7)),
+                generation: mob_dsl::Generation::from_domain(runtime_id.generation),
+                profile_material_digest: profile_digest.clone(),
+                external_addressable: false,
+                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
+                bridge_session_id: None,
+                replacing: None,
+            },
+        )
+        .expect("begin spawn exec should admit");
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::CommitSpawnMembership {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(7)),
@@ -7068,7 +7083,7 @@ mod tests {
                 replacing: None,
             },
         )
-        .expect("spawn should admit");
+        .expect("commit spawn membership should admit");
 
         let projected = MobHandle::project_member_list_entry_from_machine_identity(
             &dsl_identity,
@@ -7121,7 +7136,22 @@ mod tests {
             .expect("profile authority should admit");
             mob_dsl::MobMachineMutator::apply(
                 authority,
-                mob_dsl::MobMachineInput::Spawn {
+                mob_dsl::MobMachineInput::BeginSpawnExec {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                    fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(0)),
+                    generation: mob_dsl::Generation::from_domain(runtime_id.generation),
+                    profile_material_digest: profile_digest.clone(),
+                    external_addressable: true,
+                    runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
+                    bridge_session_id: bridge_session_id.clone(),
+                    replacing: None,
+                },
+            )
+            .expect("begin spawn exec should admit");
+            mob_dsl::MobMachineMutator::apply(
+                authority,
+                mob_dsl::MobMachineInput::CommitSpawnMembership {
                     agent_identity: dsl_identity,
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
                     fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(0)),
@@ -7133,7 +7163,7 @@ mod tests {
                     replacing: None,
                 },
             )
-            .expect("spawn should admit");
+            .expect("commit spawn membership should admit");
         }
 
         let bridge_backed = AgentIdentity::from("w-bridge");

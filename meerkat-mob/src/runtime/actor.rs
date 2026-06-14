@@ -1056,6 +1056,44 @@ struct FinalizeSpawnOutcome {
     failed_restore_peer_ids: Vec<RespawnTopologyPeerId>,
 }
 
+/// Heap-allocated carrier for the spawn-finalize parameters.
+///
+/// `finalize_spawn_from_pending` was a single ~620-line async fn whose state
+/// machine compiled to a ~38KiB future. During fleet restore many of these
+/// futures were polled while nested under `MobBuilder::reconcile_resume` and
+/// the `MobActor::run` task frame, and the deep comms-drain stage could
+/// overflow tokio's 2MiB worker stack. Boxing the parameters here keeps the
+/// thin driver frame at a single pointer, and the admit/activate split (each
+/// `Box::pin`ned) ensures the pre-commit stage frame is dropped before the
+/// post-commit activation work — including the comms drain — is polled.
+struct SpawnFinalizeCtx {
+    profile_name: ProfileName,
+    agent_identity: AgentIdentity,
+    generation: crate::ids::Generation,
+    fence_token: crate::ids::FenceToken,
+    runtime_mode: crate::MobRuntimeMode,
+    prompt: ContentInput,
+    initial_turn_prompt: Option<ContentInput>,
+    labels: std::collections::BTreeMap<String, String>,
+    operation_id: meerkat_core::ops::OperationId,
+    owner_bridge_session_id: Option<SessionId>,
+    auto_wire_parent: bool,
+    restore_wiring: Option<RestoreWiringPlan>,
+    effective_profile_override: Option<crate::profile::Profile>,
+    authorized_profile_material: AuthorizedSpawnProfileMaterial,
+    continuity_intent: super::handle::SpawnContinuityIntent,
+}
+
+/// Facts produced by the spawn-admit phase (`BeginSpawnExec` →
+/// `CommitSpawnMembership` → `provision.commit()`) that the activation phase
+/// (`CommitSpawnActivation`) needs to finish wiring the member into the roster
+/// and runtime.
+struct SpawnAdmitted {
+    member_ref: MemberRef,
+    agent_runtime_id: crate::ids::AgentRuntimeId,
+    is_replacing: bool,
+}
+
 struct RespawnTopologyRestoreResolution {
     result: mob_dsl::RespawnTopologyRestoreResultKind,
     failed_peer_ids: Vec<RespawnTopologyPeerId>,
@@ -5928,8 +5966,12 @@ impl MobActor {
             .get(&dsl_identity)
             .cloned();
 
+        // Spawn-ladder admission preview: `BeginSpawnExec` carries the spawn
+        // admission guards (the gate the old monolithic `Spawn` input owned),
+        // so a read-only peek of it is the canonical "would this spawn be
+        // admitted" probe.
         self.preview_dsl_input(
-            mob_dsl::MobMachineInput::Spawn {
+            mob_dsl::MobMachineInput::BeginSpawnExec {
                 agent_identity: dsl_identity,
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
                     &crate::ids::AgentRuntimeId::initial(domain_identity),
@@ -6400,7 +6442,12 @@ impl MobActor {
                         "spawn preview could not recover DSL authority state: {error}"
                     ))
                 })?;
-        let spawn = mob_dsl::MobMachineInput::Spawn {
+        // Spawn-ladder preview: drive the member through `BeginSpawnExec` →
+        // `CommitSpawnMembership` so it is committed into membership before the
+        // `SubmitWork` admission guard is evaluated against the recovered
+        // authority.
+        let preview_bridge_session_id = mob_dsl::SessionId::from_domain(&SessionId::new());
+        let begin_spawn = mob_dsl::MobMachineInput::BeginSpawnExec {
             agent_identity: dsl_identity.clone(),
             agent_runtime_id: dsl_runtime_id.clone(),
             fence_token: dsl_fence_token,
@@ -6408,12 +6455,24 @@ impl MobActor {
             profile_material_digest: authorized_profile_material.profile_material_digest.clone(),
             external_addressable: authorized_profile_material.external_addressable,
             runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::AutonomousHost,
-            bridge_session_id: Some(mob_dsl::SessionId::from_domain(&SessionId::new())),
+            bridge_session_id: Some(preview_bridge_session_id.clone()),
+            replacing: replacing.clone(),
+        };
+        mob_dsl::MobMachineMutator::apply(&mut authority, begin_spawn)
+            .map_err(|_| self.invalid_transition_to(MobState::Running))?;
+        let commit_membership = mob_dsl::MobMachineInput::CommitSpawnMembership {
+            agent_identity: dsl_identity.clone(),
+            agent_runtime_id: dsl_runtime_id.clone(),
+            fence_token: dsl_fence_token,
+            generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
+            profile_material_digest: authorized_profile_material.profile_material_digest.clone(),
+            external_addressable: authorized_profile_material.external_addressable,
+            runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::AutonomousHost,
+            bridge_session_id: Some(preview_bridge_session_id),
             replacing,
         };
-        let transition = mob_dsl::MobMachineMutator::apply(&mut authority, spawn)
+        mob_dsl::MobMachineMutator::apply(&mut authority, commit_membership)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
-        let _ = transition;
 
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
@@ -7568,6 +7627,7 @@ impl MobActor {
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_revival_pending: dsl.member_revival_pending.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
+                        spawn_exec_phase: dsl.spawn_exec_phase.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
                         pending_session_ingress_detach_runtime_ids: dsl
                             .pending_session_ingress_detach_runtime_ids
@@ -9798,6 +9858,39 @@ impl MobActor {
         spawn_result
     }
 
+    /// Reset the `spawn_exec` phase opened by `BeginSpawnExec` after a
+    /// pre-`CommitSpawnMembership` failure, so the identity stays respawnable.
+    /// Returns the original spawn error, folding any `AbortSpawnExec` failure
+    /// into an `Internal` error — a wedged spawn-exec phase is never silently
+    /// dropped.
+    fn fold_spawn_exec_abort(
+        &mut self,
+        dsl_identity: &mob_dsl::AgentIdentity,
+        agent_identity: &AgentIdentity,
+        original: MobError,
+        context: &str,
+    ) -> MobError {
+        match self.apply_dsl_input(
+            mob_dsl::MobMachineInput::AbortSpawnExec {
+                agent_identity: dsl_identity.clone(),
+            },
+            context,
+        ) {
+            Ok(()) => original,
+            Err(abort_error) => MobError::Internal(format!(
+                "spawn pre-commit unwind for '{agent_identity}' ({context}): {original}; spawn-exec phase reset (AbortSpawnExec) failed: {abort_error}"
+            )),
+        }
+    }
+
+    /// Machine-driven spawn ladder driver.
+    ///
+    /// The work is split into two `Box::pin`ned phases so the pre-commit
+    /// (`finalize_spawn_admit`) future is dropped before the post-commit
+    /// activation work — including the deep comms drain — is polled. Combined
+    /// with the boxed parameter carrier this keeps the spawn off tokio's 2MiB
+    /// worker stack during fleet restore (the old single ~38KiB future could
+    /// overflow it while nested under `reconcile_resume` and the actor task).
     #[allow(clippy::too_many_arguments)]
     async fn finalize_spawn_from_pending(
         &mut self,
@@ -9824,6 +9917,45 @@ impl MobActor {
             runtime_mode = ?runtime_mode,
             "MobActor::finalize_spawn_from_pending start"
         );
+        let ctx = Box::new(SpawnFinalizeCtx {
+            profile_name: profile_name.clone(),
+            agent_identity: agent_identity.clone(),
+            generation,
+            fence_token,
+            runtime_mode,
+            prompt,
+            initial_turn_prompt,
+            labels,
+            operation_id,
+            owner_bridge_session_id,
+            auto_wire_parent,
+            restore_wiring,
+            effective_profile_override,
+            authorized_profile_material,
+            continuity_intent,
+        });
+        let admitted = Box::pin(self.finalize_spawn_admit(&ctx, provision)).await?;
+        Box::pin(self.finalize_spawn_activate(ctx, admitted)).await
+    }
+
+    /// Spawn ladder, pre-commit phase: `BeginSpawnExec` → trust / overlay /
+    /// event append → `CommitSpawnMembership` → `provision.commit()`. On any
+    /// pre-membership failure the opened spawn-exec phase is reset via
+    /// `AbortSpawnExec` and the pending provision is archived, leaving the
+    /// identity respawnable.
+    async fn finalize_spawn_admit(
+        &mut self,
+        ctx: &SpawnFinalizeCtx,
+        provision: PendingProvision,
+    ) -> Result<SpawnAdmitted, MobError> {
+        let profile_name = &ctx.profile_name;
+        let agent_identity = &ctx.agent_identity;
+        let generation = ctx.generation;
+        let fence_token = ctx.fence_token;
+        let runtime_mode = ctx.runtime_mode;
+        let authorized_profile_material = &ctx.authorized_profile_material;
+        let labels = &ctx.labels;
+        let continuity_intent = &ctx.continuity_intent;
         let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         let overlay_record =
@@ -9850,29 +9982,62 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending preparing DSL Spawn"
         );
-        let prepared_spawn = self.prepare_dsl_input_transition(
-            mob_dsl::MobMachineInput::Spawn {
+        // Spawn ladder step 1: open the spawn-exec phase. `BeginSpawnExec`
+        // carries the spawn admission guards, sets the per-identity phase to
+        // `Opened`, and emits nothing. Any failure between here and
+        // `CommitSpawnMembership` fires `AbortSpawnExec` to reset the phase.
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::BeginSpawnExec {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 generation: mob_dsl::Generation::from_domain(generation),
-                profile_material_digest: authorized_profile_material.profile_material_digest,
+                profile_material_digest: authorized_profile_material
+                    .profile_material_digest
+                    .clone(),
+                external_addressable,
+                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
+                bridge_session_id: bridge_session_id.clone(),
+                replacing: replacing.clone(),
+            },
+            "finalize_spawn_admit_begin_spawn_exec",
+        )?;
+        // Spawn ladder step 2: prepare `CommitSpawnMembership`. It guards on
+        // `phase == Opened` and carries the verbatim membership update plus the
+        // `MemberSpawned` lifecycle journal emit. Prepared (not committed) here
+        // so the journal effect is validated before the expensive trust /
+        // overlay / append work; committed once those succeed.
+        let prepared_spawn = match self.prepare_dsl_input_transition(
+            mob_dsl::MobMachineInput::CommitSpawnMembership {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                generation: mob_dsl::Generation::from_domain(generation),
+                profile_material_digest: authorized_profile_material
+                    .profile_material_digest
+                    .clone(),
                 external_addressable,
                 runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
                 bridge_session_id: bridge_session_id.clone(),
                 replacing,
             },
-            "finalize_spawn_from_pending_dsl_spawn",
-        )?;
+            "finalize_spawn_admit_commit_membership",
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(self.fold_spawn_exec_abort(
+                    &dsl_identity,
+                    agent_identity,
+                    error,
+                    "finalize_spawn_admit_commit_membership",
+                ));
+            }
+        };
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending prepared DSL Spawn"
+            "MobActor::finalize_spawn_admit prepared membership commit"
         );
-        tracing::debug!(
-            agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending validating lifecycle journal"
-        );
-        Self::require_member_lifecycle_journal_effect(
+        if let Err(error) = Self::require_member_lifecycle_journal_effect(
             &prepared_spawn.transition,
             mob_dsl::MobLifecycleJournalKind::MemberSpawned,
             &identity,
@@ -9880,11 +10045,18 @@ impl MobActor {
             Some(fence_token),
             generation,
             bridge_session_id.clone(),
-            "finalize_spawn_from_pending_dsl_spawn",
-        )?;
+            "finalize_spawn_admit_commit_membership",
+        ) {
+            return Err(self.fold_spawn_exec_abort(
+                &dsl_identity,
+                agent_identity,
+                error,
+                "finalize_spawn_admit_commit_membership",
+            ));
+        }
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending validated lifecycle journal"
+            "MobActor::finalize_spawn_admit validated lifecycle journal"
         );
 
         tracing::debug!(
@@ -9921,12 +10093,18 @@ impl MobActor {
                     Some((session_id, comms, install))
                 }
                 Err(error) => {
+                    let error = self.fold_spawn_exec_abort(
+                        &dsl_identity,
+                        agent_identity,
+                        error.into(),
+                        "finalize_spawn_admit_trust",
+                    );
                     if let Err(rollback_error) = provision.rollback().await {
                         return Err(MobError::Internal(format!(
                             "spawn supervisor private trust failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
                         )));
                     }
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
         } else {
@@ -9957,12 +10135,18 @@ impl MobActor {
                     )
                     .await;
                 }
+                let error = self.fold_spawn_exec_abort(
+                    &dsl_identity,
+                    agent_identity,
+                    error.into(),
+                    "finalize_spawn_admit_overlay",
+                );
                 if let Err(rollback_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
                         "spawn overlay upsert failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
                     )));
                 }
-                return Err(error.into());
+                return Err(error);
             }
         }
         tracing::debug!(
@@ -10004,21 +10188,32 @@ impl MobActor {
                 )
                 .await;
             }
+            let append_error = self.fold_spawn_exec_abort(
+                &dsl_identity,
+                agent_identity,
+                MobError::from(append_error),
+                "finalize_spawn_admit_append",
+            );
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
                     "spawn append failed for '{agent_identity}': {append_error}; archive compensation failed: {rollback_error}"
                 )));
             }
-            return Err(MobError::from(append_error));
+            return Err(append_error);
         }
+        // Spawn ladder step 3: commit `CommitSpawnMembership`. The member is
+        // now authoritative in `live_runtime_ids` / `member_session_bindings`
+        // and the per-identity phase advances to `MembershipCommitted`. Beyond
+        // this point failures unwind through `rollback_failed_spawn` (which
+        // destroys the member and resets the phase), NOT `AbortSpawnExec`.
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending committing DSL spawn"
+            "MobActor::finalize_spawn_admit committing membership"
         );
         self.commit_prepared_dsl_transition(prepared_spawn)?;
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending committed DSL spawn"
+            "MobActor::finalize_spawn_admit committed membership"
         );
 
         // Commit the provision: the member is now owned by the roster.
@@ -10027,7 +10222,7 @@ impl MobActor {
         let member_ref = provision.commit()?;
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending committed provision"
+            "MobActor::finalize_spawn_admit committed provision"
         );
         self.restore_diagnostics
             .write()
@@ -10035,8 +10230,52 @@ impl MobActor {
             .remove(agent_identity);
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending cleared diagnostics"
+            "MobActor::finalize_spawn_admit cleared diagnostics"
         );
+
+        Ok(SpawnAdmitted {
+            member_ref,
+            agent_runtime_id,
+            is_replacing,
+        })
+    }
+
+    /// Spawn ladder, post-commit phase: roster projection, peer registration,
+    /// role wiring, runtime start / turn-driven comms drain, respawn topology
+    /// restore, and finally `CommitSpawnActivation`. Failures here unwind via
+    /// `rollback_failed_spawn` (which destroys the member and resets the
+    /// spawn-exec phase), not `AbortSpawnExec`.
+    async fn finalize_spawn_activate(
+        &mut self,
+        ctx: Box<SpawnFinalizeCtx>,
+        admitted: SpawnAdmitted,
+    ) -> Result<FinalizeSpawnOutcome, MobError> {
+        let SpawnFinalizeCtx {
+            profile_name,
+            agent_identity,
+            generation,
+            fence_token,
+            runtime_mode,
+            prompt,
+            initial_turn_prompt,
+            labels,
+            operation_id,
+            owner_bridge_session_id,
+            auto_wire_parent,
+            restore_wiring,
+            effective_profile_override,
+            authorized_profile_material: _,
+            continuity_intent: _,
+        } = *ctx;
+        let SpawnAdmitted {
+            member_ref,
+            agent_runtime_id,
+            is_replacing,
+        } = admitted;
+        let profile_name = &profile_name;
+        let agent_identity = &agent_identity;
+        let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
 
         // Populate the Roster projection AFTER DSL `Spawn` authoritatively
         // applies. The pre-DSL roster insert was deleted in Wave-A commit
@@ -10195,12 +10434,11 @@ impl MobActor {
         for target in &planned_wiring_targets {
             let target_identity = crate::ids::AgentIdentity::from(target.as_str());
             let local_meerkat = agent_identity.clone();
-            match self
-                .handle_wire(
-                    local_meerkat,
-                    super::handle::PeerTarget::Local(target_identity),
-                )
-                .await
+            match Box::pin(self.handle_wire(
+                local_meerkat,
+                super::handle::PeerTarget::Local(target_identity),
+            ))
+            .await
             {
                 Ok(()) => wired_spawn_targets.push(target.clone()),
                 Err(wire_error) => {
@@ -10214,15 +10452,14 @@ impl MobActor {
                     // compensate (tests assert this path at e.g.
                     // `test_role_wiring_failure_is_returned_to_spawn_caller`).
                     self.clear_kickoff_state(agent_identity).await;
-                    if let Err(rollback_error) = self
-                        .rollback_failed_spawn(
-                            agent_identity,
-                            profile_name,
-                            &member_ref,
-                            &wired_spawn_targets,
-                            &planned_wiring_targets,
-                        )
-                        .await
+                    if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
+                        agent_identity,
+                        profile_name,
+                        &member_ref,
+                        &wired_spawn_targets,
+                        &planned_wiring_targets,
+                    ))
+                    .await
                     {
                         return Err(MobError::Internal(format!(
                             "spawn wire fan-out failed for '{agent_identity}': {surfaced_wire_error}; rollback failed: {rollback_error}"
@@ -10247,17 +10484,16 @@ impl MobActor {
             // Spawn emits RequestRuntimeBinding. Drain it before startup can
             // publish RuntimeBound, otherwise the session may emit a fallback
             // runtime id that MobMachine correctly rejects as not live.
-            if let Err(binding_error) = self.flush_routed_effects().await {
+            if let Err(binding_error) = Box::pin(self.flush_routed_effects()).await {
                 self.clear_kickoff_state(agent_identity).await;
-                if let Err(rollback_error) = self
-                    .rollback_failed_spawn(
-                        agent_identity,
-                        profile_name,
-                        &member_ref,
-                        &wired_spawn_targets,
-                        &planned_wiring_targets,
-                    )
-                    .await
+                if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
+                    agent_identity,
+                    profile_name,
+                    &member_ref,
+                    &wired_spawn_targets,
+                    &planned_wiring_targets,
+                ))
+                .await
                 {
                     return Err(MobError::Internal(format!(
                         "spawn runtime binding failed for '{agent_identity}': {binding_error}; rollback failed: {rollback_error}"
@@ -10265,20 +10501,18 @@ impl MobActor {
                 }
                 return Err(binding_error);
             }
-            if let Err(start_error) = self
-                .start_autonomous_member(agent_identity, &member_ref, prompt)
-                .await
+            if let Err(start_error) =
+                Box::pin(self.start_autonomous_member(agent_identity, &member_ref, prompt)).await
             {
                 self.clear_kickoff_state(agent_identity).await;
-                if let Err(rollback_error) = self
-                    .rollback_failed_spawn(
-                        agent_identity,
-                        profile_name,
-                        &member_ref,
-                        &wired_spawn_targets,
-                        &planned_wiring_targets,
-                    )
-                    .await
+                if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
+                    agent_identity,
+                    profile_name,
+                    &member_ref,
+                    &wired_spawn_targets,
+                    &planned_wiring_targets,
+                ))
+                .await
                 {
                     return Err(MobError::Internal(format!(
                         "spawn host-loop start failed for '{agent_identity}': {start_error}; rollback failed: {rollback_error}"
@@ -10322,37 +10556,38 @@ impl MobActor {
                     let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
                         self.definition.id.as_ref(),
                     );
-                    adapter
-                        .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                        .await
-                        .map_err(|err| {
-                            MobError::Internal(format!(
-                                "mob comms drain spawn failed for session {bridge_session_id}: {err}"
-                            ))
-                        })?;
+                    Box::pin(adapter.maybe_spawn_mob_comms_drain(
+                        bridge_session_id,
+                        comms_runtime,
+                        mob_id,
+                    ))
+                    .await
+                    .map_err(|err| {
+                        MobError::Internal(format!(
+                            "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                        ))
+                    })?;
                 }
             }
 
             if let Some(initial_turn_prompt) = initial_turn_prompt {
-                if let Err(start_error) = self
-                    .dispatch_turn_driven_spawn_initial_turn(
-                        agent_identity,
-                        &agent_runtime_id,
-                        fence_token,
-                        &operation_id,
-                        initial_turn_prompt,
-                    )
-                    .await
+                if let Err(start_error) = Box::pin(self.dispatch_turn_driven_spawn_initial_turn(
+                    agent_identity,
+                    &agent_runtime_id,
+                    fence_token,
+                    &operation_id,
+                    initial_turn_prompt,
+                ))
+                .await
                 {
-                    if let Err(rollback_error) = self
-                        .rollback_failed_spawn(
-                            agent_identity,
-                            profile_name,
-                            &member_ref,
-                            &wired_spawn_targets,
-                            &planned_wiring_targets,
-                        )
-                        .await
+                    if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
+                        agent_identity,
+                        profile_name,
+                        &member_ref,
+                        &wired_spawn_targets,
+                        &planned_wiring_targets,
+                    ))
+                    .await
                     {
                         return Err(MobError::Internal(format!(
                             "turn-driven spawn initial turn failed for '{agent_identity}': {start_error}; rollback failed: {rollback_error}"
@@ -10374,12 +10609,11 @@ impl MobActor {
                     continue;
                 }
                 let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
-                if let Err(error) = self
-                    .handle_wire(
-                        agent_identity.clone(),
-                        super::handle::PeerTarget::Local(peer_agent_identity),
-                    )
-                    .await
+                if let Err(error) = Box::pin(self.handle_wire(
+                    agent_identity.clone(),
+                    super::handle::PeerTarget::Local(peer_agent_identity),
+                ))
+                .await
                 {
                     tracing::warn!(
                         agent_identity = %agent_identity,
@@ -10393,12 +10627,11 @@ impl MobActor {
             }
             for peer_spec in plan.external_peers {
                 let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
-                if let Err(error) = self
-                    .handle_wire(
-                        agent_identity.clone(),
-                        super::handle::PeerTarget::External(peer_spec.clone()),
-                    )
-                    .await
+                if let Err(error) = Box::pin(self.handle_wire(
+                    agent_identity.clone(),
+                    super::handle::PeerTarget::External(peer_spec.clone()),
+                ))
+                .await
                 {
                     tracing::warn!(
                         agent_identity = %agent_identity,
@@ -10411,9 +10644,21 @@ impl MobActor {
             }
         }
 
+        // Spawn ladder step 4: finalize. `CommitSpawnActivation` advances the
+        // phase past `MembershipCommitted` and clears the per-identity
+        // spawn-exec entry — the member is fully live and the ladder is
+        // settled, so a future respawn of this identity can `BeginSpawnExec`
+        // again. Best-effort respawn topology-restore failures
+        // (`failed_restore_peer_ids`) do not block activation.
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::CommitSpawnActivation {
+                agent_identity: dsl_identity.clone(),
+            },
+            "finalize_spawn_activate_commit_activation",
+        )?;
         tracing::debug!(
             agent_identity = %agent_identity,
-            "MobActor::finalize_spawn_from_pending done"
+            "MobActor::finalize_spawn_activate done"
         );
         Ok(FinalizeSpawnOutcome {
             receipt: super::handle::MemberSpawnReceipt {
@@ -20049,7 +20294,22 @@ mod runtime_observation_tests {
         .expect("AuthorizeSpawnProfile should seed live runtime ownership");
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
-            mob_dsl::MobMachineInput::Spawn {
+            mob_dsl::MobMachineInput::BeginSpawnExec {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: mob_dsl::Generation(0),
+                profile_material_digest: "test-profile-digest".to_string(),
+                external_addressable: true,
+                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::AutonomousHost,
+                bridge_session_id: Some(mob_dsl::SessionId("member-session".to_string())),
+                replacing: None,
+            },
+        )
+        .expect("BeginSpawnExec should open the spawn-exec phase");
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::CommitSpawnMembership {
                 agent_identity: identity,
                 agent_runtime_id: runtime_id.clone(),
                 fence_token: mob_dsl::FenceToken(1),
@@ -20061,7 +20321,7 @@ mod runtime_observation_tests {
                 replacing: None,
             },
         )
-        .expect("Spawn should seed live runtime ownership");
+        .expect("CommitSpawnMembership should seed live runtime ownership");
         let signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: runtime_id,
             fence_token: mob_dsl::FenceToken(1),

@@ -11,8 +11,8 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AdaptiveLayerPhase, AdaptiveLayerSetupFaultKind, AdaptiveRunPhase, AdaptiveStopReason,
     ExternalMemberRebindCapability, FlowFrameReducerCommandKind, FlowRunPublicResultClassKind,
     FlowRunReducerCommandKind, LoopIterationReducerCommandKind, MemberAdmissionVerdictKind,
-    MobLifecycleJournalKind, PolicyDecision, StepFaultDispositionKind, StepOutputFaultKind,
-    SupervisorEscalationFailureCause, TurnTimeoutDisposition,
+    MobLifecycleJournalKind, PolicyDecision, SpawnExecPhase, StepFaultDispositionKind,
+    StepOutputFaultKind, SupervisorEscalationFailureCause, TurnTimeoutDisposition,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -1826,7 +1826,22 @@ mod tests {
         .expect("AuthorizeSpawnProfile should seed live member authority");
         MobMachineMutator::apply(
             authority,
-            MobMachineInput::Spawn {
+            MobMachineInput::BeginSpawnExec {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                generation: Generation(1),
+                profile_material_digest: profile_material_digest.clone(),
+                external_addressable: true,
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                bridge_session_id: Some(bridge_session_id.clone()),
+                replacing: None,
+            },
+        )
+        .expect("BeginSpawnExec should open the spawn-exec phase");
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::CommitSpawnMembership {
                 agent_identity: identity.clone(),
                 agent_runtime_id: runtime_id.clone(),
                 fence_token: FenceToken(7),
@@ -1838,7 +1853,7 @@ mod tests {
                 replacing: None,
             },
         )
-        .expect("Spawn should seed a live member through machine authority");
+        .expect("CommitSpawnMembership should seed a live member through machine authority");
         bridge_session_id
     }
 

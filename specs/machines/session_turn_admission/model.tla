@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionTurnAdmissionMachine.
 
-CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues
+CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, RuntimeSystemContextApplicationAuthorizationValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnAdmissionShutdownTerminalValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -23,9 +23,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, interrupt_pending, shutdown_pending, last_public_terminal
+VARIABLES phase, model_step_count, interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal
 
-vars == << phase, model_step_count, interrupt_pending, shutdown_pending, last_public_terminal >>
+vars == << phase, model_step_count, interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == (IF (prompt_trimmed_text_byte_count > 0) THEN TRUE ELSE (prompt_non_text_block_count > 0))
 is_active_phase(arg_phase) == (IF (arg_phase = "Admitted") THEN TRUE ELSE (IF (arg_phase = "Running") THEN TRUE ELSE (arg_phase = "Completing")))
@@ -35,6 +35,7 @@ Init ==
     /\ model_step_count = 0
     /\ interrupt_pending = FALSE
     /\ shutdown_pending = FALSE
+    /\ admission_drain_pending = FALSE
     /\ last_public_terminal = None
 
 TerminalStutter ==
@@ -45,35 +46,35 @@ ProjectTurnAdmissionIdle ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ProjectTurnAdmissionAdmitted ==
     /\ phase = "Admitted"
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ProjectTurnAdmissionRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ProjectTurnAdmissionCompleting ==
     /\ phase = "Completing"
     /\ phase' = "Completing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ProjectTurnAdmissionShuttingDown ==
     /\ phase = "ShuttingDown"
     /\ phase' = "ShuttingDown"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ClaimTurn ==
@@ -83,6 +84,7 @@ ClaimTurn ==
     /\ interrupt_pending' = FALSE
     /\ shutdown_pending' = FALSE
     /\ last_public_terminal' = None
+    /\ UNCHANGED << admission_drain_pending >>
 
 
 AbortClaim ==
@@ -91,21 +93,42 @@ AbortClaim ==
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = FALSE
     /\ shutdown_pending' = FALSE
-    /\ UNCHANGED << last_public_terminal >>
+    /\ UNCHANGED << admission_drain_pending, last_public_terminal >>
+
+
+ClaimTurnShuttingDown ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AbortClaimShuttingDown ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 BeginTurn ==
     /\ phase = "Admitted"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+BeginTurnShuttingDown ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveTurn ==
     /\ phase = "Running"
     /\ phase' = "Completing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 FinalizeTurnToShutdown ==
@@ -114,6 +137,7 @@ FinalizeTurnToShutdown ==
     /\ phase' = "ShuttingDown"
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = FALSE
+    /\ admission_drain_pending' = TRUE
     /\ UNCHANGED << shutdown_pending, last_public_terminal >>
 
 
@@ -124,7 +148,7 @@ FinalizeTurnToIdle ==
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = FALSE
     /\ shutdown_pending' = FALSE
-    /\ UNCHANGED << last_public_terminal >>
+    /\ UNCHANGED << admission_drain_pending, last_public_terminal >>
 
 
 RequestInterruptAdmittedFirst ==
@@ -133,7 +157,7 @@ RequestInterruptAdmittedFirst ==
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = TRUE
-    /\ UNCHANGED << shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestInterruptAdmittedDuplicate ==
@@ -141,7 +165,7 @@ RequestInterruptAdmittedDuplicate ==
     /\ interrupt_pending
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestInterruptRunningFirst ==
@@ -150,7 +174,7 @@ RequestInterruptRunningFirst ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = TRUE
-    /\ UNCHANGED << shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestInterruptRunningDuplicate ==
@@ -158,7 +182,7 @@ RequestInterruptRunningDuplicate ==
     /\ interrupt_pending
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestShutdownImmediateIdle ==
@@ -167,6 +191,7 @@ RequestShutdownImmediateIdle ==
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = FALSE
     /\ shutdown_pending' = TRUE
+    /\ admission_drain_pending' = TRUE
     /\ UNCHANGED << last_public_terminal >>
 
 
@@ -176,6 +201,7 @@ RequestShutdownImmediateAdmitted ==
     /\ model_step_count' = model_step_count + 1
     /\ interrupt_pending' = FALSE
     /\ shutdown_pending' = TRUE
+    /\ admission_drain_pending' = TRUE
     /\ UNCHANGED << last_public_terminal >>
 
 
@@ -184,7 +210,7 @@ RequestShutdownDeferredRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ shutdown_pending' = TRUE
-    /\ UNCHANGED << interrupt_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestShutdownDeferredCompleting ==
@@ -192,42 +218,94 @@ RequestShutdownDeferredCompleting ==
     /\ phase' = "Completing"
     /\ model_step_count' = model_step_count + 1
     /\ shutdown_pending' = TRUE
-    /\ UNCHANGED << interrupt_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, admission_drain_pending, last_public_terminal >>
 
 
 RequestShutdownAlreadyShuttingDown ==
     /\ phase = "ShuttingDown"
     /\ phase' = "ShuttingDown"
     /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+ResolvePendingAdmissionDrained ==
+    /\ phase = "ShuttingDown"
+    /\ admission_drain_pending
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ admission_drain_pending' = FALSE
     /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+
+
+AuthorizeSessionTeardown ==
+    /\ phase = "ShuttingDown"
+    /\ (admission_drain_pending = FALSE)
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 AuthorizeCancelAfterBoundaryAdmitted ==
     /\ phase = "Admitted"
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 AuthorizeStartTurnDispatchAdmitted ==
     /\ phase = "Admitted"
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 AuthorizeStartTurnDispatchShuttingDown ==
     /\ phase = "ShuttingDown"
     /\ phase' = "ShuttingDown"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AuthorizeRuntimeSystemContextApplicationActiveIdle ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AuthorizeRuntimeSystemContextApplicationActiveAdmitted ==
+    /\ phase = "Admitted"
+    /\ phase' = "Admitted"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AuthorizeRuntimeSystemContextApplicationActiveRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AuthorizeRuntimeSystemContextApplicationActiveCompleting ==
+    /\ phase = "Completing"
+    /\ phase' = "Completing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+AuthorizeRuntimeSystemContextApplicationShuttingDown ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 AuthorizeCancelAfterBoundaryRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveDispositionContentTurn(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -236,7 +314,7 @@ ResolveDispositionContentTurn(execution_kind_present, execution_kind, prompt_tri
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = None
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
 
 
 ResolveDispositionResumePendingWithBoundary(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -245,7 +323,7 @@ ResolveDispositionResumePendingWithBoundary(execution_kind_present, execution_ki
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = None
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
 
 
 ResolveDispositionResumePendingWithoutBoundary(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -254,7 +332,7 @@ ResolveDispositionResumePendingWithoutBoundary(execution_kind_present, execution
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = Some("NoPendingBoundary")
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
 
 
 ResolveDispositionDirectPrompt(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -263,7 +341,7 @@ ResolveDispositionDirectPrompt(execution_kind_present, execution_kind, prompt_tr
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = None
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
 
 
 ResolveDispositionDirectPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -272,7 +350,7 @@ ResolveDispositionDirectPending(execution_kind_present, execution_kind, prompt_t
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = None
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
 
 
 ResolveDispositionDirectNoPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
@@ -281,7 +359,14 @@ ResolveDispositionDirectNoPending(execution_kind_present, execution_kind, prompt
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ last_public_terminal' = Some("NoPendingBoundary")
-    /\ UNCHANGED << interrupt_pending, shutdown_pending >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending >>
+
+
+ResolveStartTurnDispositionShuttingDown(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveRuntimeKeepAliveEnable(keep_alive_request) ==
@@ -289,7 +374,7 @@ ResolveRuntimeKeepAliveEnable(keep_alive_request) ==
     /\ (keep_alive_request = "Enable")
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveRuntimeKeepAliveDisable(keep_alive_request) ==
@@ -297,7 +382,7 @@ ResolveRuntimeKeepAliveDisable(keep_alive_request) ==
     /\ (keep_alive_request = "Disable")
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveRuntimeKeepAlivePreserve(keep_alive_request) ==
@@ -305,7 +390,14 @@ ResolveRuntimeKeepAlivePreserve(keep_alive_request) ==
     /\ (keep_alive_request = "Preserve")
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
+
+
+ResolveRuntimeKeepAliveShuttingDown(keep_alive_request) ==
+    /\ phase = "ShuttingDown"
+    /\ phase' = "ShuttingDown"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveLastStartTurnPublicTerminalNoPendingIdle ==
@@ -313,7 +405,7 @@ ResolveLastStartTurnPublicTerminalNoPendingIdle ==
     /\ (last_public_terminal = Some("NoPendingBoundary"))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveLastStartTurnPublicTerminalNoPendingAdmitted ==
@@ -321,7 +413,7 @@ ResolveLastStartTurnPublicTerminalNoPendingAdmitted ==
     /\ (last_public_terminal = Some("NoPendingBoundary"))
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveLastStartTurnPublicTerminalNoPendingRunning ==
@@ -329,7 +421,7 @@ ResolveLastStartTurnPublicTerminalNoPendingRunning ==
     /\ (last_public_terminal = Some("NoPendingBoundary"))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveLastStartTurnPublicTerminalNoPendingCompleting ==
@@ -337,7 +429,7 @@ ResolveLastStartTurnPublicTerminalNoPendingCompleting ==
     /\ (last_public_terminal = Some("NoPendingBoundary"))
     /\ phase' = "Completing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 ResolveLastStartTurnPublicTerminalNoPendingShuttingDown ==
@@ -345,7 +437,7 @@ ResolveLastStartTurnPublicTerminalNoPendingShuttingDown ==
     /\ (last_public_terminal = Some("NoPendingBoundary"))
     /\ phase' = "ShuttingDown"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
 Next ==
@@ -356,7 +448,10 @@ Next ==
     \/ ProjectTurnAdmissionShuttingDown
     \/ ClaimTurn
     \/ AbortClaim
+    \/ ClaimTurnShuttingDown
+    \/ AbortClaimShuttingDown
     \/ BeginTurn
+    \/ BeginTurnShuttingDown
     \/ ResolveTurn
     \/ FinalizeTurnToShutdown
     \/ FinalizeTurnToIdle
@@ -369,9 +464,16 @@ Next ==
     \/ RequestShutdownDeferredRunning
     \/ RequestShutdownDeferredCompleting
     \/ RequestShutdownAlreadyShuttingDown
+    \/ ResolvePendingAdmissionDrained
+    \/ AuthorizeSessionTeardown
     \/ AuthorizeCancelAfterBoundaryAdmitted
     \/ AuthorizeStartTurnDispatchAdmitted
     \/ AuthorizeStartTurnDispatchShuttingDown
+    \/ AuthorizeRuntimeSystemContextApplicationActiveIdle
+    \/ AuthorizeRuntimeSystemContextApplicationActiveAdmitted
+    \/ AuthorizeRuntimeSystemContextApplicationActiveRunning
+    \/ AuthorizeRuntimeSystemContextApplicationActiveCompleting
+    \/ AuthorizeRuntimeSystemContextApplicationShuttingDown
     \/ AuthorizeCancelAfterBoundaryRunning
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionContentTurn(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionResumePendingWithBoundary(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
@@ -379,9 +481,11 @@ Next ==
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPrompt(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectNoPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
+    \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveStartTurnDispositionShuttingDown(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveEnable(keep_alive_request)
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveDisable(keep_alive_request)
     \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAlivePreserve(keep_alive_request)
+    \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveShuttingDown(keep_alive_request)
     \/ ResolveLastStartTurnPublicTerminalNoPendingIdle
     \/ ResolveLastStartTurnPublicTerminalNoPendingAdmitted
     \/ ResolveLastStartTurnPublicTerminalNoPendingRunning
@@ -390,6 +494,7 @@ Next ==
     \/ TerminalStutter
 
 shutdown_phase_is_not_active == (IF (phase # "ShuttingDown") THEN TRUE ELSE (is_active_phase(phase) = FALSE))
+drain_obligation_only_while_shutting_down == (IF (admission_drain_pending = FALSE) THEN TRUE ELSE (phase = "ShuttingDown"))
 
 CiStateConstraint == /\ model_step_count <= 6
 DeepStateConstraint == /\ model_step_count <= 8
@@ -397,5 +502,6 @@ DeepStateConstraint == /\ model_step_count <= 8
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []shutdown_phase_is_not_active
+THEOREM Spec => []drain_obligation_only_while_shutting_down
 
 =============================================================================

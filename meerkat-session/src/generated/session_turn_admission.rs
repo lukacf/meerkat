@@ -60,6 +60,19 @@ pub enum RuntimeKeepAlivePersistenceDecision {
     PreserveExisting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeSystemContextApplicationAuthorization {
+    #[default]
+    Authorized,
+    SessionArchived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnAdmissionShutdownTerminal {
+    #[default]
+    SessionArchived,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTurnAdmissionInput {
     ProjectTurnAdmission,
@@ -73,6 +86,9 @@ pub enum SessionTurnAdmissionInput {
     AuthorizeStartTurnDispatch,
     AuthorizeCancelAfterBoundary,
     ResolveLastStartTurnPublicTerminal,
+    AuthorizeRuntimeSystemContextApplication,
+    ResolvePendingAdmissionDrained,
+    AuthorizeSessionTeardown,
     ResolveRuntimeKeepAlive {
         keep_alive_request: RuntimeKeepAliveRequest,
     },
@@ -109,6 +125,14 @@ pub enum SessionTurnAdmissionEffect {
     RuntimeKeepAliveResolved {
         decision: RuntimeKeepAlivePersistenceDecision,
     },
+    PendingAdmissionDrainRequested,
+    RuntimeSystemContextApplicationResolved {
+        authorization: RuntimeSystemContextApplicationAuthorization,
+    },
+    TurnAdmissionShutdownTerminalResolved {
+        terminal: TurnAdmissionShutdownTerminal,
+    },
+    SessionTeardownAuthorized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +178,7 @@ pub struct SessionTurnAdmissionMachineState {
     lifecycle_phase: TurnAdmissionPhase,
     pub interrupt_pending: bool,
     pub shutdown_pending: bool,
+    pub admission_drain_pending: bool,
     pub last_public_terminal: Option<StartTurnPublicTerminal>,
 }
 
@@ -173,7 +198,10 @@ enum SessionTurnAdmissionTransition {
     ProjectTurnAdmissionShuttingDown,
     ClaimTurn,
     AbortClaim,
+    ClaimTurnShuttingDown,
+    AbortClaimShuttingDown,
     BeginTurn,
+    BeginTurnShuttingDown,
     ResolveTurn,
     FinalizeTurnToShutdown,
     FinalizeTurnToIdle,
@@ -186,9 +214,16 @@ enum SessionTurnAdmissionTransition {
     RequestShutdownDeferredRunning,
     RequestShutdownDeferredCompleting,
     RequestShutdownAlreadyShuttingDown,
+    ResolvePendingAdmissionDrained,
+    AuthorizeSessionTeardown,
     AuthorizeCancelAfterBoundaryAdmitted,
     AuthorizeStartTurnDispatchAdmitted,
     AuthorizeStartTurnDispatchShuttingDown,
+    AuthorizeRuntimeSystemContextApplicationActiveIdle,
+    AuthorizeRuntimeSystemContextApplicationActiveAdmitted,
+    AuthorizeRuntimeSystemContextApplicationActiveRunning,
+    AuthorizeRuntimeSystemContextApplicationActiveCompleting,
+    AuthorizeRuntimeSystemContextApplicationShuttingDown,
     AuthorizeCancelAfterBoundaryRunning,
     ResolveDispositionContentTurn,
     ResolveDispositionResumePendingWithBoundary,
@@ -196,9 +231,11 @@ enum SessionTurnAdmissionTransition {
     ResolveDispositionDirectPrompt,
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
+    ResolveStartTurnDispositionShuttingDown,
     ResolveRuntimeKeepAliveEnable,
     ResolveRuntimeKeepAliveDisable,
     ResolveRuntimeKeepAlivePreserve,
+    ResolveRuntimeKeepAliveShuttingDown,
     ResolveLastStartTurnPublicTerminalNoPendingIdle,
     ResolveLastStartTurnPublicTerminalNoPendingAdmitted,
     ResolveLastStartTurnPublicTerminalNoPendingRunning,
@@ -218,6 +255,7 @@ impl SessionTurnAdmissionMachineAuthority {
         state.lifecycle_phase = TurnAdmissionPhase::Idle;
         state.interrupt_pending = false;
         state.shutdown_pending = false;
+        state.admission_drain_pending = false;
         state.last_public_terminal = None;
         Self { state }
     }
@@ -321,6 +359,9 @@ impl SessionTurnAdmissionMachineAuthority {
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Idle) {
                     matches.push(SessionTurnAdmissionTransition::ClaimTurn);
                 }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches.push(SessionTurnAdmissionTransition::ClaimTurnShuttingDown);
+                }
                 let transition = Self::single_transition(matches, "ClaimTurn")?;
                 match transition {
                     SessionTurnAdmissionTransition::ClaimTurn => {
@@ -335,6 +376,14 @@ impl SessionTurnAdmissionMachineAuthority {
                             is_active: is_active_phase(self.state.lifecycle_phase),
                         }])
                     }
+                    SessionTurnAdmissionTransition::ClaimTurnShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::TurnAdmissionShutdownTerminalResolved {
+                                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+                            },
+                        ])
+                    }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionTurnAdmissionError {
                         op: "ClaimTurn_transition",
@@ -346,12 +395,24 @@ impl SessionTurnAdmissionMachineAuthority {
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted) {
                     matches.push(SessionTurnAdmissionTransition::AbortClaim);
                 }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches.push(SessionTurnAdmissionTransition::AbortClaimShuttingDown);
+                }
                 let transition = Self::single_transition(matches, "AbortClaim")?;
                 match transition {
                     SessionTurnAdmissionTransition::AbortClaim => {
                         self.state.interrupt_pending = false;
                         self.state.shutdown_pending = false;
                         self.state.lifecycle_phase = TurnAdmissionPhase::Idle;
+                        Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
+                            phase: self.state.lifecycle_phase,
+                            interrupt_pending: self.state.interrupt_pending,
+                            shutdown_pending: self.state.shutdown_pending,
+                            is_active: is_active_phase(self.state.lifecycle_phase),
+                        }])
+                    }
+                    SessionTurnAdmissionTransition::AbortClaimShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
                         Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
                             phase: self.state.lifecycle_phase,
                             interrupt_pending: self.state.interrupt_pending,
@@ -370,6 +431,9 @@ impl SessionTurnAdmissionMachineAuthority {
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted) {
                     matches.push(SessionTurnAdmissionTransition::BeginTurn);
                 }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches.push(SessionTurnAdmissionTransition::BeginTurnShuttingDown);
+                }
                 let transition = Self::single_transition(matches, "BeginTurn")?;
                 match transition {
                     SessionTurnAdmissionTransition::BeginTurn => {
@@ -380,6 +444,14 @@ impl SessionTurnAdmissionMachineAuthority {
                             shutdown_pending: self.state.shutdown_pending,
                             is_active: is_active_phase(self.state.lifecycle_phase),
                         }])
+                    }
+                    SessionTurnAdmissionTransition::BeginTurnShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::TurnAdmissionShutdownTerminalResolved {
+                                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+                            },
+                        ])
                     }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionTurnAdmissionError {
@@ -425,13 +497,17 @@ impl SessionTurnAdmissionMachineAuthority {
                 match transition {
                     SessionTurnAdmissionTransition::FinalizeTurnToShutdown => {
                         self.state.interrupt_pending = false;
+                        self.state.admission_drain_pending = true;
                         self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
-                        Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
-                            phase: self.state.lifecycle_phase,
-                            interrupt_pending: self.state.interrupt_pending,
-                            shutdown_pending: self.state.shutdown_pending,
-                            is_active: is_active_phase(self.state.lifecycle_phase),
-                        }])
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::PendingAdmissionDrainRequested,
+                            SessionTurnAdmissionEffect::TurnAdmissionProjected {
+                                phase: self.state.lifecycle_phase,
+                                interrupt_pending: self.state.interrupt_pending,
+                                shutdown_pending: self.state.shutdown_pending,
+                                is_active: is_active_phase(self.state.lifecycle_phase),
+                            },
+                        ])
                     }
                     SessionTurnAdmissionTransition::FinalizeTurnToIdle => {
                         self.state.interrupt_pending = false;
@@ -553,24 +629,32 @@ impl SessionTurnAdmissionMachineAuthority {
                     SessionTurnAdmissionTransition::RequestShutdownImmediateIdle => {
                         self.state.interrupt_pending = false;
                         self.state.shutdown_pending = true;
+                        self.state.admission_drain_pending = true;
                         self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
-                        Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
-                            phase: self.state.lifecycle_phase,
-                            interrupt_pending: self.state.interrupt_pending,
-                            shutdown_pending: self.state.shutdown_pending,
-                            is_active: is_active_phase(self.state.lifecycle_phase),
-                        }])
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::PendingAdmissionDrainRequested,
+                            SessionTurnAdmissionEffect::TurnAdmissionProjected {
+                                phase: self.state.lifecycle_phase,
+                                interrupt_pending: self.state.interrupt_pending,
+                                shutdown_pending: self.state.shutdown_pending,
+                                is_active: is_active_phase(self.state.lifecycle_phase),
+                            },
+                        ])
                     }
                     SessionTurnAdmissionTransition::RequestShutdownImmediateAdmitted => {
                         self.state.interrupt_pending = false;
                         self.state.shutdown_pending = true;
+                        self.state.admission_drain_pending = true;
                         self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
-                        Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
-                            phase: self.state.lifecycle_phase,
-                            interrupt_pending: self.state.interrupt_pending,
-                            shutdown_pending: self.state.shutdown_pending,
-                            is_active: is_active_phase(self.state.lifecycle_phase),
-                        }])
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::PendingAdmissionDrainRequested,
+                            SessionTurnAdmissionEffect::TurnAdmissionProjected {
+                                phase: self.state.lifecycle_phase,
+                                interrupt_pending: self.state.interrupt_pending,
+                                shutdown_pending: self.state.shutdown_pending,
+                                is_active: is_active_phase(self.state.lifecycle_phase),
+                            },
+                        ])
                     }
                     SessionTurnAdmissionTransition::RequestShutdownDeferredRunning => {
                         self.state.shutdown_pending = true;
@@ -740,6 +824,104 @@ impl SessionTurnAdmissionMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "ResolveLastStartTurnPublicTerminal_transition" }),
                 }
             }
+            SessionTurnAdmissionInput::AuthorizeRuntimeSystemContextApplication => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Idle) {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveIdle);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted) {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveAdmitted);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Running) {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveRunning);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Completing) {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveCompleting);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationShuttingDown);
+                }
+                let transition =
+                    Self::single_transition(matches, "AuthorizeRuntimeSystemContextApplication")?;
+                match transition {
+                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveIdle => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Idle;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveAdmitted => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveRunning => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Running;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveCompleting => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Completing;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::SessionArchived, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "AuthorizeRuntimeSystemContextApplication_transition" }),
+                }
+            }
+            SessionTurnAdmissionInput::ResolvePendingAdmissionDrained => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown)
+                    && (self.state.admission_drain_pending)
+                {
+                    matches.push(SessionTurnAdmissionTransition::ResolvePendingAdmissionDrained);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolvePendingAdmissionDrained")?;
+                match transition {
+                    SessionTurnAdmissionTransition::ResolvePendingAdmissionDrained => {
+                        self.state.admission_drain_pending = false;
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![SessionTurnAdmissionEffect::TurnAdmissionProjected {
+                            phase: self.state.lifecycle_phase,
+                            interrupt_pending: self.state.interrupt_pending,
+                            shutdown_pending: self.state.shutdown_pending,
+                            is_active: is_active_phase(self.state.lifecycle_phase),
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionTurnAdmissionError {
+                        op: "ResolvePendingAdmissionDrained_transition",
+                    }),
+                }
+            }
+            SessionTurnAdmissionInput::AuthorizeSessionTeardown => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown)
+                    && (self.state.admission_drain_pending == false)
+                {
+                    matches.push(SessionTurnAdmissionTransition::AuthorizeSessionTeardown);
+                }
+                let transition = Self::single_transition(matches, "AuthorizeSessionTeardown")?;
+                match transition {
+                    SessionTurnAdmissionTransition::AuthorizeSessionTeardown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![SessionTurnAdmissionEffect::SessionTeardownAuthorized])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionTurnAdmissionError {
+                        op: "AuthorizeSessionTeardown_transition",
+                    }),
+                }
+            }
             SessionTurnAdmissionInput::ResolveRuntimeKeepAlive { keep_alive_request } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
@@ -756,6 +938,10 @@ impl SessionTurnAdmissionMachineAuthority {
                     && (keep_alive_request == RuntimeKeepAliveRequest::Preserve)
                 {
                     matches.push(SessionTurnAdmissionTransition::ResolveRuntimeKeepAlivePreserve);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches
+                        .push(SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveShuttingDown);
                 }
                 let transition = Self::single_transition(matches, "ResolveRuntimeKeepAlive")?;
                 match transition {
@@ -776,6 +962,14 @@ impl SessionTurnAdmissionMachineAuthority {
                         Ok(vec![SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
                             decision: RuntimeKeepAlivePersistenceDecision::PreserveExisting,
                         }])
+                    }
+                    SessionTurnAdmissionTransition::ResolveRuntimeKeepAliveShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::TurnAdmissionShutdownTerminalResolved {
+                                terminal: TurnAdmissionShutdownTerminal::SessionArchived,
+                            },
+                        ])
                     }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionTurnAdmissionError {
@@ -844,6 +1038,11 @@ impl SessionTurnAdmissionMachineAuthority {
                 {
                     matches.push(SessionTurnAdmissionTransition::ResolveDispositionDirectNoPending);
                 }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
+                    matches.push(
+                        SessionTurnAdmissionTransition::ResolveStartTurnDispositionShuttingDown,
+                    );
+                }
                 let transition = Self::single_transition(matches, "ResolveStartTurnDisposition")?;
                 match transition {
                     SessionTurnAdmissionTransition::ResolveDispositionContentTurn => {
@@ -888,6 +1087,12 @@ impl SessionTurnAdmissionMachineAuthority {
                         Ok(vec![
                             SessionTurnAdmissionEffect::StartTurnDispositionResolved { disposition: StartTurnDisposition::NoPendingBoundary, },
                             SessionTurnAdmissionEffect::StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::ResolveStartTurnDispositionShuttingDown => {
+                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::TurnAdmissionShutdownTerminalResolved { terminal: TurnAdmissionShutdownTerminal::SessionArchived, },
                         ])
                     }
                     #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "ResolveStartTurnDisposition_transition" }),
@@ -960,6 +1165,24 @@ impl SessionTurnAdmissionMachineAuthority {
         &mut self,
     ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
         self.apply_input(SessionTurnAdmissionInput::ResolveLastStartTurnPublicTerminal)
+    }
+
+    pub fn authorize_runtime_system_context_application(
+        &mut self,
+    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
+        self.apply_input(SessionTurnAdmissionInput::AuthorizeRuntimeSystemContextApplication)
+    }
+
+    pub fn resolve_pending_admission_drained(
+        &mut self,
+    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
+        self.apply_input(SessionTurnAdmissionInput::ResolvePendingAdmissionDrained)
+    }
+
+    pub fn authorize_session_teardown(
+        &mut self,
+    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
+        self.apply_input(SessionTurnAdmissionInput::AuthorizeSessionTeardown)
     }
 
     pub fn resolve_runtime_keep_alive(

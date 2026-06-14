@@ -205,12 +205,15 @@ pub enum CompletionSupersessionDisposition {
     Supersede,
     #[serde(rename = "Proceed")]
     Proceed,
+    #[serde(rename = "AlreadySuperseded")]
+    AlreadySuperseded,
 }
 impl CompletionSupersessionDisposition {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Supersede => "Supersede",
             Self::Proceed => "Proceed",
+            Self::AlreadySuperseded => "AlreadySuperseded",
         }
     }
 }
@@ -220,6 +223,7 @@ impl std::convert::TryFrom<&str> for CompletionSupersessionDisposition {
         match value {
             "Supersede" => Ok(Self::Supersede),
             "Proceed" => Ok(Self::Proceed),
+            "AlreadySuperseded" => Ok(Self::AlreadySuperseded),
             other => Err(format!(
                 "invalid CompletionSupersessionDisposition value `{other}`"
             )),
@@ -497,6 +501,78 @@ impl std::fmt::Display for DeliveryReceiptStage {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LateCompletionResolutionClass {
+    #[default]
+    #[serde(rename = "DeliveryCompleted")]
+    DeliveryCompleted,
+    #[serde(rename = "RuntimeCompleted")]
+    RuntimeCompleted,
+    #[serde(rename = "RuntimeRejected")]
+    RuntimeRejected,
+    #[serde(rename = "RuntimeTransportError")]
+    RuntimeTransportError,
+    #[serde(rename = "RuntimeInternalError")]
+    RuntimeInternalError,
+    #[serde(rename = "DeliveryCompletionFailed")]
+    DeliveryCompletionFailed,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+}
+impl LateCompletionResolutionClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DeliveryCompleted => "DeliveryCompleted",
+            Self::RuntimeCompleted => "RuntimeCompleted",
+            Self::RuntimeRejected => "RuntimeRejected",
+            Self::RuntimeTransportError => "RuntimeTransportError",
+            Self::RuntimeInternalError => "RuntimeInternalError",
+            Self::DeliveryCompletionFailed => "DeliveryCompletionFailed",
+            Self::DeliveryFailed => "DeliveryFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LateCompletionResolutionClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DeliveryCompleted" => Ok(Self::DeliveryCompleted),
+            "RuntimeCompleted" => Ok(Self::RuntimeCompleted),
+            "RuntimeRejected" => Ok(Self::RuntimeRejected),
+            "RuntimeTransportError" => Ok(Self::RuntimeTransportError),
+            "RuntimeInternalError" => Ok(Self::RuntimeInternalError),
+            "DeliveryCompletionFailed" => Ok(Self::DeliveryCompletionFailed),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            other => Err(format!(
+                "invalid LateCompletionResolutionClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LateCompletionResolutionClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LateCompletionResolutionClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MisfirePolicy {
     #[default]
     #[serde(rename = "Skip")]
@@ -741,6 +817,8 @@ pub enum OccurrenceLifecycleInputVariant {
     ReleaseLeaseForPausedSchedule,
     #[serde(rename = "ClassifyTransitionFailure")]
     ClassifyTransitionFailure,
+    #[serde(rename = "ClassifyStaleCompletionArrival")]
+    ClassifyStaleCompletionArrival,
 }
 impl OccurrenceLifecycleInputVariant {
     pub fn as_str(&self) -> &'static str {
@@ -765,6 +843,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::LeaseExpired => "LeaseExpired",
             Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
             Self::ClassifyTransitionFailure => "ClassifyTransitionFailure",
+            Self::ClassifyStaleCompletionArrival => "ClassifyStaleCompletionArrival",
         }
     }
 }
@@ -792,6 +871,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "LeaseExpired" => Ok(Self::LeaseExpired),
             "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
             "ClassifyTransitionFailure" => Ok(Self::ClassifyTransitionFailure),
+            "ClassifyStaleCompletionArrival" => Ok(Self::ClassifyStaleCompletionArrival),
             other => Err(format!(
                 "invalid OccurrenceLifecycleInputVariant value `{other}`"
             )),
@@ -983,6 +1063,8 @@ pub enum OccurrenceTransitionFailureClassKind {
     NotLeaseHolding,
     #[serde(rename = "NotLiveForTerminal")]
     NotLiveForTerminal,
+    #[serde(rename = "StaleCompletionArrivalClassificationRejected")]
+    StaleCompletionArrivalClassificationRejected,
 }
 impl OccurrenceTransitionFailureClassKind {
     pub fn as_str(&self) -> &'static str {
@@ -1001,6 +1083,9 @@ impl OccurrenceTransitionFailureClassKind {
             Self::NotDispatching => "NotDispatching",
             Self::NotLeaseHolding => "NotLeaseHolding",
             Self::NotLiveForTerminal => "NotLiveForTerminal",
+            Self::StaleCompletionArrivalClassificationRejected => {
+                "StaleCompletionArrivalClassificationRejected"
+            }
         }
     }
 }
@@ -1024,6 +1109,9 @@ impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureClassKind {
             "NotDispatching" => Ok(Self::NotDispatching),
             "NotLeaseHolding" => Ok(Self::NotLeaseHolding),
             "NotLiveForTerminal" => Ok(Self::NotLiveForTerminal),
+            "StaleCompletionArrivalClassificationRejected" => {
+                Ok(Self::StaleCompletionArrivalClassificationRejected)
+            }
             other => Err(format!(
                 "invalid OccurrenceTransitionFailureClassKind value `{other}`"
             )),
@@ -1409,6 +1497,10 @@ pub struct State {
     pub completed_at_utc_ms: Option<u64>,
     pub attempt_count: u64,
     pub superseded_by_revision: Option<u64>,
+    pub late_completion_recorded_at_utc_ms: Option<u64>,
+    pub late_completion_resolution: Option<LateCompletionResolutionClass>,
+    pub late_completion_detail: Option<String>,
+    pub stale_completion_arrivals: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -1532,6 +1624,10 @@ pub mod inputs {
         pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
         pub trigger: OccurrenceLifecycleInputVariant,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyStaleCompletionArrival {
+        pub trigger: OccurrenceLifecycleInputVariant,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1556,6 +1652,7 @@ pub enum Input {
     LeaseExpired(inputs::LeaseExpired),
     ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
     ClassifyTransitionFailure(inputs::ClassifyTransitionFailure),
+    ClassifyStaleCompletionArrival(inputs::ClassifyStaleCompletionArrival),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1584,6 +1681,7 @@ impl Input {
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
             Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
             Self::ClassifyTransitionFailure(_) => InputKind::ClassifyTransitionFailure,
+            Self::ClassifyStaleCompletionArrival(_) => InputKind::ClassifyStaleCompletionArrival,
         }
     }
 }
@@ -1609,6 +1707,7 @@ pub enum InputKind {
     LeaseExpired,
     ReleaseLeaseForPausedSchedule,
     ClassifyTransitionFailure,
+    ClassifyStaleCompletionArrival,
 }
 
 pub mod effects {
@@ -1666,6 +1765,15 @@ pub mod effects {
         pub trigger: OccurrenceLifecycleInputVariant,
         pub public_class: OccurrenceTransitionFailureClassKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LateCompletionResolutionRecorded {
+        pub resolution: LateCompletionResolutionClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StaleCompletionArrivalClassified {
+        pub phase: OccurrenceLifecycleState,
+        pub trigger: OccurrenceLifecycleInputVariant,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1688,6 +1796,8 @@ pub enum Effect {
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
     TransitionFailureClassified(effects::TransitionFailureClassified),
+    LateCompletionResolutionRecorded(effects::LateCompletionResolutionRecorded),
+    StaleCompletionArrivalClassified(effects::StaleCompletionArrivalClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1709,6 +1819,8 @@ pub enum EffectKind {
     DeliveryFailed,
     LeaseExpired,
     TransitionFailureClassified,
+    LateCompletionResolutionRecorded,
+    StaleCompletionArrivalClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -1813,6 +1925,24 @@ pub enum TransitionId {
     ClassifyTransitionFailureNotLiveForTerminalMisfired,
     ClassifyTransitionFailureNotLiveForTerminalSuperseded,
     ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedPending,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedClaimed,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedDispatching,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedAwaitingCompletion,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedCompleted,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedSkipped,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedMisfired,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedSuperseded,
+    ClassifyTransitionFailureStaleCompletionArrivalRejectedDeliveryFailed,
+    ClassifyStaleCompletionArrivalObservedPending,
+    ClassifyStaleCompletionArrivalObservedClaimed,
+    ClassifyStaleCompletionArrivalObservedDispatching,
+    ClassifyStaleCompletionArrivalObservedAwaitingCompletion,
+    ClassifyStaleCompletionArrivalObservedCompleted,
+    ClassifyStaleCompletionArrivalObservedSkipped,
+    ClassifyStaleCompletionArrivalObservedMisfired,
+    ClassifyStaleCompletionArrivalObservedSuperseded,
+    ClassifyStaleCompletionArrivalObservedDeliveryFailed,
     PlanOccurrenceFromPending,
     ClassifyDuePendingFuture,
     ClassifyDuePendingMisfire,
@@ -1845,6 +1975,7 @@ pub enum TransitionId {
     ClassifyCompletionSupersessionDeleted,
     ClassifyCompletionSupersessionStale,
     ClassifyCompletionSupersessionProceed,
+    ClassifyCompletionSupersessionAlreadySuperseded,
     SyncTargetSnapshotPending,
     SyncTargetSnapshotClaimed,
     RecordReceiptPending,
@@ -1859,6 +1990,7 @@ pub enum TransitionId {
     ClaimPending,
     DispatchStartedFromClaimed,
     AwaitCompletionFromDispatching,
+    AwaitCompletionAfterSupersession,
     CompleteFromDispatchingOrAwaiting,
     RuntimeCompletionCompleted,
     RuntimeCompletionRuntimeRejected,
@@ -1880,12 +2012,21 @@ pub enum TransitionId {
     TargetProbeMissingMisfireByPolicy,
     DueMisfirePending,
     SupersedePendingOrLive,
+    SupersedeAlreadySuperseded,
+    LateCompleteAfterSupersession,
+    LateRuntimeCompletionCompletedAfterSupersession,
+    LateRuntimeCompletionRejectedAfterSupersession,
+    LateRuntimeCompletionTransportErrorAfterSupersession,
+    LateRuntimeCompletionInternalErrorAfterSupersession,
+    LateDeliveryCompletionFailureAfterSupersession,
+    LateDeliveryFailureAfterSupersession,
     LeaseExpiredFromClaimed,
     LeaseExpiredFromDispatching,
     LeaseExpiredFromAwaitingCompletion,
     ReleaseLeaseForPausedScheduleFromClaimed,
     ReleaseLeaseForPausedScheduleFromDispatching,
     ReleaseLeaseForPausedScheduleFromAwaitingCompletion,
+    ReleaseLeaseForPausedScheduleAfterSupersession,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1996,5 +2137,9 @@ pub fn initial_state() -> State {
         completed_at_utc_ms: None,
         attempt_count: 0,
         superseded_by_revision: None,
+        late_completion_recorded_at_utc_ms: None,
+        late_completion_resolution: None,
+        late_completion_detail: None,
+        stale_completion_arrivals: 0,
     }
 }

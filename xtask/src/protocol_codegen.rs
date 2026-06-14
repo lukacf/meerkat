@@ -5679,6 +5679,8 @@ const STA_LOCAL_ENUMS: &[&str] = &[
     "StartTurnDispatchAuthorization",
     "RuntimeKeepAliveRequest",
     "RuntimeKeepAlivePersistenceDecision",
+    "RuntimeSystemContextApplicationAuthorization",
+    "TurnAdmissionShutdownTerminal",
 ];
 const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
 const STA_EXTERNAL_ENUM_PATH: &str =
@@ -5751,6 +5753,8 @@ fn sta_default_variant(name: &str) -> Result<&'static str> {
         "StartTurnDispatchAuthorization" => Ok("Authorized"),
         "RuntimeKeepAliveRequest" => Ok("Preserve"),
         "RuntimeKeepAlivePersistenceDecision" => Ok("PreserveExisting"),
+        "RuntimeSystemContextApplicationAuthorization" => Ok("Authorized"),
+        "TurnAdmissionShutdownTerminal" => Ok("SessionArchived"),
         other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
     }
 }

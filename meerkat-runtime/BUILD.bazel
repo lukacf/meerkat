@@ -2047,6 +2047,72 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "unregister_drain_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "unregister_drain_contract",
+    crate_root = "tests/unregister_drain_contract.rs",
+    crate_features = [
+        "live",
+        "sqlite-store",
+        "test-support",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/comms_drain.rs",
+        "src/handles/peer_comms.rs",
+        "src/meerkat_machine/mod.rs",
+    ],
+    srcs = [
+        "tests/unregister_drain_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.1",
+        "CARGO_BIN_NAME": "unregister_drain_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-runtime",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-derive:meerkat_machine_derive",
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-live:meerkat_live",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
@@ -2077,5 +2143,6 @@ test_suite(
         ":trust_reconcile_concurrency_test",
         ":turn_content_shape_contract_test",
         ":turn_metadata_single_construction_site_test",
+        ":unregister_drain_contract_test",
     ],
 )

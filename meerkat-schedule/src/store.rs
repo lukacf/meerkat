@@ -1,8 +1,8 @@
 use crate::error::ScheduleStoreError;
 use crate::lifecycle::{
     AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, OccurrenceDueAction,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
-    OccurrenceSupersessionAck, ScheduleLifecycleInput,
+    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceLifecycleMutator, OccurrenceSupersessionAck, ScheduleLifecycleInput,
 };
 use crate::types::{
     DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, RuntimeDeliveryOutcome, Schedule,
@@ -227,13 +227,19 @@ pub trait ScheduleStore: Send + Sync {
         request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, ScheduleStoreError>;
 
+    /// Attempt to apply `transition` to the occurrence identified by
+    /// `occurrence_id`, gated on the claim evidence matching the durable row.
+    /// Returns `None` when the claim evidence is stale (attempt/token mismatch)
+    /// so callers can feed a `ClassifyStaleCompletionArrival` input. Returns
+    /// the updated occurrence together with the emitted effects so callers can
+    /// inspect `LateCompletionResolutionRecorded` without a second read.
     async fn transition_occurrence_if_current(
         &self,
         occurrence_id: &OccurrenceId,
         expected_attempt: u32,
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
-    ) -> Result<Option<Occurrence>, ScheduleStoreError>;
+    ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError>;
 
     async fn transition_occurrence_with_receipt_if_current(
         &self,
@@ -332,7 +338,7 @@ impl ScheduleStore for DisabledScheduleStore {
         _expected_attempt: u32,
         _expected_claim_token: Option<Uuid>,
         _transition: OccurrenceLifecycleInput,
-    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+    ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError> {
         Err(unsupported(self.kind()))
     }
 
@@ -482,23 +488,49 @@ impl ScheduleStore for MemoryScheduleStore {
         }
         let mut occurrence_acks = Vec::new();
         if let Some(supersession) = supersession {
-            for occurrence in state.occurrences.values_mut() {
-                if occurrence.schedule_id != committed_schedule.schedule_id
-                    || occurrence.phase != OccurrencePhase::Pending
-                    || occurrence.schedule_revision >= supersession.superseded_by_revision()
-                {
-                    continue;
-                }
-                let mutator = occurrence
-                    .clone()
+            let occurrence_ids: Vec<OccurrenceId> = state
+                .occurrences
+                .values()
+                .filter(|occurrence| {
+                    occurrence.schedule_id == committed_schedule.schedule_id
+                        && !occurrence.is_terminal()
+                        && occurrence.schedule_revision < supersession.superseded_by_revision()
+                })
+                .map(|occurrence| occurrence.occurrence_id.clone())
+                .collect();
+            for occurrence_id in occurrence_ids {
+                let current = state
+                    .occurrences
+                    .get(&occurrence_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ScheduleStoreError::Internal(format!(
+                            "occurrence {occurrence_id} disappeared during supersession sweep"
+                        ))
+                    })?;
+                let mutator = current
                     .apply(OccurrenceLifecycleInput::Supersede {
                         superseded_by_revision: supersession.superseded_by_revision(),
                         at_utc: supersession.at_utc(),
                     })
                     .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
                 let (updated, _effects, acks) = mutator.into_parts_with_supersession_feedback();
+                // The commit-time sweep is the sole receipt minter for
+                // supersession (0.7.2 D1). Mint exactly one superseded receipt
+                // per swept row; later driver paths that encounter an already-
+                // Superseded occurrence must not mint a second one.
+                let receipt = updated
+                    .delivery_receipt_from_authority(None)
+                    .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
+                state
+                    .receipts
+                    .entry(updated.occurrence_id.clone())
+                    .or_default()
+                    .push(receipt);
                 occurrence_acks.extend(acks);
-                *occurrence = updated;
+                state
+                    .occurrences
+                    .insert(updated.occurrence_id.clone(), updated);
             }
         }
         committed_schedule = apply_supersession_feedback(committed_schedule, occurrence_acks)?;
@@ -733,7 +765,7 @@ impl ScheduleStore for MemoryScheduleStore {
         expected_attempt: u32,
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
-    ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+    ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError> {
         let mut state = self.inner.write().await;
         let Some(current) = state.occurrences.get(occurrence_id).cloned() else {
             return Ok(None);
@@ -743,14 +775,14 @@ impl ScheduleStore for MemoryScheduleStore {
         {
             return Ok(None);
         }
-        let updated = current
+        let mutator = current
             .apply(transition)
-            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-            .into_occurrence();
+            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+        let (updated, effects) = mutator.into_parts();
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated.clone());
-        Ok(Some(updated))
+        Ok(Some((updated, effects)))
     }
 
     async fn transition_occurrence_with_receipt_if_current(

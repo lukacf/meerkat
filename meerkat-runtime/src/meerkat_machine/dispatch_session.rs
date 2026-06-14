@@ -442,13 +442,13 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
-                let Some(_gate_guard) = self.lock_current_session_mutation_gate(&session_id).await
+                let Some(gate_guard) = self.lock_current_session_mutation_gate(&session_id).await
                 else {
                     return Err(RuntimeDriverError::NotReady {
                         state: RuntimeState::Destroyed,
                     });
                 };
-                self.unregister_session_inner_locked_authorized(&session_id)
+                self.unregister_session_inner_locked_authorized(&session_id, gate_guard)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }

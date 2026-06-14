@@ -477,10 +477,22 @@ impl RuntimeOAuthFlowHandle {
 
     fn expire_collected_flows(&self, pruned: OAuthPrunedFlows) {
         for (flow_id, target) in pruned.browser {
-            let _ = self.expire_browser(&target, &flow_id);
+            if let Err(err) = self.expire_browser(&target, &flow_id) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?target, %flow_id,
+                    "expire_collected_flows: browser flow expiry no-op (legitimate interleaving): {err}"
+                );
+            }
         }
         for (device_code, target) in pruned.device {
-            let _ = self.lifecycle.expire_device_flow(&target, &device_code);
+            if let Err(err) = self.lifecycle.expire_device_flow(&target, &device_code) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?target, %device_code,
+                    "expire_collected_flows: device flow expiry no-op (legitimate interleaving): {err}"
+                );
+            }
         }
     }
 
@@ -700,7 +712,13 @@ impl RuntimeOAuthFlowHandle {
             let _ =
                 self.registry
                     .consume(&flow.state, &flow.target, flow.provider, &flow.redirect_uri);
-            let _ = self.expire_browser(&flow.target, &flow.state);
+            if let Err(err) = self.expire_browser(&flow.target, &flow.state) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?flow.target, flow_id = %flow.state,
+                    "sync_persisted_payloads: stale browser expiry no-op (legitimate interleaving): {err}"
+                );
+            }
         }
         for flow in current
             .device
@@ -710,9 +728,16 @@ impl RuntimeOAuthFlowHandle {
             let _ =
                 self.registry
                     .expire_device_code(&flow.device_code, &flow.target, flow.provider);
-            let _ = self
+            if let Err(err) = self
                 .lifecycle
-                .expire_device_flow(&flow.target, &flow.device_code);
+                .expire_device_flow(&flow.target, &flow.device_code)
+            {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?flow.target, device_code = %flow.device_code,
+                    "sync_persisted_payloads: stale device expiry no-op (legitimate interleaving): {err}"
+                );
+            }
         }
         let current = self.registry.snapshot_for_persistence(now_millis);
         let current_browser = current
@@ -786,8 +811,13 @@ impl RuntimeOAuthFlowHandle {
                 created_at,
             )
             .is_err()
+            && let Err(err) = self.expire_browser(&persisted.target, &persisted.state)
         {
-            let _ = self.expire_browser(&persisted.target, &persisted.state);
+            tracing::debug!(
+                target: "meerkat::auth::oauth",
+                binding_target = ?persisted.target, flow_id = %persisted.state,
+                "restore_browser_payload: browser expiry compensation no-op (legitimate interleaving): {err}"
+            );
         }
     }
 
@@ -826,10 +856,15 @@ impl RuntimeOAuthFlowHandle {
                 expires_at,
             )
             .is_err()
-        {
-            let _ = self
+            && let Err(err) = self
                 .lifecycle
-                .expire_device_flow(&persisted.target, &persisted.device_code);
+                .expire_device_flow(&persisted.target, &persisted.device_code)
+        {
+            tracing::debug!(
+                target: "meerkat::auth::oauth",
+                binding_target = ?persisted.target, device_code = %persisted.device_code,
+                "restore_device_payload: device expiry compensation no-op (legitimate interleaving): {err}"
+            );
         }
     }
 }
@@ -1461,7 +1496,13 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
-                let _ = self.expire_browser(&target, &state);
+                if let Err(expire_err) = self.expire_browser(&target, &state) {
+                    tracing::debug!(
+                        target: "meerkat::auth::oauth",
+                        binding_target = ?target, flow_id = %state,
+                        "start: browser expiry compensation no-op after insert failure (legitimate interleaving): {expire_err}"
+                    );
+                }
                 return Err(err);
             }
         };
@@ -1480,7 +1521,13 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             let _ = self
                 .registry
                 .consume(&state, &target, provider, &redirect_uri);
-            let _ = self.expire_browser(&target, &state);
+            if let Err(expire_err) = self.expire_browser(&target, &state) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?target, flow_id = %state,
+                    "start: browser expiry compensation no-op after persist failure (legitimate interleaving): {expire_err}"
+                );
+            }
             return Err(err);
         }
         Ok(state)
@@ -1586,7 +1633,13 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
-                let _ = self.lifecycle.expire_device_flow(&target, &device_code);
+                if let Err(expire_err) = self.lifecycle.expire_device_flow(&target, &device_code) {
+                    tracing::debug!(
+                        target: "meerkat::auth::oauth",
+                        binding_target = ?target, %device_code,
+                        "admit_device_code: device expiry compensation no-op after insert failure (legitimate interleaving): {expire_err}"
+                    );
+                }
                 return Err(err);
             }
         };
@@ -1605,7 +1658,13 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             let _ = self
                 .registry
                 .expire_device_code(&device_code, &target, provider);
-            let _ = self.lifecycle.expire_device_flow(&target, &device_code);
+            if let Err(expire_err) = self.lifecycle.expire_device_flow(&target, &device_code) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?target, %device_code,
+                    "admit_device_code: device expiry compensation no-op after persist failure (legitimate interleaving): {expire_err}"
+                );
+            }
             return Err(err);
         }
         Ok(())
@@ -1655,13 +1714,25 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         {
             Ok(poll) => poll,
             Err(OAuthFlowError::Missing) => {
-                let _ = self.lifecycle.finish_device_poll(target, device_code);
+                if let Err(finish_err) = self.lifecycle.finish_device_poll(target, device_code) {
+                    tracing::debug!(
+                        target: "meerkat::auth::oauth",
+                        binding_target = ?target, %device_code,
+                        "begin_device_code_poll: poll finish compensation no-op after missing registry entry (legitimate interleaving): {finish_err}"
+                    );
+                }
                 return Err(OAuthFlowError::RegistryProjectionMissing {
                     operation: "begin_oauth_device_poll",
                 });
             }
             Err(err) => {
-                let _ = self.lifecycle.finish_device_poll(target, device_code);
+                if let Err(finish_err) = self.lifecycle.finish_device_poll(target, device_code) {
+                    tracing::debug!(
+                        target: "meerkat::auth::oauth",
+                        binding_target = ?target, %device_code,
+                        "begin_device_code_poll: poll finish compensation no-op after poll error (legitimate interleaving): {finish_err}"
+                    );
+                }
                 return Err(err);
             }
         };
@@ -3724,5 +3795,210 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // --- 0.7.2 disciplined shell inputs (lane L3 auth-release) ---
+    //
+    // Shell-level interleaving pins for the release drain (D1) and the
+    // post-teardown totality of Expire*/Confirm*/Finish* (D2a). The
+    // release-with-pending-flow tests stay RED until Stage B wires
+    // BeginRelease + drain discharge into `release_lease`; the
+    // post-release no-op tests go GREEN with the DSL change alone.
+
+    /// D1 (Stage B RED): releasing a lease with a pending browser flow must
+    /// succeed by terminally cancelling the flow as a machine-owned drain
+    /// obligation — not leave a flow behind that later "expires" into a
+    /// Released machine, and not fail the release.
+    #[test]
+    fn release_lease_terminally_cancels_pending_browser_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending flow must drain it, not fail");
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+        assert!(
+            !lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "pending flow must be terminally cancelled by the release drain"
+        );
+
+        // The flow is dead: completing the login is a typed rejection.
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::LifecycleRejected { .. })
+        ));
+
+        // A late error-handler/prune compensation fire for the cancelled
+        // flow lands on the Released machine as a benign no-op
+        // (worklist entries 24, 25, 27, 30).
+        lifecycle
+            .apply_oauth_input(
+                &target,
+                auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                    flow_id: state.clone(),
+                },
+                "late_prune_expire_browser",
+                false,
+            )
+            .expect("post-release expire must be a benign no-op");
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+    }
+
+    /// D1 (Stage B RED): same drain obligation for pending device flows
+    /// (worklist entries 26, 28).
+    #[test]
+    fn release_lease_terminally_cancels_pending_device_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+
+        authority
+            .admit_device_code(
+                target.clone(),
+                provider,
+                "device-code-1".to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending device flow must drain it, not fail");
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+        assert!(
+            !lifecycle.has_oauth_device_flow_for_test(&target, "device-code-1"),
+            "pending device flow must be terminally cancelled by the release drain"
+        );
+
+        // Late prune/compensation expiry of the cancelled flow is benign.
+        lifecycle
+            .expire_device_flow(&target, "device-code-1")
+            .expect("post-release device expire must be a benign no-op");
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+    }
+
+    /// D2a (GREEN with the DSL change): the poll/prune producers and the
+    /// durable-admission confirmation legitimately fire at a Released
+    /// machine; every arrival is Ok-no-op through the shell dispatch path,
+    /// never an ERROR-class rejection (worklist entries 24-30).
+    #[test]
+    fn post_release_oauth_observations_through_shell_dispatch_are_benign() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("releasing an empty lease succeeds");
+        // Snapshot contract: a Released lease projects `phase: None` (Released
+        // means "no live lease phase"), so None is the released observation.
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+
+        lifecycle
+            .apply_oauth_input(
+                &target,
+                auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                    flow_id: "ghost-browser".to_string(),
+                },
+                "late_prune_expire_browser",
+                false,
+            )
+            .expect("post-release browser expire must be a benign no-op");
+        lifecycle
+            .expire_device_flow(&target, "ghost-device")
+            .expect("post-release device expire must be a benign no-op");
+        lifecycle
+            .finish_device_poll(&target, "ghost-poll")
+            .expect("post-release poll finish must be a benign no-op");
+        lifecycle
+            .confirm_oauth_durable_admission(&target, 0, 16, "late_confirm_oauth_durable_admission")
+            .expect("post-release durable-admission confirmation must be a benign no-op");
+
+        // The benign observations left the lease released (still projects None).
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
+    }
+
+    /// D1 + D2a (Stage B RED): deterministic teardown interleave — the
+    /// prune-shaped expire fires at the exact release-acceptance point
+    /// (after the Release transition committed, before `release_lease`
+    /// returns) and must be a benign no-op, not a guard rejection.
+    #[test]
+    fn late_prune_expire_at_release_acceptance_is_benign() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let lease_key = LeaseKey::from_auth_binding(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                "http://127.0.0.1/callback".to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        let hook_result: Arc<StdMutex<Option<Result<(), String>>>> = Arc::new(StdMutex::new(None));
+        let hook_result_for_hook = Arc::clone(&hook_result);
+        let lifecycle_for_hook = Arc::clone(&lifecycle);
+        let target_for_hook = target.clone();
+        let lease_key_for_hook = lease_key.clone();
+        let flow_for_hook = state.clone();
+        let _hook_guard = crate::handles::auth_lease::install_release_after_accept_hook_for_test(
+            Arc::new(move |released_key| {
+                if released_key != &lease_key_for_hook {
+                    return;
+                }
+                let outcome = lifecycle_for_hook
+                    .apply_oauth_input(
+                        &target_for_hook,
+                        auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
+                            flow_id: flow_for_hook.clone(),
+                        },
+                        "late_prune_expire_at_release_acceptance",
+                        false,
+                    )
+                    .map_err(|err| err.to_string());
+                *hook_result_for_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+            }),
+        );
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("release with a pending flow must drain it, not fail");
+
+        let outcome = hook_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("release acceptance hook must have fired");
+        assert_eq!(
+            outcome,
+            Ok(()),
+            "expire fired at release acceptance must be a benign no-op"
+        );
+        assert_eq!(snapshot_phase(&lifecycle, &target), None);
     }
 }

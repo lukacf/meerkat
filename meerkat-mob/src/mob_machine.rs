@@ -382,6 +382,7 @@ pub enum MobMachineRuntimeInternalReason {
     SessionIngressDetachFeedback,
     SessionIngressDetachRequest,
     StartupKickoffLifecycle,
+    TeardownPendingSpawnDrain,
     RetireIdempotencyAuthority,
     SupervisorAuthority,
     TrustHandoffAuthority,
@@ -630,6 +631,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::KickoffClear,
         reason: MobMachineRuntimeInternalReason::StartupKickoffLifecycle,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::KickoffQuiesced,
+        reason: MobMachineRuntimeInternalReason::StartupKickoffLifecycle,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CancelPendingSpawn,
+        reason: MobMachineRuntimeInternalReason::TeardownPendingSpawnDrain,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RegisterMemberPeer,

@@ -189,6 +189,58 @@ impl std::fmt::Display for RuntimeKeepAliveRequest {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeSystemContextApplicationAuthorization {
+    #[default]
+    #[serde(rename = "Authorized")]
+    Authorized,
+    #[serde(rename = "SessionArchived")]
+    SessionArchived,
+}
+impl RuntimeSystemContextApplicationAuthorization {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Authorized => "Authorized",
+            Self::SessionArchived => "SessionArchived",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeSystemContextApplicationAuthorization {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Authorized" => Ok(Self::Authorized),
+            "SessionArchived" => Ok(Self::SessionArchived),
+            other => Err(format!(
+                "invalid RuntimeSystemContextApplicationAuthorization value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeSystemContextApplicationAuthorization {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeSystemContextApplicationAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum StartTurnDispatchAuthorization {
     #[default]
     #[serde(rename = "Authorized")]
@@ -439,6 +491,54 @@ impl std::fmt::Display for TurnAdmissionPhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnAdmissionShutdownTerminal {
+    #[default]
+    #[serde(rename = "SessionArchived")]
+    SessionArchived,
+}
+impl TurnAdmissionShutdownTerminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SessionArchived => "SessionArchived",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnAdmissionShutdownTerminal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SessionArchived" => Ok(Self::SessionArchived),
+            other => Err(format!(
+                "invalid TurnAdmissionShutdownTerminal value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnAdmissionShutdownTerminal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnAdmissionShutdownTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -459,6 +559,7 @@ pub struct State {
     pub phase: Phase,
     pub interrupt_pending: bool,
     pub shutdown_pending: bool,
+    pub admission_drain_pending: bool,
     pub last_public_terminal: Option<StartTurnPublicTerminal>,
 }
 impl Default for State {
@@ -493,6 +594,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveLastStartTurnPublicTerminal {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeRuntimeSystemContextApplication {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePendingAdmissionDrained {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSessionTeardown {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeKeepAlive {
         pub keep_alive_request: RuntimeKeepAliveRequest,
     }
@@ -519,6 +626,9 @@ pub enum Input {
     AuthorizeStartTurnDispatch(inputs::AuthorizeStartTurnDispatch),
     AuthorizeCancelAfterBoundary(inputs::AuthorizeCancelAfterBoundary),
     ResolveLastStartTurnPublicTerminal(inputs::ResolveLastStartTurnPublicTerminal),
+    AuthorizeRuntimeSystemContextApplication(inputs::AuthorizeRuntimeSystemContextApplication),
+    ResolvePendingAdmissionDrained(inputs::ResolvePendingAdmissionDrained),
+    AuthorizeSessionTeardown(inputs::AuthorizeSessionTeardown),
     ResolveRuntimeKeepAlive(inputs::ResolveRuntimeKeepAlive),
     ResolveStartTurnDisposition(inputs::ResolveStartTurnDisposition),
 }
@@ -538,6 +648,11 @@ impl Input {
             Self::ResolveLastStartTurnPublicTerminal(_) => {
                 InputKind::ResolveLastStartTurnPublicTerminal
             }
+            Self::AuthorizeRuntimeSystemContextApplication(_) => {
+                InputKind::AuthorizeRuntimeSystemContextApplication
+            }
+            Self::ResolvePendingAdmissionDrained(_) => InputKind::ResolvePendingAdmissionDrained,
+            Self::AuthorizeSessionTeardown(_) => InputKind::AuthorizeSessionTeardown,
             Self::ResolveRuntimeKeepAlive(_) => InputKind::ResolveRuntimeKeepAlive,
             Self::ResolveStartTurnDisposition(_) => InputKind::ResolveStartTurnDisposition,
         }
@@ -556,6 +671,9 @@ pub enum InputKind {
     AuthorizeStartTurnDispatch,
     AuthorizeCancelAfterBoundary,
     ResolveLastStartTurnPublicTerminal,
+    AuthorizeRuntimeSystemContextApplication,
+    ResolvePendingAdmissionDrained,
+    AuthorizeSessionTeardown,
     ResolveRuntimeKeepAlive,
     ResolveStartTurnDisposition,
 }
@@ -592,6 +710,18 @@ pub mod effects {
     pub struct RuntimeKeepAliveResolved {
         pub decision: RuntimeKeepAlivePersistenceDecision,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PendingAdmissionDrainRequested {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeSystemContextApplicationResolved {
+        pub authorization: RuntimeSystemContextApplicationAuthorization,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TurnAdmissionShutdownTerminalResolved {
+        pub terminal: TurnAdmissionShutdownTerminal,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionTeardownAuthorized {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -603,6 +733,10 @@ pub enum Effect {
     StartTurnDispositionResolved(effects::StartTurnDispositionResolved),
     StartTurnPublicTerminalResolved(effects::StartTurnPublicTerminalResolved),
     RuntimeKeepAliveResolved(effects::RuntimeKeepAliveResolved),
+    PendingAdmissionDrainRequested(effects::PendingAdmissionDrainRequested),
+    RuntimeSystemContextApplicationResolved(effects::RuntimeSystemContextApplicationResolved),
+    TurnAdmissionShutdownTerminalResolved(effects::TurnAdmissionShutdownTerminalResolved),
+    SessionTeardownAuthorized(effects::SessionTeardownAuthorized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -613,6 +747,10 @@ pub enum EffectKind {
     StartTurnDispositionResolved,
     StartTurnPublicTerminalResolved,
     RuntimeKeepAliveResolved,
+    PendingAdmissionDrainRequested,
+    RuntimeSystemContextApplicationResolved,
+    TurnAdmissionShutdownTerminalResolved,
+    SessionTeardownAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -625,7 +763,10 @@ pub enum TransitionId {
     ProjectTurnAdmissionShuttingDown,
     ClaimTurn,
     AbortClaim,
+    ClaimTurnShuttingDown,
+    AbortClaimShuttingDown,
     BeginTurn,
+    BeginTurnShuttingDown,
     ResolveTurn,
     FinalizeTurnToShutdown,
     FinalizeTurnToIdle,
@@ -638,9 +779,16 @@ pub enum TransitionId {
     RequestShutdownDeferredRunning,
     RequestShutdownDeferredCompleting,
     RequestShutdownAlreadyShuttingDown,
+    ResolvePendingAdmissionDrained,
+    AuthorizeSessionTeardown,
     AuthorizeCancelAfterBoundaryAdmitted,
     AuthorizeStartTurnDispatchAdmitted,
     AuthorizeStartTurnDispatchShuttingDown,
+    AuthorizeRuntimeSystemContextApplicationActiveIdle,
+    AuthorizeRuntimeSystemContextApplicationActiveAdmitted,
+    AuthorizeRuntimeSystemContextApplicationActiveRunning,
+    AuthorizeRuntimeSystemContextApplicationActiveCompleting,
+    AuthorizeRuntimeSystemContextApplicationShuttingDown,
     AuthorizeCancelAfterBoundaryRunning,
     ResolveDispositionContentTurn,
     ResolveDispositionResumePendingWithBoundary,
@@ -648,9 +796,11 @@ pub enum TransitionId {
     ResolveDispositionDirectPrompt,
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
+    ResolveStartTurnDispositionShuttingDown,
     ResolveRuntimeKeepAliveEnable,
     ResolveRuntimeKeepAliveDisable,
     ResolveRuntimeKeepAlivePreserve,
+    ResolveRuntimeKeepAliveShuttingDown,
     ResolveLastStartTurnPublicTerminalNoPendingIdle,
     ResolveLastStartTurnPublicTerminalNoPendingAdmitted,
     ResolveLastStartTurnPublicTerminalNoPendingRunning,
@@ -730,6 +880,7 @@ pub fn initial_state() -> State {
         phase: Phase::Idle,
         interrupt_pending: false,
         shutdown_pending: false,
+        admission_drain_pending: false,
         last_public_terminal: None,
     }
 }

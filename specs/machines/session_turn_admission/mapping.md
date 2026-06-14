@@ -39,9 +39,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortClaim`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_claim_run_finalize`
+- `ClaimTurnShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortClaimShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginTurn`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_claim_run_finalize`
+- `BeginTurnShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurn`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_claim_run_finalize`, `turn_admission_interrupt_and_shutdown`, `turn_admission_dispatch_and_boundary_cancel`, `turn_admission_start_turn_disposition`, `turn_admission_runtime_keep_alive`
@@ -78,6 +87,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestShutdownAlreadyShuttingDown`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_interrupt_and_shutdown`
+- `ResolvePendingAdmissionDrained`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeSessionTeardown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeCancelAfterBoundaryAdmitted`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_dispatch_and_boundary_cancel`
@@ -87,6 +102,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeStartTurnDispatchShuttingDown`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_dispatch_and_boundary_cancel`
+- `AuthorizeRuntimeSystemContextApplicationActiveIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRuntimeSystemContextApplicationActiveAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRuntimeSystemContextApplicationActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRuntimeSystemContextApplicationActiveCompleting`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRuntimeSystemContextApplicationShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeCancelAfterBoundaryRunning`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_dispatch_and_boundary_cancel`
@@ -108,6 +138,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveDispositionDirectNoPending`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_start_turn_disposition`
+- `ResolveStartTurnDispositionShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeKeepAliveEnable`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
@@ -117,6 +150,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeKeepAlivePreserve`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `ResolveRuntimeKeepAliveShuttingDown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingIdle`
   - anchors: `session_turn_admission_authority`
   - scenarios: (unclaimed)
@@ -155,10 +191,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeKeepAliveResolved`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `PendingAdmissionDrainRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeSystemContextApplicationResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `TurnAdmissionShutdownTerminalResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SessionTeardownAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `shutdown_phase_is_not_active`
   - anchors: `session_turn_admission_authority`
+  - scenarios: (unclaimed)
+- `drain_obligation_only_while_shutting_down`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
 

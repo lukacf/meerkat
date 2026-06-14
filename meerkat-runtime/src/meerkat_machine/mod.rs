@@ -1027,7 +1027,7 @@ struct RuntimeLoopAttachment {
     effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
     boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
     interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
-    _loop_handle: tokio::task::JoinHandle<()>,
+    loop_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Mechanical runtime-loop channel slot.
@@ -1073,6 +1073,24 @@ impl RuntimeSessionEntry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.handle_teardown_gate.close();
+    }
+
+    /// True while the runtime-loop executor registration is `Active` *or*
+    /// `Draining`. The drain window (`BeginUnregisterSession` → final
+    /// `UnregisterSession`) keeps the session registered so the in-flight run
+    /// can still commit and resolve its completion waiters; the runtime-loop
+    /// driver-authority gate must therefore admit `Draining`, while the
+    /// registration *claim* check stays `Active`-only (no new attachment may be
+    /// granted inside the drain window).
+    fn generated_executor_registration_active_or_draining(&self) -> bool {
+        let authority = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            authority.state().registration_phase,
+            dsl::RegistrationPhase::Active | dsl::RegistrationPhase::Draining
+        )
     }
 
     fn generated_stop_deferred(&self) -> bool {
@@ -1133,8 +1151,22 @@ impl RuntimeSessionEntry {
             effect_tx,
             boundary_handle,
             interrupt_handle,
-            _loop_handle: loop_handle,
+            loop_handle,
         });
+    }
+
+    /// Detach the runtime-loop channels, returning the loop's `JoinHandle` so a
+    /// caller can await its quiescence.
+    ///
+    /// Dropping the returned `wake_tx`/`effect_tx` (held inside the attachment)
+    /// closes the loop's receivers, which drives the loop through its canonical
+    /// `StopRuntimeExecutor` + `RuntimeExecutorExited` exit. The slot is left
+    /// `Empty`. Returns `None` when no loop is attached.
+    fn take_loop_join_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        match std::mem::replace(&mut self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
+            RuntimeLoopAttachmentSlot::Attached(attachment) => Some(attachment.loop_handle),
+            RuntimeLoopAttachmentSlot::Empty => None,
+        }
     }
 
     fn clear_dead_attachment(&mut self) -> bool {
@@ -1275,7 +1307,7 @@ impl MeerkatMachine {
                 .ok_or(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 })?;
-            if !entry.generated_executor_registration_active() {
+            if !entry.generated_executor_registration_active_or_draining() {
                 return Err(RuntimeDriverError::ValidationFailed {
                     reason:
                         "generated MeerkatMachine has no active runtime-loop executor registration"

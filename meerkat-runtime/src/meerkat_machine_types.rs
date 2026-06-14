@@ -610,6 +610,7 @@ pub enum MeerkatMachineRuntimeInternalReason {
     ExternalSurfaceLifecycle,
     FailureRecoveryLifecycle,
     UserInterruptDispatch,
+    SessionUnregisterDrainLifecycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -889,6 +890,12 @@ meerkat_machine_runtime_internal_inputs!(
     UserInterruptDispatch => [
         InterruptCurrentRun,
         ResolveUserInterruptPublicResult,
+    ],
+    SessionUnregisterDrainLifecycle => [
+        BeginUnregisterSession,
+        CommsDrainExitedForUnregister,
+        CompletionWaitersResolvedForUnregister,
+        RuntimeLoopStoppedForUnregister,
     ],
 );
 

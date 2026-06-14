@@ -5784,12 +5784,15 @@ pub enum RegistrationPhase {
     Queuing,
     #[serde(rename = "Active")]
     Active,
+    #[serde(rename = "Draining")]
+    Draining,
 }
 impl RegistrationPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Queuing => "Queuing",
             Self::Active => "Active",
+            Self::Draining => "Draining",
         }
     }
 }
@@ -5799,6 +5802,7 @@ impl std::convert::TryFrom<&str> for RegistrationPhase {
         match value {
             "Queuing" => Ok(Self::Queuing),
             "Active" => Ok(Self::Active),
+            "Draining" => Ok(Self::Draining),
             other => Err(format!("invalid RegistrationPhase value `{other}`")),
         }
     }
@@ -10251,6 +10255,9 @@ pub struct State {
     pub model_routing_approval_parent_kind:
         std::collections::BTreeMap<String, RoutingApprovalParentKind>,
     pub registration_phase: RegistrationPhase,
+    pub unregister_runtime_loop_drain_pending: bool,
+    pub unregister_comms_drain_exit_pending: bool,
+    pub unregister_completion_waiter_drain_pending: bool,
     pub staged_session_phase: StagedSessionPhase,
     pub staged_session_id: Option<SessionId>,
     pub staged_session_keep_alive: Option<bool>,
@@ -10470,6 +10477,26 @@ pub mod inputs {
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterSession {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginUnregisterSession {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLoopStoppedForUnregister {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommsDrainExitedForUnregister {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompletionWaitersResolvedForUnregister {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11939,6 +11966,10 @@ pub mod inputs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     RegisterSession(inputs::RegisterSession),
+    BeginUnregisterSession(inputs::BeginUnregisterSession),
+    RuntimeLoopStoppedForUnregister(inputs::RuntimeLoopStoppedForUnregister),
+    CommsDrainExitedForUnregister(inputs::CommsDrainExitedForUnregister),
+    CompletionWaitersResolvedForUnregister(inputs::CompletionWaitersResolvedForUnregister),
     UnregisterSession(inputs::UnregisterSession),
     ResolveRuntimeOpsLifecycleDurability(inputs::ResolveRuntimeOpsLifecycleDurability),
     HydrateSessionLlmState(inputs::HydrateSessionLlmState),
@@ -12221,6 +12252,12 @@ impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
             Self::RegisterSession(_) => InputKind::RegisterSession,
+            Self::BeginUnregisterSession(_) => InputKind::BeginUnregisterSession,
+            Self::RuntimeLoopStoppedForUnregister(_) => InputKind::RuntimeLoopStoppedForUnregister,
+            Self::CommsDrainExitedForUnregister(_) => InputKind::CommsDrainExitedForUnregister,
+            Self::CompletionWaitersResolvedForUnregister(_) => {
+                InputKind::CompletionWaitersResolvedForUnregister
+            }
             Self::UnregisterSession(_) => InputKind::UnregisterSession,
             Self::ResolveRuntimeOpsLifecycleDurability(_) => {
                 InputKind::ResolveRuntimeOpsLifecycleDurability
@@ -12564,6 +12601,10 @@ impl Input {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
     RegisterSession,
+    BeginUnregisterSession,
+    RuntimeLoopStoppedForUnregister,
+    CommsDrainExitedForUnregister,
+    CompletionWaitersResolvedForUnregister,
     UnregisterSession,
     ResolveRuntimeOpsLifecycleDurability,
     HydrateSessionLlmState,
@@ -13725,6 +13766,18 @@ pub mod effects {
         pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
         pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestRuntimeLoopStopForUnregister {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestCommsDrainExitForUnregister {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestCompletionWaiterResolutionForUnregister {
+        pub session_id: SessionId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13883,6 +13936,11 @@ pub enum Effect {
     SessionLlmReconfigurePlanResolved(effects::SessionLlmReconfigurePlanResolved),
     PeerProjectionChanged(effects::PeerProjectionChanged),
     CommsTrustReconcileRequested(effects::CommsTrustReconcileRequested),
+    RequestRuntimeLoopStopForUnregister(effects::RequestRuntimeLoopStopForUnregister),
+    RequestCommsDrainExitForUnregister(effects::RequestCommsDrainExitForUnregister),
+    RequestCompletionWaiterResolutionForUnregister(
+        effects::RequestCompletionWaiterResolutionForUnregister,
+    ),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14038,6 +14096,9 @@ pub enum EffectKind {
     SessionLlmReconfigurePlanResolved,
     PeerProjectionChanged,
     CommsTrustReconcileRequested,
+    RequestRuntimeLoopStopForUnregister,
+    RequestCommsDrainExitForUnregister,
+    RequestCompletionWaiterResolutionForUnregister,
 }
 
 #[allow(non_camel_case_types)]
@@ -14076,6 +14137,26 @@ pub enum TransitionId {
     SetMobOperatorCreateAuthority,
     GrantMobOperatorManageMob,
     SetMobOperatorSpawnProfilesInMob,
+    BeginUnregisterSessionIdle,
+    BeginUnregisterSessionAttached,
+    BeginUnregisterSessionRunning,
+    BeginUnregisterSessionRetired,
+    BeginUnregisterSessionStopped,
+    RuntimeLoopStoppedForUnregisterIdle,
+    RuntimeLoopStoppedForUnregisterAttached,
+    RuntimeLoopStoppedForUnregisterRunning,
+    RuntimeLoopStoppedForUnregisterRetired,
+    RuntimeLoopStoppedForUnregisterStopped,
+    CommsDrainExitedForUnregisterIdle,
+    CommsDrainExitedForUnregisterAttached,
+    CommsDrainExitedForUnregisterRunning,
+    CommsDrainExitedForUnregisterRetired,
+    CommsDrainExitedForUnregisterStopped,
+    CompletionWaitersResolvedForUnregisterIdle,
+    CompletionWaitersResolvedForUnregisterAttached,
+    CompletionWaitersResolvedForUnregisterRunning,
+    CompletionWaitersResolvedForUnregisterRetired,
+    CompletionWaitersResolvedForUnregisterStopped,
     UnregisterSessionIdle,
     UnregisterSessionAttached,
     UnregisterSessionRunning,
@@ -15484,6 +15565,25 @@ pub enum TransitionId {
     InteractionStreamClosedEarlyRunning,
     InteractionStreamClosedEarlyRetired,
     InteractionStreamClosedEarlyStopped,
+    NotifyDrainExitedAfterUnregister,
+    McpServerConnectPendingAfterUnregister,
+    McpServerConnectedAfterUnregister,
+    McpServerFailedAfterUnregister,
+    McpServerDisconnectedAfterUnregister,
+    McpServerReloadAfterUnregister,
+    PeerRequestSentAfterUnregister,
+    PeerResponseProgressArrivedAfterUnregister,
+    PeerResponseTerminalArrivedAfterUnregister,
+    PeerResponseRejectedAfterUnregister,
+    PeerRequestTimedOutAfterUnregister,
+    PeerRequestSendFailedAfterUnregister,
+    PeerRequestReceivedAfterUnregister,
+    PeerResponseRepliedAfterUnregister,
+    InteractionStreamReservedAfterUnregister,
+    InteractionStreamAttachedAfterUnregister,
+    InteractionStreamCompletedAfterUnregister,
+    InteractionStreamExpiredAfterUnregister,
+    InteractionStreamClosedEarlyAfterUnregister,
     AttachSessionIngressIdle,
     AttachSessionIngressAttached,
     AttachSessionIngressRunning,
@@ -15812,6 +15912,9 @@ pub fn initial_state() -> State {
         model_routing_approval_phases: Default::default(),
         model_routing_approval_parent_kind: Default::default(),
         registration_phase: RegistrationPhase::Queuing,
+        unregister_runtime_loop_drain_pending: false,
+        unregister_comms_drain_exit_pending: false,
+        unregister_completion_waiter_drain_pending: false,
         staged_session_phase: StagedSessionPhase::NotStaged,
         staged_session_id: None,
         staged_session_keep_alive: None,

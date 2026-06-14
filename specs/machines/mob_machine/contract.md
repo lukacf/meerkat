@@ -307,6 +307,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `KickoffResolveFailed`(member_id: AgentIdentity, error: String)
 - `KickoffCancelRequested`(member_id: AgentIdentity)
 - `KickoffClear`(member_id: AgentIdentity)
+- `KickoffQuiesced`(member_id: AgentIdentity)
+- `CancelPendingSpawn`(agent_identity: AgentIdentity)
 - `ProbeMemberAdmission`(agent_identity: AgentIdentity)
 - `ComputeRespawnGeneration`(agent_identity: AgentIdentity)
 - `ClassifyStepOutputFault`(run_id: RunId, step_id: StepId, target_retry_key: String, fault: StepOutputFaultKind, attempt: u32, max_retries: u32)
@@ -424,6 +426,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistKickoffUpdate`(member_id: AgentIdentity, phase: KickoffPhase)
 - `PersistKickoffFailureUpdate`(member_id: AgentIdentity, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: AgentIdentity, intent: KickoffIntent)
+- `RequestKickoffQuiesce`(member_id: AgentIdentity)
+- `RequestPendingSpawnQuiesceForDestroy`
 - `MemberAdmissionProbed`(agent_identity: AgentIdentity, verdict: MemberAdmissionVerdictKind)
 - `RespawnGenerationComputed`(agent_identity: AgentIdentity, next_generation: Generation)
 - `StepOutputFaultClassified`(run_id: RunId, step_id: StepId, target_retry_key: String, disposition: StepFaultDispositionKind, terminal_cause: StepOutputFaultKind)
@@ -3260,6 +3264,160 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `KickoffClear`(member_id)
 - To: `Completed`
 
+### `KickoffQuiescedInFlightRunning`
+- From: `Running`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_in_flight`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffQuiescedInFlightStopped`
+- From: `Stopped`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_in_flight`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffQuiescedInFlightCompleted`
+- From: `Completed`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_in_flight`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffQuiescedIdleRunning`
+- From: `Running`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_not_in_flight`
+- To: `Running`
+
+### `KickoffQuiescedIdleStopped`
+- From: `Stopped`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_not_in_flight`
+- To: `Stopped`
+
+### `KickoffQuiescedIdleCompleted`
+- From: `Completed`
+- On: `KickoffQuiesced`(member_id)
+- Guards:
+  - `kickoff_not_in_flight`
+- To: `Completed`
+
+### `KickoffQuiescedDestroyed`
+- From: `Destroyed`
+- On: `KickoffQuiesced`(member_id)
+- To: `Destroyed`
+
+### `KickoffResolveStartedLateArrivalRunning`
+- From: `Running`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Running`
+
+### `KickoffResolveStartedLateArrivalStopped`
+- From: `Stopped`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Stopped`
+
+### `KickoffResolveStartedLateArrivalCompleted`
+- From: `Completed`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Completed`
+
+### `KickoffResolveStartedDestroyed`
+- From: `Destroyed`
+- On: `KickoffResolveStarted`(member_id)
+- To: `Destroyed`
+
+### `KickoffResolveCallbackPendingLateArrivalRunning`
+- From: `Running`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Running`
+
+### `KickoffResolveCallbackPendingLateArrivalStopped`
+- From: `Stopped`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Stopped`
+
+### `KickoffResolveCallbackPendingLateArrivalCompleted`
+- From: `Completed`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_not_starting`
+- To: `Completed`
+
+### `KickoffResolveCallbackPendingDestroyed`
+- From: `Destroyed`
+- On: `KickoffResolveCallbackPending`(member_id)
+- To: `Destroyed`
+
+### `KickoffResolveFailedLateArrivalRunning`
+- From: `Running`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_not_active`
+- To: `Running`
+
+### `KickoffResolveFailedLateArrivalStopped`
+- From: `Stopped`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_not_active`
+- To: `Stopped`
+
+### `KickoffResolveFailedLateArrivalCompleted`
+- From: `Completed`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_not_active`
+- To: `Completed`
+
+### `KickoffResolveFailedDestroyed`
+- From: `Destroyed`
+- On: `KickoffResolveFailed`(member_id, error)
+- To: `Destroyed`
+
+### `KickoffCancelRequestedLateArrivalRunning`
+- From: `Running`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_not_active`
+- To: `Running`
+
+### `KickoffCancelRequestedLateArrivalStopped`
+- From: `Stopped`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_not_active`
+- To: `Stopped`
+
+### `KickoffCancelRequestedLateArrivalCompleted`
+- From: `Completed`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_not_active`
+- To: `Completed`
+
+### `KickoffCancelRequestedDestroyed`
+- From: `Destroyed`
+- On: `KickoffCancelRequested`(member_id)
+- To: `Destroyed`
+
 ### `ProbeMemberAdmissionDuplicateRunning`
 - From: `Running`
 - On: `ProbeMemberAdmission`(agent_identity)
@@ -3880,7 +4038,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`
+- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `RetireMemberPeerOnly`
@@ -3892,6 +4050,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_absent`
   - `session_binding_absent`
+- Emits: `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetireLiveRunning`
@@ -3904,7 +4063,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`
+- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetireLiveStopped`
@@ -3917,7 +4076,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`
+- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `AdmitDestroyMemberRetirePeerOnlyRunning`
@@ -3930,6 +4089,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_absent`
   - `session_binding_absent`
+- Emits: `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetirePeerOnlyStopped`
@@ -3942,6 +4102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `session_absent`
   - `session_binding_absent`
+- Emits: `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `AdmitDestroyMemberRetireAlreadyRetiringRunning`
@@ -3952,6 +4113,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `member_retiring`
   - `session_matches_binding_or_absent`
+- Emits: `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetireAlreadyRetiringStopped`
@@ -3962,6 +4124,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `member_retiring`
   - `session_matches_binding_or_absent`
+- Emits: `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `ObserveRuntimeRetired`
@@ -3980,6 +4143,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `kickoff_quiesced`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -3990,6 +4154,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `kickoff_quiesced`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Stopped`
 
@@ -4000,6 +4165,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `kickoff_quiesced`
 - To: `Running`
 
 ### `ObserveMemberRetirementArchivedRetiredStopped`
@@ -4009,6 +4175,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `kickoff_quiesced`
 - To: `Stopped`
 
 ### `ObserveMemberRetirementArchivedStaleRuntime`
@@ -4055,6 +4222,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
 - To: `Running`
 
@@ -4068,6 +4236,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
 - To: `Stopped`
 
@@ -4081,6 +4250,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
 - To: `Running`
 
@@ -4094,6 +4264,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
 - To: `Stopped`
 
@@ -4171,7 +4342,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `AdmitDestroyCleanup`
 - From: `Running`, `Stopped`, `Completed`
 - On: `AdmitDestroyCleanup`()
-- Emits: `AppendLifecycleJournal`
+- Emits: `AppendLifecycleJournal`, `RequestPendingSpawnQuiesceForDestroy`
 - To: `Running`
 
 ### `AdmitDestroyStorageFinalizing`
@@ -4195,6 +4366,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DestroyMob`(session_id)
 - Guards:
   - `session_ingress_detaches_closed`
+  - `kickoff_waiters_quiesced`
+  - `pending_spawns_drained`
 - Emits: `RequestRuntimeDestroy`
 - To: `Destroyed`
 
@@ -6302,7 +6475,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `releasing_matches_current`
   - `session_matches_releasing`
-- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `RetireRunningPreservingBinding`
@@ -6316,7 +6489,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `prior_session_binding_present`
   - `releasing_absent`
   - `session_binding_matches`
-- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `RetireRunningNoBinding`
@@ -6330,7 +6503,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_prior_session_binding`
   - `releasing_absent`
   - `session_absent`
-- Emits: `AppendLifecycleJournal`
+- Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `RetireStoppedReleasing`
@@ -6345,7 +6518,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `releasing_matches_current`
   - `session_matches_releasing`
-- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `RequestPendingSessionIngressDetachForMobDestroyRunning`
@@ -6403,7 +6576,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `prior_session_binding_present`
   - `releasing_absent`
   - `session_binding_matches`
-- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `RetireStoppedNoBinding`
@@ -6417,7 +6590,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_prior_session_binding`
   - `releasing_absent`
   - `session_absent`
-- Emits: `AppendLifecycleJournal`
+- Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `RetireAbsentRunning`
@@ -6461,11 +6634,89 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
+### `CompleteSpawnLateArrivalRunning`
+- From: `Running`
+- On: `CompleteSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Running`
+
+### `CompleteSpawnLateArrivalStopped`
+- From: `Stopped`
+- On: `CompleteSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Stopped`
+
+### `CompleteSpawnLateArrivalCompleted`
+- From: `Completed`
+- On: `CompleteSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Completed`
+
+### `CompleteSpawnDestroyed`
+- From: `Destroyed`
+- On: `CompleteSpawn`(agent_identity)
+- To: `Destroyed`
+
+### `CancelPendingSpawnPresentRunning`
+- From: `Running`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_spawns_present`
+  - `pending_identity_present`
+- To: `Running`
+
+### `CancelPendingSpawnPresentStopped`
+- From: `Stopped`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_spawns_present`
+  - `pending_identity_present`
+- To: `Stopped`
+
+### `CancelPendingSpawnPresentCompleted`
+- From: `Completed`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_spawns_present`
+  - `pending_identity_present`
+- To: `Completed`
+
+### `CancelPendingSpawnAbsentRunning`
+- From: `Running`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Running`
+
+### `CancelPendingSpawnAbsentStopped`
+- From: `Stopped`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Stopped`
+
+### `CancelPendingSpawnAbsentCompleted`
+- From: `Completed`
+- On: `CancelPendingSpawn`(agent_identity)
+- Guards:
+  - `pending_identity_absent`
+- To: `Completed`
+
+### `CancelPendingSpawnDestroyed`
+- From: `Destroyed`
+- On: `CancelPendingSpawn`(agent_identity)
+- To: `Destroyed`
+
 ### `DestroyFromAny`
 - From: `Running`, `Stopped`, `Completed`
 - On: `Destroy`()
 - Guards:
   - `session_ingress_detaches_closed`
+  - `kickoff_waiters_quiesced`
+  - `pending_spawns_drained`
 - To: `Destroyed`
 
 ### `RespawnRunning`

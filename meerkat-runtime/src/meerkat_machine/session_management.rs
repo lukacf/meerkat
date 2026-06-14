@@ -676,7 +676,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         epoch_id: &meerkat_core::RuntimeEpochId,
     ) {
-        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
             return;
         };
         {
@@ -689,7 +689,7 @@ impl MeerkatMachine {
             }
         }
         if let Err(err) = self
-            .unregister_session_inner_locked_authorized(session_id)
+            .unregister_session_inner_locked_authorized(session_id, gate_guard)
             .await
         {
             tracing::warn!(
@@ -1233,6 +1233,31 @@ impl MeerkatMachine {
         self.unregister_session_inner(session_id).await;
     }
 
+    /// Stage `BeginUnregisterSession`, which opens the machine-owned drain
+    /// window. Carries the same binding facts as the final `UnregisterSession`
+    /// so the machine can match them against the active runtime authority.
+    async fn stage_begin_unregister_session_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StagedSessionDslInput, String> {
+        let begin_input = {
+            let authority = self.session_dsl_authority(session_id).await?;
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                agent_runtime_id: state.active_runtime_id.clone(),
+                fence_token: state.active_fence_token,
+                generation: state.active_runtime_generation,
+                runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+            }
+        };
+        self.stage_session_dsl_transition(session_id, begin_input, "BeginUnregisterSession")
+            .await
+    }
+
     async fn stage_unregister_session_authority(
         &self,
         session_id: &SessionId,
@@ -1340,18 +1365,13 @@ impl MeerkatMachine {
 
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner start");
-        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
             tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner no mutation gate");
             return;
         };
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner locked mutation gate");
-        Box::pin(self.unregister_session_inner_locked(session_id)).await;
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner complete");
-    }
-
-    pub(super) async fn unregister_session_inner_locked(&self, session_id: &SessionId) {
         if let Err(err) =
-            Box::pin(self.unregister_session_inner_locked_authorized(session_id)).await
+            Box::pin(self.unregister_session_inner_locked_authorized(session_id, gate_guard)).await
         {
             tracing::warn!(
                 %session_id,
@@ -1359,11 +1379,43 @@ impl MeerkatMachine {
                 "generated MeerkatMachine rejected session unregister"
             );
         }
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner complete");
     }
 
+    /// Two-phase unregister drain (campaign 0.7.2 D1).
+    ///
+    /// The shell must quiesce every in-process producer of session-scoped
+    /// inputs before the machine commits teardown, so a run that commits
+    /// terminally while unregister races it still resolves its completion
+    /// waiters with the committed outcome (never an authority error).
+    ///
+    /// Sequence:
+    /// 1. (gate held) `BeginUnregisterSession` opens the machine-owned drain
+    ///    window (`registration_phase = Draining`, three obligation flags set)
+    ///    and emits the three `Request*ForUnregister` owner-realized effects.
+    /// 2. Discharge the runtime-loop-stop obligation by detaching the loop
+    ///    channels (dropping `wake_tx`/`effect_tx`) while keeping its
+    ///    `JoinHandle`; discharge the comms-drain obligation by aborting the
+    ///    drain task while keeping its `JoinHandle`.
+    /// 3. **Drop the mutation gate.** The in-flight run commits and the loop
+    ///    exits through `lock_current_runtime_loop_driver_authority`, which
+    ///    re-acquires this same gate — awaiting the loop under the gate would
+    ///    deadlock. The machine-owned `Draining` marker keeps the window safe:
+    ///    `EnsureSessionWithExecutor` / `BeginUnregisterSession` re-entry are
+    ///    guard-rejected, and the loop's own commits are exactly what we wait
+    ///    for.
+    /// 4. Await both `JoinHandle`s (the drain task's `JoinError::is_cancelled`
+    ///    is benign — it was just aborted). No artificial timeout caps.
+    /// 5. Re-acquire the gate; resolve any completion waiters the in-flight run
+    ///    did not already resolve with the runtime-terminated outcome.
+    /// 6. Fire the three `*ForUnregister` feedback inputs to close the
+    ///    obligations.
+    /// 7. Stage + commit the final `UnregisterSession`; persist, remove the
+    ///    entry, finalize.
     pub(super) async fn unregister_session_inner_locked_authorized(
         &self,
         session_id: &SessionId,
+        gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<(), RuntimeDriverError> {
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized start");
         let driver_handle = {
@@ -1375,15 +1427,238 @@ impl MeerkatMachine {
                     state: RuntimeState::Destroyed,
                 })?
         };
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized resolving completion authority");
+
+        // Capture the lifecycle phase BEFORE the drain awaits the runtime loop.
+        // The drain quiesces the loop, which commits its canonical
+        // StopRuntimeExecutor + RuntimeExecutorExited exit and can advance the
+        // phase from Idle/Attached/Running to `Stopped`. The ops-lifecycle
+        // durability authority is later resolved on the *post-drain* phase,
+        // where `Stopped` maps to `RetainSnapshot` — suppressing the
+        // post-unregister machine-lifecycle persist and the orphaned-snapshot
+        // delete, so the durable binding snapshot keeps pointing at the
+        // now-torn-down runtime. Recovery then rebinds that stale runtime id
+        // and the next `PrepareBindings` is guard-rejected. The durability
+        // decision must reflect the phase at teardown *intent* (before the
+        // drain), not the transient `Stopped` the drain itself produces: an
+        // Idle/Attached/Running teardown deletes its snapshot, while a genuine
+        // `Stopped`/`Retired` session (stopped or archived before unregister)
+        // retains it.
+        let pre_drain_phase = self
+            .session_dsl_state(session_id)
+            .await
+            .ok()
+            .map(|state| state.lifecycle_phase);
+        let pre_drain_retains_snapshot = matches!(
+            pre_drain_phase,
+            Some(
+                crate::meerkat_machine::dsl::MeerkatPhase::Stopped
+                    | crate::meerkat_machine::dsl::MeerkatPhase::Retired
+            )
+        );
+
+        // Phase 1: open the drain window. A concurrent second unregister whose
+        // BeginUnregisterSession is rejected because the window is already open
+        // is a benign already-in-progress observation, not an error.
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized beginning drain window");
+        match self
+            .stage_begin_unregister_session_authority(session_id)
+            .await
+        {
+            Ok(staged) => {
+                self.commit_session_dsl_transition(session_id, staged, "BeginUnregisterSession")
+                    .await
+                    .map_err(RuntimeDriverError::Internal)?;
+            }
+            Err(reason) => {
+                let already_draining =
+                    self.session_dsl_state(session_id).await.is_ok_and(|state| {
+                        state.registration_phase
+                            == crate::meerkat_machine::dsl::RegistrationPhase::Draining
+                    });
+                if already_draining {
+                    tracing::debug!(
+                        %session_id,
+                        "BeginUnregisterSession rejected: drain already in progress (benign)"
+                    );
+                    return Ok(());
+                }
+                return Err(self
+                    .classify_session_dsl_rejection(session_id, reason)
+                    .await);
+            }
+        }
+
+        // Phase 2: discharge the runtime-loop-stop and comms-drain-abort
+        // obligations, retaining both JoinHandles to await below. The live
+        // interrupt handle is captured before `take_loop_join_handle` empties
+        // the attachment slot, so the drain can hard-cancel an in-flight run
+        // (see Phase 4).
+        let (loop_handle, loop_interrupt_handle, drain_handle) = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.get_mut(session_id) {
+                Some(entry) => {
+                    let interrupt_handle = entry.interrupt_handle();
+                    (
+                        entry.take_loop_join_handle(),
+                        interrupt_handle,
+                        entry.drain_slot.abort_keeping_handle(),
+                    )
+                }
+                None => (None, None, None),
+            }
+        };
+
+        // Phase 3: drop the mutation gate so the in-flight run and the runtime
+        // loop can re-acquire it to commit and exit. Phase 4: await quiescence.
+        drop(gate_guard);
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized awaiting runtime-loop and comms-drain quiescence");
+        if let Some(loop_handle) = loop_handle {
+            // Dropping `wake_tx`/`effect_tx` (above) drives the loop through its
+            // canonical `StopRuntimeExecutor` exit *once it returns to its
+            // `select!`* — but a loop blocked inside `CoreExecutor::apply`
+            // (mid `start_turn`) never observes the closed channel. Hard-cancel
+            // the in-flight run so a well-behaved executor unwinds `apply` and
+            // the loop reaches its clean exit (StopRuntimeExecutor +
+            // discard_live_session) promptly.
+            if let Some(interrupt_handle) = loop_interrupt_handle
+                && let Err(error) = interrupt_handle
+                    .hard_cancel_current_run("runtime session unregistered".to_string())
+                    .await
+            {
+                tracing::debug!(
+                    %session_id,
+                    %error,
+                    "in-flight run hard-cancel during unregister drain returned an error (benign if no run was active)"
+                );
+            }
+
+            // A backend that does not honor the interrupt (a genuinely stuck
+            // turn) would otherwise wedge the loop's `JoinHandle` forever.
+            // Give the loop a grace window to complete its clean exit, then
+            // abort the task so teardown cannot stall on a stuck run. The
+            // grace is far above any realistic clean-exit latency (sub-ms once
+            // `apply` returns) and far below caller shutdown budgets, so the
+            // responsive path never reaches the abort and its
+            // StopRuntimeExecutor + discard_live_session cleanup is preserved.
+            const RUNTIME_LOOP_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+            let abort_handle = loop_handle.abort_handle();
+            match crate::tokio::time::timeout(RUNTIME_LOOP_DRAIN_GRACE, loop_handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_error)) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %join_error,
+                        "runtime loop task ended abnormally during unregister drain"
+                    );
+                }
+                Err(_elapsed) => {
+                    abort_handle.abort();
+                    tracing::warn!(
+                        %session_id,
+                        "runtime loop did not quiesce within the unregister drain grace window after hard-cancel; aborting the stuck loop task"
+                    );
+                }
+            }
+        }
+        if let Some(drain_handle) = drain_handle
+            && let Err(join_error) = drain_handle.await
+            && !join_error.is_cancelled()
+        {
+            tracing::warn!(
+                %session_id,
+                error = %join_error,
+                "comms drain task ended abnormally during unregister drain"
+            );
+        }
+
+        // Phase 5: re-acquire the gate. If the session vanished while the gate
+        // was released (e.g. a racing teardown), the drain already completed
+        // elsewhere — nothing left to commit.
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            tracing::debug!(
+                %session_id,
+                "session removed by a concurrent teardown during unregister drain (benign)"
+            );
+            return Ok(());
+        };
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized re-acquired mutation gate after drain");
+
+        // Resolve any completion waiters the in-flight run did not already
+        // resolve. A run that committed during the drain window resolves its
+        // own waiter with the committed outcome; this sweep terminalizes any
+        // that are still outstanding so the final commit cannot strand them.
         let runtime_terminated_completion_authority =
             crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
                 &driver_handle,
             )
             .await?;
+        {
+            let completions = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .map(|entry| Arc::clone(&entry.completions))
+            };
+            if let Some(completions) = completions {
+                // Same client-facing reason as the finalize sweep below — the
+                // drain-phase vs finalize-phase split is an internal detail and
+                // must not fragment the observable CompletionOutcome contract.
+                completions.lock().await.resolve_all_runtime_terminated(
+                    "runtime session unregistered",
+                    runtime_terminated_completion_authority.clone(),
+                );
+            }
+        }
+
+        // Phase 6: fire the three feedback inputs to close the obligations.
+        for (input, context) in [
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "RuntimeLoopStoppedForUnregister",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "CommsDrainExitedForUnregister",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "CompletionWaitersResolvedForUnregister",
+            ),
+        ] {
+            let staged = self
+                .stage_session_dsl_transition(session_id, input, context)
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            self.commit_session_dsl_transition(session_id, staged, context)
+                .await
+                .map_err(RuntimeDriverError::Internal)?;
+        }
+
+        // Phase 7: stage + commit the final UnregisterSession.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized staging unregister");
-        let (staged, durability_authority) =
+        let (staged, resolved_durability_authority) =
             self.stage_unregister_session_authority(session_id).await?;
+        // Bind the effective durability to the pre-drain teardown intent (see
+        // the pre_drain_phase capture above). A session that was already
+        // `Stopped`/`Retired` before unregister keeps the authority's resolved
+        // `RetainSnapshot` (a genuine stop/archive snapshot recovery must still
+        // observe); an Idle/Attached/Running teardown that the drain merely
+        // advanced to `Stopped` deletes its orphaned snapshot and persists the
+        // cleared binding so recovery starts fresh.
+        let durability_authority = if pre_drain_retains_snapshot {
+            resolved_durability_authority
+        } else {
+            RuntimeOpsLifecycleDurabilityAuthority {
+                action:
+                    crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot,
+            }
+        };
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committing unregister");
         self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
             .await
@@ -1474,6 +1749,110 @@ impl MeerkatMachine {
                     return false;
                 }
             };
+
+        // The terminal storeless session has no attached runtime loop or comms
+        // drain task to quiesce, so the drain obligations are discharged
+        // trivially: open the window (Begin) then immediately close all three
+        // obligations before committing the final UnregisterSession. This keeps
+        // the wasm discard path on the same machine-owned teardown contract as
+        // the native unregister drain.
+        match self
+            .stage_begin_unregister_session_authority(session_id)
+            .await
+        {
+            Ok(staged) => {
+                if let Err(err) = self
+                    .commit_session_dsl_transition(session_id, staged, "BeginUnregisterSession")
+                    .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        error = %err,
+                        "failed to open drain window for storeless WASM session discard"
+                    );
+                    return false;
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %reason,
+                    "generated MeerkatMachine rejected drain-window open for storeless WASM session discard"
+                );
+                return false;
+            }
+        }
+        for (input, context) in [
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "RuntimeLoopStoppedForUnregister",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "CommsDrainExitedForUnregister",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                },
+                "CompletionWaitersResolvedForUnregister",
+            ),
+        ] {
+            match self
+                .stage_session_dsl_transition(session_id, input, context)
+                .await
+            {
+                Ok(staged) => {
+                    if let Err(err) = self
+                        .commit_session_dsl_transition(session_id, staged, context)
+                        .await
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            error = %err,
+                            "failed to close drain obligation for storeless WASM session discard"
+                        );
+                        return false;
+                    }
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %reason,
+                        "generated MeerkatMachine rejected drain feedback for storeless WASM session discard"
+                    );
+                    return false;
+                }
+            }
+        }
+        let (staged, _durability) = match self.stage_unregister_session_authority(session_id).await
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %err,
+                    "failed to stage final unregister for storeless WASM session discard"
+                );
+                return false;
+            }
+        };
+        if let Err(err) = self
+            .commit_session_dsl_transition(session_id, staged, "UnregisterSession")
+            .await
+        {
+            tracing::warn!(
+                %session_id,
+                error = %err,
+                "failed to commit final unregister for storeless WASM session discard"
+            );
+            return false;
+        }
+
         let entry = {
             let mut sessions = self.sessions.write().await;
             if let Some(entry) = sessions.get_mut(session_id) {

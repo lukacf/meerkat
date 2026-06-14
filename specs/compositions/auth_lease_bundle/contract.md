@@ -20,6 +20,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Structural Requirements
+- `auth_release_oauth_flow_drain_protocol_covered` — every release-drain obligation AuthMachine mints for in-flight OAuth flows crosses to the runtime auth-lease owner through the explicit `auth_release_oauth_flow_drain` protocol and is closed by terminal Expire* feedback before `Release` commits, rather than by ad-hoc shell reads of flow membership
 - `auth_lease_lifecycle_publication_protocol_covered` — every AuthMachine lifecycle-phase transition's external publication crosses into the runtime auth-lease owner through the explicit `auth_lease_lifecycle_publication` protocol rather than ad-hoc shell observation
 
 ## Behavioral Invariants

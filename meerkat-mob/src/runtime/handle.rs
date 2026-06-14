@@ -5233,6 +5233,28 @@ impl MobHandle {
         }
     }
 
+    /// 0.7.2 L5 test seam: deliver a kickoff completion outcome through the
+    /// REAL actor command path (`MobCommand::KickoffOutcomeResolved`), exactly
+    /// as the spawned completion-waiter task does. Used by the
+    /// teardown-interleaving tests to drive a deterministic "outcome arrives
+    /// after retire/destroy" ordering without racing task aborts.
+    #[cfg(all(test, feature = "runtime-adapter"))]
+    pub(crate) async fn debug_inject_kickoff_outcome(
+        &self,
+        agent_identity: AgentIdentity,
+        outcome: Result<
+            meerkat_runtime::completion::CompletionOutcome,
+            meerkat_runtime::completion::CompletionWaitError,
+        >,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|ack_tx| MobCommand::KickoffOutcomeResolved {
+            agent_identity,
+            outcome,
+            ack_tx,
+        })
+        .await
+    }
+
     /// Set or clear the spawn policy for automatic member provisioning.
     ///
     /// When set, external turns targeting an unknown member identity will
@@ -6703,8 +6725,23 @@ impl MobHandle {
     pub(crate) async fn query_machine_state(
         &self,
     ) -> Result<crate::machines::mob_machine::MobMachineState, MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::QueryMachineState { reply_tx })
+        match self
+            .send_actor_command(|reply_tx| MobCommand::QueryMachineState { reply_tx })
             .await
+        {
+            Ok(state) => Ok(state),
+            // Destroy is terminal: once the actor commits the `Destroy`
+            // transition it exits its command loop and the command channel
+            // closes. The actor publishes the final (Destroyed) machine state to
+            // the watch channel before exiting, so a post-destroy query reads the
+            // durable final projection from the watch instead of failing on the
+            // closed command channel. Live callers (flows) always reach the actor
+            // because the command channel is open while the actor runs.
+            Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
+                Ok(self.machine_state_watch_rx.borrow().clone())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(test)]

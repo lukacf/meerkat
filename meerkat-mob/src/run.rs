@@ -444,7 +444,9 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::KickoffResolveCallbackPending { .. }
             | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
             | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
+            | mob_dsl::MobMachineInput::KickoffQuiesced { .. }
             | mob_dsl::MobMachineInput::KickoffClear { .. }
+            | mob_dsl::MobMachineInput::CancelPendingSpawn { .. }
             | mob_dsl::MobMachineInput::RecordCoordinationWorkIntent { .. }
             | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
@@ -1628,7 +1630,9 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::KickoffResolveCallbackPending { .. }
             | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
             | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
+            | mob_dsl::MobMachineInput::KickoffQuiesced { .. }
             | mob_dsl::MobMachineInput::KickoffClear { .. }
+            | mob_dsl::MobMachineInput::CancelPendingSpawn { .. }
             | mob_dsl::MobMachineInput::RecordCoordinationWorkIntent { .. }
             | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }

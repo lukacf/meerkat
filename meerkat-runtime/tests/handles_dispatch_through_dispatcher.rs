@@ -79,6 +79,27 @@ fn find_enclosing_fn_start(lines: &[&str], line_idx: usize) -> usize {
     0
 }
 
+/// True if the function starting at `fn_start` is a unit test
+/// (`#[test]` / `#[tokio::test]`). The dispatcher-routing invariant governs
+/// *production* handle call sites; unit tests legitimately drive
+/// `apply_input` directly to exercise the handle authority in isolation, so
+/// they are excluded from the audit. Checks only the attribute lines
+/// immediately preceding the `fn` header, so production call sites are never
+/// false-skipped.
+fn is_test_fn(lines: &[&str], fn_start: usize) -> bool {
+    for i in (fn_start.saturating_sub(4)..fn_start).rev() {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("#[test]") || trimmed.starts_with("#[tokio::test]") {
+            return true;
+        }
+        // Stop scanning once we pass the contiguous attribute/doc block.
+        if !trimmed.starts_with('#') && !trimmed.starts_with("//") && !trimmed.is_empty() {
+            break;
+        }
+    }
+    false
+}
+
 /// Approximate the function body end by scanning forward for the
 /// closing brace at the original indent level. Cheap and good enough
 /// for the dispatcher-in-scope check.
@@ -133,6 +154,11 @@ fn every_apply_input_in_handles_traverses_dispatcher() {
             }
 
             let fn_start = find_enclosing_fn_start(&lines, lineno);
+            // Unit tests legitimately call `apply_input` directly; the
+            // dispatcher-routing invariant is a production-code contract.
+            if is_test_fn(&lines, fn_start) {
+                continue;
+            }
             let fn_end = find_fn_end(&lines, fn_start);
             let fn_body = lines[fn_start..=fn_end].join("\n");
 

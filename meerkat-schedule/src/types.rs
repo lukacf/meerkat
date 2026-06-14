@@ -321,6 +321,51 @@ fn occurrence_failure_class_from_wire(
     }
 }
 
+fn occurrence_late_completion_resolution_to_wire(
+    resolution: occ_dsl::LateCompletionResolutionClass,
+) -> &'static str {
+    match resolution {
+        occ_dsl::LateCompletionResolutionClass::DeliveryCompleted => "delivery_completed",
+        occ_dsl::LateCompletionResolutionClass::RuntimeCompleted => "runtime_completed",
+        occ_dsl::LateCompletionResolutionClass::RuntimeRejected => "runtime_rejected",
+        occ_dsl::LateCompletionResolutionClass::RuntimeTransportError => "runtime_transport_error",
+        occ_dsl::LateCompletionResolutionClass::RuntimeInternalError => "runtime_internal_error",
+        occ_dsl::LateCompletionResolutionClass::DeliveryCompletionFailed => {
+            "delivery_completion_failed"
+        }
+        occ_dsl::LateCompletionResolutionClass::DeliveryFailed => "delivery_failed",
+    }
+}
+
+fn occurrence_late_completion_resolution_from_wire(
+    resolution: &str,
+) -> Result<occ_dsl::LateCompletionResolutionClass, String> {
+    match resolution {
+        "delivery_completed" | "DeliveryCompleted" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::DeliveryCompleted)
+        }
+        "runtime_completed" | "RuntimeCompleted" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::RuntimeCompleted)
+        }
+        "runtime_rejected" | "RuntimeRejected" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::RuntimeRejected)
+        }
+        "runtime_transport_error" | "RuntimeTransportError" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::RuntimeTransportError)
+        }
+        "runtime_internal_error" | "RuntimeInternalError" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::RuntimeInternalError)
+        }
+        "delivery_completion_failed" | "DeliveryCompletionFailed" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::DeliveryCompletionFailed)
+        }
+        "delivery_failed" | "DeliveryFailed" => {
+            Ok(occ_dsl::LateCompletionResolutionClass::DeliveryFailed)
+        }
+        other => Err(format!("invalid LateCompletionResolutionClass `{other}`")),
+    }
+}
+
 fn occurrence_receipt_stage_to_wire(stage: occ_dsl::DeliveryReceiptStage) -> &'static str {
     match stage {
         occ_dsl::DeliveryReceiptStage::Planned => "planned",
@@ -2186,6 +2231,10 @@ struct OccurrenceMachineStateWire {
     completed_at_utc_ms: Option<u64>,
     attempt_count: u64,
     superseded_by_revision: Option<u64>,
+    late_completion_recorded_at_utc_ms: Option<u64>,
+    late_completion_resolution: Option<String>,
+    late_completion_detail: Option<String>,
+    stale_completion_arrivals: u64,
 }
 
 impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateWire {
@@ -2257,6 +2306,13 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             completed_at_utc_ms: state.completed_at_utc_ms,
             attempt_count: state.attempt_count,
             superseded_by_revision: state.superseded_by_revision,
+            late_completion_recorded_at_utc_ms: state.late_completion_recorded_at_utc_ms,
+            late_completion_resolution: state
+                .late_completion_resolution
+                .map(occurrence_late_completion_resolution_to_wire)
+                .map(str::to_string),
+            late_completion_detail: state.late_completion_detail.clone(),
+            stale_completion_arrivals: state.stale_completion_arrivals,
         }
     }
 }
@@ -2334,6 +2390,14 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             completed_at_utc_ms: wire.completed_at_utc_ms,
             attempt_count: wire.attempt_count,
             superseded_by_revision: wire.superseded_by_revision,
+            late_completion_recorded_at_utc_ms: wire.late_completion_recorded_at_utc_ms,
+            late_completion_resolution: wire
+                .late_completion_resolution
+                .as_deref()
+                .map(occurrence_late_completion_resolution_from_wire)
+                .transpose()?,
+            late_completion_detail: wire.late_completion_detail,
+            stale_completion_arrivals: wire.stale_completion_arrivals,
         })
     }
 }

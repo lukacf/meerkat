@@ -425,6 +425,41 @@ pub enum OccurrenceLifecycleInput {
     ReleaseLeaseForPausedSchedule {
         at_utc: DateTime<Utc>,
     },
+    /// 0.7.2 D2a: typed classification of a completion-shaped arrival whose
+    /// claim evidence (attempt count / claim token) is no longer current. The
+    /// store shell screens such arrivals before they can mutate lifecycle
+    /// state; instead of dropping the screened arrival silently, the shell
+    /// feeds the screen verdict back through this input so the occurrence
+    /// authority records the abandonment as a machine fact.
+    ClassifyStaleCompletionArrival {
+        trigger: StaleCompletionArrivalTrigger,
+    },
+}
+
+/// Completion-shaped input variants a stale (claim-evidence-mismatched)
+/// arrival can carry (0.7.2 D2a). Domain mirror of the occurrence authority's
+/// completion-shaped `OccurrenceLifecycleInputVariant` subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleCompletionArrivalTrigger {
+    Complete,
+    ResolveRuntimeCompletion,
+    ResolveDeliveryCompletionFailure,
+    ResolveDeliveryFailure,
+    Supersede,
+}
+
+/// Typed class of a delivery resolution that arrived after the occurrence was
+/// superseded (0.7.2 D2a). Domain mirror of the occurrence authority's
+/// `LateCompletionResolutionClass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LateCompletionResolutionClass {
+    DeliveryCompleted,
+    RuntimeCompleted,
+    RuntimeRejected,
+    RuntimeTransportError,
+    RuntimeInternalError,
+    DeliveryCompletionFailed,
+    DeliveryFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,6 +492,19 @@ pub enum OccurrenceLifecycleEffect {
     },
     DeliveryFailed,
     LeaseExpired,
+    /// 0.7.2 D2a: a delivery resolution arrived after this occurrence was
+    /// superseded and was recorded as a typed late-arrival fact. The driver
+    /// mirrors this to know the arrival landed as a late record (no fresh
+    /// terminal receipt is minted for it).
+    LateCompletionResolutionRecorded {
+        resolution: LateCompletionResolutionClass,
+    },
+    /// 0.7.2 D2a: a completion-shaped arrival bearing stale claim evidence
+    /// was classified. Pure observability; lifecycle state is untouched.
+    StaleCompletionArrivalClassified {
+        phase: OccurrencePhase,
+        trigger: StaleCompletionArrivalTrigger,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +538,11 @@ pub struct ClaimedDispatchVerdict {
 pub enum CompletionSupersessionDisposition {
     Supersede,
     Proceed,
+    /// 0.7.2 D2a: the occurrence is already Superseded (the schedule-commit
+    /// supersession sweep landed between dispatch and completion). The driver
+    /// delivers the completion outcome as a typed late-arrival record; no
+    /// fresh terminal transition or receipt is minted.
+    AlreadySuperseded,
 }
 
 /// Machine-decided post-completion supersession verdict the driver mirrors.
@@ -666,6 +719,10 @@ pub enum OccurrenceLifecycleError {
         "generated occurrence authority rejected completion-supersession disposition classification"
     )]
     CompletionSupersessionClassificationRejected,
+    #[error(
+        "generated occurrence authority rejected stale-completion-arrival classification (trigger was not completion-shaped)"
+    )]
+    StaleCompletionArrivalClassificationRejected,
     #[error("generated occurrence authority rejected recovered machine state: {source}")]
     AuthorityRecoveryRejected {
         source: occ_dsl::OccurrenceLifecycleMachineTransitionError,
@@ -1251,7 +1308,97 @@ fn convert_occurrence_input(
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
+        OccurrenceLifecycleInput::ClassifyStaleCompletionArrival { trigger } => {
+            occ_dsl::OccurrenceLifecycleInput::ClassifyStaleCompletionArrival {
+                trigger: stale_completion_arrival_trigger_to_dsl(*trigger),
+            }
+        }
     })
+}
+
+/// Map the domain stale-arrival trigger to the occurrence authority's input
+/// variant identity (0.7.2 D2a).
+fn stale_completion_arrival_trigger_to_dsl(
+    trigger: StaleCompletionArrivalTrigger,
+) -> occ_dsl::OccurrenceLifecycleInputVariant {
+    match trigger {
+        StaleCompletionArrivalTrigger::Complete => {
+            occ_dsl::OccurrenceLifecycleInputVariant::Complete
+        }
+        StaleCompletionArrivalTrigger::ResolveRuntimeCompletion => {
+            occ_dsl::OccurrenceLifecycleInputVariant::ResolveRuntimeCompletion
+        }
+        StaleCompletionArrivalTrigger::ResolveDeliveryCompletionFailure => {
+            occ_dsl::OccurrenceLifecycleInputVariant::ResolveDeliveryCompletionFailure
+        }
+        StaleCompletionArrivalTrigger::ResolveDeliveryFailure => {
+            occ_dsl::OccurrenceLifecycleInputVariant::ResolveDeliveryFailure
+        }
+        StaleCompletionArrivalTrigger::Supersede => {
+            occ_dsl::OccurrenceLifecycleInputVariant::Supersede
+        }
+    }
+}
+
+/// Mirror the occurrence authority's emitted stale-arrival trigger back into
+/// the domain trigger vocabulary. The machine's guard restricts the emitted
+/// variant to the completion-shaped subset; any other variant is a projection
+/// fault, not a silent coercion.
+fn stale_completion_arrival_trigger_from_dsl(
+    trigger: occ_dsl::OccurrenceLifecycleInputVariant,
+) -> Result<StaleCompletionArrivalTrigger, OccurrenceLifecycleError> {
+    match trigger {
+        occ_dsl::OccurrenceLifecycleInputVariant::Complete => {
+            Ok(StaleCompletionArrivalTrigger::Complete)
+        }
+        occ_dsl::OccurrenceLifecycleInputVariant::ResolveRuntimeCompletion => {
+            Ok(StaleCompletionArrivalTrigger::ResolveRuntimeCompletion)
+        }
+        occ_dsl::OccurrenceLifecycleInputVariant::ResolveDeliveryCompletionFailure => {
+            Ok(StaleCompletionArrivalTrigger::ResolveDeliveryCompletionFailure)
+        }
+        occ_dsl::OccurrenceLifecycleInputVariant::ResolveDeliveryFailure => {
+            Ok(StaleCompletionArrivalTrigger::ResolveDeliveryFailure)
+        }
+        occ_dsl::OccurrenceLifecycleInputVariant::Supersede => {
+            Ok(StaleCompletionArrivalTrigger::Supersede)
+        }
+        other => Err(OccurrenceLifecycleError::ProjectionMismatch {
+            reason: format!(
+                "occurrence authority classified non-completion-shaped trigger `{other:?}` as a stale completion arrival"
+            ),
+        }),
+    }
+}
+
+/// Mirror the occurrence authority's late-arrival resolution class into the
+/// domain vocabulary (0.7.2 D2a).
+fn late_completion_resolution_class_from_dsl(
+    resolution: occ_dsl::LateCompletionResolutionClass,
+) -> LateCompletionResolutionClass {
+    match resolution {
+        occ_dsl::LateCompletionResolutionClass::DeliveryCompleted => {
+            LateCompletionResolutionClass::DeliveryCompleted
+        }
+        occ_dsl::LateCompletionResolutionClass::RuntimeCompleted => {
+            LateCompletionResolutionClass::RuntimeCompleted
+        }
+        occ_dsl::LateCompletionResolutionClass::RuntimeRejected => {
+            LateCompletionResolutionClass::RuntimeRejected
+        }
+        occ_dsl::LateCompletionResolutionClass::RuntimeTransportError => {
+            LateCompletionResolutionClass::RuntimeTransportError
+        }
+        occ_dsl::LateCompletionResolutionClass::RuntimeInternalError => {
+            LateCompletionResolutionClass::RuntimeInternalError
+        }
+        occ_dsl::LateCompletionResolutionClass::DeliveryCompletionFailed => {
+            LateCompletionResolutionClass::DeliveryCompletionFailed
+        }
+        occ_dsl::LateCompletionResolutionClass::DeliveryFailed => {
+            LateCompletionResolutionClass::DeliveryFailed
+        }
+    }
 }
 
 /// Write DSL state back into the domain occurrence.
@@ -1532,6 +1679,9 @@ fn occurrence_error_from_transition_failure_class(
         occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal => {
             OccurrenceLifecycleError::NotLiveForTerminal
         }
+        occ_dsl::OccurrenceTransitionFailureClassKind::StaleCompletionArrivalClassificationRejected => {
+            OccurrenceLifecycleError::StaleCompletionArrivalClassificationRejected
+        }
     }
 }
 
@@ -1611,6 +1761,9 @@ fn completion_supersession_disposition_from_dsl(
         occ_dsl::CompletionSupersessionDisposition::Proceed => {
             CompletionSupersessionDisposition::Proceed
         }
+        occ_dsl::CompletionSupersessionDisposition::AlreadySuperseded => {
+            CompletionSupersessionDisposition::AlreadySuperseded
+        }
     }
 }
 
@@ -1670,6 +1823,17 @@ fn map_occurrence_effect(
             OccurrenceLifecycleEffect::DeliveryFailed
         }
         occ_dsl::OccurrenceLifecycleEffect::LeaseExpired => OccurrenceLifecycleEffect::LeaseExpired,
+        occ_dsl::OccurrenceLifecycleEffect::LateCompletionResolutionRecorded { resolution } => {
+            OccurrenceLifecycleEffect::LateCompletionResolutionRecorded {
+                resolution: late_completion_resolution_class_from_dsl(*resolution),
+            }
+        }
+        occ_dsl::OccurrenceLifecycleEffect::StaleCompletionArrivalClassified { phase, trigger } => {
+            OccurrenceLifecycleEffect::StaleCompletionArrivalClassified {
+                phase: occurrence_phase_from_dsl(*phase),
+                trigger: stale_completion_arrival_trigger_from_dsl(*trigger)?,
+            }
+        }
         occ_dsl::OccurrenceLifecycleEffect::TransitionFailureClassified { .. } => {
             return Err(OccurrenceLifecycleError::UnexpectedTransitionFailureClassificationEffect);
         }
@@ -3813,5 +3977,298 @@ mod tests {
         assert!(second.effects.is_empty());
         assert!(!second.revision_bumped);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.7.2 D2a — completion inputs are total in Superseded (machine level)
+    // -----------------------------------------------------------------------
+
+    /// Claimed → dispatched → awaiting → superseded, with the claim evidence
+    /// (claim token, attempt count) still attached — exactly the shape a
+    /// schedule-commit supersession sweep leaves behind while the completion
+    /// waiter is still in flight.
+    fn sample_superseded_in_flight_occurrence() -> Occurrence {
+        sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-late".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+            .expect("await should pass generated authority")
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: ScheduleRevision(2),
+                at_utc: Utc::now(),
+            })
+            .expect("supersede should pass generated authority")
+            .into_occurrence()
+    }
+
+    #[test]
+    fn late_complete_after_supersession_is_accepted_as_typed_record() {
+        let superseded = sample_superseded_in_flight_occurrence();
+        let token_before = superseded.claim_token();
+        let receipt_stage_before = superseded.machine_state.receipt_stage;
+
+        let mutator = superseded
+            .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
+            .expect("Complete after supersession must be accepted, not guard-rejected");
+
+        assert_eq!(
+            mutator.effects,
+            vec![
+                OccurrenceLifecycleEffect::LateCompletionResolutionRecorded {
+                    resolution: LateCompletionResolutionClass::DeliveryCompleted,
+                }
+            ],
+            "late arrival must emit exactly the late-record effect (no terminal effects)"
+        );
+        let updated = mutator.into_occurrence();
+        assert_eq!(updated.phase, OccurrencePhase::Superseded);
+        assert_eq!(updated.superseded_by_revision, Some(ScheduleRevision(2)));
+        assert_eq!(
+            updated.machine_state.late_completion_resolution,
+            Some(occ_dsl::LateCompletionResolutionClass::DeliveryCompleted)
+        );
+        assert!(
+            updated
+                .machine_state
+                .late_completion_recorded_at_utc_ms
+                .is_some()
+        );
+        assert_eq!(
+            updated.claim_token(),
+            token_before,
+            "late arrival must not touch claim evidence"
+        );
+        assert_eq!(
+            updated.machine_state.receipt_stage, receipt_stage_before,
+            "late arrival must not mint fresh receipt authority"
+        );
+    }
+
+    #[test]
+    fn late_runtime_completion_after_supersession_records_outcome_class() {
+        let cases = [
+            (
+                RuntimeCompletionOutcome::Completed,
+                occ_dsl::LateCompletionResolutionClass::RuntimeCompleted,
+            ),
+            (
+                RuntimeCompletionOutcome::CallbackPending,
+                occ_dsl::LateCompletionResolutionClass::RuntimeRejected,
+            ),
+            (
+                RuntimeCompletionOutcome::Cancelled,
+                occ_dsl::LateCompletionResolutionClass::RuntimeRejected,
+            ),
+            (
+                RuntimeCompletionOutcome::Abandoned,
+                occ_dsl::LateCompletionResolutionClass::RuntimeRejected,
+            ),
+            (
+                RuntimeCompletionOutcome::RuntimeTerminated,
+                occ_dsl::LateCompletionResolutionClass::RuntimeTransportError,
+            ),
+            (
+                RuntimeCompletionOutcome::FinalizationFailed,
+                occ_dsl::LateCompletionResolutionClass::RuntimeInternalError,
+            ),
+        ];
+        for (outcome, expected_class) in cases {
+            let updated = sample_superseded_in_flight_occurrence()
+                .apply(OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                    outcome,
+                    detail: Some("late runtime resolution".into()),
+                    at_utc: Utc::now(),
+                })
+                .expect("ResolveRuntimeCompletion after supersession must be accepted")
+                .into_occurrence();
+            assert_eq!(updated.phase, OccurrencePhase::Superseded);
+            assert_eq!(
+                updated.machine_state.late_completion_resolution,
+                Some(expected_class),
+                "outcome {outcome:?} must record class {expected_class:?}"
+            );
+            assert_eq!(
+                updated.machine_state.late_completion_detail.as_deref(),
+                Some("late runtime resolution")
+            );
+            assert_eq!(
+                updated.failure_class, None,
+                "late arrival must not rewrite terminal failure facts"
+            );
+        }
+    }
+
+    #[test]
+    fn late_delivery_failures_after_supersession_record_typed_classes() {
+        let updated = sample_superseded_in_flight_occurrence()
+            .apply(OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+                reason: DeliveryCompletionFailureReason::CompletionFutureFailed,
+                detail: Some("completion future dropped".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("ResolveDeliveryCompletionFailure after supersession must be accepted")
+            .into_occurrence();
+        assert_eq!(updated.phase, OccurrencePhase::Superseded);
+        assert_eq!(
+            updated.machine_state.late_completion_resolution,
+            Some(occ_dsl::LateCompletionResolutionClass::DeliveryCompletionFailed)
+        );
+
+        let updated = sample_superseded_in_flight_occurrence()
+            .apply(OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                reason: DeliveryFailureReason::TransportError,
+                detail: Some("adapter transport failure".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("ResolveDeliveryFailure after supersession must be accepted")
+            .into_occurrence();
+        assert_eq!(updated.phase, OccurrencePhase::Superseded);
+        assert_eq!(
+            updated.machine_state.late_completion_resolution,
+            Some(occ_dsl::LateCompletionResolutionClass::DeliveryFailed)
+        );
+    }
+
+    #[test]
+    fn supersede_after_supersession_is_idempotent_noop() {
+        let superseded = sample_superseded_in_flight_occurrence();
+        let mutator = superseded
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: ScheduleRevision(7),
+                at_utc: Utc::now(),
+            })
+            .expect("duplicate Supersede must be an idempotent no-op, not a guard rejection");
+        assert!(
+            mutator.effects.is_empty(),
+            "duplicate Supersede must emit zero effects so the shell mints no duplicate receipt"
+        );
+        let updated = mutator.into_occurrence();
+        assert_eq!(
+            updated.superseded_by_revision,
+            Some(ScheduleRevision(2)),
+            "the first recorded supersession wins"
+        );
+    }
+
+    #[test]
+    fn await_completion_and_release_lease_after_supersession_are_noops() {
+        let superseded = sample_superseded_in_flight_occurrence();
+        let token_before = superseded.claim_token();
+
+        let mutator = superseded
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+            .expect("AwaitCompletion after supersession must be a benign no-op");
+        assert!(mutator.effects.is_empty());
+        let updated = mutator.into_occurrence();
+        assert_eq!(updated.phase, OccurrencePhase::Superseded);
+        assert_eq!(updated.claim_token(), token_before);
+
+        let mutator = updated
+            .apply(OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { at_utc: Utc::now() })
+            .expect("ReleaseLeaseForPausedSchedule after supersession must be a benign no-op");
+        assert!(mutator.effects.is_empty());
+        let updated = mutator.into_occurrence();
+        assert_eq!(updated.phase, OccurrencePhase::Superseded);
+        assert_eq!(
+            updated.machine_state.receipt_stage,
+            Some(occ_dsl::DeliveryReceiptStage::Superseded),
+            "release on a superseded occurrence must not mint lease-expired receipt authority"
+        );
+    }
+
+    #[test]
+    fn classify_completion_supersession_on_superseded_snapshot_is_already_superseded() {
+        for schedule_phase in [
+            SchedulePhase::Active,
+            SchedulePhase::Paused,
+            SchedulePhase::Deleted,
+        ] {
+            let verdict = sample_superseded_in_flight_occurrence()
+                .classify_completion_supersession(schedule_phase, ScheduleRevision(3))
+                .expect("classification must stay total on a superseded snapshot");
+            assert_eq!(
+                verdict.disposition,
+                CompletionSupersessionDisposition::AlreadySuperseded,
+                "schedule phase {schedule_phase:?}"
+            );
+            assert_eq!(verdict.superseded_by_revision, None);
+        }
+    }
+
+    #[test]
+    fn classify_stale_completion_arrival_is_total_in_every_phase() {
+        let fixtures: Vec<Occurrence> = vec![
+            sample_occurrence(),
+            sample_claimed_occurrence(),
+            sample_completed_occurrence(),
+            sample_superseded_in_flight_occurrence(),
+        ];
+        for occurrence in fixtures {
+            let phase_before = occurrence.phase;
+            let mutator = occurrence
+                .apply(OccurrenceLifecycleInput::ClassifyStaleCompletionArrival {
+                    trigger: StaleCompletionArrivalTrigger::Complete,
+                })
+                .expect("stale-arrival classification must be total in every phase");
+            assert_eq!(
+                mutator.effects,
+                vec![
+                    OccurrenceLifecycleEffect::StaleCompletionArrivalClassified {
+                        phase: phase_before,
+                        trigger: StaleCompletionArrivalTrigger::Complete,
+                    }
+                ]
+            );
+            let updated = mutator.into_occurrence();
+            assert_eq!(
+                updated.phase, phase_before,
+                "stale-arrival classification must never mutate lifecycle state"
+            );
+            assert_eq!(updated.machine_state.stale_completion_arrivals, 1);
+        }
+    }
+
+    #[test]
+    fn classify_stale_completion_arrival_rejects_non_completion_trigger() {
+        // The domain trigger enum only carries completion-shaped variants, so
+        // the refusal is only reachable at the generated-authority seam.
+        let occurrence = sample_claimed_occurrence();
+        let dsl_state = occurrence_machine_state_for_test(&occurrence)
+            .expect("test occurrence projection should match authority");
+        let mut authority =
+            occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(dsl_state)
+                .expect("test occurrence state should recover");
+        let error = occ_dsl::OccurrenceLifecycleMachineMutator::apply(
+            &mut authority,
+            occ_dsl::OccurrenceLifecycleInput::ClassifyStaleCompletionArrival {
+                trigger: occ_dsl::OccurrenceLifecycleInputVariant::Claim,
+            },
+        )
+        .expect_err("non-completion-shaped trigger must be refused");
+        let class = classify_occurrence_transition_failure(&mut authority, &error)
+            .expect("refusal must classify to a typed public class");
+        assert_eq!(
+            class,
+            occ_dsl::OccurrenceTransitionFailureClassKind::StaleCompletionArrivalClassificationRejected
+        );
+    }
+
+    #[test]
+    fn late_terminal_inputs_remain_rejected_in_non_superseded_terminal_phases() {
+        // "Not allowed" stays meaningful: totality is scoped to the
+        // post-teardown Superseded state, not blanket-accepted everywhere.
+        let completed = sample_completed_occurrence();
+        let error = completed
+            .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
+            .expect_err("Complete on a Completed occurrence must still be refused");
+        assert!(
+            matches!(error, OccurrenceLifecycleError::NotLiveForTerminal),
+            "got {error:?}"
+        );
     }
 }

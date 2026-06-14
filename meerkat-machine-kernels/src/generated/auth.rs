@@ -233,6 +233,7 @@ pub struct State {
     pub oauth_device_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
     pub oauth_outstanding_flow_count: u64,
+    pub release_draining: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -275,6 +276,8 @@ pub mod inputs {
     pub struct ClearCredentialLifecycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReleaseCredentialLifecycle {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginRelease {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Release {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -404,6 +407,7 @@ pub enum Input {
     MarkReauthRequired(inputs::MarkReauthRequired),
     ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
     ReleaseCredentialLifecycle(inputs::ReleaseCredentialLifecycle),
+    BeginRelease(inputs::BeginRelease),
     Release(inputs::Release),
     RestoreAuthoritySnapshot(inputs::RestoreAuthoritySnapshot),
     RestoreCredentialLifecycleSnapshot(inputs::RestoreCredentialLifecycleSnapshot),
@@ -436,6 +440,7 @@ impl Input {
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
             Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
             Self::ReleaseCredentialLifecycle(_) => InputKind::ReleaseCredentialLifecycle,
+            Self::BeginRelease(_) => InputKind::BeginRelease,
             Self::Release(_) => InputKind::Release,
             Self::RestoreAuthoritySnapshot(_) => InputKind::RestoreAuthoritySnapshot,
             Self::RestoreCredentialLifecycleSnapshot(_) => {
@@ -473,6 +478,7 @@ pub enum InputKind {
     MarkReauthRequired,
     ClearCredentialLifecycle,
     ReleaseCredentialLifecycle,
+    BeginRelease,
     Release,
     RestoreAuthoritySnapshot,
     RestoreCredentialLifecycleSnapshot,
@@ -510,6 +516,11 @@ pub mod effects {
     pub struct CredentialUseAdmissionResolved {
         pub disposition: CredentialUseDisposition,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelOAuthFlowsForRelease {
+        pub browser_flow_ids: std::collections::BTreeSet<String>,
+        pub device_flow_ids: std::collections::BTreeSet<String>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -517,12 +528,14 @@ pub enum Effect {
     EmitLifecycleEvent(effects::EmitLifecycleEvent),
     WakeRefreshLoop(effects::WakeRefreshLoop),
     CredentialUseAdmissionResolved(effects::CredentialUseAdmissionResolved),
+    CancelOAuthFlowsForRelease(effects::CancelOAuthFlowsForRelease),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     EmitLifecycleEvent,
     WakeRefreshLoop,
     CredentialUseAdmissionResolved,
+    CancelOAuthFlowsForRelease,
 }
 
 #[allow(non_camel_case_types)]
@@ -552,6 +565,17 @@ pub enum TransitionId {
     ClearCredentialLifecycle,
     ReleaseCredentialLifecycleWithOAuth,
     ReleaseCredentialLifecycleWithoutOAuth,
+    BeginReleaseDrainingOAuthFlowsValid,
+    BeginReleaseDrainingOAuthFlowsExpiring,
+    BeginReleaseDrainingOAuthFlowsExpired,
+    BeginReleaseDrainingOAuthFlowsRefreshing,
+    BeginReleaseDrainingOAuthFlowsReauthRequired,
+    BeginReleaseWithoutOAuthFlowsValid,
+    BeginReleaseWithoutOAuthFlowsExpiring,
+    BeginReleaseWithoutOAuthFlowsExpired,
+    BeginReleaseWithoutOAuthFlowsRefreshing,
+    BeginReleaseWithoutOAuthFlowsReauthRequired,
+    BeginReleaseReleased,
     Release,
     RestoreCredentialLifecycleSnapshotValid,
     RestoreCredentialLifecycleSnapshotExpiring,
@@ -602,6 +626,12 @@ pub enum TransitionId {
     ExpireOAuthBrowserFlowExpired,
     ExpireOAuthBrowserFlowRefreshing,
     ExpireOAuthBrowserFlowReauthRequired,
+    ExpireOAuthBrowserFlowAbsentValid,
+    ExpireOAuthBrowserFlowAbsentExpiring,
+    ExpireOAuthBrowserFlowAbsentExpired,
+    ExpireOAuthBrowserFlowAbsentRefreshing,
+    ExpireOAuthBrowserFlowAbsentReauthRequired,
+    ExpireOAuthBrowserFlowReleased,
     AdmitOAuthDeviceFlowValid,
     AdmitOAuthDeviceFlowExpiring,
     AdmitOAuthDeviceFlowExpired,
@@ -613,6 +643,7 @@ pub enum TransitionId {
     ConfirmOAuthDurableAdmissionExpired,
     ConfirmOAuthDurableAdmissionRefreshing,
     ConfirmOAuthDurableAdmissionReauthRequired,
+    ConfirmOAuthDurableAdmissionReleased,
     VerifyOAuthDeviceFlowValid,
     VerifyOAuthDeviceFlowExpiring,
     VerifyOAuthDeviceFlowExpired,
@@ -628,6 +659,12 @@ pub enum TransitionId {
     FinishOAuthDevicePollExpired,
     FinishOAuthDevicePollRefreshing,
     FinishOAuthDevicePollReauthRequired,
+    FinishOAuthDevicePollAbsentValid,
+    FinishOAuthDevicePollAbsentExpiring,
+    FinishOAuthDevicePollAbsentExpired,
+    FinishOAuthDevicePollAbsentRefreshing,
+    FinishOAuthDevicePollAbsentReauthRequired,
+    FinishOAuthDevicePollReleased,
     ConsumeOAuthDeviceFlowValid,
     ConsumeOAuthDeviceFlowExpiring,
     ConsumeOAuthDeviceFlowExpired,
@@ -638,6 +675,12 @@ pub enum TransitionId {
     ExpireOAuthDeviceFlowExpired,
     ExpireOAuthDeviceFlowRefreshing,
     ExpireOAuthDeviceFlowReauthRequired,
+    ExpireOAuthDeviceFlowAbsentValid,
+    ExpireOAuthDeviceFlowAbsentExpiring,
+    ExpireOAuthDeviceFlowAbsentExpired,
+    ExpireOAuthDeviceFlowAbsentRefreshing,
+    ExpireOAuthDeviceFlowAbsentReauthRequired,
+    ExpireOAuthDeviceFlowReleased,
     ResolveCredentialUseAdmissionValidUseAuthorizedValid,
     ResolveCredentialUseAdmissionValidHoldAuthorizedValid,
     ResolveCredentialUseAdmissionValidBeginRefreshValid,
@@ -756,5 +799,6 @@ pub fn initial_state() -> State {
         oauth_device_flow_expires_at_millis: Default::default(),
         oauth_device_poll_ids: Default::default(),
         oauth_outstanding_flow_count: 0,
+        release_draining: false,
     }
 }

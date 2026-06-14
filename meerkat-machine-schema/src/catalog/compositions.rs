@@ -2524,6 +2524,81 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             owner_actor("auth_lease_owner"),
         ],
         handoff_protocols: vec![EffectHandoffProtocol {
+            // 0.7.2 D1 drain obligation: release teardown must terminally
+            // cancel in-flight OAuth flows before `Release` commits (the
+            // machine-side completion witness is Release's
+            // `oauth_release_drained` guard). Same-composition owner drain —
+            // not a cross-machine DestroyRequest route — so no C-F3
+            // `teardown` class (a DetachBeforeDestroy declaration with no
+            // pairing route is a dangling-teardown audit error).
+            name: protocol_id("auth_release_oauth_flow_drain"),
+            producer_instance: mi_id("auth_machine"),
+            effect_variant: ev_id("CancelOAuthFlowsForRelease"),
+            realizing_actor: act_id("auth_lease_owner"),
+            correlation_fields: vec![],
+            obligation_fields: vec![
+                fld_id("browser_flow_ids"),
+                fld_id("device_flow_ids"),
+            ],
+            allowed_feedback_inputs: vec![
+                FeedbackInputRef {
+                    machine_instance: mi_id("auth_machine"),
+                    input_variant: iv_id("ExpireOAuthBrowserFlow"),
+                    field_bindings: vec![FeedbackFieldBinding {
+                        input_field: fld_id("flow_id"),
+                        // Distinct owner-context labels per feedback input: the
+                        // codegen derives the TLA bound-variable name from this
+                        // string, so two `flow_id` labels in the same handoff
+                        // collide as duplicate `\E owner_ctx_flow_id` binders.
+                        source: FeedbackFieldSource::OwnerContext("browser_flow_id".into()),
+                    }],
+                },
+                FeedbackInputRef {
+                    machine_instance: mi_id("auth_machine"),
+                    input_variant: iv_id("ExpireOAuthDeviceFlow"),
+                    field_bindings: vec![FeedbackFieldBinding {
+                        input_field: fld_id("flow_id"),
+                        source: FeedbackFieldSource::OwnerContext("device_flow_id".into()),
+                    }],
+                },
+            ],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback: release_lease discharges the drain by firing \
+                 a terminal Expire* feedback per drained flow id before committing \
+                 `Release`; the Release guard `oauth_release_drained` is the \
+                 machine-side completion witness"
+                    .into(),
+            ),
+            comms_trust_authority: None,
+            durable_marker: None,
+            teardown: None,
+            rust: ProtocolRustBinding {
+                module_path:
+                    "meerkat-runtime/src/generated/protocol_auth_release_oauth_flow_drain.rs"
+                        .into(),
+                generation_mode: ProtocolGenerationMode::EffectExtractor,
+                required_imports: vec![
+                    "use crate::auth_machine::dsl::{AuthMachineAuthority, AuthMachineEffect, AuthMachineInput, AuthMachineMutator, AuthMachineTransition, AuthMachineTransitionError};".into(),
+                ],
+                authority_type_path: Some("crate::auth_machine::dsl::AuthMachineAuthority".into()),
+                mutator_trait_path: Some("crate::auth_machine::dsl::AuthMachineMutator".into()),
+                input_enum_path: Some("crate::auth_machine::dsl::AuthMachineInput".into()),
+                effect_enum_path: Some("crate::auth_machine::dsl::AuthMachineEffect".into()),
+                transition_type_path: Some("crate::auth_machine::dsl::AuthMachineTransition".into()),
+                error_type_path: Some(
+                    "crate::auth_machine::dsl::AuthMachineTransitionError".into(),
+                ),
+                executor_trigger_input_variant: None,
+                bridge_source_type_path: None,
+                helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                handle_trait_path: None,
+                handle_feedback_bindings: vec![],
+                input_payload_module_path: None,
+                additional_modes: vec![],
+            },
+        },
+        EffectHandoffProtocol {
             name: protocol_id("auth_lease_lifecycle_publication"),
             producer_instance: mi_id("auth_machine"),
             effect_variant: ev_id("EmitLifecycleEvent"),
@@ -2605,6 +2680,22 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![CompositionInvariant {
+            name: "auth_release_oauth_flow_drain_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: mi_id("auth_machine"),
+                effect_variant: ev_id("CancelOAuthFlowsForRelease"),
+                protocol_name: protocol_id("auth_release_oauth_flow_drain"),
+            },
+            statement: "every release-drain obligation AuthMachine mints for \
+                    in-flight OAuth flows crosses to the runtime auth-lease owner \
+                    through the explicit `auth_release_oauth_flow_drain` protocol \
+                    and is closed by terminal Expire* feedback before `Release` \
+                    commits, rather than by ad-hoc shell reads of flow membership"
+                .into(),
+            references_machines: vec![mi_id("auth_machine")],
+            references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
+        },
+        CompositionInvariant {
             name: "auth_lease_lifecycle_publication_protocol_covered".into(),
             kind: CompositionInvariantKind::HandoffProtocolCovered {
                 producer_instance: mi_id("auth_machine"),
@@ -2619,7 +2710,10 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             references_machines: vec![mi_id("auth_machine")],
             references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
         }],
-        witnesses: vec![witness("auth_lease_lifecycle_publication_round_trip", &[])],
+        witnesses: vec![
+            witness("auth_lease_lifecycle_publication_round_trip", &[]),
+            witness("auth_release_oauth_flow_drain_round_trip", &[]),
+        ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,

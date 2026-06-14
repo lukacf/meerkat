@@ -2157,12 +2157,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Some(runtime));
         }
 
-        if self
+        // An archived session has no authoritative runtime/session machine
+        // snapshot and never will: surfacing the store-only-mutation
+        // Unsupported error would launder the typed archived contract behind a
+        // mechanism complaint. Read the durable archive projection first so a
+        // post-archive control mutation resolves the typed NotFound contract.
+        if let Some(stored) = self
             .store
-            .exists(id)
+            .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?
         {
+            if self.session_archived_by_authority(id, &stored).await? {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
             return Err(Self::store_only_control_mutation_error(id, operation));
         }
 
@@ -2180,6 +2188,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await;
         }
 
+        // A pure store-only session (no runtime authority) is a compatibility
+        // projection: control mutations require an authoritative runtime/session
+        // machine snapshot, so they resolve the store-only Unsupported mechanism
+        // error regardless of the row's self-declared lifecycle terminal. The
+        // authoritative-archive → typed-NotFound contract is owned by the
+        // runtime-authority branch above (and `reject_if_archived_session`),
+        // which only fires for sessions that carry an authoritative snapshot.
         if self
             .store
             .exists(id)
@@ -12214,6 +12229,58 @@ mod tests {
         assert!(
             matches!(err, SessionError::NotFound { .. }),
             "AlreadyArchived verdict must surface as NotFound, got: {err:?}"
+        );
+    }
+
+    /// 0.7.2 disciplined shell inputs, entry 16 pin (persistent.rs:5068
+    /// seam): a runtime context application that arrives after archive
+    /// committed must resolve with the typed archived-session contract
+    /// (NotFound) — never an internal error and never a hung waiter.
+    #[tokio::test]
+    async fn test_runtime_context_appends_after_archive_resolve_typed_not_found() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+
+        // The racing producer acquired its admission BEFORE archive committed.
+        let admission = service
+            .inner
+            .acquire_runtime_context_admission(&id)
+            .await
+            .expect("live session should admit runtime context");
+
+        service.archive(&id).await.expect("archive should succeed");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.apply_runtime_context_appends_with_recoverable_reserved_admission(
+                &id,
+                RunId::new(),
+                Vec::new(),
+                RunApplyBoundary::RunStart,
+                Vec::new(),
+                admission,
+            ),
+        )
+        .await
+        .expect("post-archive context application must settle, not hang");
+        let (error, _recovered_admission) =
+            result.expect_err("post-archive context application must not fabricate success");
+        assert!(
+            matches!(error, SessionError::NotFound { .. }),
+            "post-archive context application must resolve the typed archived contract \
+             (NotFound), got: {error:?}"
         );
     }
 

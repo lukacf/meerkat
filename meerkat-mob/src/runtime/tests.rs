@@ -1512,6 +1512,14 @@ impl MockSessionService {
             .store(enabled, Ordering::Relaxed);
     }
 
+    /// True iff the session was terminally archived (data-loss). Distinct from
+    /// `has_live_session`: a `discard_live_session` drops the live in-memory
+    /// copy while leaving the durable session recoverable, which is NOT
+    /// archival.
+    async fn test_is_session_archived(&self, id: &SessionId) -> bool {
+        self.archived_session_ids.read().await.contains(id)
+    }
+
     fn interrupt_call_count(&self) -> u64 {
         self.interrupt_calls.load(Ordering::Relaxed)
     }
@@ -7633,11 +7641,13 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
             .any(|entry| entry.agent_identity == worker),
         "failed StopHostLoop must retain the member roster anchor for retry"
     );
+    // The campaign-0.7.2 D1 unregister drain cleanly stops the runtime loop,
+    // whose pre-existing executor-stop teardown discards the LIVE session copy
+    // (durable state is preserved — discard is not archival). The retry-safety
+    // contract is that the partial-destroy failure must not ARCHIVE (terminally
+    // lose) the bridge session; the durable copy stays recoverable.
     assert!(
-        service
-            .has_live_session(&bridge_session_id)
-            .await
-            .expect("check worker session after partial destroy"),
+        !service.test_is_session_archived(&bridge_session_id).await,
         "failed StopHostLoop must not archive the bridge session"
     );
     assert!(
@@ -42666,5 +42676,339 @@ fn kickoff_notice_intent_delivers_every_machine_emitted_phase() {
         seen.len(),
         all_intents.len(),
         "every machine-emitted kickoff phase must be forwarded with a distinct notice tag"
+    );
+}
+
+// ===========================================================================
+// 0.7.2 disciplined shell inputs — L5 (mob-kickoff/spawn waiters vs teardown)
+//
+// Worklist rows 12/13/14: the autonomous-kickoff completion waiter
+// (actor.rs `start_autonomous_member` spawn) and the spawn-provisioning
+// waiter (actor.rs `enqueue_spawn` spawn) race retire/destroy teardown.
+// These tests drive the racy orders deterministically and pin the typed
+// benign contract: teardown treats the waiters as machine-owned drain
+// obligations, and late arrivals are accepted typed no-ops (no error path,
+// no stuck state, no silent machine-state divergence).
+//
+// Stage A expectation (DSL landed, shell unchanged):
+//   * test_retire_quiesces_machine_inflight_kickoff_without_shell_handle  RED
+//   * test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle RED
+//     (the old shell only cancels kickoff when its own
+//     `autonomous_initial_turns` handle probe hits — a shell-side probe the
+//     machine-owned `RequestKickoffQuiesce` obligation replaces in Stage B)
+//   * the late-arrival and pending-spawn tests pin contracts that the DSL
+//     change alone may already satisfy (regression pins, expected GREEN).
+// ===========================================================================
+
+#[tokio::test]
+async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("worker-kickoff-quiesce-retire");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    // Machine-owned kickoff facts with NO shell waiter handle: this is the
+    // exact shape the old shell cannot quiesce (its cancel path probes the
+    // shell-side `autonomous_initial_turns` map instead of discharging the
+    // machine obligation).
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::KickoffMarkPending {
+                member_id: dsl_member.clone(),
+            },
+        )
+        .await
+        .expect("mark kickoff pending");
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
+                member_id: dsl_member.clone(),
+            },
+        )
+        .await
+        .expect("mark kickoff starting");
+
+    handle.retire(member.clone()).await.expect(
+        "retire must discharge the machine-owned kickoff quiesce obligation \
+             (RequestKickoffQuiesce -> KickoffQuiesced) before archival, instead of \
+             failing the archival guard for a kickoff the shell never owned a handle for",
+    );
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        !state.member_kickoff_pending.contains(&dsl_member)
+            && !state.member_kickoff_starting.contains(&dsl_member)
+            && !state.member_kickoff_callback_pending.contains(&dsl_member),
+        "no kickoff may remain in flight after retire completed",
+    );
+    assert!(
+        state.member_kickoff_cancelled.contains(&dsl_member),
+        "teardown quiesce of an in-flight kickoff must be machine-recorded as Cancelled",
+    );
+    // Live retire removes the member from the roster (list_members), but the
+    // frozen DSL intentionally leaves an identity_to_runtime tombstone — only
+    // the recovery/destroy paths clear that map (see test_retire_removes_from_roster).
+    // Assert the established roster contract; it is orthogonal to the
+    // kickoff-quiesce behavior this test covers.
+    assert!(
+        !handle
+            .list_members()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == member),
+        "member must be fully retired from the live roster",
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("worker-kickoff-quiesce-destroy");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::KickoffMarkPending {
+                member_id: dsl_member.clone(),
+            },
+        )
+        .await
+        .expect("mark kickoff pending");
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
+                member_id: dsl_member.clone(),
+            },
+        )
+        .await
+        .expect("mark kickoff starting");
+
+    handle.destroy().await.expect(
+        "destroy must discharge every kickoff quiesce obligation before the \
+         Destroy transition (guarded on kickoff_waiters_quiesced) commits",
+    );
+    assert_eq!(
+        handle.status().await.expect("status"),
+        MobState::Destroyed,
+        "destroy must reach the Destroyed phase",
+    );
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        !state.member_kickoff_pending.contains(&dsl_member)
+            && !state.member_kickoff_starting.contains(&dsl_member)
+            && !state.member_kickoff_callback_pending.contains(&dsl_member),
+        "no kickoff may remain in flight after destroy committed",
+    );
+}
+
+#[tokio::test]
+async fn test_late_kickoff_outcome_after_retire_is_benign() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    // Park the autonomous initial turn so the kickoff stays Starting and the
+    // real completion waiter never delivers before teardown.
+    service.set_start_turn_delay_ms(10_000);
+
+    let member = AgentIdentity::from("lead-late-outcome");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let state = handle
+                .query_machine_state()
+                .await
+                .expect("query machine state");
+            if state.member_kickoff_starting.contains(&dsl_member) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("autonomous kickoff must reach the machine-owned Starting state");
+
+    handle
+        .retire(member.clone())
+        .await
+        .expect("retire of a kickoff-in-flight autonomous member must succeed");
+
+    // The completion outcome lands AFTER teardown quiesced the kickoff —
+    // delivered through the real actor command path. It must be acknowledged
+    // as a typed benign late arrival: no error, no kickoff resurrection.
+    handle
+        .debug_inject_kickoff_outcome(
+            member.clone(),
+            Ok(meerkat_runtime::CompletionOutcome::CompletedWithoutResult),
+        )
+        .await
+        .expect("late kickoff outcome must be acknowledged, not surfaced as an error");
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_cancelled.contains(&dsl_member),
+        "machine-recorded cancellation must survive the late outcome",
+    );
+    assert!(
+        !state.member_kickoff_started.contains(&dsl_member),
+        "a late completion outcome must not resurrect a quiesced kickoff to Started",
+    );
+
+    // The mob is not stuck: full teardown still commits.
+    handle
+        .destroy()
+        .await
+        .expect("destroy must succeed after the benign late kickoff arrival");
+    assert_eq!(handle.status().await.expect("status"), MobState::Destroyed);
+}
+
+#[tokio::test]
+async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(10_000);
+
+    let member = AgentIdentity::from("lead-late-failure");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let state = handle
+                .query_machine_state()
+                .await
+                .expect("query machine state");
+            if state.member_kickoff_starting.contains(&dsl_member) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("autonomous kickoff must reach the machine-owned Starting state");
+
+    handle
+        .retire(member.clone())
+        .await
+        .expect("retire of a kickoff-in-flight autonomous member must succeed");
+
+    // Abandoned/terminated outcomes map to KickoffResolveFailed; after the
+    // quiesce they must be benign no-ops too (row 13).
+    handle
+        .debug_inject_kickoff_outcome(
+            member.clone(),
+            Ok(meerkat_runtime::CompletionOutcome::RuntimeTerminated {
+                reason: "runtime retired during teardown".to_string(),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "runtime retired during teardown",
+                ),
+            }),
+        )
+        .await
+        .expect("late kickoff failure outcome must be acknowledged, not surfaced as an error");
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_cancelled.contains(&dsl_member),
+        "machine-recorded cancellation must survive the late failure outcome",
+    );
+    assert!(
+        !state.member_kickoff_failed.contains(&dsl_member),
+        "a late failure outcome must not rewrite a quiesced kickoff to Failed",
+    );
+    assert!(
+        !state.member_kickoff_error.contains_key(&dsl_member),
+        "a late failure outcome must not record an error for a quiesced kickoff",
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_with_inflight_spawn_provisioning_quiesces_waiter() {
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("w-destroy-pending-spawn");
+    let comms_name = test_comms_name("worker", member.as_str());
+
+    let pending_spawn = {
+        let handle = handle.clone();
+        let member = member.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), member, None)
+                .await
+        })
+    };
+    // The provisioning task has provisioned the session and is parked in the
+    // pre-send delay window — the deterministic "in-flight spawn waiter".
+    let _session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+
+    handle.destroy().await.expect(
+        "destroy must drain the pending-spawn obligations (abort + await the \
+         provisioning waiter, typed CancelPendingSpawn closure) and commit",
+    );
+    assert_eq!(handle.status().await.expect("status"), MobState::Destroyed);
+
+    let spawn_error = pending_spawn
+        .await
+        .expect("spawn task join")
+        .expect_err("pending spawn must fail with the typed teardown cancellation");
+    assert!(
+        spawn_error.to_string().contains("mob is destroying"),
+        "pending spawn must surface the typed destroy cancellation reason, got: {spawn_error}"
+    );
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert_eq!(
+        state.pending_spawn_count, 0,
+        "no machine pending-spawn obligation may survive destroy",
+    );
+    assert!(
+        state.pending_spawn_sessions.is_empty(),
+        "no machine pending-spawn session may survive destroy",
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "the provisioned session must be cleaned up by the time destroy returns \
+         (the spawn waiter was aborted AND awaited, not left to straggle)",
     );
 }

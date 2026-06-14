@@ -125,6 +125,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetMobOperatorSpawnProfilesInMob`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginUnregisterSessionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterSessionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterSessionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeLoopStoppedForUnregisterIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeLoopStoppedForUnregisterAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeLoopStoppedForUnregisterRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeLoopStoppedForUnregisterRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeLoopStoppedForUnregisterStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommsDrainExitedForUnregisterIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommsDrainExitedForUnregisterAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommsDrainExitedForUnregisterRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommsDrainExitedForUnregisterRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommsDrainExitedForUnregisterStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompletionWaitersResolvedForUnregisterIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompletionWaitersResolvedForUnregisterAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompletionWaitersResolvedForUnregisterRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompletionWaitersResolvedForUnregisterRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompletionWaitersResolvedForUnregisterStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnregisterSessionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4349,6 +4409,63 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InteractionStreamClosedEarlyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `NotifyDrainExitedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `McpServerConnectPendingAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `McpServerConnectedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `McpServerFailedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `McpServerDisconnectedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `McpServerReloadAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerRequestSentAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerResponseProgressArrivedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerResponseTerminalArrivedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerResponseRejectedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerRequestTimedOutAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerRequestSendFailedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerRequestReceivedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerResponseRepliedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamReservedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAttachedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamCompletedAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamExpiredAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamClosedEarlyAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachSessionIngressIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5374,6 +5491,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CommsTrustReconcileRequested`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestRuntimeLoopStopForUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCommsDrainExitForUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompletionWaiterResolutionForUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `fence_requires_bound_runtime`
@@ -5392,6 +5518,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `deferred_stop_requires_active_runtime_phase`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `unregister_drain_obligations_require_draining`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `current_run_only_while_running_or_retired`

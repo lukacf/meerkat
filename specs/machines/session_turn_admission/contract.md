@@ -9,6 +9,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Phase enum: `Idle | Admitted | Running | Completing | ShuttingDown`
 - `interrupt_pending`: `Bool`
 - `shutdown_pending`: `Bool`
+- `admission_drain_pending`: `Bool`
 - `last_public_terminal`: `Option<StartTurnPublicTerminal>`
 
 ## Inputs
@@ -23,6 +24,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeStartTurnDispatch`
 - `AuthorizeCancelAfterBoundary`
 - `ResolveLastStartTurnPublicTerminal`
+- `AuthorizeRuntimeSystemContextApplication`
+- `ResolvePendingAdmissionDrained`
+- `AuthorizeSessionTeardown`
 - `ResolveRuntimeKeepAlive`(keep_alive_request: RuntimeKeepAliveRequest)
 - `ResolveStartTurnDisposition`(execution_kind_present: Bool, execution_kind: StartTurnExecutionKind, prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64, pending_continuation: PendingContinuationDisposition)
 
@@ -36,6 +40,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StartTurnDispositionResolved`(disposition: StartTurnDisposition)
 - `StartTurnPublicTerminalResolved`(terminal: StartTurnPublicTerminal)
 - `RuntimeKeepAliveResolved`(decision: RuntimeKeepAlivePersistenceDecision)
+- `PendingAdmissionDrainRequested`
+- `RuntimeSystemContextApplicationResolved`(authorization: RuntimeSystemContextApplicationAuthorization)
+- `TurnAdmissionShutdownTerminalResolved`(terminal: TurnAdmissionShutdownTerminal)
+- `SessionTeardownAuthorized`
 
 ## Helpers
 - `is_active_phase`(phase: TurnAdmissionPhase) -> `Bool`
@@ -43,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `shutdown_phase_is_not_active`
+- `drain_obligation_only_while_shutting_down`
 
 ## Transitions
 ### `ProjectTurnAdmissionIdle`
@@ -87,11 +96,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `TurnAdmissionProjected`
 - To: `Idle`
 
+### `ClaimTurnShuttingDown`
+- From: `ShuttingDown`
+- On: `ClaimTurn`()
+- Emits: `TurnAdmissionShutdownTerminalResolved`
+- To: `ShuttingDown`
+
+### `AbortClaimShuttingDown`
+- From: `ShuttingDown`
+- On: `AbortClaim`()
+- Emits: `TurnAdmissionProjected`
+- To: `ShuttingDown`
+
 ### `BeginTurn`
 - From: `Admitted`
 - On: `BeginTurn`()
 - Emits: `TurnAdmissionProjected`
 - To: `Running`
+
+### `BeginTurnShuttingDown`
+- From: `ShuttingDown`
+- On: `BeginTurn`()
+- Emits: `TurnAdmissionShutdownTerminalResolved`
+- To: `ShuttingDown`
 
 ### `ResolveTurn`
 - From: `Running`
@@ -104,7 +131,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `FinalizeTurn`()
 - Guards:
   - ``
-- Emits: `TurnAdmissionProjected`
+- Emits: `PendingAdmissionDrainRequested`, `TurnAdmissionProjected`
 - To: `ShuttingDown`
 
 ### `FinalizeTurnToIdle`
@@ -150,13 +177,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RequestShutdownImmediateIdle`
 - From: `Idle`
 - On: `RequestShutdown`()
-- Emits: `TurnAdmissionProjected`
+- Emits: `PendingAdmissionDrainRequested`, `TurnAdmissionProjected`
 - To: `ShuttingDown`
 
 ### `RequestShutdownImmediateAdmitted`
 - From: `Admitted`
 - On: `RequestShutdown`()
-- Emits: `TurnAdmissionProjected`
+- Emits: `PendingAdmissionDrainRequested`, `TurnAdmissionProjected`
 - To: `ShuttingDown`
 
 ### `RequestShutdownDeferredRunning`
@@ -177,6 +204,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `TurnAdmissionProjected`
 - To: `ShuttingDown`
 
+### `ResolvePendingAdmissionDrained`
+- From: `ShuttingDown`
+- On: `ResolvePendingAdmissionDrained`()
+- Guards:
+  - ``
+- Emits: `TurnAdmissionProjected`
+- To: `ShuttingDown`
+
+### `AuthorizeSessionTeardown`
+- From: `ShuttingDown`
+- On: `AuthorizeSessionTeardown`()
+- Guards:
+  - ``
+- Emits: `SessionTeardownAuthorized`
+- To: `ShuttingDown`
+
 ### `AuthorizeCancelAfterBoundaryAdmitted`
 - From: `Admitted`
 - On: `AuthorizeCancelAfterBoundary`()
@@ -193,6 +236,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ShuttingDown`
 - On: `AuthorizeStartTurnDispatch`()
 - Emits: `StartTurnDispatchResolved`
+- To: `ShuttingDown`
+
+### `AuthorizeRuntimeSystemContextApplicationActiveIdle`
+- From: `Idle`
+- On: `AuthorizeRuntimeSystemContextApplication`()
+- Emits: `RuntimeSystemContextApplicationResolved`
+- To: `Idle`
+
+### `AuthorizeRuntimeSystemContextApplicationActiveAdmitted`
+- From: `Admitted`
+- On: `AuthorizeRuntimeSystemContextApplication`()
+- Emits: `RuntimeSystemContextApplicationResolved`
+- To: `Admitted`
+
+### `AuthorizeRuntimeSystemContextApplicationActiveRunning`
+- From: `Running`
+- On: `AuthorizeRuntimeSystemContextApplication`()
+- Emits: `RuntimeSystemContextApplicationResolved`
+- To: `Running`
+
+### `AuthorizeRuntimeSystemContextApplicationActiveCompleting`
+- From: `Completing`
+- On: `AuthorizeRuntimeSystemContextApplication`()
+- Emits: `RuntimeSystemContextApplicationResolved`
+- To: `Completing`
+
+### `AuthorizeRuntimeSystemContextApplicationShuttingDown`
+- From: `ShuttingDown`
+- On: `AuthorizeRuntimeSystemContextApplication`()
+- Emits: `RuntimeSystemContextApplicationResolved`
 - To: `ShuttingDown`
 
 ### `AuthorizeCancelAfterBoundaryRunning`
@@ -249,6 +322,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `StartTurnDispositionResolved`, `StartTurnPublicTerminalResolved`
 - To: `Admitted`
 
+### `ResolveStartTurnDispositionShuttingDown`
+- From: `ShuttingDown`
+- On: `ResolveStartTurnDisposition`(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
+- Emits: `TurnAdmissionShutdownTerminalResolved`
+- To: `ShuttingDown`
+
 ### `ResolveRuntimeKeepAliveEnable`
 - From: `Admitted`
 - On: `ResolveRuntimeKeepAlive`(keep_alive_request)
@@ -272,6 +351,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
 - Emits: `RuntimeKeepAliveResolved`
 - To: `Admitted`
+
+### `ResolveRuntimeKeepAliveShuttingDown`
+- From: `ShuttingDown`
+- On: `ResolveRuntimeKeepAlive`(keep_alive_request)
+- Emits: `TurnAdmissionShutdownTerminalResolved`
+- To: `ShuttingDown`
 
 ### `ResolveLastStartTurnPublicTerminalNoPendingIdle`
 - From: `Idle`

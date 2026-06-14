@@ -1211,6 +1211,7 @@ pub enum RegistrationPhase {
     #[default]
     Queuing,
     Active,
+    Draining,
 }
 
 impl RegistrationPhase {
@@ -1218,6 +1219,7 @@ impl RegistrationPhase {
         match self {
             Self::Queuing => "Queuing",
             Self::Active => "Active",
+            Self::Draining => "Draining",
         }
     }
 }

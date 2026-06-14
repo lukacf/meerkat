@@ -26,10 +26,11 @@ pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
     AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimedDispatchDisposition,
     ClaimedDispatchVerdict, CompletionSupersessionDisposition, CompletionSupersessionVerdict,
-    OccurrenceDueAction, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
-    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, OccurrenceSupersessionAck,
-    OccurrenceWritePrecondition, ScheduleLifecycleEffect, ScheduleLifecycleError,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator, ScheduleWritePrecondition,
+    LateCompletionResolutionClass, OccurrenceDueAction, OccurrenceLifecycleEffect,
+    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
+    OccurrenceSupersessionAck, OccurrenceWritePrecondition, ScheduleLifecycleEffect,
+    ScheduleLifecycleError, ScheduleLifecycleInput, ScheduleLifecycleMutator,
+    ScheduleWritePrecondition, StaleCompletionArrivalTrigger,
 };
 pub use service::ScheduleService;
 pub use store::{

@@ -201,6 +201,18 @@ impl CommsDrainSlot {
             handle.abort();
         }
     }
+
+    /// Signal cancellation on the drain task and return its `JoinHandle` so the
+    /// caller can await quiescence. The two-phase unregister drain uses this to
+    /// abort the drain task *and* join it before committing teardown; awaiting
+    /// the returned handle yields `Err(JoinError::is_cancelled())`, which is
+    /// benign. The slot is left empty (no runtime, no handle).
+    pub(crate) fn abort_keeping_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.task_runtime = None;
+        let handle = self.handle.take()?;
+        handle.abort();
+        Some(handle)
+    }
 }
 
 pub fn abort_slot(slot: &mut CommsDrainSlot) {

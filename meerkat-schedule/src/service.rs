@@ -433,13 +433,13 @@ struct PlannedScheduleOccurrences {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::OccurrenceLifecycleInput;
     use crate::types::{
         DeliveryReceipt, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MobTargetBinding,
         OccurrenceId, ResolvedSpawnSnapshot, ScheduleSpawnTooling, ScheduledSessionAction,
         SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
+    use crate::{OccurrenceLifecycleEffect, OccurrenceLifecycleInput};
     use chrono::Duration;
     use meerkat_core::{ContentInput, ToolNameSet};
     use std::collections::BTreeMap;
@@ -558,7 +558,8 @@ mod tests {
             expected_attempt: u32,
             expected_claim_token: Option<Uuid>,
             transition: OccurrenceLifecycleInput,
-        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+        ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError>
+        {
             self.inner
                 .transition_occurrence_if_current(
                     occurrence_id,
@@ -928,6 +929,77 @@ mod tests {
                     .superseded_ack_ids
                     .contains(&occurrence.occurrence_id)),
             "delete supersession acks should be routed back through schedule authority"
+        );
+        Ok(())
+    }
+
+    /// STAGE B (0.7.2 D1 — RED until wired): delete must revoke driver-claimed
+    /// in-flight occurrences at commit time, not only Pending ones. The
+    /// revocation flows through the occurrence authority's typed Supersede
+    /// transition, and each revoked claim is accounted in the schedule
+    /// authority's `superseded_ack_ids` (machine-owned accounting of the
+    /// claims the delete revoked).
+    #[tokio::test]
+    async fn delete_revokes_and_accounts_driver_claimed_in_flight_occurrences()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+
+        let created = service
+            .create(CreateScheduleRequest {
+                name: Some("delete-in-flight-accounting".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("initial prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+
+        let claimed = store
+            .claim_due_occurrences(crate::ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 1,
+                lease_duration: Duration::seconds(30),
+            })
+            .await?;
+        let in_flight = claimed
+            .claimed
+            .into_iter()
+            .next()
+            .expect("due occurrence should be claimed");
+        assert_eq!(in_flight.phase, OccurrencePhase::Claimed);
+
+        let deleted = service.delete(&created.schedule_id).await?;
+
+        let occurrences = service.list_occurrences(&created.schedule_id).await?;
+        let revoked = occurrences
+            .iter()
+            .find(|occurrence| occurrence.occurrence_id == in_flight.occurrence_id)
+            .expect("claimed occurrence should still exist");
+        assert_eq!(
+            revoked.phase,
+            OccurrencePhase::Superseded,
+            "delete must supersede the driver-claimed in-flight occurrence at commit time"
+        );
+        assert_eq!(revoked.superseded_by_revision, Some(deleted.revision));
+        assert!(
+            deleted
+                .superseded_ack_ids
+                .contains(&in_flight.occurrence_id),
+            "the revoked in-flight claim must be accounted in superseded_ack_ids"
+        );
+        assert!(
+            occurrences
+                .iter()
+                .all(|occurrence| occurrence.phase == OccurrencePhase::Superseded),
+            "no live occurrence may outlive the deleted schedule"
         );
         Ok(())
     }

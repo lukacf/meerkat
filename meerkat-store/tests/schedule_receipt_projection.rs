@@ -61,7 +61,7 @@ async fn sample_in_flight_occurrence(
     let occurrence = occurrence_write.occurrence().clone();
     store.commit_occurrence_write(occurrence_write).await?;
     let claim_token = Uuid::now_v7();
-    let occurrence = store
+    let (occurrence, _) = store
         .transition_occurrence_if_current(
             &occurrence.occurrence_id,
             occurrence.attempt_count,
@@ -75,7 +75,7 @@ async fn sample_in_flight_occurrence(
         )
         .await?
         .expect("claim should update current occurrence");
-    let occurrence = store
+    let (occurrence, _) = store
         .transition_occurrence_if_current(
             &occurrence.occurrence_id,
             occurrence.attempt_count,
@@ -87,7 +87,7 @@ async fn sample_in_flight_occurrence(
         )
         .await?
         .expect("dispatch start should update current occurrence");
-    let occurrence = store
+    let (occurrence, _) = store
         .transition_occurrence_if_current(
             &occurrence.occurrence_id,
             occurrence.attempt_count,

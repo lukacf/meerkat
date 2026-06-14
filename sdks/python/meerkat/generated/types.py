@@ -420,7 +420,7 @@ class WorkItemsResult:
 
 # Parameters for the RPC `config/set` method — replace the config (bare
 # config or wrapped with an optimistic-concurrency generation).
-ConfigSetParams = dict[str, Any] | Any
+ConfigSetParams = dict[str, Any]
 
 @dataclass
 class MobWireParams:

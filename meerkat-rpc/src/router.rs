@@ -5583,6 +5583,10 @@ mod tests {
             }
         }
 
+        fn supports_provider(&self, provider: meerkat_core::Provider) -> bool {
+            provider == meerkat_core::Provider::OpenAI
+        }
+
         async fn open_session(
             &self,
             _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,

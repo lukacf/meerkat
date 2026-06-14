@@ -462,7 +462,11 @@ impl SessionBackend {
             return Ok(Some(existing));
         }
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
-            if adapter.session_has_executor(session_id).await {
+            if adapter
+                .session_has_executor(session_id)
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?
+            {
                 return Ok(Some(existing));
             }
             existing.clear_queued_turns().await;
@@ -1241,6 +1245,21 @@ fn session_turn_error_to_mob_error(bridge_session_id: &SessionId, error: Session
     }
 }
 
+fn session_error_means_session_identity_already_active(
+    error: &SessionError,
+    bridge_session_id: &SessionId,
+) -> bool {
+    let expected = format!("Session identity already active: {bridge_session_id}");
+    matches!(
+        error,
+        SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(message)
+                | meerkat_core::error::AgentError::BuildError(message)
+        )
+            if message.contains(&expected)
+    )
+}
+
 #[cfg(feature = "runtime-adapter")]
 struct RuntimeSessionState {
     // Transport-only owner context keyed by canonical runtime input identity.
@@ -1921,6 +1940,7 @@ impl MobProvisioner for SessionBackend {
                 // Rollback: unregister the pre-registered session on failure
                 if let (Some(adapter), Some(pre_id)) =
                     (&self.runtime_adapter, &pre_registered_bridge_session_id)
+                    && !session_error_means_session_identity_already_active(&e, pre_id)
                 {
                     adapter.unregister_session(pre_id).await;
                 }

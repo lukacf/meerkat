@@ -1189,6 +1189,9 @@ struct MockSessionService {
     archived_session_ids: RwLock<HashSet<SessionId>>,
     /// Sessions whose create_session (re-materialization) should fail.
     create_fail_sessions: RwLock<HashSet<SessionId>>,
+    /// Sessions whose create_session should materialize live state but return
+    /// the already-active comms identity error observed in the #37 deliver race.
+    create_identity_already_active_sessions: RwLock<HashSet<SessionId>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
     disable_interaction_event_injector: std::sync::atomic::AtomicBool,
@@ -1251,6 +1254,7 @@ impl MockSessionService {
             archived_sent_intents: RwLock::new(HashMap::new()),
             archived_session_ids: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
+            create_identity_already_active_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
             disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
@@ -1458,6 +1462,13 @@ impl MockSessionService {
     /// Make any (re-)materialization of `session_id` via create_session fail.
     async fn set_create_session_failure(&self, session_id: &SessionId) {
         self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    async fn set_create_session_identity_already_active(&self, session_id: &SessionId) {
+        self.create_identity_already_active_sessions
             .write()
             .await
             .insert(session_id.clone());
@@ -1909,6 +1920,21 @@ impl SessionService for MockSessionService {
                 .write()
                 .await
                 .insert(session_id.clone(), dispatcher);
+        }
+
+        if self
+            .create_identity_already_active_sessions
+            .read()
+            .await
+            .contains(&session_id)
+        {
+            self.create_session_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::BuildError(format!(
+                    "Session identity already active: {session_id}"
+                )),
+            ));
         }
 
         self.create_session_in_flight
@@ -31118,11 +31144,13 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         let has_executor = service
             .runtime_adapter
             .session_has_executor(&sid_requester)
-            .await;
+            .await
+            .expect("session_has_executor should resolve");
         let has_comms = service
             .runtime_adapter
             .session_has_comms(&sid_requester)
-            .await;
+            .await
+            .expect("session_has_comms should resolve");
         panic!(
             "requester should apply the terminal peer response as runtime-owned context; has_executor={has_executor} has_comms={has_comms} snapshot={requester_snapshot:?}"
         );
@@ -33390,6 +33418,96 @@ async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
         .await
         .expect("member status");
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
+}
+
+/// Task #37 race regression: if the dispatch-triggered revival observes the
+/// live session as missing but the materialization path then hits the
+/// session-scoped comms identity's "already active" guard, the mob shell must
+/// treat that as idempotent success only after re-checking that the bridge
+/// session is live. The machine still owns the revival obligation and receives
+/// `ResolveMemberRevivalSucceeded`; the admitted turn then delivers normally.
+#[tokio::test]
+async fn test_revival_already_active_identity_is_idempotent_success() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let receipt = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "discard must remove the live materialization"
+    );
+    service
+        .set_create_session_identity_already_active(&bridge_session_id)
+        .await;
+
+    handle
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from(
+            "deliver despite already-active race".to_string(),
+        ))
+        .await
+        .expect("already-active comms identity must be treated as live revival success");
+
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "idempotent revival success must leave the bridge session live"
+    );
+    let turn_prompts = service.start_turn_prompts.read().await.clone();
+    assert!(
+        turn_prompts
+            .iter()
+            .any(|(session_id, prompt)| session_id == &bridge_session_id
+                && prompt.contains("deliver despite already-active race")),
+        "the admitted turn must run after the idempotent revival success: {turn_prompts:?}"
+    );
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    let lifecycle = machine_state.member_lifecycle_for_identity(&machine_identity);
+    assert_eq!(
+        lifecycle.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Active,
+        "already-live revival must leave the member Active: {lifecycle:?}"
+    );
+    assert!(
+        !machine_state
+            .member_revival_pending
+            .contains(&machine_identity),
+        "already-live revival success must resolve the machine-owned obligation"
+    );
 }
 
 /// Task #37 regression (failure path): when the machine-authorized revival
@@ -40146,6 +40264,7 @@ fn mob_runtime_parity_field_value(
         | "adaptive_aggregate_tool_call_reserved"
         | "adaptive_aggregate_tool_call_actual"
         | "adaptive_active_layer"
+        | "adaptive_layer_adaptive_run"
         | "adaptive_layer_phase"
         | "adaptive_layer_attempt"
         | "adaptive_layer_member_count"

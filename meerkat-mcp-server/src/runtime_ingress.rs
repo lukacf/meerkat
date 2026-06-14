@@ -186,7 +186,12 @@ impl McpRuntimeIngressContext {
         session_id: &SessionId,
     ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
-            if self.runtime_adapter.session_has_executor(session_id).await {
+            if self
+                .runtime_adapter
+                .session_has_executor(session_id)
+                .await
+                .map_err(runtime_driver_error_to_session_error)?
+            {
                 return Ok(existing);
             }
             existing.clear_queued_turns().await;

@@ -19332,7 +19332,10 @@ async fn session_has_executor_follows_generated_registration_phase() {
         .await
         .expect("register session");
     assert!(
-        !adapter.session_has_executor(&session_id).await,
+        !adapter
+            .session_has_executor(&session_id)
+            .await
+            .expect("session_has_executor should resolve"),
         "registered idle sessions start without generated executor registration"
     );
 
@@ -19341,7 +19344,10 @@ async fn session_has_executor_follows_generated_registration_phase() {
         .await
         .expect("runtime executor registration should succeed");
     assert!(
-        adapter.session_has_executor(&session_id).await,
+        adapter
+            .session_has_executor(&session_id)
+            .await
+            .expect("session_has_executor should resolve"),
         "EnsureSessionWithExecutor must publish generated active registration"
     );
     assert_eq!(
@@ -19358,7 +19364,10 @@ async fn session_has_executor_follows_generated_registration_phase() {
         .await
         .expect("stop should terminalize executor");
     assert!(
-        !adapter.session_has_executor(&session_id).await,
+        !adapter
+            .session_has_executor(&session_id)
+            .await
+            .expect("session_has_executor should resolve"),
         "RuntimeExecutorExited must clear generated executor registration"
     );
     assert_eq!(

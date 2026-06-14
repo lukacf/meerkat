@@ -3091,6 +3091,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
+ "nix 0.29.0",
  "reqwest",
  "serde",
  "serde_json",

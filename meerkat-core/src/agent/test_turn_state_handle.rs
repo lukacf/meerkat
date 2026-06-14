@@ -983,9 +983,18 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ),
                 ],
             ),
-            TurnExecutionInput::TurnLimitReached { run_id } => {
-                input("TurnLimitReached", [("run_id", run_id_value(&run_id))])
-            }
+            TurnExecutionInput::TurnLimitReached {
+                run_id,
+                turn_count,
+                max_turns,
+            } => input(
+                "TurnLimitReached",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    ("turn_count", KernelValue::U64(turn_count)),
+                    ("max_turns", KernelValue::U64(max_turns)),
+                ],
+            ),
             TurnExecutionInput::BudgetExhausted { run_id } => {
                 input("BudgetExhausted", [("run_id", run_id_value(&run_id))])
             }
@@ -1250,9 +1259,18 @@ impl TurnStateHandle for TestTurnStateHandle {
             .map(|_| ())
     }
 
-    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        self.apply_turn_input(TurnExecutionInput::TurnLimitReached { run_id })
-            .map(|_| ())
+    fn turn_limit_reached(
+        &self,
+        run_id: RunId,
+        turn_count: u64,
+        max_turns: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
+            run_id,
+            turn_count,
+            max_turns,
+        })
+        .map(|_| ())
     }
 
     fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError> {
@@ -1639,6 +1657,71 @@ mod tests {
         assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
         assert_eq!(snapshot.llm_retry_attempt, 3);
         assert_eq!(snapshot.llm_retry_max_retries, 3);
+    }
+
+    #[test]
+    fn turn_limit_handle_rejects_unreached_limit() {
+        let handle = TestTurnStateHandle::new();
+        let run_id = RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start run");
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+
+        handle
+            .turn_limit_reached(run_id.clone(), 1, 2)
+            .expect_err("machine guard must reject turn_count below max_turns");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.terminal_cause_kind, None);
+
+        handle
+            .turn_limit_reached(run_id, 2, 2)
+            .expect("turn limit reached at the boundary");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(TurnTerminalCauseKind::TurnLimitReached)
+        );
+    }
+
+    #[test]
+    fn fatal_failure_rejects_max_turns_source() {
+        let handle = TestTurnStateHandle::new();
+        let run_id = RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start run");
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+
+        handle
+            .fatal_failure(
+                run_id,
+                TurnFailureSource::new(TurnFailureSourceKind::MaxTurnsReached, "max turns"),
+            )
+            .expect_err("turn-limit terminality must use counted TurnLimitReached input");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.terminal_cause_kind, None);
     }
 
     /// Dogma K9: "am I extracting" is a TOTAL machine-owned fact

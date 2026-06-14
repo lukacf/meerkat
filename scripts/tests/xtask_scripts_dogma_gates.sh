@@ -81,6 +81,24 @@ if printf '%s' "$edge_dogma" | grep -Fq 'wasm_changed=true'; then
 else
   bad "buildbuddy-edge-changes did not mark_all on a dogma doc"
 fi
+edge_internal_dogma=$(printf 'docs-internal/dogma-audits/PR759-final-ledger.md\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
+if printf '%s' "$edge_internal_dogma" | grep -Fq 'wasm_changed=true'; then
+  ok "buildbuddy-edge-changes mark_all triggers on internal dogma audit docs"
+else
+  bad "buildbuddy-edge-changes did not mark_all on internal dogma audit docs"
+fi
+finite_ledger='docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md'
+if scripts/machine-authority-changed -- "$finite_ledger" >/dev/null; then
+  ok "machine-authority-changed exits 0 (changed) for finite ownership ledger"
+else
+  bad "machine-authority-changed did not flag finite ownership ledger"
+fi
+edge_finite_ledger=$(printf '%s\n' "$finite_ledger" | scripts/buildbuddy-edge-changes --paths-from-stdin)
+if printf '%s' "$edge_finite_ledger" | grep -Fq 'changed=true'; then
+  ok "buildbuddy-edge-changes marks finite ownership ledger as changed"
+else
+  bad "buildbuddy-edge-changes ignored finite ownership ledger"
+fi
 # Governance baselines are governance truth: a baseline-TOML-only diff must
 # escalate both the machine-authority lane and the edge lanes.
 for baseline in xtask/rmat-baseline.toml xtask/ownership-baseline.toml; do

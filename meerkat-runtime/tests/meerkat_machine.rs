@@ -3803,7 +3803,10 @@ async fn registered_session_is_not_executor_ready() {
         "prepare_bindings should register the session"
     );
     assert!(
-        !adapter.session_has_executor(&sid).await,
+        !adapter
+            .session_has_executor(&sid)
+            .await
+            .expect("session_has_executor should resolve"),
         "prepare_bindings alone should not attach an executor"
     );
 }
@@ -3856,7 +3859,10 @@ async fn executor_attached_session_is_executor_ready() {
     let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
 
     assert!(
-        !adapter.session_has_executor(&sid).await,
+        !adapter
+            .session_has_executor(&sid)
+            .await
+            .expect("session_has_executor should resolve"),
         "before executor attachment"
     );
 
@@ -3866,7 +3872,10 @@ async fn executor_attached_session_is_executor_ready() {
         .expect("runtime executor registration should succeed");
 
     assert!(
-        adapter.session_has_executor(&sid).await,
+        adapter
+            .session_has_executor(&sid)
+            .await
+            .expect("session_has_executor should resolve"),
         "after executor attachment"
     );
 }
@@ -3876,7 +3885,10 @@ async fn session_has_executor_false_for_unknown() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let unknown = SessionId::new();
     assert!(
-        !adapter.session_has_executor(&unknown).await,
+        !adapter
+            .session_has_executor(&unknown)
+            .await
+            .expect("session_has_executor should resolve"),
         "unknown session should not have an executor"
     );
 }

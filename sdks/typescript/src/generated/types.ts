@@ -305,7 +305,7 @@ export interface WorkItemsResult {
   items: unknown[];
 }
 
-export type ConfigSetParams = Record<string, unknown> | unknown;
+export type ConfigSetParams = Record<string, unknown>;
 
 export interface MobWireParams {
   member: string;

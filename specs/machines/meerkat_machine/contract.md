@@ -76,6 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_runtime_loop_drain_pending`: `Bool`
 - `unregister_comms_drain_exit_pending`: `Bool`
 - `unregister_completion_waiter_drain_pending`: `Bool`
+- `unregister_teardown_retains_snapshot`: `Bool`
 - `staged_session_phase`: `StagedSessionPhase`
 - `staged_session_id`: `Option<SessionId>`
 - `staged_session_keep_alive`: `Option<Bool>`
@@ -412,7 +413,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestCancelAfterBoundary`(run_id: RunId)
 - `CancellationObserved`(run_id: RunId)
 - `AcknowledgeTerminal`(run_id: RunId, outcome: TurnTerminalOutcome)
-- `TurnLimitReached`(run_id: RunId)
+- `TurnLimitReached`(run_id: RunId, turn_count: u64, max_turns: u64)
 - `BudgetExhausted`(run_id: RunId)
 - `TimeBudgetExceeded`(run_id: RunId)
 - `ForceCancelNoRun`
@@ -1058,7 +1059,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Running`
 
-### `BeginUnregisterSessionRetired`
+### `BeginUnregisterSessionRetainsSnapshotRetired`
 - From: `Retired`
 - On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
 - Guards:
@@ -1071,7 +1072,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Retired`
 
-### `BeginUnregisterSessionStopped`
+### `BeginUnregisterSessionRetainsSnapshotStopped`
 - From: `Stopped`
 - On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
 - Guards:
@@ -7900,6 +7901,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_not_terminal`
   - `terminal_failure_source_known`
+  - `turn_limit_uses_counted_input`
 - Emits: `TurnRunFailed`
 - To: `Running`
 
@@ -7948,10 +7950,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `TurnLimitReached`
 - From: `Running`
-- On: `TurnLimitReached`(run_id)
+- On: `TurnLimitReached`(run_id, turn_count, max_turns)
 - Guards:
   - `run_matches_current`
   - `turn_not_terminal`
+  - `turn_limit_reached`
 - Emits: `TurnRunFailed`
 - To: `Running`
 

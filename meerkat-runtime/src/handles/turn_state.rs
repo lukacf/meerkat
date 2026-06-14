@@ -304,11 +304,15 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                     outcome: mm_dsl::TurnTerminalOutcome::from(outcome),
                 }
             }
-            TurnExecutionInput::TurnLimitReached { run_id } => {
-                mm_dsl::MeerkatMachineInput::TurnLimitReached {
-                    run_id: mm_dsl::RunId::from_domain(&run_id),
-                }
-            }
+            TurnExecutionInput::TurnLimitReached {
+                run_id,
+                turn_count,
+                max_turns,
+            } => mm_dsl::MeerkatMachineInput::TurnLimitReached {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                turn_count,
+                max_turns,
+            },
             TurnExecutionInput::BudgetExhausted { run_id } => {
                 mm_dsl::MeerkatMachineInput::BudgetExhausted {
                     run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -569,9 +573,18 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             .map(|_| ())
     }
 
-    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        self.apply_turn_input(TurnExecutionInput::TurnLimitReached { run_id })
-            .map(|_| ())
+    fn turn_limit_reached(
+        &self,
+        run_id: RunId,
+        turn_count: u64,
+        max_turns: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
+            run_id,
+            turn_count,
+            max_turns,
+        })
+        .map(|_| ())
     }
 
     fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError> {
@@ -894,6 +907,47 @@ mod tests {
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.active_run_id, Some(run_id));
         assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+    }
+
+    #[test]
+    fn turn_limit_handle_rejects_unreached_limit() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(31));
+        start_running_conversation_turn(&handle, &run_id);
+
+        handle
+            .turn_limit_reached(run_id.clone(), 1, 2)
+            .expect_err("machine guard must reject turn_count below max_turns");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.terminal_cause_kind, None);
+
+        handle
+            .turn_limit_reached(run_id, 2, 2)
+            .expect("turn limit reached at the boundary");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(TurnTerminalCauseKind::TurnLimitReached)
+        );
+    }
+
+    #[test]
+    fn fatal_failure_rejects_max_turns_source() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(32));
+        start_running_conversation_turn(&handle, &run_id);
+
+        handle
+            .fatal_failure(
+                run_id.clone(),
+                failure_source(TurnFailureSourceKind::MaxTurnsReached, "max turns"),
+            )
+            .expect_err("turn-limit terminality must use counted TurnLimitReached input");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.terminal_cause_kind, None);
     }
 
     #[test]

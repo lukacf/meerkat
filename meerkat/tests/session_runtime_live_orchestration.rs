@@ -3,14 +3,10 @@
 //! Covers the surface-agnostic helpers moved out of
 //! `meerkat-rpc::session_runtime`:
 //!
-//! * `apply_precheck_gates` — B19 (realtime capability) fires before B18
-//!   (provider has live adapter); a non-realtime non-OpenAI session
-//!   reports `ModelNotRealtime` (the more specific failure), not
-//!   `ProviderHasNoLiveAdapter`. This pins the gate ordering as
-//!   intentional contract — the catalog cannot naturally produce a
-//!   realtime-capable non-OpenAI row, so the synthetic
-//!   `realtime_capable: true` argument is the only way to exercise the
-//!   B18 branch.
+//! * `apply_precheck_gates` — the pure precheck owns B19 (model realtime
+//!   capability). Provider-adapter support is resolved by the factory-aware
+//!   live-open path, where provider truth is available without hard-coding an
+//!   OpenAI branch in the surface-agnostic helper.
 //! * `live_channel_requires_close_for_identity_change` — closes on
 //!   model swap, closes on provider swap, in-place refresh otherwise.
 //!
@@ -46,15 +42,9 @@ fn precheck_b19_fires_before_b18_for_non_realtime_non_openai() {
 }
 
 #[test]
-fn precheck_b18_rejects_realtime_capable_non_openai() {
-    let err = apply_precheck_gates(Provider::Anthropic, "synthetic-rt-anthropic", true)
-        .expect_err("realtime-capable non-OpenAI should fail B18");
-    match err {
-        LiveOpenPrecheckError::ProviderHasNoLiveAdapter { provider } => {
-            assert_eq!(provider, "anthropic");
-        }
-        other => panic!("expected ProviderHasNoLiveAdapter, got {other:?}"),
-    }
+fn precheck_allows_realtime_capable_non_openai_for_factory_resolution() {
+    apply_precheck_gates(Provider::Anthropic, "synthetic-rt-anthropic", true)
+        .expect("provider adapter support is checked by the live session factory");
 }
 
 #[test]

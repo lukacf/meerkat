@@ -8,7 +8,7 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeCapabilities, RealtimeInputChunk, RealtimeTurningMode,
     RealtimeVideoChunk,
 };
-use meerkat_core::{PendingSystemContextAppend, RealtimeTranscriptEvent, ToolResult};
+use meerkat_core::{PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, ToolResult};
 use meerkat_core::{SessionLlmIdentity, StopReason, ToolDef, types::Message, types::Usage};
 use serde_json::Value;
 
@@ -315,6 +315,16 @@ impl RealtimeSessionOpenConfig {
 pub trait RealtimeSessionFactory: Send + Sync {
     /// Report the provider/product capability set exposed by this factory.
     fn capabilities(&self) -> RealtimeCapabilities;
+
+    /// Whether this factory is the typed owner for opening live/realtime
+    /// adapters for `provider`.
+    ///
+    /// Shared runtime code must not infer wired-adapter support from provider
+    /// names. The concrete factory that actually mints the adapter owns that
+    /// support fact.
+    fn supports_provider(&self, _provider: Provider) -> bool {
+        false
+    }
 
     /// Open a provider-created realtime session using the selected turning mode.
     async fn open_session(

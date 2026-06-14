@@ -1428,37 +1428,11 @@ impl MeerkatMachine {
                 })?
         };
 
-        // Capture the lifecycle phase BEFORE the drain awaits the runtime loop.
-        // The drain quiesces the loop, which commits its canonical
-        // StopRuntimeExecutor + RuntimeExecutorExited exit and can advance the
-        // phase from Idle/Attached/Running to `Stopped`. The ops-lifecycle
-        // durability authority is later resolved on the *post-drain* phase,
-        // where `Stopped` maps to `RetainSnapshot` — suppressing the
-        // post-unregister machine-lifecycle persist and the orphaned-snapshot
-        // delete, so the durable binding snapshot keeps pointing at the
-        // now-torn-down runtime. Recovery then rebinds that stale runtime id
-        // and the next `PrepareBindings` is guard-rejected. The durability
-        // decision must reflect the phase at teardown *intent* (before the
-        // drain), not the transient `Stopped` the drain itself produces: an
-        // Idle/Attached/Running teardown deletes its snapshot, while a genuine
-        // `Stopped`/`Retired` session (stopped or archived before unregister)
-        // retains it.
-        let pre_drain_phase = self
-            .session_dsl_state(session_id)
-            .await
-            .ok()
-            .map(|state| state.lifecycle_phase);
-        let pre_drain_retains_snapshot = matches!(
-            pre_drain_phase,
-            Some(
-                crate::meerkat_machine::dsl::MeerkatPhase::Stopped
-                    | crate::meerkat_machine::dsl::MeerkatPhase::Retired
-            )
-        );
-
         // Phase 1: open the drain window. A concurrent second unregister whose
         // BeginUnregisterSession is rejected because the window is already open
-        // is a benign already-in-progress observation, not an error.
+        // is a benign already-in-progress observation, not an error. The
+        // machine records whether teardown intent should retain the durable
+        // runtime snapshot before the drain can advance lifecycle state.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized beginning drain window");
         match self
             .stage_begin_unregister_session_authority(session_id)
@@ -1664,23 +1638,8 @@ impl MeerkatMachine {
 
         // Phase 7: stage + commit the final UnregisterSession.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized staging unregister");
-        let (staged, resolved_durability_authority) =
+        let (staged, durability_authority) =
             self.stage_unregister_session_authority(session_id).await?;
-        // Bind the effective durability to the pre-drain teardown intent (see
-        // the pre_drain_phase capture above). A session that was already
-        // `Stopped`/`Retired` before unregister keeps the authority's resolved
-        // `RetainSnapshot` (a genuine stop/archive snapshot recovery must still
-        // observe); an Idle/Attached/Running teardown that the drain merely
-        // advanced to `Stopped` deletes its orphaned snapshot and persists the
-        // cleared binding so recovery starts fresh.
-        let durability_authority = if pre_drain_retains_snapshot {
-            resolved_durability_authority
-        } else {
-            RuntimeOpsLifecycleDurabilityAuthority {
-                action:
-                    crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot,
-            }
-        };
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committing unregister");
         self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
             .await
@@ -1898,9 +1857,15 @@ impl MeerkatMachine {
     }
 
     /// Check whether a session has an active RuntimeLoop or attachment in
-    /// progress. Returns `false` only for `Queuing` sessions (registered via
-    /// `prepare_bindings()` with no executor) and unknown sessions.
-    pub async fn session_has_executor(&self, session_id: &SessionId) -> bool {
+    /// progress.
+    ///
+    /// `Ok(false)` means only `Queuing` (registered via `prepare_bindings()`
+    /// with no executor) or unknown. Driver faults are returned explicitly so
+    /// callers cannot accidentally treat a control-plane fault as absence.
+    pub async fn session_has_executor(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(
                 None,
@@ -1910,12 +1875,11 @@ impl MeerkatMachine {
             )
             .await
         {
-            Ok(MeerkatMachineCommandResult::Bool(present)) => present,
-            Ok(_) => {
-                tracing::error!("session_has_executor: unexpected command result variant");
-                false
-            }
-            Err(_) => false,
+            Ok(MeerkatMachineCommandResult::Bool(present)) => Ok(present),
+            Ok(other) => Err(RuntimeDriverError::Internal(format!(
+                "session_has_executor: unexpected command result variant: {other:?}"
+            ))),
+            Err(error) => Err(MeerkatMachine::driver_error_from_command_error(error)),
         }
     }
 
@@ -1965,7 +1929,10 @@ impl MeerkatMachine {
     /// Returns `true` if `update_peer_ingress_context` was previously called
     /// with a non-None comms runtime for this session (e.g., via
     /// `SessionRuntime::enable_comms_drain`).
-    pub async fn session_has_comms(&self, session_id: &SessionId) -> bool {
+    pub async fn session_has_comms(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(
                 None,
@@ -1975,12 +1942,11 @@ impl MeerkatMachine {
             )
             .await
         {
-            Ok(MeerkatMachineCommandResult::Bool(present)) => present,
-            Ok(_) => {
-                tracing::error!("session_has_comms: unexpected command result variant");
-                false
-            }
-            Err(_) => false,
+            Ok(MeerkatMachineCommandResult::Bool(present)) => Ok(present),
+            Ok(other) => Err(RuntimeDriverError::Internal(format!(
+                "session_has_comms: unexpected command result variant: {other:?}"
+            ))),
+            Err(error) => Err(MeerkatMachine::driver_error_from_command_error(error)),
         }
     }
 

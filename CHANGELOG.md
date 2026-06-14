@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-14
+
+Meerkat 0.7.3 is a follow-up to 0.7.2 fixing two mob-teardown regressions
+(surfaced by the e2e-smoke mob lane, which is not in CI), an e2e-system lane
+gap, and two confirmed dogma violations with immediate operational effect.
+
+### Fixed
+
+- **Bounded comms-drain teardown await** (#770) — `unregister_session`'s
+  two-phase drain awaited the comms-drain task unbounded while the runtime-loop
+  handle was grace-bounded. An external member (e.g. a TCP transport drain)
+  whose task does not observe cooperative abort promptly could wedge teardown.
+  The comms-drain await is now bounded by a grace window + abort, matching the
+  loop handle. Regular CI-gated test added.
+- **Idempotent `discard_live_session`** (#770) — the teardown drain quiesces
+  the runtime loop, whose clean exit discards the live session; an explicit
+  caller-side discard then raced it and returned `NotFound`, breaking
+  same-process mob restart. `discard_live_session` is now idempotent
+  (codifies the existing `Ok(()) | Err(NotFound) => Ok(())` caller idiom).
+  Regular CI-gated test added.
+- **`rkat auth refresh` for `external_chatgpt_tokens`** (#770) — refreshability
+  was derived from a hand-maintained raw-string allowlist that omitted the
+  `external_chatgpt_tokens` OAuth-login mode, so refresh wrongly reported a
+  no-op ("credentials don't expire") and never exchanged the persisted token.
+  It now branches on the typed auth-method → persisted-mode owner.
+- **`@rkat/web` helper profile option** (#770) — `spawnHelper`/`forkHelper`
+  serialized `profile_name`, which the WASM helper deserializer silently
+  dropped, so the `profileName` option built helpers with the default profile.
+  The web SDK now serializes the canonical `role_name`, matching the wire
+  contract and the Python/TypeScript SDKs.
+- **e2e-system `cli-resume` lane** — built rkat without `memory-store-session`,
+  so the yolo `memory` tool degraded to Disable and the scenario's assertion
+  failed; the scenario now builds with the memory feature.
+
+### Notes
+
+- Nine additional confirmed/partial dogma rows with no immediate operational
+  effect are tracked for a follow-up.
+
 ## [0.7.2] - 2026-06-14
 
 Meerkat 0.7.2 hardens machine authority over shell-driven inputs. A campaign to

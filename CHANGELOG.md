@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-14
+
+Meerkat 0.7.2 hardens machine authority over shell-driven inputs. A campaign to
+discipline a confirmed inventory of "undisciplined shell input" sites makes the
+inputs the shell feeds canonical machine flows pass through a machine-owned
+lifecycle: teardown now drains each producer class under an explicit
+machine-owned obligation window, and inputs that legitimately arrive after
+teardown resolve as typed no-ops instead of runtime errors. "Not currently
+expected" no longer means "runtime ERROR".
+
+### Changed
+
+- **Machine-owned teardown drain (Layer 1)** — `MeerkatMachine` session
+  unregister, `AuthMachine` OAuth-flow release, and `MobMachine` kickoff
+  teardown open a machine-owned draining window: a `Begin*` transition emits one
+  drain-request effect per producer class, the shell quiesces those producers
+  (abort + bounded await), feedback inputs discharge the obligations, and the
+  final teardown transition is guarded on every obligation being closed. A
+  teardown can no longer commit while one of its producer classes is still live.
+- **Total post-teardown inputs (Layer 2)** — inputs that legitimately interleave
+  after a teardown window (late completion acks, drained-producer callbacks,
+  post-unregister lifecycle signals) resolve as machine-owned no-op transitions
+  or typed-benign dispatch rather than surfacing as runtime errors.
+- **Destroy/detach obligation pairing** — effect handoff protocols pair
+  `EffectTeardownClass::DestroyRequest` with the `DetachBeforeDestroy`
+  obligation, with seam-inventory audits enforcing drain completeness across
+  compositions.
+
+### Notes
+
+- The token-gating pilot (Layer 3 of the campaign) is deferred to a follow-up
+  release pending a deeper review of the token model.
+
 ## [0.7.1] - 2026-06-12
 
 Meerkat 0.7.1 restores the core/provider boundary: the model catalog returns

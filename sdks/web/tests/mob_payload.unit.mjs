@@ -1233,3 +1233,31 @@ test('Session.destroy re-throws non-already-gone typed errors', () => {
   );
   assert.throws(() => session.destroy(), /SESSION_BUSY/);
 });
+
+// Regression: the WASM helper deserializers (MobSpawnHelperOptions /
+// MobForkHelperOptions) consume `role_name`, matching the canonical wire
+// contract and the TS/Python SDKs. The web SDK previously serialized
+// `profile_name`, which the WASM boundary silently dropped, so
+// `spawnHelper`/`forkHelper` built helpers with the DEFAULT profile.
+test('Mob.spawnHelper / forkHelper serialize canonical role_name (not profile_name)', async () => {
+  let spawnCaptured;
+  let forkCaptured;
+  const mob = new Mob('mob-web-unit', {
+    async mob_spawn_helper(_mobId, json) {
+      spawnCaptured = JSON.parse(json);
+      return JSON.stringify({ agent_identity: 'h-1', member_ref: 'ref-h-1', tokens_used: 0 });
+    },
+    async mob_fork_helper(_mobId, json) {
+      forkCaptured = JSON.parse(json);
+      return JSON.stringify({ agent_identity: 'h-2', member_ref: 'ref-h-2', tokens_used: 0 });
+    },
+  });
+
+  await mob.spawnHelper('do it', { agentIdentity: 'h-1', profileName: 'reviewer' });
+  await mob.forkHelper('src-1', 'do it', { agentIdentity: 'h-2', profileName: 'reviewer' });
+
+  assert.equal(spawnCaptured.role_name, 'reviewer');
+  assert.equal(spawnCaptured.profile_name, undefined);
+  assert.equal(forkCaptured.role_name, 'reviewer');
+  assert.equal(forkCaptured.profile_name, undefined);
+});

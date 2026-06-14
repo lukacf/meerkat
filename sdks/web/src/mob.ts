@@ -1099,7 +1099,11 @@ export class Mob {
         JSON.stringify({
           prompt,
           agent_identity: options.agentIdentity,
-          profile_name: options.profileName,
+          // Canonical wire field is `role_name` (the WASM helper structs +
+          // TS/Python SDKs all consume `role_name`); serializing `profile_name`
+          // here was silently dropped by the WASM deserializer, so the helper
+          // was built with the default profile.
+          role_name: options.profileName,
           auth_binding: options.authBinding,
           runtime_mode: options.runtimeMode,
           backend: options.backend,
@@ -1135,7 +1139,11 @@ export class Mob {
           source_member_id: sourceMemberId,
           prompt,
           agent_identity: options.agentIdentity,
-          profile_name: options.profileName,
+          // Canonical wire field is `role_name` (the WASM helper structs +
+          // TS/Python SDKs all consume `role_name`); serializing `profile_name`
+          // here was silently dropped by the WASM deserializer, so the helper
+          // was built with the default profile.
+          role_name: options.profileName,
           auth_binding: options.authBinding,
           fork_context: options.forkContext,
           runtime_mode: options.runtimeMode,

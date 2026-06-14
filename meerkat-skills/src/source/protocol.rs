@@ -60,6 +60,8 @@ impl StdioExternalClient {
     }
 
     async fn request(&self, request: &StdioRequest<'_>) -> Result<String, SkillError> {
+        let payload = serde_json::to_vec(request)
+            .map_err(|e| SkillError::Load(format!("stdio request encode failed: {e}").into()))?;
         let mut command = Command::new(&self.command);
         command.args(&self.args).envs(&self.env);
         if let Some(cwd) = &self.cwd {
@@ -69,45 +71,79 @@ impl StdioExternalClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        command.kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| {
             SkillError::Load(format!("stdio skill source spawn failed: {e}").into())
         })?;
 
-        let payload = serde_json::to_vec(request)
-            .map_err(|e| SkillError::Load(format!("stdio request encode failed: {e}").into()))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&payload).await.map_err(|e| {
-                SkillError::Load(format!("stdio skill source write failed: {e}").into())
-            })?;
-            stdin.write_all(b"\n").await.map_err(|e| {
-                SkillError::Load(format!("stdio skill source write failed: {e}").into())
-            })?;
-        }
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SkillError::Load("stdio skill source stdout pipe unavailable".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SkillError::Load("stdio skill source stderr pipe unavailable".into()))?;
+        let stdout_task = tokio::spawn(async move {
+            let mut output = String::new();
+            stdout
+                .read_to_string(&mut output)
+                .await
+                .map(|_| output)
+                .map_err(|e| {
+                    SkillError::Load(format!("stdio skill source read failed: {e}").into())
+                })
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut output = String::new();
+            stderr
+                .read_to_string(&mut output)
+                .await
+                .map(|_| output)
+                .map_err(|e| {
+                    SkillError::Load(format!("stdio skill source stderr read failed: {e}").into())
+                })
+        });
 
-        let read_output = async {
-            let mut stdout = String::new();
-            if let Some(mut child_stdout) = child.stdout.take() {
-                child_stdout
-                    .read_to_string(&mut stdout)
-                    .await
-                    .map_err(|e| {
-                        SkillError::Load(format!("stdio skill source read failed: {e}").into())
-                    })?;
-            }
-            let status = child.wait().await.map_err(|e| {
-                SkillError::Load(format!("stdio skill source wait failed: {e}").into())
-            })?;
-            if !status.success() {
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(&payload).await {
+                let _ = child.kill().await;
                 return Err(SkillError::Load(
-                    format!("stdio skill source exited with {status}").into(),
+                    format!("stdio skill source write failed: {e}").into(),
                 ));
             }
-            Ok(stdout)
+            if let Err(e) = stdin.write_all(b"\n").await {
+                let _ = child.kill().await;
+                return Err(SkillError::Load(
+                    format!("stdio skill source write failed: {e}").into(),
+                ));
+            }
+        }
+
+        let status = tokio::select! {
+            status = child.wait() => status.map_err(|e| {
+                SkillError::Load(format!("stdio skill source wait failed: {e}").into())
+            })?,
+            () = tokio::time::sleep(self.timeout) => {
+                let _ = child.kill().await;
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(SkillError::Load("stdio skill source timed out".into()));
+            }
         };
 
-        tokio::time::timeout(self.timeout, read_output)
-            .await
-            .map_err(|_| SkillError::Load("stdio skill source timed out".into()))?
+        let stdout = stdout_task.await.map_err(|e| {
+            SkillError::Load(format!("stdio stdout task join failed: {e}").into())
+        })??;
+        let stderr = stderr_task.await.map_err(|e| {
+            SkillError::Load(format!("stdio stderr task join failed: {e}").into())
+        })??;
+        if !status.success() {
+            return Err(SkillError::Load(
+                format!("stdio skill source exited with {status}: {stderr}").into(),
+            ));
+        }
+        Ok(stdout)
     }
 }
 

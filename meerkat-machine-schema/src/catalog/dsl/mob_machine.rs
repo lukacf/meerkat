@@ -257,6 +257,7 @@ macro_rules! mob_catalog_machine_dsl {
             adaptive_aggregate_tool_call_reserved: Map<AdaptiveRunId, u64>,
             adaptive_aggregate_tool_call_actual: Map<AdaptiveRunId, u64>,
             adaptive_active_layer: Map<AdaptiveRunId, AdaptiveLayerId>,
+            adaptive_layer_adaptive_run: Map<AdaptiveLayerId, AdaptiveRunId>,
             adaptive_layer_phase: Map<AdaptiveLayerId, Enum<AdaptiveLayerPhase>>,
             adaptive_layer_attempt: Map<AdaptiveLayerId, u64>,
             adaptive_layer_member_count: Map<AdaptiveLayerId, u64>,
@@ -444,6 +445,7 @@ macro_rules! mob_catalog_machine_dsl {
             adaptive_aggregate_tool_call_reserved = EmptyMap,
             adaptive_aggregate_tool_call_actual = EmptyMap,
             adaptive_active_layer = EmptyMap,
+            adaptive_layer_adaptive_run = EmptyMap,
             adaptive_layer_phase = EmptyMap,
             adaptive_layer_attempt = EmptyMap,
             adaptive_layer_member_count = EmptyMap,
@@ -2368,6 +2370,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.adaptive_aggregate_tool_call_reserved.get_cloned(adaptive_run_id).get("value") + tool_call_reservation
                 );
                 self.adaptive_active_layer.insert(adaptive_run_id, layer_id);
+                self.adaptive_layer_adaptive_run.insert(layer_id, adaptive_run_id);
                 self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::Admitted);
                 self.adaptive_layer_attempt.insert(layer_id, attempt);
                 self.adaptive_layer_member_count.insert(layer_id, member_count);

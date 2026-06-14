@@ -1148,6 +1148,12 @@ pub(super) struct MobActor {
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
+    /// Per bridge-session shell lifecycle locks for #37 live-materialization
+    /// revival. These serialize the observation/rebuild mechanics around a
+    /// machine-owned member binding without copying live-session truth into the
+    /// MobMachine.
+    pub(super) member_revival_locks:
+        Arc<tokio::sync::Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
     pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     pub(super) supervisor_bridge: Arc<super::MobSupervisorBridge>,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
@@ -4675,6 +4681,26 @@ impl MobActor {
         member_ref: &MemberRef,
         bridge_session_id: &SessionId,
     ) -> Result<(), MobError> {
+        let revival_lock = self.member_revival_lock_for(bridge_session_id).await;
+        let _revival_guard = revival_lock.lock().await;
+        match self
+            .session_service
+            .has_live_session(bridge_session_id)
+            .await
+        {
+            Ok(true) => {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    bridge_session_id = %bridge_session_id,
+                    "member live materialization already present after acquiring revival lock"
+                );
+                return Ok(());
+            }
+            Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(MobError::SessionError(error)),
+        }
+
         let agent_identity = entry.agent_identity.clone();
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
@@ -4773,7 +4799,7 @@ impl MobActor {
                     Ok(()) => {
                         self.apply_dsl_signal(
                             mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {
-                                agent_identity: dsl_identity,
+                                agent_identity: dsl_identity.clone(),
                             },
                             "resolve_member_revival_succeeded",
                         )?;
@@ -4790,6 +4816,36 @@ impl MobActor {
                         Ok(())
                     }
                     Err(error) => {
+                        if revival_error_means_session_already_live(&error, bridge_session_id) {
+                            match self
+                                .session_service
+                                .has_live_session(bridge_session_id)
+                                .await
+                            {
+                                Ok(true) => {
+                                    self.apply_dsl_signal(
+                                        mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {
+                                            agent_identity: dsl_identity.clone(),
+                                        },
+                                        "resolve_member_revival_already_live",
+                                    )?;
+                                    self.restore_diagnostics
+                                        .write()
+                                        .await
+                                        .remove(&agent_identity);
+                                    tracing::info!(
+                                        mob_id = %self.definition.id,
+                                        agent_identity = %agent_identity,
+                                        bridge_session_id = %bridge_session_id,
+                                        "machine-authorized revival found an already-live session; treating materialization as idempotent success"
+                                    );
+                                    return Ok(());
+                                }
+                                Ok(false)
+                                | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+                                Err(error) => return Err(MobError::SessionError(error)),
+                            }
+                        }
                         let failure_reason = format!(
                             "machine-authorized revival of bridge session '{bridge_session_id}' failed: {error}"
                         );
@@ -4823,6 +4879,17 @@ impl MobActor {
                 }
             }
         }
+    }
+
+    async fn member_revival_lock_for(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.member_revival_locks.lock().await;
+        locks
+            .entry(bridge_session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Realize a machine-authorized member revival through the existing resume
@@ -19926,6 +19993,21 @@ impl MobActor {
             sender_comms,
         )
         .await
+    }
+}
+
+fn revival_error_means_session_already_live(
+    error: &MobError,
+    bridge_session_id: &SessionId,
+) -> bool {
+    let expected = format!("Session identity already active: {bridge_session_id}");
+    match error {
+        MobError::SessionError(meerkat_core::service::SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(message)
+            | meerkat_core::error::AgentError::BuildError(message),
+        ))
+        | MobError::Internal(message) => message.contains(&expected),
+        _ => false,
     }
 }
 

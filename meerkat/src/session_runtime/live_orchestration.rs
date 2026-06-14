@@ -38,10 +38,12 @@ use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 
 use crate::session_runtime::errors::LiveOpenPrecheckError;
 
-/// Apply the B19 (realtime-capability) and B18 (provider-supported) gates
-/// to a resolved LLM identity. Shared between the staged-session and live-
-/// session branches of `precheck_live_open` so both paths enforce
-/// identical contracts.
+/// Apply the B19 (realtime-capability) gate to a resolved LLM identity.
+/// Shared between the staged-session and live-session branches of
+/// `precheck_live_open` so both paths enforce identical catalog capability
+/// contracts. B18 (provider has a wired live adapter) is owned by the concrete
+/// realtime factory at the live-open surface because the factory mints the
+/// adapter.
 pub fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPrecheckError> {
     let realtime_capable = meerkat_models::capabilities_for(identity.provider, &identity.model)
         .map(|caps| caps.realtime)
@@ -49,15 +51,10 @@ pub fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPr
     apply_precheck_gates(identity.provider, &identity.model, realtime_capable)
 }
 
-/// Pure gate-ordering helper: B19 (realtime capability) fires before
-/// B18 (provider has live adapter). Split out from `precheck_identity`
-/// so unit tests can pin the B18 branch — the catalog cannot naturally
-/// produce a realtime-capable non-OpenAI row, so e2e never reaches
-/// `ProviderHasNoLiveAdapter` and a synthetic `realtime_capable: true`
-/// is the only way to assert the non-OpenAI rejection contract. Also
-/// documents the gate ordering as intentional: a non-realtime non-OpenAI
-/// session reports `ModelNotRealtime` (the more specific failure), not
-/// `ProviderHasNoLiveAdapter`.
+/// Pure B19 helper: model realtime capability is catalog-owned. Provider
+/// adapter support is deliberately not checked here; the
+/// [`RealtimeSessionFactory`](meerkat_llm_core::realtime_session::RealtimeSessionFactory)
+/// support predicate owns that fact.
 pub fn apply_precheck_gates(
     provider: meerkat_core::Provider,
     model: &str,
@@ -66,11 +63,6 @@ pub fn apply_precheck_gates(
     if !realtime_capable {
         return Err(LiveOpenPrecheckError::ModelNotRealtime {
             model: model.to_string(),
-            provider: provider.as_str(),
-        });
-    }
-    if !matches!(provider, meerkat_core::Provider::OpenAI) {
-        return Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter {
             provider: provider.as_str(),
         });
     }

@@ -1015,12 +1015,9 @@ pub async fn handle_live_open(
     {
         let factory = session_factory;
         let open_config = &prepared_open_config;
-        // B18: refuse providers without a wired live adapter and models that
-        // lack realtime capability before reaching the factory. Without this,
-        // a Gemini Live session would route through the OpenAI realtime
-        // factory and a non-realtime model would silently bind to live
-        // transport, surfacing only as an opaque WebSocket handshake error
-        // at provider connect time.
+        // B19: refuse models that lack realtime capability before reaching the
+        // factory. B18 (provider has a wired live adapter) is checked against
+        // the factory below so the adapter-minting seam owns provider support.
         if let Err(precheck_err) = runtime.precheck_live_open(&session_id).await {
             close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
             let (code, message) = match &precheck_err {
@@ -1039,6 +1036,17 @@ pub async fn handle_live_open(
                 }
             };
             return RpcResponse::error(id, code, message);
+        }
+        if !factory.supports_provider(open_config.llm_identity.provider) {
+            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "provider {} has no live adapter wired in this build",
+                    open_config.llm_identity.provider.as_str()
+                ),
+            );
         }
 
         // E25: open a provider-native `LiveAdapter` directly. The OpenAI

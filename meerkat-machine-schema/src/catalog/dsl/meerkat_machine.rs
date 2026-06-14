@@ -2529,6 +2529,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             unregister_runtime_loop_drain_pending: bool,
             unregister_comms_drain_exit_pending: bool,
             unregister_completion_waiter_drain_pending: bool,
+            unregister_teardown_retains_snapshot: bool,
             staged_session_phase: StagedSessionPhase,
             staged_session_id: Option<SessionId>,
             staged_session_keep_alive: Option<bool>,
@@ -2980,6 +2981,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             unregister_runtime_loop_drain_pending = false,
             unregister_comms_drain_exit_pending = false,
             unregister_completion_waiter_drain_pending = false,
+            unregister_teardown_retains_snapshot = false,
             staged_session_phase = StagedSessionPhase::NotStaged,
             staged_session_id = None,
             staged_session_keep_alive = None,
@@ -3654,7 +3656,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RequestCancelAfterBoundary { run_id: RunId },
             CancellationObserved { run_id: RunId },
             AcknowledgeTerminal { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
-            TurnLimitReached { run_id: RunId },
+            TurnLimitReached { run_id: RunId, turn_count: u64, max_turns: u64 },
             BudgetExhausted { run_id: RunId },
             TimeBudgetExceeded { run_id: RunId },
             ForceCancelNoRun,
@@ -5433,7 +5435,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             self.registration_phase == RegistrationPhase::Draining
             || (self.unregister_runtime_loop_drain_pending == false
                 && self.unregister_comms_drain_exit_pending == false
-                && self.unregister_completion_waiter_drain_pending == false)
+                && self.unregister_completion_waiter_drain_pending == false
+                && self.unregister_teardown_retains_snapshot == false)
         }
 
         invariant current_run_only_while_running_or_retired {
@@ -5890,7 +5893,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the runtime loop may still commit its in-flight run while
         // Draining.
         transition BeginUnregisterSession {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running]
             on input BeginUnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
@@ -5903,6 +5906,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.unregister_runtime_loop_drain_pending = true;
                 self.unregister_comms_drain_exit_pending = true;
                 self.unregister_completion_waiter_drain_pending = true;
+                self.unregister_teardown_retains_snapshot = false;
+            }
+            to Idle
+            emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
+            emit RequestCommsDrainExitForUnregister { session_id: session_id }
+            emit RequestCompletionWaiterResolutionForUnregister { session_id: session_id }
+        }
+
+        transition BeginUnregisterSessionRetainsSnapshot {
+            per_phase [Retired, Stopped]
+            on input BeginUnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "not_already_draining" { self.registration_phase != RegistrationPhase::Draining }
+            update {
+                self.registration_phase = RegistrationPhase::Draining;
+                self.unregister_runtime_loop_drain_pending = true;
+                self.unregister_comms_drain_exit_pending = true;
+                self.unregister_completion_waiter_drain_pending = true;
+                self.unregister_teardown_retains_snapshot = true;
             }
             to Idle
             emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
@@ -5990,6 +6016,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Idle
         }
@@ -6027,6 +6054,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Idle
         }
@@ -6064,6 +6092,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Idle
         }
@@ -6101,6 +6130,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Idle
         }
@@ -6138,6 +6168,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Idle
         }
@@ -6158,7 +6189,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: generation,
                 runtime_epoch_id: runtime_epoch_id,
-                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+                action: if self.unregister_teardown_retains_snapshot { RuntimeOpsLifecycleDurabilityAction::RetainSnapshot } else { RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot }
             }
         }
         transition ResolveRuntimeOpsLifecycleDurabilityAttached {
@@ -6177,7 +6208,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: generation,
                 runtime_epoch_id: runtime_epoch_id,
-                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+                action: if self.unregister_teardown_retains_snapshot { RuntimeOpsLifecycleDurabilityAction::RetainSnapshot } else { RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot }
             }
         }
         transition ResolveRuntimeOpsLifecycleDurabilityRunning {
@@ -6196,7 +6227,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: generation,
                 runtime_epoch_id: runtime_epoch_id,
-                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+                action: if self.unregister_teardown_retains_snapshot { RuntimeOpsLifecycleDurabilityAction::RetainSnapshot } else { RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot }
             }
         }
         transition ResolveRuntimeOpsLifecycleDurabilityRetired {
@@ -6215,7 +6246,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: generation,
                 runtime_epoch_id: runtime_epoch_id,
-                action: RuntimeOpsLifecycleDurabilityAction::RetainSnapshot
+                action: if self.unregister_teardown_retains_snapshot { RuntimeOpsLifecycleDurabilityAction::RetainSnapshot } else { RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot }
             }
         }
         transition ResolveRuntimeOpsLifecycleDurabilityStopped {
@@ -6234,7 +6265,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: generation,
                 runtime_epoch_id: runtime_epoch_id,
-                action: RuntimeOpsLifecycleDurabilityAction::RetainSnapshot
+                action: if self.unregister_teardown_retains_snapshot { RuntimeOpsLifecycleDurabilityAction::RetainSnapshot } else { RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot }
             }
         }
 
@@ -8900,6 +8931,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.unregister_runtime_loop_drain_pending = false;
                 self.unregister_comms_drain_exit_pending = false;
                 self.unregister_completion_waiter_drain_pending = false;
+                self.unregister_teardown_retains_snapshot = false;
             }
             to Destroyed
             emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
@@ -13395,6 +13427,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             guard "terminal_failure_source_known" { terminal_failure_source != RunFailureSourceKind::Unknown }
+            guard "turn_limit_uses_counted_input" { terminal_failure_source != RunFailureSourceKind::MaxTurnsReached }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
@@ -13504,10 +13537,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition TurnLimitReached {
-            on input TurnLimitReached { run_id }
+            on input TurnLimitReached { run_id, turn_count, max_turns }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
+            guard "turn_limit_reached" { turn_count >= max_turns }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;

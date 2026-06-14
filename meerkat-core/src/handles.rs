@@ -790,7 +790,12 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn acknowledge_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError>;
+    fn turn_limit_reached(
+        &self,
+        run_id: RunId,
+        turn_count: u64,
+        max_turns: u64,
+    ) -> Result<(), DslTransitionError>;
 
     fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 

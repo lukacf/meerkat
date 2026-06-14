@@ -1580,6 +1580,8 @@ where
             if !self.turn_in_extraction_flow()? && turn_count >= max_turns {
                 self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
                     run_id: run_id.clone(),
+                    turn_count: u64::from(turn_count),
+                    max_turns: u64::from(max_turns),
                 })?;
                 return self.build_result(turn_count, tool_call_count).await;
             }
@@ -5835,8 +5837,10 @@ mod tests {
         fn turn_limit_reached(
             &self,
             run_id: RunId,
+            turn_count: u64,
+            max_turns: u64,
         ) -> Result<(), crate::handles::DslTransitionError> {
-            self.inner.turn_limit_reached(run_id)
+            self.inner.turn_limit_reached(run_id, turn_count, max_turns)
         }
 
         fn budget_exhausted(

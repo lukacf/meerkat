@@ -1614,8 +1614,14 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         requested_keep_alive: bool,
-    ) -> bool {
-        requested_keep_alive || self.runtime_adapter.session_has_comms(session_id).await
+    ) -> Result<bool, RpcError> {
+        if requested_keep_alive {
+            return Ok(true);
+        }
+        self.runtime_adapter
+            .session_has_comms(session_id)
+            .await
+            .map_err(runtime_driver_error_to_rpc)
     }
 
     async fn persisted_keep_alive(&self, session_id: &SessionId) -> Result<bool, RpcError> {
@@ -4246,7 +4252,7 @@ impl SessionRuntime {
         let keep_alive = self.persisted_keep_alive(session_id).await?;
         let peer_ingress_enabled = self
             .preserve_existing_peer_ingress(session_id, keep_alive)
-            .await;
+            .await?;
         if !peer_ingress_enabled {
             return Ok(());
         }
@@ -4264,7 +4270,11 @@ impl SessionRuntime {
         let comms_rt = self.service.comms_runtime(session_id).await;
         if keep_alive
             && comms_rt.is_none()
-            && !self.runtime_adapter.session_has_comms(session_id).await
+            && !self
+                .runtime_adapter
+                .session_has_comms(session_id)
+                .await
+                .map_err(runtime_driver_error_to_rpc)?
         {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
@@ -4332,7 +4342,11 @@ impl SessionRuntime {
         // Check for a live executor (not just registration). Sessions
         // registered via `prepare_bindings()` exist in the adapter map but
         // have no RuntimeLoop — inputs would queue without being processed.
-        if !adapter.session_has_executor(session_id).await {
+        if !adapter
+            .session_has_executor(session_id)
+            .await
+            .map_err(runtime_driver_error_to_rpc)?
+        {
             let persisted_session = self.load_persisted_session(session_id).await?;
             let persisted_session_exists = persisted_session.is_some();
             let adapter_registration_exists = adapter.contains_session(session_id).await;
@@ -4414,7 +4428,12 @@ impl SessionRuntime {
             .map_err(|_| meerkat_core::service::SessionError::NotFound {
                 id: session_id.clone(),
             })?;
-        if self.runtime_adapter.session_has_executor(session_id).await {
+        if self
+            .runtime_adapter
+            .session_has_executor(session_id)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?
+        {
             return Ok(());
         }
         let mob_state = self.mob_state();
@@ -4605,8 +4624,11 @@ impl SessionRuntime {
                     // Check if the runtime adapter already has comms configured
                     // for this session (e.g., via enable_comms_drain). If so,
                     // the session-service comms check is not authoritative.
-                    let adapter_has_comms =
-                        self.runtime_adapter.session_has_comms(session_id).await;
+                    let adapter_has_comms = self
+                        .runtime_adapter
+                        .session_has_comms(session_id)
+                        .await
+                        .map_err(runtime_driver_error_to_rpc)?;
                     let staged_keep_alive_authorized =
                         staged_session_existed && staged_keep_alive == Some(true);
                     if !adapter_has_comms && !staged_keep_alive_authorized {
@@ -4648,7 +4670,7 @@ impl SessionRuntime {
                 } else {
                     let peer_ingress_enabled = self
                         .preserve_existing_peer_ingress(session_id, keep_alive)
-                        .await;
+                        .await?;
                     // Preserve an already-active peer ingress channel for
                     // externally-enabled sessions even when the persisted
                     // keep_alive bit is false. Without this, ordinary turn
@@ -6274,8 +6296,20 @@ impl SessionRuntime {
                     let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
                     if !owner.is_mob_owned() {
                         let comms_rt = service.comms_runtime(&session_id).await;
-                        let peer_ingress_enabled =
-                            keep_alive || runtime_adapter.session_has_comms(&session_id).await;
+                        let peer_ingress_enabled = match runtime_adapter
+                            .session_has_comms(&session_id)
+                            .await
+                        {
+                            Ok(adapter_has_comms) => keep_alive || adapter_has_comms,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %session_id,
+                                    error = %error,
+                                    "runtime refresh callback could not prove peer-ingress comms state; preserving requested keep_alive only"
+                                );
+                                keep_alive
+                            }
+                        };
                         if let Err(error) = runtime_adapter
                             .update_peer_ingress_context(
                                 &session_id,
@@ -8855,50 +8889,26 @@ mod tests {
         assert!(capabilities_for(Provider::OpenAI, "no-such-model").is_none());
     }
 
-    /// B18 contract pin (non-OpenAI rejection).
+    /// Provider-adapter ownership pin.
     ///
-    /// The B18 branch in `apply_precheck_gates` rejects realtime-capable
-    /// sessions whose provider is not OpenAI (the only realtime factory
-    /// wired in Wave 1). The catalog cannot naturally produce a
-    /// realtime-capable non-OpenAI capability row — every Gemini and
-    /// Anthropic row in the `meerkat-models` capability tables has
-    /// `realtime: false` — so e2e tests never reach this branch and M73
-    /// surfaces `ModelNotRealtime` instead of `ProviderHasNoLiveAdapter`
-    /// even when the test exercises a Gemini provider.
-    ///
-    /// This unit test pins the contract directly: with a synthesized
-    /// `realtime_capable: true` for Gemini, the gate must fire B18 and
-    /// return `ProviderHasNoLiveAdapter`. If a future Wave wires a Gemini
-    /// realtime factory and flips this expectation, this test forces the
-    /// owner to update the gate explicitly rather than have the change slip
-    /// through silently.
+    /// `apply_precheck_gates` is intentionally surface-agnostic and only owns
+    /// the B19 realtime-capability gate. Provider-adapter support needs the
+    /// concrete realtime session factory, so the live-open handler resolves it
+    /// after precheck through `RealtimeSessionFactory::supports_provider`.
     #[test]
-    fn apply_precheck_gates_rejects_non_openai_realtime() {
-        let result = apply_precheck_gates(
+    fn apply_precheck_gates_allows_realtime_non_openai_for_factory_support_check() {
+        apply_precheck_gates(
             meerkat_core::Provider::Gemini,
             "gemini-3-live-hypothetical",
-            // Synthesized: the catalog cannot produce this combination, so
-            // we set the bool directly to reach the B18 branch.
             true,
-        );
-        match result {
-            Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter { provider }) => {
-                assert_eq!(provider, "gemini");
-            }
-            other => panic!(
-                "expected ProviderHasNoLiveAdapter for realtime-capable Gemini, got {other:?}"
-            ),
-        }
+        )
+        .expect("provider adapter support is checked by the live session factory");
     }
 
-    /// B19-before-B18 gate ordering pin.
+    /// B19 gate pin.
     ///
-    /// When both gates would reject (non-realtime AND non-OpenAI), B19
-    /// (the more specific "model lacks realtime capability" failure) must
-    /// fire first. Documenting the ordering here prevents a future refactor
-    /// from silently swapping the branches and changing the public error
-    /// code surface from `INVALID_PARAMS` to `INTERNAL_ERROR` on the same
-    /// inputs.
+    /// Non-realtime models fail before any provider-adapter support check,
+    /// because adapter support is only meaningful for realtime-capable models.
     #[test]
     fn apply_precheck_gates_b19_fires_before_b18() {
         let result = apply_precheck_gates(

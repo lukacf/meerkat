@@ -330,6 +330,7 @@ impl SessionRuntime {
                 .map_err(rpc_to_schedule)?;
             self.preserve_existing_peer_ingress(session_id, keep_alive)
                 .await
+                .map_err(rpc_to_schedule)?
         };
         #[cfg(not(feature = "comms"))]
         let peer_ingress_enabled = false;
@@ -421,6 +422,7 @@ impl SessionRuntime {
                 .map_err(rpc_to_schedule)?;
             self.preserve_existing_peer_ingress(session_id, keep_alive)
                 .await
+                .map_err(rpc_to_schedule)?
         };
         #[cfg(not(feature = "comms"))]
         let peer_ingress_enabled = false;

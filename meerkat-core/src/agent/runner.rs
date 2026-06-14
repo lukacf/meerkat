@@ -2199,7 +2199,12 @@ mod snapshot_projection_tests {
         fn acknowledge_terminal(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
             Err(refused())
         }
-        fn turn_limit_reached(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+        fn turn_limit_reached(
+            &self,
+            _run_id: RunId,
+            _turn_count: u64,
+            _max_turns: u64,
+        ) -> Result<(), DslTransitionError> {
             Err(refused())
         }
         fn budget_exhausted(&self, _run_id: RunId) -> Result<(), DslTransitionError> {

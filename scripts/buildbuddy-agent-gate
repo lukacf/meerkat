@@ -190,13 +190,13 @@ is_governance_path() {
     specs/machines/*|specs/compositions/*)
       return 0
       ;;
-    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs)
+    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs|docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
       return 0
       ;;
     .claude/skills/meerkat-dogma-inquisition/*)
       return 0
       ;;
-    docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/architecture/dogma-audits/*)
+    docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs-internal/dogma-audits/*)
       return 0
       ;;
     *)

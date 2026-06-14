@@ -12646,11 +12646,48 @@
     "type": "object"
   },
   "ConfigSetParams": {
+    "$defs": {
+      "ConfigContractSchema": {
+        "description": "Schema-only projection for config write payloads.\n\nThe runtime [`meerkat_core::Config`] type owns defaults, loading, and\nplatform-dependent behavior. Public config-set contracts need only the\nstable section layout, so schema emission points here while serde continues\nto deserialize into the real runtime type.",
+        "properties": {
+          "agent": true,
+          "budget": true,
+          "comms": true,
+          "compaction": true,
+          "hooks": true,
+          "limits": true,
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "model_fallback": true,
+          "models": true,
+          "presentation": true,
+          "provider_tools": true,
+          "realm": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "rest": true,
+          "retry": true,
+          "self_hosted": true,
+          "shell": true,
+          "skills": true,
+          "storage": true,
+          "store": true,
+          "tools": true
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "anyOf": [
       {
         "properties": {
-          "config": true,
+          "config": {
+            "$ref": "#/$defs/ConfigContractSchema"
+          },
           "expected_generation": {
             "format": "uint64",
             "minimum": 0,
@@ -12665,7 +12702,9 @@
         ],
         "type": "object"
       },
-      true
+      {
+        "$ref": "#/$defs/ConfigContractSchema"
+      }
     ],
     "description": "Parameters for the RPC `config/set` method — replace the config (bare\nconfig or wrapped with an optimistic-concurrency generation).",
     "title": "ConfigSetParams"

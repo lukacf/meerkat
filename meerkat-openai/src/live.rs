@@ -3039,6 +3039,10 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         openai_realtime_capabilities_default()
     }
 
+    fn supports_provider(&self, provider: Provider) -> bool {
+        provider == Provider::OpenAI
+    }
+
     async fn open_session(
         &self,
         open_config: &RealtimeSessionOpenConfig,

@@ -213,12 +213,21 @@ pub struct RestPeerResponseTerminalRequest {
 #[serde(untagged)]
 pub enum RestSetConfigRequest {
     Wrapped {
-        #[cfg_attr(feature = "schema", schemars(with = "Value"))]
+        #[cfg_attr(
+            feature = "schema",
+            schemars(with = "crate::wire::config::ConfigContractSchema")
+        )]
         config: Config,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_generation: Option<u64>,
     },
-    Direct(#[cfg_attr(feature = "schema", schemars(with = "Value"))] Config),
+    Direct(
+        #[cfg_attr(
+            feature = "schema",
+            schemars(with = "crate::wire::config::ConfigContractSchema")
+        )]
+        Config,
+    ),
 }
 
 /// `PATCH /config` — RFC-7386 merge-patch (bare patch or wrapped with an

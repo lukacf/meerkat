@@ -54,6 +54,48 @@ use tokio::time::timeout;
 
 pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 
+#[cfg(unix)]
+async fn terminate_child_process_group(child: &mut tokio::process::Child) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    if let Some(pid) = child.id() {
+        let pgid = Pid::from_raw(pid as i32);
+        let _ = killpg(pgid, Signal::SIGTERM);
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {
+                let _ = killpg(pgid, Signal::SIGKILL);
+                let _ = child.wait().await;
+            }
+            _ = child.wait() => {}
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+async fn terminate_child_process_group(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remaining_until(deadline: tokio::time::Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn abort_command_reader_tasks(
+    stdout_task: &tokio::task::JoinHandle<Result<Vec<u8>, String>>,
+    stderr_task: &tokio::task::JoinHandle<Result<Vec<u8>, String>>,
+) {
+    stdout_task.abort();
+    stderr_task.abort();
+}
+
 /// Response returned by runtime adapters.
 ///
 /// `deny_unknown_fields` keeps this contract fail-closed: a runtime that
@@ -540,20 +582,48 @@ impl DefaultHookEngine {
             duration_ms: None,
         };
 
-        let runtime_result = timeout(
-            Duration::from_millis(timeout_ms),
-            self.invoke_runtime(&entry, &adapter, invocation.clone()),
-        )
-        .await;
-
-        let response = match runtime_result {
-            Err(_) => {
-                return Err(HookEngineError::Timeout {
-                    hook_id: entry.id.clone(),
+        let response = match &adapter {
+            #[cfg(not(target_arch = "wasm32"))]
+            HookAdapterConfig::Command(cfg) => {
+                self.invoke_command_runtime(
+                    &entry,
+                    &cfg.command,
+                    &cfg.args,
+                    &cfg.env,
+                    invocation.clone(),
                     timeout_ms,
-                });
+                )
+                .await?
             }
-            Ok(response) => response?,
+            #[cfg(target_arch = "wasm32")]
+            HookAdapterConfig::Command(cfg) => {
+                self.invoke_command_runtime(
+                    &entry,
+                    &cfg.command,
+                    &cfg.args,
+                    &cfg.env,
+                    invocation.clone(),
+                    timeout_ms,
+                )
+                .await?
+            }
+            _ => {
+                let runtime_result = timeout(
+                    Duration::from_millis(timeout_ms),
+                    self.invoke_runtime(&entry, &adapter, invocation.clone()),
+                )
+                .await;
+
+                match runtime_result {
+                    Err(_) => {
+                        return Err(HookEngineError::Timeout {
+                            hook_id: entry.id.clone(),
+                            timeout_ms,
+                        });
+                    }
+                    Ok(response) => response?,
+                }
+            }
         };
         outcome.decision = runtime_decision_with_configured_hook_id(response.decision, &entry.id);
 
@@ -598,10 +668,13 @@ impl DefaultHookEngine {
                         reason,
                     })
             }
-            HookAdapterConfig::Command(cfg) => {
-                self.invoke_command_runtime(entry, &cfg.command, &cfg.args, &cfg.env, invocation)
-                    .await
-            }
+            HookAdapterConfig::Command(cfg) => Err(HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!(
+                    "command hook '{}' was routed outside the subprocess owner",
+                    cfg.command
+                ),
+            }),
             HookAdapterConfig::Http(cfg) => {
                 self.invoke_http_runtime(entry, &cfg.url, &cfg.method, &cfg.headers, invocation)
                     .await
@@ -617,19 +690,8 @@ impl DefaultHookEngine {
         args: &[String],
         env: &HashMap<String, String>,
         invocation: HookInvocation,
+        timeout_ms: u64,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
-        let mut child = Command::new(command)
-            .args(args)
-            .envs(env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|err| HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason: format!("failed to spawn command hook: {err}"),
-            })?;
-
         let payload =
             serde_json::to_vec(&invocation).map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
@@ -647,71 +709,171 @@ impl DefaultHookEngine {
             });
         }
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&payload)
-                .await
-                .map_err(|err| HookEngineError::ExecutionFailed {
-                    hook_id: entry.id.clone(),
-                    reason: format!("failed to write command hook stdin: {err}"),
-                })?;
-        }
+        let mut command = Command::new(command);
+        command
+            .args(args)
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| HookEngineError::ExecutionFailed {
+        let mut child = command
+            .spawn()
+            .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: "command hook stdout pipe unavailable".to_string(),
+                reason: format!("failed to spawn command hook: {err}"),
             })?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason: "command hook stderr pipe unavailable".to_string(),
-            })?;
+
+        let mut stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                terminate_child_process_group(&mut child).await;
+                return Err(HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: "command hook stdin pipe unavailable".to_string(),
+                });
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate_child_process_group(&mut child).await;
+                return Err(HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: "command hook stdout pipe unavailable".to_string(),
+                });
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                terminate_child_process_group(&mut child).await;
+                return Err(HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: "command hook stderr pipe unavailable".to_string(),
+                });
+            }
+        };
 
         let max_output_bytes = self.policy.payload_max_bytes();
-        let stdout_task = tokio::spawn(Self::read_stream_limited(
+        let mut stdout_task = tokio::spawn(Self::read_stream_limited(
             stdout,
             max_output_bytes,
             "command stdout",
         ));
-        let stderr_task = tokio::spawn(Self::read_stream_limited(
+        let mut stderr_task = tokio::spawn(Self::read_stream_limited(
             stderr,
             max_output_bytes,
             "command stderr",
         ));
 
-        let status = child
-            .wait()
-            .await
-            .map_err(|err| HookEngineError::ExecutionFailed {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let Some(write_timeout) = remaining_until(deadline) else {
+            terminate_child_process_group(&mut child).await;
+            abort_command_reader_tasks(&stdout_task, &stderr_task);
+            return Err(HookEngineError::Timeout {
+                hook_id: entry.id.clone(),
+                timeout_ms,
+            });
+        };
+        tokio::select! {
+            write_result = stdin.write_all(&payload) => {
+                if let Err(err) = write_result {
+                    terminate_child_process_group(&mut child).await;
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    return Err(HookEngineError::ExecutionFailed {
+                        hook_id: entry.id.clone(),
+                        reason: format!("failed to write command hook stdin: {err}"),
+                    });
+                }
+            }
+            () = tokio::time::sleep(write_timeout) => {
+                terminate_child_process_group(&mut child).await;
+                abort_command_reader_tasks(&stdout_task, &stderr_task);
+                return Err(HookEngineError::Timeout {
+                    hook_id: entry.id.clone(),
+                    timeout_ms,
+                });
+            }
+        }
+        drop(stdin);
+
+        let Some(wait_timeout) = remaining_until(deadline) else {
+            terminate_child_process_group(&mut child).await;
+            abort_command_reader_tasks(&stdout_task, &stderr_task);
+            return Err(HookEngineError::Timeout {
+                hook_id: entry.id.clone(),
+                timeout_ms,
+            });
+        };
+        let status = tokio::select! {
+            status = child.wait() => status.map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
                 reason: format!("failed waiting for command hook: {err}"),
-            })?;
+            })?,
+            () = tokio::time::sleep(wait_timeout) => {
+                terminate_child_process_group(&mut child).await;
+                abort_command_reader_tasks(&stdout_task, &stderr_task);
+                return Err(HookEngineError::Timeout {
+                    hook_id: entry.id.clone(),
+                    timeout_ms,
+                });
+            }
+        };
 
-        let stdout = stdout_task
-            .await
-            .map_err(|err| HookEngineError::ExecutionFailed {
+        let Some(stdout_timeout) = remaining_until(deadline) else {
+            abort_command_reader_tasks(&stdout_task, &stderr_task);
+            return Err(HookEngineError::Timeout {
                 hook_id: entry.id.clone(),
-                reason: format!("command stdout task join failed: {err}"),
-            })?
-            .map_err(|reason| HookEngineError::ExecutionFailed {
+                timeout_ms,
+            });
+        };
+        let stdout = tokio::select! {
+            stdout = &mut stdout_task => stdout,
+            () = tokio::time::sleep(stdout_timeout) => {
+                abort_command_reader_tasks(&stdout_task, &stderr_task);
+                return Err(HookEngineError::Timeout {
+                    hook_id: entry.id.clone(),
+                    timeout_ms,
+                });
+            }
+        }
+        .map_err(|err| HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason: format!("command stdout task join failed: {err}"),
+        })?
+        .map_err(|reason| HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason,
+        })?;
+        let Some(stderr_timeout) = remaining_until(deadline) else {
+            stderr_task.abort();
+            return Err(HookEngineError::Timeout {
                 hook_id: entry.id.clone(),
-                reason,
-            })?;
-        let stderr = stderr_task
-            .await
-            .map_err(|err| HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason: format!("command stderr task join failed: {err}"),
-            })?
-            .map_err(|reason| HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason,
-            })?;
+                timeout_ms,
+            });
+        };
+        let stderr = tokio::select! {
+            stderr = &mut stderr_task => stderr,
+            () = tokio::time::sleep(stderr_timeout) => {
+                stderr_task.abort();
+                return Err(HookEngineError::Timeout {
+                    hook_id: entry.id.clone(),
+                    timeout_ms,
+                });
+            }
+        }
+        .map_err(|err| HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason: format!("command stderr task join failed: {err}"),
+        })?
+        .map_err(|reason| HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason,
+        })?;
 
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr).to_string();
@@ -737,6 +899,7 @@ impl DefaultHookEngine {
         _args: &[String],
         _env: &HashMap<String, String>,
         _invocation: HookInvocation,
+        _timeout_ms: u64,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
         Err(HookEngineError::ExecutionFailed {
             hook_id: entry.id.clone(),
@@ -1035,7 +1198,9 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::config::HookRuntimeKind;
-    use meerkat_core::{HookLlmRequest, HookPoint, HookReasonCode, SessionId};
+    use meerkat_core::{
+        ContentInput, HookLlmRequest, HookPoint, HookReasonCode, RunInput, SessionId,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn static_handler(response: RuntimeHookResponse) -> InProcessHookHandler {
@@ -1739,6 +1904,43 @@ mod tests {
             report.outcomes[0].failure_reason.is_none(),
             "command runtime error: {:?}",
             report.outcomes[0].failure_reason
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn command_runtime_timeout_covers_stdin_write() {
+        let mut config = HooksConfig {
+            payload_max_bytes: 1024 * 1024,
+            ..Default::default()
+        };
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("command-hook-stdin-timeout"),
+            point: HookPoint::RunStarted,
+            timeout_ms: Some(25),
+            runtime: HookAdapterConfig::from_kind_and_value(
+                HookRuntimeKind::Command,
+                Some(serde_json::json!({
+                    "command": "sh",
+                    "args": ["-c", "sleep 5"],
+                    "env": {}
+                })),
+            )
+            .unwrap_or_default(),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let mut invocation = invocation(HookPoint::RunStarted, SessionId::new());
+        invocation.prompt_input = Some(RunInput::from(ContentInput::Text("x".repeat(256 * 1024))));
+
+        let err = engine
+            .execute(invocation, None)
+            .await
+            .expect_err("non-reading command must time out while stdin write is pending");
+        assert!(
+            matches!(err, HookEngineError::Timeout { .. }),
+            "expected timeout, got {err:?}"
         );
     }
 

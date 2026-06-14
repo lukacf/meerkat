@@ -8,6 +8,65 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Schema-only projection for config write payloads.
+///
+/// The runtime [`meerkat_core::Config`] type owns defaults, loading, and
+/// platform-dependent behavior. Public config-set contracts need only the
+/// stable section layout, so schema emission points here while serde continues
+/// to deserialize into the real runtime type.
+#[cfg(feature = "schema")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ConfigContractSchema {
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub agent: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub storage: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub budget: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub retry: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub tools: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub models: Value,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[schemars(range(min = 1))]
+    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub shell: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub store: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub comms: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub compaction: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub limits: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub rest: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub hooks: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub skills: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub self_hosted: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub provider_tools: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub model_fallback: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub presentation: Value,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub realm: std::collections::BTreeMap<String, Value>,
+}
+
+#[cfg(feature = "schema")]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Reason a live channel was skipped during config propagation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -111,12 +170,15 @@ pub struct ConfigWriteResult {
 #[serde(untagged)]
 pub enum ConfigSetParams {
     Wrapped {
-        #[cfg_attr(feature = "schema", schemars(with = "Value"))]
+        #[cfg_attr(feature = "schema", schemars(with = "ConfigContractSchema"))]
         config: meerkat_core::Config,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_generation: Option<u64>,
     },
-    Direct(#[cfg_attr(feature = "schema", schemars(with = "Value"))] meerkat_core::Config),
+    Direct(
+        #[cfg_attr(feature = "schema", schemars(with = "ConfigContractSchema"))]
+        meerkat_core::Config,
+    ),
 }
 
 /// Parameters for the RPC `config/patch` method — RFC-7386 merge-patch
@@ -128,4 +190,24 @@ pub struct ConfigPatchParams {
     pub patch: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<u64>,
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_contract_schema_matches_max_tokens_validation_floor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = schemars::schema_for!(ConfigContractSchema);
+        let schema_json = serde_json::to_value(schema)?;
+        assert_eq!(
+            schema_json
+                .pointer("/properties/max_tokens/minimum")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "Config::validate rejects max_tokens == 0, so the public config-set schema must not advertise zero as valid"
+        );
+        Ok(())
+    }
 }

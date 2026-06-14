@@ -3785,6 +3785,7 @@ impl MobBuilder {
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             restore_diagnostics,
+            member_revival_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             runtime_metadata,
             supervisor_bridge,
             spawn_policy,

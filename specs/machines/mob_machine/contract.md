@@ -179,6 +179,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `adaptive_aggregate_tool_call_reserved`: `Map<AdaptiveRunId, u64>`
 - `adaptive_aggregate_tool_call_actual`: `Map<AdaptiveRunId, u64>`
 - `adaptive_active_layer`: `Map<AdaptiveRunId, AdaptiveLayerId>`
+- `adaptive_layer_adaptive_run`: `Map<AdaptiveLayerId, AdaptiveRunId>`
 - `adaptive_layer_phase`: `Map<AdaptiveLayerId, AdaptiveLayerPhase>`
 - `adaptive_layer_attempt`: `Map<AdaptiveLayerId, u64>`
 - `adaptive_layer_member_count`: `Map<AdaptiveLayerId, u64>`

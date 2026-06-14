@@ -134,10 +134,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginUnregisterSessionRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `BeginUnregisterSessionRetired`
+- `BeginUnregisterSessionRetainsSnapshotRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `BeginUnregisterSessionStopped`
+- `BeginUnregisterSessionRetainsSnapshotStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeLoopStoppedForUnregisterIdle`

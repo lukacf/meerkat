@@ -6459,7 +6459,11 @@ mod tests {
             "test requires a live session with comms runtime"
         );
         assert!(
-            !state.runtime_adapter.session_has_comms(&session_id).await,
+            !state
+                .runtime_adapter
+                .session_has_comms(&session_id)
+                .await
+                .expect("session_has_comms should resolve"),
             "test starts before peer ingress has been configured"
         );
 
@@ -6520,7 +6524,11 @@ mod tests {
             "expected capacity error: {err:?}"
         );
         assert!(
-            !state.runtime_adapter.session_has_comms(&session_id).await,
+            !state
+                .runtime_adapter
+                .session_has_comms(&session_id)
+                .await
+                .expect("session_has_comms should resolve"),
             "capacity failure must not configure peer ingress before active admission"
         );
         let stored = state

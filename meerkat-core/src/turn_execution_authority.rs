@@ -475,6 +475,8 @@ pub enum TurnExecutionInput {
     },
     TurnLimitReached {
         run_id: RunId,
+        turn_count: u64,
+        max_turns: u64,
     },
     BudgetExhausted {
         run_id: RunId,

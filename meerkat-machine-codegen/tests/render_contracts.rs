@@ -102,7 +102,9 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     assert!(rendered.contains("INPUTS\n  MobMachineInput = {"));
     assert!(rendered.contains("SIGNALS\n  MobMachineSignal = {"));
     for required in [
-        "\"Spawn\"",
+        // `Spawn` was decomposed into the machine-driven spawn-exec ladder.
+        "\"BeginSpawnExec\"",
+        "\"CommitSpawnMembership\"",
         "\"SubmitWork\"",
         "\"RunFlow\"",
         "\"ForceCancel\"",
@@ -312,7 +314,8 @@ fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
         !seam_witness_next.contains("CoreNext")
             && seam_witness_next.contains("meerkat_RecoverRuntimeAuthorityIdle")
             && seam_witness_next.contains("mob_AuthorizeSpawnProfileRunning")
-            && seam_witness_next.contains("mob_SpawnRunningFresh")
+            && seam_witness_next.contains("mob_BeginSpawnExecFresh")
+            && seam_witness_next.contains("mob_CommitSpawnMembershipFresh")
             && seam_witness_next.contains("meerkat_PrepareBindingsIdle")
             && seam_witness_next.contains("mob_SubmitWorkRunningExternal")
             && seam_witness_next.contains("meerkat_IngestAttached")

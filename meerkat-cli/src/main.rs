@@ -4408,16 +4408,17 @@ async fn refresh_auth_profile(
         .get(profile_id)
         .ok_or_else(|| anyhow::anyhow!("Auth profile '{realm}:{profile_id}' not found"))?;
 
-    // No-op fast paths: refresh is meaningless for non-OAuth methods.
-    // Dogma §5: typed truth — we branch on auth_method, not folklore.
-    let is_refreshable = matches!(
-        profile.auth_method.as_str(),
-        "managed_chatgpt_oauth"
-            | "claude_ai_oauth"
-            | "oauth_to_api_key"
-            | "google_oauth"
-            | "code_assist_oauth"
-    );
+    // No-op fast path: refresh is meaningless for methods whose persisted
+    // credential is not an OAuth-login-lifecycle secret. Dogma §5: branch on
+    // the typed owner — the per-provider auth matrix's persisted-mode mapping —
+    // not a hand-maintained raw-string allowlist. The old `matches!` set omitted
+    // the real `external_chatgpt_tokens` OAuth-login mode (so `auth refresh`
+    // wrongly no-op'd it with a false "credentials don't expire" message) and
+    // carried the dead `code_assist_oauth` string that parses nowhere in the
+    // matrix.
+    let is_refreshable = meerkat_providers::NormalizedAuthMethod::from_auth_profile(profile)
+        .and_then(meerkat_providers::NormalizedAuthMethod::persisted_auth_mode)
+        .is_some_and(meerkat_core::auth::persisted_auth_mode_uses_oauth_login_lifecycle);
     if !is_refreshable {
         println!(
             "profile:       {realm}:{profile_id}\n\

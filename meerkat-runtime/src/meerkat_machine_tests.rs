@@ -2375,6 +2375,73 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
     );
 }
 
+/// Regression (0.7.2): `unregister_session` must BOUND its comms-drain await.
+///
+/// The two-phase drain aborts the comms-drain task and awaits its quiescence.
+/// The runtime-loop handle is bounded (grace + abort), but the comms-drain
+/// handle was awaited UNBOUNDED — so an external member (e.g. a TCP transport
+/// drain) whose task does not observe the cooperative abort promptly wedged
+/// teardown forever (the `external_tcp_production_drain` smoke hung past 900s).
+/// This is a regular (non-live, CI-gated) guard: a drain task that blocks its
+/// worker and ignores abort must NOT stall `unregister_session`.
+#[tokio::test(flavor = "multi_thread")]
+async fn unregister_session_bounds_an_unquiescing_comms_drain() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    // A drain task that blocks its worker thread and does NOT honor tokio's
+    // cooperative abort, modelling a transport drain parked in a non-yielding
+    // operation. It auto-releases well above the teardown grace so that a
+    // regressed (unbounded) await terminates the test rather than hanging
+    // runtime shutdown.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = tokio::spawn(async move {
+        tokio::task::block_in_place(move || {
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+    });
+    {
+        let mut sessions = adapter.sessions.write().await;
+        let entry = sessions
+            .get_mut(&session_id)
+            .expect("register_session must have created the entry");
+        {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                    mode: crate::meerkat_machine::dsl::DrainMode::from(
+                        CommsDrainMode::PersistentHost,
+                    ),
+                },
+            )
+            .expect("test drain spawn authority should accept");
+        }
+        entry.drain_slot.install_task(comms_runtime, stuck);
+    }
+
+    // `COMMS_DRAIN_GRACE` (~2s) must bound teardown; pre-fix this awaited the
+    // stuck handle unbounded (~10s) and the 5s outer bound would elapse.
+    crate::tokio::time::timeout(
+        Duration::from_secs(5),
+        adapter.unregister_session(&session_id),
+    )
+    .await
+    .expect("unregister_session must not hang on an unquiescing comms drain");
+
+    // Release the modelled-stuck worker so the test does not leak it.
+    let _ = release_tx.send(());
+}
+
 #[tokio::test]
 async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());

@@ -1464,11 +1464,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// This is used when a runtime-backed turn mutates the in-memory session
     /// but fails to durably commit its boundary. Discarding the live handle
     /// forces subsequent access to recover from the last persisted snapshot.
+    ///
+    /// Idempotent: "the live handle is not present" is the desired end state,
+    /// so discarding an already-discarded (or never-materialized) session is a
+    /// success, not a `NotFound`. The runtime loop's `StopRuntimeExecutor`
+    /// clean exit discards the live handle as it quiesces, so a teardown drain
+    /// (`unregister_session`) that awaits that quiescence can race an explicit
+    /// caller-side discard; both must converge on `Ok(())`. Every production
+    /// caller already encodes this (`Ok(()) | Err(NotFound) => Ok(())`); this
+    /// makes the contract itself idempotent.
     pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
-        let handle = sessions
-            .swap_remove(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let Some(handle) = sessions.swap_remove(id) else {
+            return Ok(());
+        };
         drop(sessions);
         // Clear the singular typed materialization record. For a staged
         // session the registry-held capacity permit drops with it, so the
@@ -7088,6 +7097,47 @@ mod archive_shutdown_drain_tests {
             matches!(result, Err(SessionError::NotFound { .. })),
             "post-archive context application must be a typed NotFound, got {result:?}"
         );
+    }
+
+    /// Regression (0.7.2): `discard_live_session` must be idempotent.
+    ///
+    /// The runtime-loop drain in `unregister_session` (D1) quiesces the loop,
+    /// whose `StopRuntimeExecutor` clean exit discards the live handle. A caller
+    /// that then explicitly discards the same session (e.g. same-process mob
+    /// restart in `smoke_mob_resume`) raced that teardown and got `NotFound`,
+    /// which `.expect()` turned into a panic. "Not live" is the desired end
+    /// state, so a redundant discard must be `Ok(())`. This is a regular
+    /// (non-live, CI-gated) guard for the behavior the smoke lane caught.
+    #[tokio::test]
+    async fn discard_live_session_is_idempotent() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(DrainProbeBuilder { hooks }, 1);
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create session");
+        let session_id = created.session_id.clone();
+
+        // First discard removes the live handle.
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("first discard removes the live handle");
+
+        // Second discard of the now-absent handle must be a benign no-op, NOT
+        // `NotFound` — this is the exact interleaving the teardown drain
+        // produces against an explicit caller discard.
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("second discard is idempotent, not NotFound");
+
+        // A never-materialized session is likewise `Ok(())`.
+        let never_live = SessionId::new();
+        service
+            .discard_live_session(&never_live)
+            .await
+            .expect("discarding a never-materialized session is idempotent");
     }
 
     /// D1: archive teardown is only complete once the machine-owned drain

@@ -94,20 +94,39 @@ Handwritten code must not:
 - implement a parallel reducer
 - keep a shadow transition table
 - decide transition legality
+- choose semantic executor steps from local predicates, projections, caches, or
+  duplicated guards
 - emit semantic effects outside the owning transition
 - invent terminal classification outside generated or machine-derived paths
 
 Handwritten code may observe facts, classify raw inputs, hold handles, perform
 IO, schedule tasks, execute effects, persist snapshots, and route evidence.
 
-That permission ends at meaning. Any meaningful classification must lower into
-a typed machine input, typed composition route, or typed handoff protocol. If no
-such input exists, the model is incomplete. The runtime conforms to the machine;
-the machine does not conform to an awkward runtime path.
+That permission ends at meaning and enabledness. Any meaningful classification
+or semantic next-step decision must lower into a typed machine input, typed
+composition route, typed authority contract, or typed handoff protocol. If no
+such input, route, contract, or protocol exists, the model is incomplete. The
+runtime conforms to the machine; the machine does not conform to an awkward
+runtime path.
+
+Owning state is not enough. If a command changes semantic behavior, the
+enabledness of that command, the selected executor step, the emitted effect, and
+the closure feedback must be owned by a generated machine, composition, handoff
+protocol, or typed authority contract.
+
+A semantic effect is not complete when it is emitted. It is complete when its
+realization, failure, cancellation, or abandonment returns through the owning
+authority path, or when the owning model explicitly declares the effect
+fire-and-forget mechanics.
 
 ### 3. Shells, Stores, and Projections Are Mechanical
 
 Shell code owns mechanics, not truth.
+
+Mechanical code may realize an authorized executor step. It must not derive the
+step from stale projection state, local guard replicas, cache shape, transport
+readiness, or test-only shortcuts. If a shell-local predicate can change what
+semantic work happens next, it is authority and must move behind a named owner.
 
 Stores persist authority. They do not create it. Recovery replays or restores
 machine-owned truth through declared transition, snapshot, journal, or migrator
@@ -328,6 +347,9 @@ Reject these during review:
 - public APIs that expose raw infra identity as a user control handle
 - local fallback registries masquerading as canonical owners
 - projections that make behavior decisions
+- shell-local guards or planners that choose semantic executor steps
+- emitted effects treated as complete without modeled realization, failure,
+  cancellation, abandonment, or declared fire-and-forget semantics
 - stores that recover from stale or compatibility metadata as authority
 - success responses after hidden failure
 - unbounded queues or dropped observations with semantic consequences
@@ -349,6 +371,9 @@ For every important behavior, answer:
 - How is it typed?
 - Which generated authority, contract, profile, registry, store contract, or
   handoff protocol carries it?
+- Which authority decides whether the next semantic executor step is enabled?
+- How does each emitted effect close: realized, failed, cancelled, abandoned, or
+  explicitly fire-and-forget?
 - What happens on failure?
 - Which surfaces merely project it?
 - Which crate or package owns the optional feature bundle, and which globals

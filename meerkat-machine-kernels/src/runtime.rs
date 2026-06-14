@@ -3641,11 +3641,13 @@ mod tests {
             authorized.transition,
             transition_id("AuthorizeSpawnProfileRunning")
         );
-        let running = kernel
+        // Spawn-exec ladder step 1: `BeginSpawnExec` opens the per-identity
+        // phase and emits nothing.
+        let opened = kernel
             .transition(
                 &authorized.next_state,
                 &KernelInput {
-                    variant: input_id("Spawn"),
+                    variant: input_id("BeginSpawnExec"),
                     fields: BTreeMap::from([
                         (
                             field_id("agent_identity"),
@@ -3669,9 +3671,6 @@ mod tests {
                                 variant: enum_variant_id("AutonomousHost"),
                             },
                         ),
-                        // W3-H-1: new realtime-binding fields. `replacing`
-                        // is None (no prior binding) so the Fresh branch
-                        // fires.
                         (
                             field_id("bridge_session_id"),
                             option_some(named_string("SessionId", "bridge.worker.1")),
@@ -3680,8 +3679,56 @@ mod tests {
                     ]),
                 },
             )
-            .expect("spawn member");
-        assert_eq!(running.transition, transition_id("SpawnRunningFresh"));
+            .expect("begin spawn exec");
+        assert_eq!(opened.transition, transition_id("BeginSpawnExecFresh"));
+        assert_eq!(opened.next_state.phase, phase_id("Running"));
+
+        // Spawn-exec ladder step 2: `CommitSpawnMembership` establishes the
+        // live member and emits `RequestRuntimeBinding` (the membership effect
+        // the renamed-from-`Spawn` transition carries).
+        let running = kernel
+            .transition(
+                &opened.next_state,
+                &KernelInput {
+                    variant: input_id("CommitSpawnMembership"),
+                    fields: BTreeMap::from([
+                        (
+                            field_id("agent_identity"),
+                            named_string("AgentIdentity", "agent.worker"),
+                        ),
+                        (
+                            field_id("agent_runtime_id"),
+                            named_string("AgentRuntimeId", "runtime.worker.1"),
+                        ),
+                        (field_id("fence_token"), named_u64("FenceToken", 41)),
+                        (field_id("generation"), named_u64("Generation", 2)),
+                        (
+                            field_id("profile_material_digest"),
+                            KernelValue::String(profile_material_digest.to_owned()),
+                        ),
+                        (field_id("external_addressable"), KernelValue::Bool(false)),
+                        (
+                            field_id("runtime_mode"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("SpawnPolicyRuntimeMode"),
+                                variant: enum_variant_id("AutonomousHost"),
+                            },
+                        ),
+                        // W3-H-1: realtime-binding fields. `replacing` is None
+                        // (no prior binding) so the Fresh branch fires.
+                        (
+                            field_id("bridge_session_id"),
+                            option_some(named_string("SessionId", "bridge.worker.1")),
+                        ),
+                        (field_id("replacing"), KernelValue::None),
+                    ]),
+                },
+            )
+            .expect("commit spawn membership");
+        assert_eq!(
+            running.transition,
+            transition_id("CommitSpawnMembershipFresh")
+        );
         assert_eq!(running.next_state.phase, phase_id("Running"));
         assert!(
             running

@@ -178,42 +178,59 @@ fn mob_spawn_produces_typed_effect_variants() {
         transition("AuthorizeSpawnProfileRunning")
     );
 
-    let outcome: TransitionOutcome = kernel
+    // Spawn-exec ladder: `BeginSpawnExec` opens the phase, then
+    // `CommitSpawnMembership` (renamed from `Spawn`) establishes membership and
+    // emits `RequestRuntimeBinding`.
+    let spawn_fields = || {
+        BTreeMap::from([
+            (
+                field("agent_identity"),
+                named_string("AgentIdentity", "agent.worker"),
+            ),
+            (
+                field("agent_runtime_id"),
+                named_string("AgentRuntimeId", "runtime.worker.1"),
+            ),
+            (field("fence_token"), named_u64("FenceToken", 1)),
+            (field("generation"), named_u64("Generation", 1)),
+            (
+                field("profile_material_digest"),
+                KernelValue::String(profile_material_digest.to_owned()),
+            ),
+            (field("external_addressable"), KernelValue::Bool(false)),
+            (
+                field("runtime_mode"),
+                named_variant("SpawnPolicyRuntimeMode", "AutonomousHost"),
+            ),
+            (
+                field("bridge_session_id"),
+                option_some(named_string("SessionId", "bridge.worker.1")),
+            ),
+            (field("replacing"), KernelValue::None),
+        ])
+    };
+    let opened: TransitionOutcome = kernel
         .transition(
             &authorized.next_state,
             &KernelInput {
-                variant: input("Spawn"),
-                fields: BTreeMap::from([
-                    (
-                        field("agent_identity"),
-                        named_string("AgentIdentity", "agent.worker"),
-                    ),
-                    (
-                        field("agent_runtime_id"),
-                        named_string("AgentRuntimeId", "runtime.worker.1"),
-                    ),
-                    (field("fence_token"), named_u64("FenceToken", 1)),
-                    (field("generation"), named_u64("Generation", 1)),
-                    (
-                        field("profile_material_digest"),
-                        KernelValue::String(profile_material_digest.to_owned()),
-                    ),
-                    (field("external_addressable"), KernelValue::Bool(false)),
-                    (
-                        field("runtime_mode"),
-                        named_variant("SpawnPolicyRuntimeMode", "AutonomousHost"),
-                    ),
-                    (
-                        field("bridge_session_id"),
-                        option_some(named_string("SessionId", "bridge.worker.1")),
-                    ),
-                    (field("replacing"), KernelValue::None),
-                ]),
+                variant: input("BeginSpawnExec"),
+                fields: spawn_fields(),
             },
         )
-        .expect("spawn");
+        .expect("begin spawn exec");
+    assert_eq!(opened.transition, transition("BeginSpawnExecFresh"));
 
-    assert_eq!(outcome.transition, transition("SpawnRunningFresh"));
+    let outcome: TransitionOutcome = kernel
+        .transition(
+            &opened.next_state,
+            &KernelInput {
+                variant: input("CommitSpawnMembership"),
+                fields: spawn_fields(),
+            },
+        )
+        .expect("commit spawn membership");
+
+    assert_eq!(outcome.transition, transition("CommitSpawnMembershipFresh"));
     for emitted in &outcome.effects {
         let _: &EffectVariantId = &emitted.variant;
         let _: &BTreeMap<FieldId, KernelValue> = &emitted.fields;
@@ -267,11 +284,14 @@ fn mob_spawn_rejects_unauthorized_addressability() {
         )
         .expect("authorize spawn profile");
 
+    // The addressability admission guard lives on the `BeginSpawnExec` opener
+    // (the ladder entry that carries the original `Spawn` admission guards), so
+    // a mismatched `external_addressable` is rejected there.
     let refusal = kernel
         .transition(
             &authorized.next_state,
             &KernelInput {
-                variant: input("Spawn"),
+                variant: input("BeginSpawnExec"),
                 fields: BTreeMap::from([
                     (
                         field("agent_identity"),
@@ -309,9 +329,9 @@ fn mob_spawn_rejects_unauthorized_addressability() {
             ..
         } => {
             assert_eq!(refused_phase, phase("Running"));
-            assert_eq!(variant, input("Spawn"));
+            assert_eq!(variant, input("BeginSpawnExec"));
         }
-        other => panic!("expected Spawn NoMatchingTransition, got {other:?}"),
+        other => panic!("expected BeginSpawnExec NoMatchingTransition, got {other:?}"),
     }
 }
 
